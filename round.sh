@@ -2,7 +2,7 @@
 # round.sh <轮次> — 单轮端到端: 设备体检→清应用→起头条→跑一局→汇总一行进 campaign10.tsv
 # 由外层逐轮调度;caffeinate 包在本脚本外层防休眠。
 N=$1
-ROOT="/Users/mac/Library/Application Support/CindyGlobal/owners/ae98ca1d7b2b6ae48f15/dialogues/2026-08-25/6413c1d0-d0c1-479b-a7ec-83203567cdc1"
+ROOT="$(cd "$(dirname "$0")" && pwd)"  # 自动定位仓库根目录,搬家/克隆后无需改
 export PATH="/Users/mac/Library/Application Support/CindyGlobal/android-platform-tools/darwin-arm64/platform-tools:$PATH"
 source "$ROOT/secrets.env"  # GLM_KEY / EMPERO_KEY 从本地密钥文件读取,不进 git
 TASK="今日头条遍历"
