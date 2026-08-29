@@ -1,0 +1,10 @@
+{"v":1}
+{"r":"goal","t":"打开设置,进入关于手机页面"}
+{"els":[{"b":[46,41,625,219],"t":"At a glance"},{"b":[46,105,227,145],"t":"Thu, Aug 27"},{"b":[194,862,322,1040],"t":"Gmail"},{"b":[349,862,477,1040],"t":"Photos"},{"b":[504,862,632,1040],"t":"YouTube"},{"b":[0,41,672,1414],"t":"Home"},{"b":[47,1112,160,1240],"t":"Phone"},{"b":[202,1112,315,1240],"t":"Messages"},{"b":[357,1112,470,1240],"t":"Chrome"},{"b":[512,1112,624,1240],"t":"Settings"},{"b":[51,1276,620,1384],"t":"Google search"},{"b":[58,1289,140,1371],"t":"Google app"},{"b":[449,1276,531,1384],"t":"Voice search"},{"b":[531,1276,613,1384],"t":"Google Lens"}],"img":"step1.jpg","n":1,"r":"screen"}
+{"a":"tap","by":"glm-vision","ms":3661,"n":1,"r":"act","text":"Settings","x":567,"x2":844,"y":1174,"y2":806}
+{"d":"+[EMULATOR37X1X11X0,Model,Navigate up,Serial number] -[At a glance,Chrome,Gmail,Google Lens]","n":1,"r":"diff"}
+{"r":"note","t":"当前在主屏幕,看到Settings图标在dock栏右下角,将点击它打开设置应用"}
+{"els":[{"b":[0,41,672,347],"t":"Model"},{"b":[0,41,95,136],"t":"Navigate up"},{"b":[41,374,135,420],"t":"Model"},{"b":[41,420,280,453],"t":"sdk_gphone64_arm64"},{"b":[41,508,251,554],"t":"Serial number"},{"b":[41,554,291,587],"t":"EMULATOR37X1X11X0"}],"img":"step2.jpg","n":2,"r":"screen"}
+{"a":"done","by":"glm-53-flash","ms":4002,"n":2,"r":"act","text":"当前页面标题为 About emulated device,已进入关于手机页面,任务达成"}
+{"r":"note","t":"已到达 About emulated device 页面,任务完成"}
+{"achieved":true,"by":"glm-vision","kind":"verdict","r":"hook","reason":"最终画面显示“About emulated device”页面，包含设备信息，符合任务要求。"}

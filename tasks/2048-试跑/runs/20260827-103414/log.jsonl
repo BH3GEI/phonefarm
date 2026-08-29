@@ -1,0 +1,340 @@
+{"v":1}
+{"r":"goal","t":"玩2048,尽量拿高分,出现Game Over才算终局"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step1.jpg","n":1,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":8194,"n":1,"r":"act","x":336,"x2":67,"y":816,"y2":816}
+{"d":"pixel(9%)","n":1,"r":"diff"}
+{"r":"note","t":"2048开始,分数0。策略:左滑+下滑为主,保持大数在左下角"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step2.jpg","n":2,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":2,"r":"act","x":336,"x2":336,"y":816,"y2":1238}
+{"d":"pixel(10%)","n":2,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step3.jpg","n":3,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":6733,"n":3,"r":"act","x":336,"x2":67,"y":816,"y2":816}
+{"d":"none","n":3,"r":"diff"}
+{"r":"note","t":"2048进行中,分数4。策略:左滑+下滑交替,保持大数在左下角。已验证swipe 500→100/850有效"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step4.jpg","n":4,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":14542,"n":4,"r":"act","x":336,"x2":336,"y":816,"y2":1238}
+{"d":"pixel(5%)","n":4,"r":"diff"}
+{"r":"note","t":"2048进行中,分数4,左下角有4。策略:左滑+下滑交替,大数保持左下。已验证swipe 500→100(左)和500→850(下)有效;左滑无效时说明已靠边"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step5.jpg","n":5,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4228,"n":5,"r":"act","x":336,"x2":67,"y":816,"y2":816}
+{"d":"pixel(5%)","n":5,"r":"diff"}
+{"r":"note","t":"分数4,布局:顶行有2,左列2/4,底行4/2。继续左滑+下滑交替,大数保持左下"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step6.jpg","n":6,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":6,"r":"act","x":336,"x2":336,"y":816,"y2":1238}
+{"d":"pixel(6%)","n":6,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step7.jpg","n":7,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4504,"n":7,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(5%)","n":7,"r":"diff"}
+{"r":"note","t":"分数12,底行4/4合并机会,2/4/4在左列。继续左滑+下滑交替,大数保持左下"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step8.jpg","n":8,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":8,"r":"act","x":336,"x2":336,"y":991,"y2":1311}
+{"d":"pixel(5%)","n":8,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step9.jpg","n":9,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5190,"n":9,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(9%)","n":9,"r":"diff"}
+{"r":"note","t":"分数20,左列2/4/8递增。继续左滑+下滑交替,大数保持左下,避免上滑"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step10.jpg","n":10,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":10,"r":"act","x":336,"x2":336,"y":816,"y2":1311}
+{"d":"pixel(4%)","n":10,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step11.jpg","n":11,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":10259,"n":11,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(4%)","n":11,"r":"diff"}
+{"r":"note","t":"分数24。左列4/4/8,底行2/2可合并。左滑后下滑,继续左+下交替,避免上滑"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step12.jpg","n":12,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":12,"r":"act","x":336,"x2":336,"y":816,"y2":1311}
+{"d":"pixel(9%)","n":12,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step13.jpg","n":13,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":6355,"n":13,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(5%)","n":13,"r":"diff"}
+{"r":"note","t":"分数36。已左滑合并两个8成16,再下滑。继续左/下交替,避免上滑,保持大数在左下角。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step14.jpg","n":14,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":14,"r":"act","x":336,"x2":336,"y":816,"y2":1311}
+{"d":"pixel(10%)","n":14,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step15.jpg","n":15,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":6105,"n":15,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(9%)","n":15,"r":"diff"}
+{"r":"note","t":"分数60。底行16,4,4左滑合并成16,8,再下滑。继续左/下交替,避免上滑。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step16.jpg","n":16,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":16,"r":"act","x":336,"x2":336,"y":816,"y2":1311}
+{"d":"pixel(2%)","n":16,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step17.jpg","n":17,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5692,"n":17,"r":"act","x":336,"x2":336,"y":816,"y2":1311}
+{"d":"pixel(4%)","n":17,"r":"diff"}
+{"r":"note","t":"分数68。布局: 行2:2; 行3:4,,2; 底行:16,8,,2。继续左/下滑交替堆大数,避免上滑。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step18.jpg","n":18,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":18,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(7%)","n":18,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step19.jpg","n":19,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4448,"n":19,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(5%)","n":19,"r":"diff"}
+{"r":"note","t":"分数76。布局: 行2:2; 行3:4; 底行:16,8,4。左滑合并4+4后下滑。继续左/下滑交替,避免上滑。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step20.jpg","n":20,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":20,"r":"act","x":336,"x2":336,"y":816,"y2":1311}
+{"d":"pixel(9%)","n":20,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step21.jpg","n":21,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4318,"n":21,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(5%)","n":21,"r":"diff"}
+{"r":"note","t":"分数84。行2:2; 行3:8,2; 底行:16,8,4,2。左滑看效果,保持左/下滑交替,避免上滑。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step22.jpg","n":22,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":6183,"n":22,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(4%)","n":22,"r":"diff"}
+{"r":"note","t":"分数84。策略:左滑合并行2的2,2,再下滑贴底。保持左/下交替,避免上滑。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step23.jpg","n":23,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":23,"r":"act","x":336,"x2":336,"y":816,"y2":1311}
+{"d":"none","n":23,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step24.jpg","n":24,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5661,"n":24,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(7%)","n":24,"r":"diff"}
+{"r":"note","t":"分数92。底部行16,8,4,4;左滑合并4,4,再下滑贴底。策略:保持左/下交替,避免上滑,大块沉底左角。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step25.jpg","n":25,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":25,"r":"act","x":336,"x2":336,"y":991,"y2":1340}
+{"d":"none","n":25,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step26.jpg","n":26,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4941,"n":26,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(2%)","n":26,"r":"diff"}
+{"r":"note","t":"分数104。底行16,8,8;右列4/空/空/空。策略:左滑合并8,8成16,再下滑贴底,保持大块沉底左下角,避免上滑。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step27.jpg","n":27,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":27,"r":"act","x":336,"x2":336,"y":991,"y2":1340}
+{"d":"pixel(5%)","n":27,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step28.jpg","n":28,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5125,"n":28,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(7%)","n":28,"r":"diff"}
+{"r":"note","t":"分数120。左滑合并16+16、2+2,再下滑贴底。策略:大块沉底左下,多左滑/下滑,避免上滑,直到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step29.jpg","n":29,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":29,"r":"act","x":336,"x2":336,"y":991,"y2":1340}
+{"d":"pixel(9%)","n":29,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step30.jpg","n":30,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4668,"n":30,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(4%)","n":30,"r":"diff"}
+{"r":"note","t":"分数164。棋面:4(左上二行),8/2/2(三行),32/8/2(底行)。策略:大块沉左下,循环左滑/下滑,避免上滑,直到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step31.jpg","n":31,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":31,"r":"act","x":336,"x2":336,"y":991,"y2":1340}
+{"d":"none","n":31,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step32.jpg","n":32,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4643,"n":32,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(4%)","n":32,"r":"diff"}
+{"r":"note","t":"分数168。棋面:4(2行),8/4(3行),32/8/2/2(底行)。策略:大块沉左下,循环左滑/下滑,避免上滑,直到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step33.jpg","n":33,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":33,"r":"act","x":336,"x2":336,"y":991,"y2":1340}
+{"d":"pixel(5%)","n":33,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step34.jpg","n":34,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5781,"n":34,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"none","n":34,"r":"diff"}
+{"r":"note","t":"分数172。棋面:4/2/4(2行),8/4(3行),32/8/4(底行),右列空。策略:大块沉左下,循环左滑/下滑,避免上滑,直到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step35.jpg","n":35,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":34410,"n":35,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"none","n":35,"r":"diff"}
+{"r":"note","t":"分数172。棋面:2行4/2/4,3行8/4,底行32/8/4,右列空。策略:左滑/下滑循环,大块沉左下,避免上滑,直到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step36.jpg","n":36,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":11296,"n":36,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(5%)","n":36,"r":"diff"}
+{"r":"note","t":"分数172。布局:2行4/2/4,3行8/4,底行32/8/4。左滑已两次无效,可能左向被锁。改为下滑→左滑循环,视新块位置调整;避免上滑,直至Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step37.jpg","n":37,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":37,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(2%)","n":37,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step38.jpg","n":38,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":10225,"n":38,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(4%)","n":38,"r":"diff"}
+{"r":"note","t":"分数196。布局:2/-/-/-;4/2/2;-;8/4;-;32/16;-。先左滑合并行2的2+2,再下滑。避免上滑。持续到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step39.jpg","n":39,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":39,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(9%)","n":39,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step40.jpg","n":40,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":14316,"n":40,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(6%)","n":40,"r":"diff"}
+{"r":"note","t":"分数208。布局:2/-/-/-;4/-/-/-;8/8/-/2;32/16/2/-。已左滑合并8+8,再下滑压实。策略:主用左/下滑,避免上滑。持续到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step41.jpg","n":41,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":41,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(4%)","n":41,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step42.jpg","n":42,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7919,"n":42,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(3%)","n":42,"r":"diff"}
+{"r":"note","t":"分数228。布局:2/2/-/-;4/-/-/-;16/2/-/-;32/16/4/-。左滑合并2+2,再下滑压实。策略:主用左/下滑,避免上滑。持续到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step43.jpg","n":43,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":43,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(9%)","n":43,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step44.jpg","n":44,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7657,"n":44,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(5%)","n":44,"r":"diff"}
+{"r":"note","t":"分数240。布局:2/-/-/-;8/-/-/-;16/2/-/-;32/16/4/2。左滑8+16合并,下滑压实。策略:主用左/下滑,避免上滑,持续到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step45.jpg","n":45,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":45,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(4%)","n":45,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step46.jpg","n":46,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":9999,"n":46,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(7%)","n":46,"r":"diff"}
+{"r":"note","t":"分数244。布局:2/-/-/-;8/-/-/-;16/2/-/2;32/16/4/4。左滑合并4+4,再下滑压实。策略:主用左/下滑,避免上滑,持续到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step47.jpg","n":47,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":47,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(5%)","n":47,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step48.jpg","n":48,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7966,"n":48,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(6%)","n":48,"r":"diff"}
+{"r":"note","t":"分数264。布局:2/-/-/2;8/-/-/2;16/8/-/-;32/16/8/-。左滑可合并2+2和8?实际8不同行,先左后下。持续左/下滑直至Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step49.jpg","n":49,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":49,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(5%)","n":49,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step50.jpg","n":50,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4665,"n":50,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(4%)","n":50,"r":"diff"}
+{"r":"note","t":"分数264。布局:2/-/-/2;8/2/-/-;16/8/2/2;32/16/8/-。策略:交替左滑/下滑,右上的2会随下移合并。持续至Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step51.jpg","n":51,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":51,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(5%)","n":51,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step52.jpg","n":52,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5428,"n":52,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(5%)","n":52,"r":"diff"}
+{"r":"note","t":"分数268。布局:2/-/-/2;8/2/2/-;16/8/4/-;32/16/8/-。策略:继续交替下滑/左滑,右上的2下移后可与左列合并。持续至Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step53.jpg","n":53,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":53,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"none","n":53,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step54.jpg","n":54,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":9106,"n":54,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"none","n":54,"r":"diff"}
+{"r":"note","t":"分数272。布局:2/-/-/-;8/4/2/-;16/8/4/2;32/16/8/2。左滑合并8/4后继续下滑/左滑交替,保持大数在底部。持续至Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step55.jpg","n":55,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7951,"n":55,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(4%)","n":55,"r":"diff"}
+{"r":"note","t":"分数272。左滑已无效(各行靠左)。下滑可合并第4列2+2→4。之后继续下/左交替,保持大数在底部,直至Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step56.jpg","n":56,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":11217,"n":56,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(4%)","n":56,"r":"diff"}
+{"r":"note","t":"分数276。行2: 8,4,2,2左滑合并; 底行32,16,8,4。策略: 左/下交替,大数保持底部,直至Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step57.jpg","n":57,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":57,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(5%)","n":57,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step58.jpg","n":58,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7398,"n":58,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(4%)","n":58,"r":"diff"}
+{"r":"note","t":"分数288。行1: 2,2,2,_; 行3: 16,8,8,_; 底行32,16,8,4。左滑可合并2+2。策略: 左/下交替,大数保持底部,直至Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step59.jpg","n":59,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":59,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(6%)","n":59,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step60.jpg","n":60,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7347,"n":60,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(11%)","n":60,"r":"diff"}
+{"r":"note","t":"分数340。左滑合并32+32+8+4使底行变化,再下滑压实。大数保持底部,左/下交替,直至Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step61.jpg","n":61,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":61,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(7%)","n":61,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step62.jpg","n":62,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":21084,"n":62,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(9%)","n":62,"r":"diff"}
+{"r":"note","t":"分数408。底行64,8,4,4左滑合并4;列0有4,8,16,64可继续下滑增长。保持左/下交替,避免右滑打散底行。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step63.jpg","n":63,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":63,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(7%)","n":63,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step64.jpg","n":64,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":6812,"n":64,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(6%)","n":64,"r":"diff"}
+{"r":"note","t":"分数428。底行64,8,8;先左滑合并8,再下滑。列0:4,8,16,64可下压增长。避免右滑打散底行。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step65.jpg","n":65,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":65,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(7%)","n":65,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step66.jpg","n":66,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4502,"n":66,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(2%)","n":66,"r":"diff"}
+{"r":"note","t":"分数448。上一步左滑+下滑后：列0为4,8,16,64。继续保持左滑/下滑节奏，避免右滑打散底行。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step67.jpg","n":67,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":67,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(5%)","n":67,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step68.jpg","n":68,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4197,"n":68,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(7%)","n":68,"r":"diff"}
+{"r":"note","t":"分数448。棋盘：行1:4,2,_,2 行2:8,4,4,_ 行3:16,8,2,_ 行4:64,16,4,_。保持左滑/下滑，底行64,16,4待合并。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step69.jpg","n":69,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4671,"n":69,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(6%)","n":69,"r":"diff"}
+{"r":"note","t":"分数460。棋盘：行1:4,4,_,_ 行2:8,8,_,_ 行3:16,8,2,4 行4:64,16,4,_。左滑可合并4,4和8,8，继续左滑/下滑。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step70.jpg","n":70,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","n":70,"r":"act","x":336,"x2":336,"y":874,"y2":1340}
+{"d":"pixel(4%)","n":70,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step71.jpg","n":71,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7240,"n":71,"r":"act","x":500,"x2":920,"y":600}
+{"d":"rejected(缺y2)","n":71,"r":"diff"}
+{"r":"note","t":"分数520。行2:8,-,-,- 行3:32,8,4,2 行4:64,16,4,4。已下滑合并4,4→8。之后尽量保持大数在底部，交替左/下滑。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step72.jpg","n":72,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":9702,"n":72,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(5%)","n":72,"r":"diff"}
+{"r":"note","t":"分数520。行3:32,8,4,2 行4:64,16,4(合并后)。已左滑合并4,4→8。继续保持大数在底部，交替左/下滑，右滑慎用避免大数错位。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step73.jpg","n":73,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":6842,"n":73,"r":"act","x":336,"x2":67,"y":1020,"y2":1020}
+{"d":"none","n":73,"r":"diff"}
+{"r":"note","t":"分数528。行3:32,8,4,2 行4:64,16,8,_。左滑可合并行3的8+8(中列)和2到底。继续左/下交替，右滑慎用。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step74.jpg","n":74,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":10483,"n":74,"r":"act","x":336,"x2":67,"y":947,"y2":947}
+{"d":"none","n":74,"r":"diff"}
+{"r":"note","t":"分数528。局面:行1:2,_,_,_ 行2:8,_,_,_ 行3:32,8,4,2 行4:64,16,8,_。下移无效(各列已沉底),左移合并行4空格并保持小数在上方。策略:左/下为主,避免上滑打乱2和8的堆叠。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step75.jpg","n":75,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":8199,"n":75,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"none","n":75,"r":"diff"}
+{"r":"note","t":"分数528。行1:2,_,_,_ 行2:8,_,_,_ 行3:32,8,4,2 行4:64,16,8,_。左/下均无效(已沉底),改试右移让行4的8靠到右角,保持大数在左下。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step76.jpg","n":76,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5206,"n":76,"r":"act","x":336,"x2":639,"y":874,"y2":874}
+{"d":"pixel(10%)","n":76,"r":"diff"}
+{"r":"note","t":"分数528。行1:2 行2:8 行3:32,8,4,2 行4:64,16,8,_。左/下无效,现试右移。后续策略:保持大数在左下/右下,避免无效滑动,持续玩到Game Over。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step77.jpg","n":77,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5513,"n":77,"r":"act","x":336,"x2":336,"y":1165,"y2":582}
+{"d":"pixel(48%)","n":77,"r":"diff"}
+{"r":"note","t":"分数528。行1:_,_,_,2 行2:2,_,_,8 行3:32,8,4,2 行4:_,64,16,8。右移有效。策略:大数靠右下,交替右/下,避免无效方向,持续到Game Over。"}
+{"els":[{"b":[0,180,672,1416],"t":"超级清理大师"},{"b":[20,197,82,252],"t":"‹"},{"b":[82,202,591,247],"t":"超级清理大师"},{"b":[589,199,653,250],"t":"⋮"},{"b":[54,337,619,438],"t":"1268 MB"},{"b":[54,447,619,482],"t":"发现大量垃圾,建议立即清理"},{"b":[34,570,208,647],"t":"&#129529;"},{"b":[34,659,208,691],"t":"清理加速"},{"b":[247,570,424,647],"t":"&#128737;️"},{"b":[247,659,424,691],"t":"病毒查杀"},{"b":[463,570,639,647],"t":"❄️"},{"b":[463,659,639,691],"t":"手机降温"},{"b":[34,772,208,849],"t":"&#128230;"},{"b":[34,861,208,895],"t":"软件管理"},{"b":[247,772,424,849],"t":"&#128640;"},{"b":[247,861,424,895],"t":"网络测速"},{"b":[463,772,639,849],"t":"&#128081;"},{"b":[463,861,639,895],"t":"会员中心"},{"b":[54,977,294,1020],"t":"&#129511; 新人红包 天天领"},{"b":[520,977,619,1020],"t":"去领取 ›"},{"b":[88,1324,135,1376],"t":"&#127968;"},{"b":[90,1379,133,1412],"t":"首页"},{"b":[314,1324,359,1376],"t":"&#129517;"},{"b":[314,1379,357,1412],"t":"发现"},{"b":[536,1324,583,1376],"t":"&#128100;"},{"b":[538,1379,581,1412],"t":"我的"},{"b":[543,512,589,558],"t":"✕"},{"b":[109,618,562,748],"t":"&#129511;"},{"b":[109,756,562,813],"t":"恭喜获得 888 元现金红包"},{"b":[109,831,562,869],"t":"仅剩 3 分钟,过期作废"},{"b":[109,899,562,988],"t":"立即领取"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"},{"b":[102,196,416,232],"t":"Translate page?"},{"b":[102,232,416,260],"t":"Chinese (Simplified) to English"},{"b":[416,187,499,269],"t":"More options in the Translate page?"},{"b":[500,166,651,289],"t":"Translate"}],"img":"step78.jpg","n":78,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4906,"n":78,"r":"act","x":841,"y":367}
+{"d":"rejected(空白背景:σ0.0亮度250≈背景248)","n":78,"r":"diff"}
+{"r":"note","t":"滑下时误触发弹窗广告(超级清理大师红包页),已点✕关闭,需回到2048棋盘。分数528。策略:大数靠右下,交替右/下。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"},{"b":[102,196,416,232],"t":"Translate page?"},{"b":[102,232,416,260],"t":"Chinese (Simplified) to English"},{"b":[416,187,499,269],"t":"More options in the Translate page?"},{"b":[500,166,651,289],"t":"Translate"}],"img":"step79.jpg","n":79,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":10548,"n":79,"r":"act","x":573,"y":781}
+{"d":"pixel(8%)","n":79,"r":"diff"}
+{"r":"note","t":"广告红包弹窗,点✕(852,536)关闭。关闭后需检查是否回到2048棋盘,若仍是广告页则用back返回。分数528,策略:大数靠右下,交替右/下,swipe距离要大。"}
+{"els":[{"b":[0,180,672,1416],"t":"超级清理大师"},{"b":[20,197,82,252],"t":"‹"},{"b":[82,202,591,247],"t":"超级清理大师"},{"b":[589,199,653,250],"t":"⋮"},{"b":[54,337,619,438],"t":"1268 MB"},{"b":[54,447,619,482],"t":"发现大量垃圾,建议立即清理"},{"b":[34,570,208,647],"t":"&#129529;"},{"b":[34,659,208,691],"t":"清理加速"},{"b":[247,570,424,647],"t":"&#128737;️"},{"b":[247,659,424,691],"t":"病毒查杀"},{"b":[463,570,639,647],"t":"❄️"},{"b":[463,659,639,691],"t":"手机降温"},{"b":[34,772,208,849],"t":"&#128230;"},{"b":[34,861,208,895],"t":"软件管理"},{"b":[247,772,424,849],"t":"&#128640;"},{"b":[247,861,424,895],"t":"网络测速"},{"b":[463,772,639,849],"t":"&#128081;"},{"b":[463,861,639,895],"t":"会员中心"},{"b":[54,977,294,1020],"t":"&#129511; 新人红包 天天领"},{"b":[520,977,619,1020],"t":"去领取 ›"},{"b":[88,1324,135,1376],"t":"&#127968;"},{"b":[90,1379,133,1412],"t":"首页"},{"b":[314,1324,359,1376],"t":"&#129517;"},{"b":[314,1379,357,1412],"t":"发现"},{"b":[536,1324,583,1376],"t":"&#128100;"},{"b":[538,1379,581,1412],"t":"我的"},{"b":[543,512,589,558],"t":"✕"},{"b":[109,618,562,748],"t":"&#129511;"},{"b":[109,756,562,813],"t":"恭喜获得 888 元现金红包"},{"b":[109,831,562,869],"t":"仅剩 3 分钟,过期作废"},{"b":[109,899,562,988],"t":"立即领取"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"},{"b":[102,196,416,232],"t":"Translate page?"},{"b":[102,232,416,260],"t":"Chinese (Simplified) to English"},{"b":[416,187,499,269],"t":"More options in the Translate page?"},{"b":[500,166,651,289],"t":"Translate"}],"img":"step80.jpg","n":80,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4843,"n":80,"r":"act","x":565,"y":782}
+{"d":"pixel(75%)","n":80,"r":"diff"}
+{"r":"note","t":"广告连环弹窗,点✕后仍需检查;若不回2048则再back。分数528,策略:大数靠右下,交替右/下,swipe距离要大。"}
+{"els":[{"b":[27,104,219,159],"t":"Bookmarks"},{"b":[418,91,500,173],"t":"Sort and view options"},{"b":[500,91,583,173],"t":"Create new folder"},{"b":[583,91,665,173],"t":"Close dialog"},{"b":[24,180,565,248],"t":"Search your bookmarks"},{"b":[555,293,637,375],"t":"Close"},{"b":[195,375,476,408],"t":"Get all your bookmarks"},{"b":[97,428,574,452],"t":"Sync to get your bookmarks from your oth"},{"b":[54,473,617,555],"t":"Turn on sync"},{"b":[0,603,672,765],"t":"Mobile bookmarks No bookmarks"},{"b":[98,686,164,752],"t":"0"},{"b":[192,665,627,702],"t":"Mobile bookmarks"},{"b":[0,765,672,927],"t":"Reading list No unread pages"},{"b":[98,848,164,914],"t":"0"},{"b":[192,827,627,864],"t":"Reading list"}],"img":"step81.jpg","n":81,"r":"screen"}
+{"a":"back","by":"glm-53-flash","n":81,"r":"act","text":"若仍是广告页,用back返回2048"}
+{"d":"pixel(75%)","n":81,"r":"diff"}
+{"els":[{"b":[0,180,672,1416],"t":"超级清理大师"},{"b":[88,1324,135,1376],"t":"&#127968;"},{"b":[90,1379,133,1412],"t":"首页"},{"b":[314,1324,359,1376],"t":"&#129517;"},{"b":[314,1379,357,1412],"t":"发现"},{"b":[536,1324,583,1376],"t":"&#128100;"},{"b":[538,1379,581,1412],"t":"我的"},{"b":[543,512,589,558],"t":"✕"},{"b":[109,618,562,748],"t":"&#129511;"},{"b":[109,756,562,813],"t":"恭喜获得 888 元现金红包"},{"b":[109,831,562,869],"t":"仅剩 3 分钟,过期作废"},{"b":[109,899,562,988],"t":"立即领取"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Customize and control Google Chrome"}],"img":"step82.jpg","n":82,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":6016,"n":82,"r":"act","x":565,"y":533}
+{"d":"pixel(81%)","n":82,"r":"diff"}
+{"r":"note","t":"广告弹窗:先点✕(841,366),若弹窗仍在再back回浏览器。回到2048后继续:大数靠右下,交替右/下滑,swipe距离大。"}
+{"els":[{"b":[0,180,672,1416],"t":"超级清理大师"},{"b":[20,197,82,252],"t":"‹"},{"b":[82,202,591,247],"t":"超级清理大师"},{"b":[589,199,653,250],"t":"⋮"},{"b":[54,337,619,438],"t":"1268 MB"},{"b":[54,447,619,482],"t":"发现大量垃圾,建议立即清理"},{"b":[34,570,208,647],"t":"&#129529;"},{"b":[34,659,208,691],"t":"清理加速"},{"b":[247,570,424,647],"t":"&#128737;️"},{"b":[247,659,424,691],"t":"病毒查杀"},{"b":[463,570,639,647],"t":"❄️"},{"b":[463,659,639,691],"t":"手机降温"},{"b":[34,772,208,849],"t":"&#128230;"},{"b":[34,861,208,895],"t":"软件管理"},{"b":[247,772,424,849],"t":"&#128640;"},{"b":[247,861,424,895],"t":"网络测速"},{"b":[463,772,639,849],"t":"&#128081;"},{"b":[463,861,639,895],"t":"会员中心"},{"b":[54,977,294,1020],"t":"&#129511; 新人红包 天天领"},{"b":[520,977,619,1020],"t":"去领取 ›"},{"b":[88,1324,135,1376],"t":"&#127968;"},{"b":[90,1379,133,1412],"t":"首页"},{"b":[314,1324,359,1376],"t":"&#129517;"},{"b":[314,1379,357,1412],"t":"发现"},{"b":[536,1324,583,1376],"t":"&#128100;"},{"b":[538,1379,581,1412],"t":"我的"},{"b":[543,512,589,558],"t":"✕"},{"b":[109,618,562,748],"t":"&#129511;"},{"b":[109,756,562,813],"t":"恭喜获得 888 元现金红包"},{"b":[109,831,562,869],"t":"仅剩 3 分钟,过期作废"},{"b":[109,899,562,988],"t":"立即领取"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"},{"b":[102,196,416,232],"t":"Translate page?"},{"b":[102,232,416,260],"t":"Chinese (Simplified) to English"},{"b":[416,187,499,269],"t":"More options in the Translate page?"},{"b":[500,166,651,289],"t":"Translate"}],"img":"step83.jpg","n":83,"r":"screen"}
+{"a":"back","by":"glm-53-flash","ms":7666,"n":83,"r":"act"}
+{"d":"pixel(26%)","n":83,"r":"diff"}
+{"els":[{"b":[130,133,359,179],"t":"Search settings"},{"b":[123,228,255,268],"t":"Location"},{"b":[123,268,508,301],"t":"On / 5 apps have access to location"},{"b":[123,373,425,419],"t":"Safety &amp; emergency"},{"b":[123,419,510,452],"t":"Emergency SOS, medical info, alerts"},{"b":[123,523,627,569],"t":"Passwords, passkeys &amp; accounts"},{"b":[123,569,472,602],"t":"Suggestions for sign-in &amp; autofill"},{"b":[123,666,630,752],"t":"Digital Wellbeing &amp; parental control"},{"b":[123,752,593,785],"t":"Screen time, app timers, bedtime schedul"},{"b":[123,848,230,894],"t":"Google"},{"b":[123,894,370,927],"t":"Services &amp; preferences"},{"b":[123,998,236,1044],"t":"System"},{"b":[123,1044,497,1077],"t":"Languages, gestures, time, backup"},{"b":[123,1149,471,1195],"t":"About emulated device"},{"b":[123,1195,362,1228],"t":"sdk_gphone64_arm64"},{"b":[123,1299,345,1345],"t":"Tips &amp; support"},{"b":[123,1345,410,1378],"t":"Help articles, phone &amp; chat"}],"img":"step84.jpg","n":84,"r":"screen"}
+{"a":"back","by":"glm-53-flash","ms":3813,"n":84,"r":"act"}
+{"d":"none","n":84,"r":"diff"}
+{"r":"note","t":"误入系统设置页,连续back返回浏览器中的2048。回去后继续:大数靠右下,交替右/下滑,swipe距离大(如500,680→100,680)。"}
+{"els":[{"b":[130,133,359,179],"t":"Search settings"},{"b":[123,228,255,268],"t":"Location"},{"b":[123,268,508,301],"t":"On / 5 apps have access to location"},{"b":[123,373,425,419],"t":"Safety &amp; emergency"},{"b":[123,419,510,452],"t":"Emergency SOS, medical info, alerts"},{"b":[123,523,627,569],"t":"Passwords, passkeys &amp; accounts"},{"b":[123,569,472,602],"t":"Suggestions for sign-in &amp; autofill"},{"b":[123,666,630,752],"t":"Digital Wellbeing &amp; parental control"},{"b":[123,752,593,785],"t":"Screen time, app timers, bedtime schedul"},{"b":[123,848,230,894],"t":"Google"},{"b":[123,894,370,927],"t":"Services &amp; preferences"},{"b":[123,998,236,1044],"t":"System"},{"b":[123,1044,497,1077],"t":"Languages, gestures, time, backup"},{"b":[123,1149,471,1195],"t":"About emulated device"},{"b":[123,1195,362,1228],"t":"sdk_gphone64_arm64"},{"b":[123,1299,345,1345],"t":"Tips &amp; support"},{"b":[123,1345,410,1378],"t":"Help articles, phone &amp; chat"}],"img":"step85.jpg","n":85,"r":"screen"}
+{"a":"back","by":"glm-53-flash","ms":8090,"n":85,"r":"act"}
+{"d":"pixel(94%)","n":85,"r":"diff"}
+{"r":"note","t":"仍在系统设置主页,继续back返回浏览器2048。回去后:大数靠右下,交替右/下滑,swipe距离大(500,680→100,680)。"}
+{"els":[{"b":[46,100,625,262],"t":"At a glance"},{"b":[46,159,212,196],"t":"Thu, Aug 27"},{"b":[194,859,322,1021],"t":"Gmail"},{"b":[349,859,477,1021],"t":"Photos"},{"b":[504,859,632,1021],"t":"YouTube"},{"b":[0,84,672,1414],"t":"Home"},{"b":[47,1112,160,1240],"t":"Phone"},{"b":[202,1112,315,1240],"t":"Messages"},{"b":[357,1112,470,1240],"t":"Chrome"},{"b":[512,1112,624,1240],"t":"Settings"},{"b":[51,1276,620,1384],"t":"Google search"},{"b":[58,1289,140,1371],"t":"Google app"},{"b":[449,1276,531,1384],"t":"Voice search"},{"b":[531,1276,613,1384],"t":"Google Lens"}],"img":"step86.jpg","n":86,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":3845,"n":86,"r":"act","x":413,"y":1174}
+{"d":"pixel(96%)","n":86,"r":"diff"}
+{"r":"note","t":"从Chrome重新打开2048页面,之后继续:大数靠右下,交替右/下滑,swipe距离大(500,680→100,680)。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step87.jpg","n":87,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":5554,"n":87,"r":"act","x":571,"y":531}
+{"d":"pixel(76%)","n":87,"r":"diff"}
+{"r":"note","t":"当前被引到垃圾页面'超级清理大师'(非2048),先关闭弹窗,再找方式返回2048页面(可改URL或后退/重新打开10.0.2.2:8899的2048页)。"}
+{"els":[{"b":[0,180,672,1416],"t":"超级清理大师"},{"b":[20,197,82,252],"t":"‹"},{"b":[82,202,591,247],"t":"超级清理大师"},{"b":[589,199,653,250],"t":"⋮"},{"b":[54,337,619,438],"t":"1268 MB"},{"b":[54,447,619,482],"t":"发现大量垃圾,建议立即清理"},{"b":[34,570,208,647],"t":"&#129529;"},{"b":[34,659,208,691],"t":"清理加速"},{"b":[247,570,424,647],"t":"&#128737;️"},{"b":[247,659,424,691],"t":"病毒查杀"},{"b":[463,570,639,647],"t":"❄️"},{"b":[463,659,639,691],"t":"手机降温"},{"b":[34,772,208,849],"t":"&#128230;"},{"b":[34,861,208,895],"t":"软件管理"},{"b":[247,772,424,849],"t":"&#128640;"},{"b":[247,861,424,895],"t":"网络测速"},{"b":[463,772,639,849],"t":"&#128081;"},{"b":[463,861,639,895],"t":"会员中心"},{"b":[54,977,294,1020],"t":"&#129511; 新人红包 天天领"},{"b":[520,977,619,1020],"t":"去领取 ›"},{"b":[88,1324,135,1376],"t":"&#127968;"},{"b":[90,1379,133,1412],"t":"首页"},{"b":[314,1324,359,1376],"t":"&#129517;"},{"b":[314,1379,357,1412],"t":"发现"},{"b":[536,1324,583,1376],"t":"&#128100;"},{"b":[538,1379,581,1412],"t":"我的"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step88.jpg","n":88,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4474,"n":88,"r":"act","x":57,"y":131}
+{"d":"pixel(43%)","n":88,"r":"diff"}
+{"r":"note","t":"在地址栏输入10.0.2.2:8899返回2048页。"}
+{"els":[{"b":[0,180,672,1416],"t":"超级清理大师"},{"b":[20,197,82,252],"t":"‹"},{"b":[82,202,591,247],"t":"超级清理大师"},{"b":[589,199,653,250],"t":"⋮"},{"b":[54,337,619,438],"t":"1268 MB"},{"b":[54,447,619,482],"t":"发现大量垃圾,建议立即清理"},{"b":[34,570,208,647],"t":"&#129529;"},{"b":[34,659,208,691],"t":"清理加速"},{"b":[247,570,424,647],"t":"&#128737;️"},{"b":[247,659,424,691],"t":"病毒查杀"},{"b":[463,570,639,647],"t":"❄️"},{"b":[463,659,639,691],"t":"手机降温"},{"b":[34,772,208,849],"t":"&#128230;"},{"b":[34,861,208,895],"t":"软件管理"},{"b":[247,772,424,849],"t":"&#128640;"},{"b":[247,861,424,895],"t":"网络测速"},{"b":[463,772,639,849],"t":"&#128081;"},{"b":[463,861,639,895],"t":"会员中心"},{"b":[54,977,294,1020],"t":"&#129511; 新人红包 天天领"},{"b":[520,977,619,1020],"t":"去领取 ›"},{"b":[88,1324,135,1376],"t":"&#127968;"},{"b":[90,1379,133,1412],"t":"首页"},{"b":[314,1324,359,1376],"t":"&#129517;"},{"b":[314,1379,357,1412],"t":"发现"},{"b":[536,1324,583,1376],"t":"&#128100;"},{"b":[538,1379,581,1412],"t":"我的"},{"b":[543,512,589,558],"t":"✕"},{"b":[109,618,562,748],"t":"&#129511;"},{"b":[109,756,562,813],"t":"恭喜获得 888 元现金红包"},{"b":[109,831,562,869],"t":"仅剩 3 分钟,过期作废"},{"b":[109,899,562,988],"t":"立即领取"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"},{"b":[102,196,416,232],"t":"Translate page?"},{"b":[102,232,416,260],"t":"Chinese (Simplified) to English"},{"b":[416,187,499,269],"t":"More options in the Translate page?"},{"b":[500,166,651,289],"t":"Translate"}],"img":"step89.jpg","n":89,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":5151,"n":89,"r":"act","x":173,"y":550}
+{"d":"rejected(空白背景:σ2.2亮度250≈背景232)","n":89,"r":"diff"}
+{"r":"note","t":"误入了流氓页面后回到了Chrome新标签页。点快捷方式10.0.2.2/ga...返回2048游戏页继续。"}
+{"els":[{"b":[68,324,439,433],"t":"Search or type URL"},{"b":[459,337,541,420],"t":"Start voice search"},{"b":[541,337,624,420],"t":"Search with your camera using Google Len"},{"b":[47,504,184,639],"t":"Navigate: : 10.0.2.2"},{"b":[135,515,162,543],"t":"Available offline"},{"b":[54,611,177,639],"t":"10.0.2.2/game.html"},{"b":[180,504,317,639],"t":"Navigate: Facebook: m.facebook.com"},{"b":[187,611,310,639],"t":"Facebook"},{"b":[312,504,449,639],"t":"Navigate: YouTube: m.youtube.com"},{"b":[319,611,443,639],"t":"YouTube"},{"b":[445,504,582,639],"t":"Navigate: Amazon.com: www.amazon.com"},{"b":[452,611,575,639],"t":"Amazon.com"},{"b":[578,504,644,639],"t":"Navigate: Wikipedia: en.m.wikipedia.org"},{"b":[584,611,644,639],"t":"Wikipedia"},{"b":[41,726,141,763],"t":"Discover"},{"b":[596,704,637,786],"t":"Options for Discover"},{"b":[555,793,637,875],"t":"Close"},{"b":[197,875,473,907],"t":"Get better suggestions"},{"b":[105,928,566,952],"t":"Sync to get the most relevant content fr"},{"b":[54,973,617,1055],"t":"Turn on sync"},{"b":[54,1123,617,1174],"t":"No stories available"},{"b":[54,1174,617,1207],"t":"Check back later for new stories"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[418,84,507,180],"t":"Signed out. Opens dialog to sign in and "},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step90.jpg","n":90,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4566,"n":90,"r":"act","x":115,"y":568}
+{"d":"pixel(17%)","n":90,"r":"diff"}
+{"r":"note","t":"误入流氓页面后回到Chrome新标签页。点击快捷方式10.0.2.2/game.html返回2048游戏，加载后先wait确认页面，再继续用大距离swipe玩到Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/game.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step91.jpg","n":91,"r":"screen"}
+{"a":"wait","by":"glm-53-flash","ms":3551,"n":91,"r":"act"}
+{"d":"pixel(84%)","n":91,"r":"diff"}
+{"r":"note","t":"已回到game.html页面但内容空白，可能在加载。wait后若仍空白，尝试刷新页面再继续玩2048。"}
+{"els":[{"b":[0,180,672,1416],"t":"超级清理大师"},{"b":[20,197,82,252],"t":"‹"},{"b":[82,202,591,247],"t":"超级清理大师"},{"b":[589,199,653,250],"t":"⋮"},{"b":[54,337,619,438],"t":"1268 MB"},{"b":[54,447,619,482],"t":"发现大量垃圾,建议立即清理"},{"b":[34,570,208,647],"t":"&#129529;"},{"b":[34,659,208,691],"t":"清理加速"},{"b":[247,570,424,647],"t":"&#128737;️"},{"b":[247,659,424,691],"t":"病毒查杀"},{"b":[463,570,639,647],"t":"❄️"},{"b":[463,659,639,691],"t":"手机降温"},{"b":[34,772,208,849],"t":"&#128230;"},{"b":[34,861,208,895],"t":"软件管理"},{"b":[247,772,424,849],"t":"&#128640;"},{"b":[247,861,424,895],"t":"网络测速"},{"b":[463,772,639,849],"t":"&#128081;"},{"b":[463,861,639,895],"t":"会员中心"},{"b":[54,977,294,1020],"t":"&#129511; 新人红包 天天领"},{"b":[520,977,619,1020],"t":"去领取 ›"},{"b":[88,1324,135,1376],"t":"&#127968;"},{"b":[90,1379,133,1412],"t":"首页"},{"b":[314,1324,359,1376],"t":"&#129517;"},{"b":[314,1379,357,1412],"t":"发现"},{"b":[536,1324,583,1376],"t":"&#128100;"},{"b":[538,1379,581,1412],"t":"我的"},{"b":[543,512,589,558],"t":"✕"},{"b":[109,618,562,748],"t":"&#129511;"},{"b":[109,756,562,813],"t":"恭喜获得 888 元现金红包"},{"b":[109,831,562,869],"t":"仅剩 3 分钟,过期作废"},{"b":[109,899,562,988],"t":"立即领取"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"},{"b":[102,196,416,232],"t":"Translate page?"},{"b":[102,232,416,260],"t":"Chinese (Simplified) to English"},{"b":[416,187,499,269],"t":"More options in the Translate page?"},{"b":[500,166,651,289],"t":"Translate"}],"img":"step92.jpg","n":92,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4340,"n":92,"r":"act","x":335,"y":940}
+{"d":"pixel(16%)","n":92,"r":"diff"}
+{"r":"note","t":"game.html显示'农场小游戏'开始页,点击开始游戏后应出现2048棋盘,之后用大幅swipe玩(左滑500→100等),直到Game Over。"}
+{"els":[{"b":[0,180,672,1416],"t":"超级清理大师"},{"b":[20,197,82,252],"t":"‹"},{"b":[82,202,591,247],"t":"超级清理大师"},{"b":[589,199,653,250],"t":"⋮"},{"b":[54,337,619,438],"t":"1268 MB"},{"b":[54,447,619,482],"t":"发现大量垃圾,建议立即清理"},{"b":[34,570,208,647],"t":"&#129529;"},{"b":[34,659,208,691],"t":"清理加速"},{"b":[247,570,424,647],"t":"&#128737;️"},{"b":[247,659,424,691],"t":"病毒查杀"},{"b":[463,570,639,647],"t":"❄️"},{"b":[463,659,639,691],"t":"手机降温"},{"b":[34,772,208,849],"t":"&#128230;"},{"b":[34,861,208,895],"t":"软件管理"},{"b":[247,772,424,849],"t":"&#128640;"},{"b":[247,861,424,895],"t":"网络测速"},{"b":[463,772,639,849],"t":"&#128081;"},{"b":[463,861,639,895],"t":"会员中心"},{"b":[54,977,294,1020],"t":"&#129511; 新人红包 天天领"},{"b":[520,977,619,1020],"t":"去领取 ›"},{"b":[88,1324,135,1376],"t":"&#127968;"},{"b":[90,1379,133,1412],"t":"首页"},{"b":[314,1324,359,1376],"t":"&#129517;"},{"b":[314,1379,357,1412],"t":"发现"},{"b":[536,1324,583,1376],"t":"&#128100;"},{"b":[538,1379,581,1412],"t":"我的"},{"b":[543,512,589,558],"t":"✕"},{"b":[109,618,562,748],"t":"&#129511;"},{"b":[109,756,562,813],"t":"恭喜获得 888 元现金红包"},{"b":[109,831,562,869],"t":"仅剩 3 分钟,过期作废"},{"b":[109,899,562,988],"t":"立即领取"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"},{"b":[102,196,416,232],"t":"Translate page?"},{"b":[102,232,416,260],"t":"Chinese (Simplified) to English"},{"b":[416,187,499,269],"t":"More options in the Translate page?"},{"b":[500,166,651,289],"t":"Translate"}],"img":"step93.jpg","n":93,"r":"screen"}
+{"kind":"budget","limit":60,"r":"hook","spent":60,"stall":0,"stop":"budget"}
+{"achieved":false,"by":"glm-53-flash","kind":"verdict","r":"hook","reason":"最终画面仅显示通关/VICTORY，无Game Over终局证据，不满足要求"}

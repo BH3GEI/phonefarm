@@ -1,0 +1,7 @@
+# 感知参数 — 手工设定(非自愈产物)
+# 来历: 靶子是 Chrome 承载的网页,uiautomator 只能看到地址栏,
+#       els 差异通道恒为噪音;改用像素通道判断页面是否切换。
+# 回退: 使用本参数一局空击率高于 origin_null_rate 时程序删除本文件。
+
+diff_channel = "pixel"
+origin_null_rate = 0.50

@@ -1,0 +1,149 @@
+{"v":1}
+{"r":"goal","t":"玩2048,尽量拿高分,出现Game Over才算终局"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step1.jpg","n":1,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5076,"n":1,"r":"act","text":"左滑合并2和4","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(5%)","n":1,"r":"diff"}
+{"r":"note","t":"开局，分数0。策略：主要左/下滑，大块沉左下角，滑动距离要大。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step2.jpg","n":2,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":3908,"n":2,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(5%)","n":2,"r":"diff"}
+{"r":"note","t":"开局分数0，已有左滑。策略：大块沉左下角，主要左/下滑，滑距要大(≥400)。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step3.jpg","n":3,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4866,"n":3,"r":"act","text":"","x":336,"x2":336,"y":787,"y2":1384}
+{"d":"pixel(5%)","n":3,"r":"diff"}
+{"r":"note","t":"棋盘约y450-1070。策略：大块沉左下角，主要左/下滑。当前左列2,4,2。继续下滑后再左滑合并。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step4.jpg","n":4,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4031,"n":4,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(7%)","n":4,"r":"diff"}
+{"r":"note","t":"棋盘y450-1070。左列顶部2,下面2,4,2——左滑可合并2+2成4。继续左/下滑策略，大块沉左下。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step5.jpg","n":5,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4608,"n":5,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(5%)","n":5,"r":"diff"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step6.jpg","n":6,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":9747,"n":6,"r":"act","x":500,"x2":950,"y":600}
+{"d":"rejected(缺y2)","n":6,"r":"diff"}
+{"r":"note","t":"左列自上而下2,2,4,4，下滑可同时合并成4和8，大块沉左下。继续下滑/左滑策略。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step7.jpg","n":7,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":3882,"n":7,"r":"act","x":336,"x2":336,"y":874,"y2":1384}
+{"d":"pixel(6%)","n":7,"r":"diff"}
+{"r":"note","t":"左列2,2,4,4可下滑合并为4和8。策略：下滑/左滑为主，保持大块沉左下。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step8.jpg","n":8,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4673,"n":8,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(8%)","n":8,"r":"diff"}
+{"r":"note","t":"棋盘: (0,0)=2,(0,2)=4,(0,3)=8,(1,3)=4,分数20。策略: 左滑为主,保持大块沉左下,避免右滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step9.jpg","n":9,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4822,"n":9,"r":"act","x":336,"x2":336,"y":728,"y2":1384}
+{"d":"pixel(14%)","n":9,"r":"diff"}
+{"r":"note","t":"棋盘: 列0自上2,4,8;(0,1)=4,(1,1)=2,分数20。策略: 下滑/左滑为主,大块沉左下,避免右滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step10.jpg","n":10,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":10512,"n":10,"r":"act","x":538,"x2":67,"y":845,"y2":845}
+{"d":"pixel(5%)","n":10,"r":"diff"}
+{"r":"note","t":"棋盘: 列0自上2,4,8,2;底行2,4,2,2。分数24。左滑可合并底行2+2。策略: 下/左滑为主,大块沉左下,避免右滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step11.jpg","n":11,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4786,"n":11,"r":"act","x":336,"x2":67,"y":845,"y2":845}
+{"d":"pixel(5%)","n":11,"r":"diff"}
+{"r":"note","t":"棋盘: 4,2,_,_ / 4,_,_,_ / 8,4,_,_ / 2,4,4,_。分数32。策略: 左滑合并底行4+4及中行,大块沉左下;避免右/上滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step12.jpg","n":12,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7443,"n":12,"r":"act","x":336,"x2":336,"y":845,"y2":1384}
+{"d":"pixel(12%)","n":12,"r":"diff"}
+{"r":"note","t":"分数40。下滑合并第1列4+4→8、与8相邻，期望得8,8。策略：优先左/下滑，大块沉左下，避免右/上滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step13.jpg","n":13,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5229,"n":13,"r":"act","x":336,"x2":67,"y":845,"y2":845}
+{"d":"pixel(4%)","n":13,"r":"diff"}
+{"r":"note","t":"分数48。棋盘：行1:8,2,_,2；行2:8,4,_,_；行3:2,8,_,2。左滑合并8+8→16。策略：优先左/下滑，大块沉左下，避免右/上滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step14.jpg","n":14,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":6936,"n":14,"r":"act","x":336,"x2":336,"y":845,"y2":1384}
+{"d":"pixel(6%)","n":14,"r":"diff"}
+{"r":"note","t":"分数52。棋盘：行1:8,4,_,_；行2:8,4,_,_；行3:2,8,2,2。下滑可合并8+8→16、4+4→8。策略：优先下滑/左滑，大块沉左下，避免右上滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step15.jpg","n":15,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4861,"n":15,"r":"act","x":336,"x2":336,"y":874,"y2":1384}
+{"d":"pixel(4%)","n":15,"r":"diff"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step16.jpg","n":16,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4547,"n":16,"r":"act","x":336,"x2":67,"y":874,"y2":874}
+{"d":"pixel(5%)","n":16,"r":"diff"}
+{"r":"note","t":"分数96。棋盘：行1:_,_,2,_；行2:全空；行3:16,_,_,_；行4:2,16,2,4。策略：优先左滑/下滑，合并16+16需对齐，大块沉左下，避免上滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step17.jpg","n":17,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":6234,"n":17,"r":"act","x":336,"x2":67,"y":845,"y2":845}
+{"d":"pixel(4%)","n":17,"r":"diff"}
+{"r":"note","t":"分数96。行1:2,2,_,_；行3:16；行4:2,16,2,4。左滑可合并顶部2+2。策略：大块沉左下，优先左/下滑，避免上滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step18.jpg","n":18,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4647,"n":18,"r":"act","x":336,"x2":67,"y":1238,"y2":1238}
+{"d":"pixel(5%)","n":18,"r":"diff"}
+{"r":"note","t":"分数100。行1:4,_ ,_,_；行2:_,_,2,_；行3:16；行4:2,16,2,4。大块沉左下，优先左/下滑，避免上滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step19.jpg","n":19,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":9926,"n":19,"r":"act","x":336,"x2":336,"y":874,"y2":1384}
+{"d":"pixel(5%)","n":19,"r":"diff"}
+{"r":"note","t":"分数100。当前盘:行1:4,_,_,2；行2:2；行3:16；行4:2,16,2,4。左列4/2/16/2。尝试下滑看是否可动，若无效再试左滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step20.jpg","n":20,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7235,"n":20,"r":"act","x":571,"x2":100,"y":874,"y2":874}
+{"d":"pixel(7%)","n":20,"r":"diff"}
+{"r":"note","t":"分数100。盘面:行1:4,_,_,_；行2:2,_,_,2；行3:16,_,_,2；行4:2,16,2,4。右滑可合并行2的2+2。策略:尽量把大数(16)压在底行，避免上滑打乱。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step21.jpg","n":21,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5457,"n":21,"r":"act","x":336,"x2":605,"y":1238,"y2":1238}
+{"d":"pixel(12%)","n":21,"r":"diff"}
+{"r":"note","t":"分数104。盘面:行1:4,_,_,2；行2:4,_,_,_；行3:16,2,_,_；行4:2,16,2,4。刚右滑合并了行1的2。策略:大数压底行，主用右滑/下滑，避免上滑。继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step22.jpg","n":22,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4494,"n":22,"r":"act","x":336,"x2":605,"y":1238,"y2":1238}
+{"d":"none","n":22,"r":"diff"}
+{"r":"note","t":"分数104。盘面:行1:_,_,4,2；行2:_,_,_,4；行3:_,2,16,2；行4:2,16,2,4。策略:大数压底行,主用右滑/下滑,避免上滑,继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step23.jpg","n":23,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4525,"n":23,"r":"act","x":336,"x2":605,"y":1238,"y2":1238}
+{"d":"none","n":23,"r":"diff"}
+{"r":"note","t":"分数104。盘面:行1:_,_,4,2；行2:_,_,_,4；行3:_,2,16,2；行4:2,16,2,4。策略:大数压底行,主用右滑/下滑,避免上滑,继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step24.jpg","n":24,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4719,"n":24,"r":"act","x":336,"x2":80,"y":1238,"y2":1238}
+{"d":"pixel(20%)","n":24,"r":"diff"}
+{"r":"note","t":"分数104。盘面:行1:_,_,4,2；行2:_,_,_,4；行3:_,2,16,2；行4:2,16,2,4。连续右滑已无效(两次none),改左滑尝试制造空格,大数仍保持在底行。避免上滑,继续至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step25.jpg","n":25,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5419,"n":25,"r":"act","text":"左滑合并16与底行","x":571,"x2":100,"y":859,"y2":859}
+{"d":"none","n":25,"r":"diff"}
+{"r":"note","t":"分数104。盘面:行1:4,2,_,_；行2:4,2,_,_；行3:2,16,2,_；行4:2,16,2,4。右滑无效后已左滑。继续左/下滑操作,避免无效重复方向,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step26.jpg","n":26,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5399,"n":26,"r":"act","x":336,"x2":336,"y":816,"y2":1340}
+{"d":"pixel(15%)","n":26,"r":"diff"}
+{"r":"note","t":"分数104。盘面:4,2,_,_/4,2,_,_/2,16,2,_/2,16,2,4。已左滑。计划下滑合并16列和4列,之后交替左右下,避免无效重复方向,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step27.jpg","n":27,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5412,"n":27,"r":"act","x":336,"x2":80,"y":1238,"y2":1238}
+{"d":"pixel(9%)","n":27,"r":"diff"}
+{"r":"note","t":"分数156。盘面:_,_,_,_/_,_,_,2/8,4,_,_/4,32,4,4。左滑后底行4,4合并。策略:保持大数(32)在左下,交替左/下,必要时上滑解僵局,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step28.jpg","n":28,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5412,"n":28,"r":"act","x":336,"x2":80,"y":1238,"y2":1238}
+{"d":"pixel(5%)","n":28,"r":"diff"}
+{"r":"note","t":"分数164。盘面:2,_,_,2/2,_,_,_/8,4,_,_/4,32,8,_(截图更新,与旧note不同)。大数32,8在底行。策略:交替左/下,大数保持左下,僵局时上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step29.jpg","n":29,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5518,"n":29,"r":"act","x":336,"x2":80,"y":859,"y2":859}
+{"d":"pixel(4%)","n":29,"r":"diff"}
+{"r":"note","t":"分数164。盘面:2,_,_,2/2,_,_,_/8,4,_,_/4,32,8,_。大数32,8在底行。策略:交替左/下,大数保持左下,僵局时上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step30.jpg","n":30,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4461,"n":30,"r":"act","x":336,"x2":80,"y":859,"y2":859}
+{"d":"pixel(5%)","n":30,"r":"diff"}
+{"r":"note","t":"分数168。盘面:4,_,_,_/2,_,_,_/8,4,_,2/4,32,8,_。大数32,8在底行。策略:交替左/下,大数保持左下,僵局时上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step31.jpg","n":31,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4087,"n":31,"r":"act","x":336,"x2":336,"y":1238,"y2":655}
+{"d":"pixel(11%)","n":31,"r":"diff"}
+{"r":"note","t":"分数168。盘面:4,2,_,_/2,_,_,_/8,4,2,_/4,32,8,_。大数32,8在底行。策略:下/左交替,大数保持左下,僵局时上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step32.jpg","n":32,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7057,"n":32,"r":"act","x":470,"x2":67,"y":859,"y2":859}
+{"d":"pixel(4%)","n":32,"r":"diff"}
+{"r":"note","t":"分数168。盘面:4,2,2,2/2,4,8,_/8,32,_,_/4,_,_,_。32在中左,继续左滑合并顶行后保持下/左循环,大数压左下,僵局时上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step33.jpg","n":33,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5590,"n":33,"r":"act","x":470,"x2":67,"y":859,"y2":859}
+{"d":"pixel(9%)","n":33,"r":"diff"}
+{"r":"note","t":"分数172。盘面:4,4,2,_/2,4,8,_/8,32,_,_/4,_,_,2。左滑可合并顶行4+4。策略:保持左滑+下滑循环,大数压左下/左上,僵局时上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step34.jpg","n":34,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4657,"n":34,"r":"act","text":"","x":336,"x2":336,"y":1020,"y2":437}
+{"d":"pixel(5%)","n":34,"r":"diff"}
+{"r":"note","t":"分数180。盘面:8,2,_,_/2,4,8,2/8,32,2,_/4,_,_,_。下/左滑循环,保护32在左下区,僵局时上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step35.jpg","n":35,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":7591,"n":35,"r":"act","x":336,"x2":336,"y":1238,"y2":655}
+{"d":"pixel(4%)","n":35,"r":"diff"}
+{"r":"note","t":"分数180。盘面:8,2,8,2/2,4,2,_/8,32,2,_/4,_,_,_。坚持下滑为主、左滑辅助,保护32在左下区,僵局时上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step36.jpg","n":36,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4543,"n":36,"r":"act","x":336,"x2":336,"y":1238,"y2":655}
+{"d":"pixel(2%)","n":36,"r":"diff"}
+{"r":"note","t":"分数184。盘面:8,2,8,2/2,4,4,_/8,32,_,_/4,_,2,_。坚持下滑为主、左滑辅助,可先左滑合并4+4,保护32在左下区,僵局时上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step37.jpg","n":37,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":8222,"n":37,"r":"act","x":336,"x2":336,"y":1238,"y2":655}
+{"d":"pixel(4%)","n":37,"r":"diff"}
+{"r":"note","t":"分数184。盘面:8,2,8,2/2,4,4,_/8,32,2,_/4,_,2,_。策略:下滑为主,左滑合并4+4,保护32,僵局上滑,直至Game Over。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/2048.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step38.jpg","n":38,"r":"screen"}

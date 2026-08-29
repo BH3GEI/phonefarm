@@ -1,0 +1,7 @@
+{"v":1}
+{"born":1,"id":1,"lose":0,"r":"lesson","t":"About在设置列表最底部，进入设置后需下滑约3屏，接近底部时一次滚动可能无更新，需继续","win":4}
+{"born":1,"id":2,"lose":1,"r":"lesson","t":"列表底部SIM status与About emulated device相邻，点击前核对目标文字所在矩形，勿按记忆坐标点击；本局因坐标偏差点击了错误项退出到底部区域，需重新滚动回底部再点","win":3}
+{"born":1,"id":3,"lose":1,"r":"lesson","t":"主屏dock栏常驻Settings图标，可直接点击，无需打开应用抽屉","win":4}
+{"born":4,"id":4,"lose":0,"r":"lesson","t":"点击About后如误点相邻项导致列表回跳顶部，不要执行done，应先确认当前页面是否已是About emulated device页，否则滚回底部重新点击","win":0}
+{"born":6,"id":5,"lose":0,"r":"lesson","t":"若当前停留在资讯App等第三方应用内，back难以退出到主屏，应先按home键回主屏，再点dock栏Settings图标打开设置","win":0}
+{"born":7,"id":6,"lose":0,"r":"lesson","t":"swipe命令必须同时给出起点和终点完整坐标(含y2)，缺终点坐标会被rejected","win":0}

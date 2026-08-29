@@ -1,0 +1,61 @@
+{"v":1}
+{"r":"goal","t":"这是一个测试用的手机清理类App。系统遍历它的所有页面:点开每个功能入口、菜单项、底部标签(首页/发现/我的)及其子页面,尽量覆盖全部可到达页面。规则:①遇弹窗广告先关闭(点弹窗角上的关闭叉×,不要点\"立即领取/开通会员\"这类诱导按钮);②遇权限申请弹窗点\"拒绝\"以继续;③每到新页面在note里维护已访问清单;④一个分支看完用back返回上级再探索没走过的入口;⑤所有入口子页面都访问过、无新页面可去时用done,text里列出访问过的所有页面名。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/game.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step1.jpg","n":1,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":3095,"n":1,"r":"act","x":336,"y":903}
+{"d":"none","n":1,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页。点了'开始游戏',等待下页。"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/game.html"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step2.jpg","n":2,"r":"screen"}
+{"a":"back","by":"glm-53-flash","ms":4125,"n":2,"r":"act"}
+{"d":"+[10.0.2.2/game.html,Amazon.com,Available offline,Check back later f] -[10.0.2.2:8899/game,New tab,Your connection to]","n":2,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页(VICTORY)。当前在浏览器中,back返回App继续探索其他入口。"}
+{"els":[{"b":[68,324,439,433],"t":"Search or type URL"},{"b":[459,337,541,420],"t":"Start voice search"},{"b":[541,337,624,420],"t":"Search with your camera using Google Len"},{"b":[47,504,184,639],"t":"Navigate: : 10.0.2.2"},{"b":[135,515,162,543],"t":"Available offline"},{"b":[54,611,177,639],"t":"10.0.2.2/game.html"},{"b":[180,504,317,639],"t":"Navigate: Facebook: m.facebook.com"},{"b":[187,611,310,639],"t":"Facebook"},{"b":[312,504,449,639],"t":"Navigate: YouTube: m.youtube.com"},{"b":[319,611,443,639],"t":"YouTube"},{"b":[445,504,582,639],"t":"Navigate: Amazon.com: www.amazon.com"},{"b":[452,611,575,639],"t":"Amazon.com"},{"b":[578,504,644,639],"t":"Navigate: Wikipedia: en.m.wikipedia.org"},{"b":[584,611,644,639],"t":"Wikipedia"},{"b":[41,726,141,763],"t":"Discover"},{"b":[596,704,637,786],"t":"Options for Discover"},{"b":[555,793,637,875],"t":"Close"},{"b":[197,875,473,907],"t":"Get better suggestions"},{"b":[105,928,566,952],"t":"Sync to get the most relevant content fr"},{"b":[54,973,617,1055],"t":"Turn on sync"},{"b":[54,1123,617,1174],"t":"No stories available"},{"b":[54,1174,617,1207],"t":"Check back later for new stories"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[418,84,507,180],"t":"Signed out. Opens dialog to sign in and "},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step3.jpg","n":3,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":5185,"n":3,"r":"act","x":595,"y":832}
+{"d":"-[Close,Get better suggest,Sync to get the mo,Turn on sync]","n":3,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页(VICTORY)。当前误入Chrome浏览器,先关闭sync弹窗并退出浏览器,需回到清理App继续探索底部标签(首页/发现/我的)。"}
+{"els":[{"b":[68,324,439,433],"t":"Search or type URL"},{"b":[459,337,541,420],"t":"Start voice search"},{"b":[541,337,624,420],"t":"Search with your camera using Google Len"},{"b":[47,504,184,639],"t":"Navigate: : 10.0.2.2"},{"b":[135,515,162,543],"t":"Available offline"},{"b":[54,611,177,639],"t":"10.0.2.2/game.html"},{"b":[180,504,317,639],"t":"Navigate: Facebook: m.facebook.com"},{"b":[187,611,310,639],"t":"Facebook"},{"b":[312,504,449,639],"t":"Navigate: YouTube: m.youtube.com"},{"b":[319,611,443,639],"t":"YouTube"},{"b":[445,504,582,639],"t":"Navigate: Amazon.com: www.amazon.com"},{"b":[452,611,575,639],"t":"Amazon.com"},{"b":[578,504,644,639],"t":"Navigate: Wikipedia: en.m.wikipedia.org"},{"b":[584,611,644,639],"t":"Wikipedia"},{"b":[41,726,141,763],"t":"Discover"},{"b":[596,704,637,786],"t":"Options for Discover"},{"b":[54,813,617,864],"t":"No stories available"},{"b":[54,864,617,897],"t":"Check back later for new stories"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[418,84,507,180],"t":"Signed out. Opens dialog to sign in and "},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step4.jpg","n":4,"r":"screen"}
+{"a":"back","by":"glm-53-flash","n":4,"r":"act"}
+{"d":"+[10.0.2.2:8899/lium,New tab,Your connection to] -[10.0.2.2/game.html,Amazon.com,Available offline,Check back later f]","n":4,"r":"diff"}
+{"els":[{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step5.jpg","n":5,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4761,"n":5,"r":"act","text":"清理加速","x":119,"y":626}
+{"d":"+[Web View]","n":5,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、首页(清理大师主页)。当前点开清理加速。待探索:病毒查杀、手机降温、软件管理、网络测速、会员中心、新人红包、发现页、我的页。注意:1268MB大字区域可能是广告诱饵,别点。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#home"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step6.jpg","n":6,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":11030,"n":6,"r":"act","x":211,"y":877}
+{"d":"+[10.0.2.2:8899/lium] -[10.0.2.2:8899/lium]","n":6,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、清理大师首页、清理加速页(弹存储权限)。规则:拒绝权限、关闭广告×、1268MB区别点。待探索:病毒查杀、手机降温、软件管理、网络测速、新人红包、发现页、我的页。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#clean"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step7.jpg","n":7,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":9140,"n":7,"r":"act","text":"深度清理","x":80,"y":846}
+{"d":"+[10.0.2.2:8899/lium] -[10.0.2.2:8899/lium]","n":7,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、清理大师首页、清理加速页、深度清理页(进行中)。规则:拒绝权限、关广告×、1268MB区别点。待探索:微信专清、视频专清、一键清理、病毒查杀、手机降温、软件管理、网络测速、新人红包、发现页、我的页。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#cleanDeep"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step8.jpg","n":8,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4450,"n":8,"r":"act","x":336,"y":709}
+{"d":"+[10.0.2.2:8899/lium] -[10.0.2.2:8899/lium]","n":8,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、清理大师首页、清理加速页、深度清理页(已点过升级会员按钮,是诱导,后续跳过)。待探索:微信专清、视频专清、一键清理、病毒查杀、手机降温、软件管理、网络测速、新人红包、发现页、我的页。规则:拒绝权限、关广告×。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#member"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step9.jpg","n":9,"r":"screen"}
+{"a":"back","by":"glm-53-flash","n":9,"r":"act"}
+{"d":"+[10.0.2.2:8899/lium] -[10.0.2.2:8899/lium]","n":9,"r":"diff"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#cleanDeep"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step10.jpg","n":10,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":5182,"n":10,"r":"act","x":26,"y":332}
+{"d":"none","n":10,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、清理大师首页、清理加速页、深度清理页(升级会员按钮为诱导,跳过)。当前在深度清理WebView内,点左上角<返回App首页。待探索:微信专清、视频专清、一键清理、病毒查杀、手机降温、软件管理、网络测速、新人红包、发现页、我的页。规则:拒绝权限、关广告×。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#cleanDeep"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step11.jpg","n":11,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4749,"n":11,"r":"act","x":25,"y":221}
+{"d":"none","n":11,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、清理大师首页、清理加速页、深度清理页(升级会员为诱导,跳过)。浏览器页面点左上角<回App首页。待探索:微信专清、视频专清、一键清理、病毒查杀、手机降温、软件管理、网络测速、新人红包、发现页、我的页。规则:拒绝权限、关广告×。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#cleanDeep"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step12.jpg","n":12,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4719,"n":12,"r":"act","text":"微信专清","x":107,"y":692}
+{"d":"none","n":12,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、清理大师首页、清理加速页、深度清理页(升级会员诱导,跳过)、浏览器误入页。当前清理加速页,正访问微信专清。待探索:视频专清、一键清理、病毒查杀、手机降温、软件管理、网络测速、新人红包、发现页、我的页。规则:拒绝权限、关广告×。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#cleanDeep"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step13.jpg","n":13,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":8655,"n":13,"r":"act","text":"视频专清","x":336,"y":880}
+{"d":"none","n":13,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、清理大师首页、清理加速页、深度清理页(升级诱导,跳过)、浏览器误入页、微信专清。当前清理加速页,正点视频专清。待探索:一键清理、病毒查杀、手机降温、软件管理、网络测速、新人红包、发现页、我的页。规则:拒绝权限、关广告×。"}
+{"by":"glm-53-flash","changed":true,"desc":"跳转至深度清理扫描页并提示升级会员","kind":"arbit","r":"hook"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#cleanDeep"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step14.jpg","n":14,"r":"screen"}
+{"a":"back","by":"glm-53-flash","ms":15115,"n":14,"r":"act"}
+{"d":"none","n":14,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、清理大师首页、清理加速页、深度清理页(升级诱导)、浏览器误入页、微信专清。当前深度清理页,back回清理加速页。待探索:视频专清、一键清理、病毒查杀、手机降温、软件管理、网络测速、新人红包、发现页、我的页。规则:拒绝权限、关广告×、跳过升级按钮。"}
+{"els":[{"b":[0,84,672,1414],"t":"Web View"},{"b":[0,84,82,180],"t":"Open the home page"},{"b":[88,112,130,153],"t":"Your connection to this site is not secu"},{"b":[136,89,405,175],"t":"10.0.2.2:8899/liumang.html#cleanDeep"},{"b":[418,84,507,180],"t":"New tab"},{"b":[507,84,589,180],"t":"Switch or close tabs"},{"b":[589,84,672,180],"t":"Update available. More options"}],"img":"step15.jpg","n":15,"r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":4446,"n":15,"r":"act","x":107,"y":785}
+{"d":"none","n":15,"r":"diff"}
+{"r":"note","t":"已访问:农场小游戏首页、小游戏通关页、清理大师首页、清理加速页、深度清理页(升级诱导)、浏览器误入页、微信专清。当前清理加速页,点视频专清中。待探索:视频专清、一键清理、病毒查杀、手机降温、软件管理、网络测速、新人红包、发现页、我的页。规则:拒绝权限、关广告×、跳过升级按钮。"}

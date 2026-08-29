@@ -1,0 +1,22 @@
+{"v":1}
+{"r":"goal","t":"打开设置,找到\"关于手机\""}
+{"r":"screen","n":1,"els":[{"t":"Phone","b":[37,1145,168,1207]},{"t":"Messages","b":[174,1145,305,1207]},{"t":"Chrome","b":[311,1145,442,1207]},{"t":"Settings","b":[535,1145,666,1207]}],"img":"step1.jpg"}
+{"r":"act","n":1,"a":"tap","x":568,"y":1176,"by":"empero","ms":4830}
+{"r":"diff","n":1,"d":"+[Network & internet,Connected devices,Apps,Notifications,Battery] -[Phone,Messages,Chrome]"}
+{"r":"note","t":"已进入设置主页,About不在首屏,需下滑"}
+{"r":"screen","n":2,"els":[{"t":"Network & internet","b":[20,320,938,428]},{"t":"Apps","b":[20,540,938,648]},{"t":"Battery","b":[20,760,938,868]}],"img":"step2.jpg"}
+{"r":"act","n":2,"a":"scroll_down","by":"empero","ms":4210}
+{"r":"diff","n":2,"d":"+[Storage,Sound & vibration,Display] -[Network & internet,Connected devices]"}
+{"r":"act","n":3,"a":"scroll_down","by":"empero","ms":4400}
+{"r":"diff","n":3,"d":"+[SIM status,About emulated device,Tips & support] -[Apps,Notifications]"}
+{"r":"screen","n":4,"els":[{"t":"Storage","b":[20,210,938,318]},{"t":"SIM status","b":[20,1830,938,1938]},{"t":"About emulated device","b":[20,1940,938,2048]}],"img":"step4.jpg"}
+{"r":"act","n":4,"a":"tap","x":479,"y":1884,"by":"glm-vision","ms":3620}
+{"r":"diff","n":4,"d":"+[SIM status,Network,Signal strength,OK]"}
+{"r":"note","t":"点开的是SIM状态弹窗,About在其下一行,y约1994"}
+{"r":"act","n":5,"a":"back","by":"glm-vision","ms":3150}
+{"r":"diff","n":5,"d":"-[SIM status,Network,Signal strength,OK]"}
+{"r":"act","n":6,"a":"tap","x":479,"y":1994,"by":"glm-vision","ms":3480}
+{"r":"diff","n":6,"d":"+[Model,Serial number,sdk_gphone64_arm64]"}
+{"r":"screen","n":7,"els":[{"t":"Model","b":[60,340,600,430]},{"t":"sdk_gphone64_arm64","b":[60,440,600,500]},{"t":"Serial number","b":[60,560,600,650]},{"t":"EMULATOR37X1X11X0","b":[60,660,600,720]}],"img":"step7.jpg"}
+{"r":"act","n":7,"a":"done","text":"页面显示Model与Serial number,已到达关于手机内容","by":"glm-vision","ms":2980}
+{"r":"hook","kind":"verdict","achieved":true,"reason":"最终画面含Model与序列号,与goal相符","by":"glm-53-flash"}

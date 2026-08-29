@@ -1,0 +1,6 @@
+# 感知自愈参数 — 程序按白名单落盘
+# 来历: 局2因通道盲区(停机前仲裁)触发感知自愈后的参数
+# 回退: 使用本参数的一局空击率高于 origin_null_rate 时,程序删除本文件
+
+diff_channel = "pixel"
+origin_null_rate = 0.86

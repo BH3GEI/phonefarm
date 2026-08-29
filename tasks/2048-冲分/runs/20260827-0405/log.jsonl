@@ -1,0 +1,24 @@
+{"v":1}
+{"r":"goal","t":"玩2048,尽量拿高分,出现Game Over才算终局"}
+{"r":"screen","n":1,"els":[{"t":"10.0.2.2:8899/2048.html","b":[120,88,560,132]}],"img":"step1.jpg"}
+{"r":"act","n":1,"a":"swipe","x":336,"y":728,"x2":336,"y2":436,"by":"glm-vision","ms":4420}
+{"r":"diff","n":1,"d":"pixel(up,22%)"}
+{"r":"note","t":"canvas棋盘,元素列表只有地址栏;分数0,三个2"}
+{"r":"act","n":2,"a":"swipe","x":225,"y":1059,"x2":225,"y2":634,"by":"glm-vision","ms":4130}
+{"r":"diff","n":2,"d":"pixel(full,31%)"}
+{"r":"act","n":3,"a":"tap","x":336,"y":900,"by":"empero","ms":4870}
+{"r":"diff","n":3,"d":"none"}
+{"r":"act","n":4,"a":"tap","x":339,"y":905,"by":"glm-vision","ms":3720}
+{"r":"diff","n":4,"d":"none"}
+{"r":"hook","kind":"arbit","changed":false,"desc":"无变化","by":"glm-53-flash"}
+{"r":"ban","a":"tap","x":336,"y":900,"rad":30,"why":"同点两次空击,仲裁确认无变化(棋盘不响应点击)"}
+{"r":"note","t":"棋盘只认滑动不认点击;大数尽量固定右下"}
+{"r":"act","n":5,"a":"swipe","x":252,"y":1186,"x2":252,"y2":762,"by":"glm-vision","ms":4010}
+{"r":"diff","n":5,"d":"pixel(down,27%)"}
+{"r":"act","n":6,"a":"swipe","x":448,"y":672,"x2":112,"y2":672,"by":"glm-vision","ms":3960}
+{"r":"diff","n":6,"d":"pixel(full,29%)"}
+{"r":"act","n":17,"a":"swipe","x":225,"y":1059,"x2":225,"y2":634,"by":"glm-vision","ms":4150}
+{"r":"diff","n":17,"d":"none"}
+{"r":"screen","n":17,"els":[{"t":"10.0.2.2:8899/2048.html","b":[120,88,560,132]}],"img":"step17.jpg"}
+{"r":"hook","kind":"budget","spent":24,"limit":40,"stop":"watchdog","stall":6}
+{"r":"hook","kind":"verdict","achieved":false,"reason":"未出现Game Over,分数32,因连续无进展被终止","by":"glm-53-flash"}

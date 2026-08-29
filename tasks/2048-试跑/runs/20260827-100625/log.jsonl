@@ -1,0 +1,68 @@
+{"v":1}
+{"r":"goal","t":"玩2048,尽量拿高分,出现Game Over才算终局"}
+{"els":[{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step1.jpg","n":1,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4767,"n":1,"r":"act","x":336,"x2":336,"y":728,"y2":1093}
+{"d":"pixel(9%)","n":1,"r":"diff"}
+{"r":"note","t":"2048开局，两个2在第3行。策略：保持大数字在底行，主要向左和下滑动，避免向上。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step2.jpg","n":2,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":3893,"n":2,"r":"act","x":336,"x2":67,"y":1020,"y2":1020}
+{"d":"pixel(7%)","n":2,"r":"diff"}
+{"r":"note","t":"底行两个2在第2、4列。向左滑合并成4，之后保持大数在底行，主要左/下滑动，避免向上。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step3.jpg","n":3,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4718,"n":3,"r":"act","x":336,"x2":67,"y":1020,"y2":1020}
+{"d":"pixel(6%)","n":3,"r":"diff"}
+{"r":"note","t":"底行: 4在第1列, 2在第4列。策略：保持大数在底行，主要左/下滑，避免向上。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step4.jpg","n":4,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":3927,"n":4,"r":"act","x":336,"x2":67,"y":1020,"y2":1020}
+{"d":"pixel(5%)","n":4,"r":"diff"}
+{"r":"note","t":"底行: 4第1列, 2第2列; 第2行第4列有2; 左上角有2。策略：大数保持在底行，主要左滑/下滑，避免上滑。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step5.jpg","n":5,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4172,"n":5,"r":"act","x":336,"x2":67,"y":1020,"y2":1020}
+{"d":"pixel(4%)","n":5,"r":"diff"}
+{"r":"note","t":"底行: 4第1列, 2第2列; 第2行: 2第1列, 2第3列; 第1行: 2第1列。分数4。策略：大数留在底行，主要左滑/下滑，避免上滑除非必要。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step6.jpg","n":6,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4050,"n":6,"r":"act","x":336,"x2":67,"y":1020,"y2":1020}
+{"d":"pixel(5%)","n":6,"r":"diff"}
+{"r":"note","t":"底行: 4第1列,2第2列; 第3行: 2第3列; 第2行: 4第1列; 第1行: 2第1列。分数8。策略：大数留底行，主要左滑/下滑，避免上滑。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step7.jpg","n":7,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5169,"n":7,"r":"act","x":336,"x2":67,"y":1020,"y2":1020}
+{"d":"pixel(6%)","n":7,"r":"diff"}
+{"r":"note","t":"底行:4,2; 第3行:2第1列; 第2行:4第1列,4第4列; 第1行:2第1列。分数8。策略：大数留底行，主要左滑/下滑，避免上滑。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step8.jpg","n":8,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":6727,"n":8,"r":"act","x":336,"x2":67,"y":976,"y2":976}
+{"d":"none","n":8,"r":"diff"}
+{"r":"note","t":"底行:4,2,2可合并;第3行2第1列;第2行8第1列;第1行2第1列。分数16。策略：大数留左下/底行，主要左滑/下滑，避免上滑。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step9.jpg","n":9,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5122,"n":9,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(6%)","n":9,"r":"diff"}
+{"r":"note","t":"当前:行1列1=2;行2列1=8;行3列1=2;底行4,4,2。分数20。底行4+4合并后得8,再与列1的8可竖向合并。策略：主要左滑/下滑，避免上滑，大数留左下。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step10.jpg","n":10,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4829,"n":10,"r":"act","x":336,"x2":67,"y":1020,"y2":1020}
+{"d":"pixel(4%)","n":10,"r":"diff"}
+{"r":"note","t":"棋盘:行1:2,-,2,-;行2:8;行3:2;行4:8,2。分数28。两列1有8,8和2,2。策略:左滑合并底行8和2,再下滑合并8。大数留左下,避免上滑。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step11.jpg","n":11,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":12243,"n":11,"r":"act","x":336,"x2":67,"y":991,"y2":991}
+{"d":"pixel(4%)","n":11,"r":"diff"}
+{"r":"note","t":"棋盘:行1:4;行2:8;行3:2;行4:8,2,-,2。分数32。左滑合并底行2+2得8,8,4,之后底行可下滑合并列的8+8?列1为4,8,2,8,下滑后底行8,8可否合并看结果。大数留左下,避免上滑。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step12.jpg","n":12,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":11477,"n":12,"r":"act","x":336,"x2":336,"y":1020,"y2":437}
+{"d":"pixel(5%)","n":12,"r":"diff"}
+{"r":"note","t":"棋盘:4,-,-,-/8,2,-,-/2,-,-,-/8,4,-,-,分36。本次下滑:列1的8+8合并成16,列2的2+4?不合并。之后底行约-,4,-,16+?继续左滑整理,大数留左下,避免上滑。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step13.jpg","n":13,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5605,"n":13,"r":"act","text":"","x":160,"y":900}
+{"d":"rejected(缺x2)","n":13,"r":"diff"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step14.jpg","n":14,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":5721,"n":14,"r":"act","x":336,"x2":605,"y":991,"y2":991}
+{"d":"pixel(20%)","n":14,"r":"diff"}
+{"r":"note","t":"棋盘:4,2,-,-/8,4,-,-/2,-,-,-/8,-,2,-,分36。策略:大数留左下,优先左滑/下滑,避免上滑。下一步左滑可合并4+4?列2的4+4(行1行2)左滑后行1为4,2,行2为8合并…先左滑看结果。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step15.jpg","n":15,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":8427,"n":15,"r":"act","x":336,"x2":336,"y":991,"y2":991}
+{"d":"none","n":15,"r":"diff"}
+{"r":"note","t":"误写，忽略此条"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step16.jpg","n":16,"r":"screen"}
+{"a":"swipe","by":"glm-53-flash","ms":4116,"n":16,"r":"act","x":336,"x2":639,"y":874,"y2":874}
+{"d":"none","n":16,"r":"diff"}
+{"r":"note","t":"分数36。策略：优先右滑，其次下滑，避免无效上滑。act15原地swipe无效，勿重复。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step17.jpg","n":17,"r":"screen"}
+{"kind":"budget","limit":16,"r":"hook","spent":16,"stall":2,"stop":"budget"}
+{"achieved":false,"by":"glm-53-flash","kind":"verdict","r":"hook","reason":"未出现Game Over，棋局仍在进行，任务未达终局"}

@@ -1,0 +1,33 @@
+{"v":1}
+{"r":"goal","t":"玩2048,先试点击操作棋盘看是否有反应,点击无效再改用滑动,尽量拿高分"}
+{"els":[{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step1.jpg","n":1,"r":"screen"}
+{"a":"tap","by":"glm-vision","ms":3665,"n":1,"r":"act","text":"点击棋盘测试操作","x":420,"y":660}
+{"d":"+[Web View]","n":1,"r":"diff"}
+{"r":"note","t":"当前2048游戏界面已加载，分数为0，棋盘上已有两个'2'数字块。正在测试点击操作是否有效。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step2.jpg","n":2,"r":"screen"}
+{"a":"tap","by":"glm-vision","ms":3305,"n":2,"r":"act","text":"点击棋盘上的数字2测试点击操作是否有效","x":420,"y":660}
+{"d":"none","n":2,"r":"diff"}
+{"r":"note","t":"2048游戏界面已加载，分数为0，棋盘上有两个'2'数字块。上一步点击了棋盘上的数字2，需要观察点击是否有反应。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step3.jpg","n":3,"r":"screen"}
+{"a":"swipe","by":"glm-vision","ms":3596,"n":3,"r":"act","text":"尝试滑动棋盘","x":336,"x2":336,"y":728,"y2":291}
+{"d":"none","n":3,"r":"diff"}
+{"r":"note","t":"点击数字块无反应，改用滑动操作。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step4.jpg","n":4,"r":"screen"}
+{"a":"swipe","by":"glm-vision","ms":3813,"n":4,"r":"act","text":"尝试向上滑动棋盘","x":336,"x2":134,"y":728,"y2":728}
+{"d":"none","n":4,"r":"diff"}
+{"r":"note","t":"2048游戏界面已加载，分数为4，棋盘上有2和4两个数字块。前两次点击和一次滑动均无反应，继续尝试滑动操作。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step5.jpg","n":5,"r":"screen"}
+{"a":"swipe","by":"glm-vision","ms":3633,"n":5,"r":"act","text":"尝试向下滑动棋盘","x":336,"x2":336,"y":728,"y2":1165}
+{"d":"none","n":5,"r":"diff"}
+{"r":"note","t":"2048游戏界面已加载，分数为4，棋盘上有2、4、2三个数字块。前两次点击和两次滑动均无反应，继续尝试滑动操作。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step6.jpg","n":6,"r":"screen"}
+{"a":"swipe","by":"glm-vision","ms":3968,"n":6,"r":"act","text":"向右滑动棋盘","x":336,"x2":538,"y":728,"y2":728}
+{"d":"none","n":6,"r":"diff"}
+{"r":"note","t":"2048游戏界面已加载，分数为4，棋盘上有2、4、2三个数字块。前两次点击和两次滑动均无反应，继续尝试向右滑动操作。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step7.jpg","n":7,"r":"screen"}
+{"a":"swipe","by":"glm-vision","ms":4149,"n":7,"r":"act","text":"尝试向上滑动棋盘","x":336,"x2":336,"y":728,"y2":291}
+{"d":"none","n":7,"r":"diff"}
+{"r":"note","t":"2048游戏界面已加载，分数为4，棋盘上有2、4、2三个数字块。前两次点击和三次滑动均无反应，继续尝试向上滑动操作。"}
+{"els":[{"b":[0,41,672,1414],"t":"Web View"},{"b":[0,41,82,136],"t":"Open the home page"},{"b":[88,68,130,109],"t":"Your connection to this site is not secu"},{"b":[136,46,494,131],"t":"10.0.2.2:8899/2048.html"},{"b":[507,41,589,136],"t":"Switch or close tabs"},{"b":[589,41,672,136],"t":"Customize and control Google Chrome"}],"img":"step8.jpg","n":7,"r":"screen"}
+{"kind":"budget","limit":18,"r":"hook","spent":7,"stall":6,"stop":"watchdog"}
+{"achieved":true,"by":"glm-vision","kind":"verdict","r":"hook","reason":"画面显示2048游戏界面，分数12，棋盘有数字，说明已进入游戏并开始操作"}

@@ -1,0 +1,973 @@
+//! 六步循环 + 记录流(契约v1) + 确定性检查 + 时间点表。
+//! v0.3: 多步计划(一次调用1~plan_max个动作,逐步验证,遇挫弃约) + 双采集并行。
+//! v0.4: 定格从"固定等待"改为"等画面安静"(连续两张小图一致即稳,上限settle_ms);
+//!       不安静的屏记为动态(noise=背景动静幅度),像素差异需压过背景才算有效,
+//!       边界差异(刚过背景一点)经仲裁裁定,每局限5次。
+//! 程序只写 tasks/<任务>/ 之下: runs/<局>/log.jsonl、runs/<局>/step*.jpg、lessons.jsonl、params.toml。
+use crate::brain::Brain;
+use crate::device::{frames_diff_pct, mode_gray, patch_stats, thumb_gray, Adb, Node};
+use crate::Config;
+use serde_json::{json, Value};
+use std::collections::VecDeque;
+use std::fs;
+use std::io::Write;
+
+const NORM: i64 = 999;
+/// 小图差异≤该值(%)视为"没动": 静态屏的采样抖动(状态栏时钟等)在此之下
+const QUIET_PCT: f32 = 0.6;
+
+struct Cap {
+    seq: u32,
+    els: Vec<Node>, // 设备像素空间
+    img: String,    // jpg 绝对路径
+    img_rel: String,
+    w: i32,
+    h: i32,
+    thumb: Option<Vec<u8>>,
+    noise: f32, // 采集时量到的背景动静幅度(%);0=画面安静
+}
+
+#[derive(Clone, Default)]
+struct ActN {
+    a: String,
+    x: Option<i64>, // 0~999,过门后转图片像素
+    y: Option<i64>,
+    x2: Option<i64>,
+    y2: Option<i64>,
+    text: Option<String>,
+}
+
+struct Ban {
+    x: i32, // 图片像素空间
+    y: i32,
+    rad: i32,
+    why: String,
+}
+
+struct Log {
+    f: Option<fs::File>,
+}
+impl Log {
+    fn put(&mut self, v: Value) {
+        if let Some(f) = self.f.as_mut() {
+            let _ = writeln!(f, "{}", v);
+        }
+    }
+}
+
+fn tcut(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+/// 从模型原文里扫出所有平衡的 JSON 对象
+fn extract_objs(text: &str) -> Vec<Value> {
+    let bytes: Vec<char> = text.chars().collect();
+    let mut objs = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '{' {
+            let mut depth = 0i32;
+            let mut in_str = false;
+            let mut esc = false;
+            let mut j = i;
+            while j < bytes.len() {
+                let c = bytes[j];
+                if esc { esc = false; }
+                else if in_str {
+                    if c == '\\' { esc = true; }
+                    else if c == '"' { in_str = false; }
+                } else if c == '"' { in_str = true; }
+                else if c == '{' { depth += 1; }
+                else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        let s: String = bytes[i..=j].iter().collect();
+                        if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                            objs.push(v);
+                        }
+                        i = j;
+                        break;
+                    }
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    objs
+}
+
+fn num(v: &Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_f64().map(|f| f.round() as i64))
+}
+
+fn now_tag() -> String {
+    let out = std::process::Command::new("date").arg("+%Y%m%d-%H%M%S").output();
+    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "run".into())
+}
+
+/// 双采集(截图与元素列表并行) + 等画面安静:
+/// 连拍小图,连续两张一致(≤QUIET_PCT)即认为停稳(noise=0);
+/// 到 cap_ms 上限仍不一致 → 动态屏,期间小图两两差异的最大值记为背景动静幅度(noise>0)。
+fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64) -> Option<Cap> {
+    let img_rel = format!("step{seq}.jpg");
+    let img = format!("{run_dir}/{img_rel}");
+    let (wh, els, noise) = std::thread::scope(|s| {
+        let h_els = s.spawn(|| phone.els(cfg.els_timeout_ms));
+        let mut prev = phone.quick_thumb("a");
+        let mut noise = 0.0f32;
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_millis() < cap_ms as u128 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let cur = phone.quick_thumb("b");
+            if let (Some(a), Some(b)) = (&prev, &cur) {
+                let pct = frames_diff_pct(a, b);
+                if pct <= QUIET_PCT {
+                    noise = 0.0; // 停稳:此前的不一致是过渡帧,不算背景动静
+                    break;
+                }
+                if pct > noise { noise = pct; }
+            }
+            prev = cur;
+        }
+        let wh = phone.screen(&img);
+        (wh, h_els.join().unwrap_or_default(), noise)
+    });
+    let (w, h) = wh?;
+    let thumb = thumb_gray(&img, tmp, &format!("{}", seq % 2));
+    Some(Cap { seq, els, img, img_rel, w, h, thumb, noise })
+}
+
+/// 元素框: 设备像素 → 图片像素
+fn el_img_space(n: &Node, cap: &Cap, realw: i32, realh: i32) -> [i32; 4] {
+    let sx = |v: i32| (v as i64 * cap.w as i64 / realw.max(1) as i64) as i32;
+    let sy = |v: i32| (v as i64 * cap.h as i64 / realh.max(1) as i64) as i32;
+    [sx(n.b[0]), sy(n.b[1]), sx(n.b[2]), sy(n.b[3])]
+}
+
+/// 图片像素 → 0~999
+fn to_norm(v: i32, span: i32) -> i64 {
+    (v as i64 * NORM / span.max(1) as i64).clamp(0, NORM)
+}
+
+fn act_line(n: u32, a: &ActN) -> String {
+    match a.a.as_str() {
+        "tap" => format!("act#{n} tap({},{})", a.x.unwrap_or(-1), a.y.unwrap_or(-1)),
+        "swipe" => format!(
+            "act#{n} swipe({},{}→{},{})",
+            a.x.unwrap_or(-1), a.y.unwrap_or(-1), a.x2.unwrap_or(-1), a.y2.unwrap_or(-1)
+        ),
+        "type" => format!("act#{n} type({})", tcut(a.text.as_deref().unwrap_or(""), 20)),
+        o => format!("act#{n} {o}"),
+    }
+}
+
+/// ② 上下文组装: goal + 全部经验 + 最近act/diff窗 + ban + note + 屏幕
+fn render_ctx(goal: &str, lessons: &[Value], window: &[(String, String)], bans: &[Ban],
+              note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
+    let mut s = format!("goal: {goal}\n");
+    for l in lessons {
+        s.push_str(&format!(
+            "lesson#{}(win{}/lose{}): {}\n",
+            l["id"].as_i64().unwrap_or(0),
+            l["win"].as_i64().unwrap_or(0),
+            l["lose"].as_i64().unwrap_or(0),
+            l["t"].as_str().unwrap_or("")
+        ));
+    }
+    for (a, d) in window {
+        s.push_str(&format!("{a} → diff: {d}\n"));
+    }
+    for b in bans.iter().rev().take(8) {
+        s.push_str(&format!(
+            "ban: tap({},{})±{} — {}\n",
+            to_norm(b.x, cap.w), to_norm(b.y, cap.h),
+            b.rad as i64 * NORM / cap.w.max(1) as i64, b.why
+        ));
+    }
+    if !note.is_empty() {
+        s.push_str(&format!("note: {note}\n"));
+    }
+    if cap.noise > 0.0 {
+        s.push_str(&format!(
+            "(本画面持续在动:视频/动画,背景动静约{:.0}%。你的动作效果会按扣除该背景来判断,正常继续遍历即可;若确认是视频页可在note记下)\n",
+            cap.noise
+        ));
+    }
+    s.push_str("screen:\n");
+    for n in cap.els.iter().take(60) {
+        let bi = el_img_space(n, cap, realw, realh);
+        s.push_str(&format!(
+            "{} [{},{},{},{}]\n",
+            n.t,
+            to_norm(bi[0], cap.w), to_norm(bi[1], cap.h),
+            to_norm(bi[2], cap.w), to_norm(bi[3], cap.h)
+        ));
+    }
+    if cap.els.is_empty() {
+        s.push_str("(元素列表为空,只看截图)\n");
+    }
+    s.push_str("(当前截图见图)");
+    s
+}
+
+/// ③ 决策调用: 返回按序计划(1~plan_max个act,done截断) + note。换人重问最多3家。
+fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str)
+    -> Result<(Vec<ActN>, Option<String>, String, u64), String>
+{
+    let sys = cfg.prompts.get("step").map(|s| s.as_str()).unwrap_or("");
+    for attempt in 0..3 {
+        let out = brain.call(sys, user, &[img], 500, attempt)?;
+        let objs = extract_objs(&out.text);
+        let mut acts: Vec<ActN> = Vec::new();
+        // note 两种来法都收: 正常的 r=note,以及把便签误当动作发的 r=act,a=note(契约口子,不判死)
+        let mut note = objs.iter().find(|o| o["r"] == "note")
+            .and_then(|o| o["t"].as_str()).map(String::from);
+        for o in &objs {
+            if o["r"] != "act" { continue; }
+            let name = o["a"].as_str().unwrap_or("").to_string();
+            if name.is_empty() { continue; }
+            if name == "note" {
+                let t = o["t"].as_str().or_else(|| o["text"].as_str()).map(String::from);
+                if t.is_some() && note.is_none() { note = t; }
+                continue;
+            }
+            let is_done = name == "done";
+            acts.push(ActN {
+                a: name,
+                x: num(&o["x"]),
+                y: num(&o["y"]),
+                x2: num(&o["x2"]),
+                y2: num(&o["y2"]),
+                text: o["text"].as_str().map(String::from),
+            });
+            if is_done || acts.len() >= cfg.plan_max { break; }
+        }
+        if !acts.is_empty() {
+            // done 只能单发: 计划里 done 前面还有动作时,截到 done 之前——
+            // 前面的动作执行完画面会变,必须重新看过画面才能宣判(防 [back,done] 落在登录层)。
+            if let Some(di) = acts.iter().position(|a| a.a == "done") {
+                acts.truncate(if di == 0 { 1 } else { di });
+            }
+            return Ok((acts, note, out.by, out.ms));
+        }
+        if let Some(t) = note {
+            // 只发了便签没发动作: 记下便签原地等一拍,重新决策(此前这里会"连续3家无法解析"判死)
+            println!("      ({} 只给了note没给act,记便签原地等待)", out.by);
+            return Ok((vec![ActN { a: "wait".into(), ..Default::default() }], Some(t), out.by, out.ms));
+        }
+        println!("      ({} 回复不含act记录,换下一家)", out.by);
+        brain.blame(&out.by);
+    }
+    Err("连续3家回复都无法解析".into())
+}
+
+/// ④ 确定性门(值域/前科/连点/空白)。通过返回 None, 驳回返回原因。坐标就地转成图片像素。
+fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg: &Config, tmp: &str) -> Option<String> {
+    let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "back", "wait", "done"];
+    if !known.contains(&a.a.as_str()) {
+        return Some(format!("未知动作:{}", tcut(&a.a, 12)));
+    }
+    let chk = |v: Option<i64>, name: &str| -> Result<i64, String> {
+        match v {
+            Some(x) if (-1..=1100).contains(&x) => Ok(x.clamp(0, NORM)),
+            Some(x) => Err(format!("出界:{name}={x}")),
+            None => Err(format!("缺{name}")),
+        }
+    };
+    match a.a.as_str() {
+        "tap" => {
+            let (x, y) = match (chk(a.x, "x"), chk(a.y, "y")) {
+                (Ok(x), Ok(y)) => (x, y),
+                (Err(e), _) | (_, Err(e)) => return Some(e),
+            };
+            let xi = (x * cap.w as i64 / NORM) as i32;
+            let yi = (y * cap.h as i64 / NORM) as i32;
+            if let Some(b) = bans.iter().find(|b| (b.x - xi).abs() < b.rad && (b.y - yi).abs() < b.rad) {
+                return Some(format!("前科:距ban({},{})不足{}px", to_norm(b.x, cap.w), to_norm(b.y, cap.h), b.rad));
+            }
+            // 同点连点: 前两个已执行动作都是tap且都落在同一点 → 这将是第3次,直接驳回。
+            // 证据: 2048抖动、"我的"登录振荡、(70,88)直播页连点,三次同型。
+            let near = |p: &(i32, i32)| (p.0 - xi).abs() < cfg.ban_radius && (p.1 - yi).abs() < cfg.ban_radius;
+            let mut rev = taps.iter().rev();
+            if let (Some(p1), Some(p2)) = (rev.next(), rev.next()) {
+                if near(p1) && near(p2) {
+                    return Some("同点连点3次:换个目标,或用back/scroll_down离开当前位置".into());
+                }
+            }
+            if let (Some((sd, mean)), Some(bg)) =
+                (patch_stats(&cap.img, xi, yi, tmp), cap.thumb.as_ref().map(|t| mode_gray(t) as f32))
+            {
+                if sd < 6.0 && (mean - bg).abs() < 22.0 {
+                    return Some(format!("空白背景:σ{sd:.1}亮度{mean:.0}≈背景{bg:.0}"));
+                }
+            }
+            a.x = Some(xi as i64);
+            a.y = Some(yi as i64);
+        }
+        "swipe" => {
+            let vs = match (chk(a.x, "x"), chk(a.y, "y"), chk(a.x2, "x2"), chk(a.y2, "y2")) {
+                (Ok(x), Ok(y), Ok(x2), Ok(y2)) => (x, y, x2, y2),
+                (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)) => {
+                    return Some(e)
+                }
+            };
+            if (vs.0 - vs.2).abs() + (vs.1 - vs.3).abs() < 50 {
+                return Some(format!("滑动距离过短:({},{})→({},{})", vs.0, vs.1, vs.2, vs.3));
+            }
+            a.x = Some(vs.0 * cap.w as i64 / NORM);
+            a.y = Some(vs.1 * cap.h as i64 / NORM);
+            a.x2 = Some(vs.2 * cap.w as i64 / NORM);
+            a.y2 = Some(vs.3 * cap.h as i64 / NORM);
+        }
+        "type" => {
+            if a.text.as_deref().unwrap_or("").is_empty() {
+                return Some("type缺text".into());
+            }
+        }
+        _ => {}
+    }
+    // 字段归位: 与动作无关的字段不入日志(模型偶尔多填,空间口径会混)
+    match a.a.as_str() {
+        "tap" => { a.x2 = None; a.y2 = None; }
+        "swipe" => {}
+        _ => { a.x = None; a.y = None; a.x2 = None; a.y2 = None; }
+    }
+    None
+}
+
+/// ⑤ 执行(图片像素 → 设备像素)
+fn exec(phone: &Adb, a: &ActN, cap: &Cap, realw: i32, realh: i32) {
+    let sx = |v: Option<i64>| (v.unwrap_or(0) * realw as i64 / cap.w.max(1) as i64) as i32;
+    let sy = |v: Option<i64>| (v.unwrap_or(0) * realh as i64 / cap.h.max(1) as i64) as i32;
+    match a.a.as_str() {
+        "tap" => phone.tap(sx(a.x), sy(a.y)),
+        "swipe" => phone.swipe(sx(a.x), sy(a.y), sx(a.x2), sy(a.y2)),
+        "scroll_up" => phone.scroll_up(),
+        "scroll_down" => phone.scroll_down(),
+        "back" => phone.back(),
+        "type" => phone.type_text(a.text.as_deref().unwrap_or("")),
+        "wait" => std::thread::sleep(std::time::Duration::from_millis(2500)),
+        _ => {}
+    }
+}
+
+/// 仲裁: 前后两张截图给模型,问"有没有真实变化"。返回 (changed, desc, 由谁判)。
+fn arbit_changed(brain: &mut Brain, cfg: &Config, img_a: &str, img_b: &str)
+    -> Option<(bool, String, String)>
+{
+    let p = cfg.hook_for("pre_ban").and_then(|h| cfg.prompt_of(h))?;
+    let u = "第一张为点击前截图,第二张为点击后截图。".to_string();
+    for att in 0..2 {
+        if let Ok(out) = brain.call(p, &u, &[img_a, img_b], 150, att) {
+            let objs = extract_objs(&out.text);
+            if let Some(o) = objs.iter().find(|o| o["r"] == "hook" && o["kind"] == "arbit") {
+                return Some((
+                    o["changed"].as_bool().unwrap_or(false),
+                    o["desc"].as_str().unwrap_or("").to_string(),
+                    out.by.clone(),
+                ));
+            }
+            brain.blame(&out.by);
+        }
+    }
+    None
+}
+
+/// ⑥ 画面差异: els 集合差 / 像素通道回退。
+/// 动态屏(任一端noise>0)下像素差异需压过背景才算有效:
+///   ≤bg+5% → none;bg+5%~bg+13% → 边界区(返回border=true,交仲裁);>bg+13% → 有效。
+/// 返回 (差异串, 是否边界区)。
+fn diff_of(before: &Cap, after: &Cap, channel: &str) -> (String, bool) {
+    let use_pixel = channel == "pixel" || before.els.is_empty() || after.els.is_empty();
+    if !use_pixel {
+        let count = |v: &Vec<Node>| {
+            let mut m = std::collections::HashMap::new();
+            for n in v { *m.entry(n.t.clone()).or_insert(0i32) += 1; }
+            m
+        };
+        let (mb, ma) = (count(&before.els), count(&after.els));
+        let mut added: Vec<String> = Vec::new();
+        let mut removed: Vec<String> = Vec::new();
+        for (t, ca) in &ma {
+            let cb = mb.get(t).unwrap_or(&0);
+            if ca > cb { added.push(tcut(t, 18)); }
+        }
+        for (t, cb) in &mb {
+            let ca = ma.get(t).unwrap_or(&0);
+            if cb > ca { removed.push(tcut(t, 18)); }
+        }
+        if added.is_empty() && removed.is_empty() {
+            return ("none".into(), false);
+        }
+        added.sort();
+        removed.sort();
+        added.truncate(4);
+        removed.truncate(4);
+        let mut s = String::new();
+        if !added.is_empty() { s.push_str(&format!("+[{}]", added.join(","))); }
+        if !removed.is_empty() {
+            if !s.is_empty() { s.push(' '); }
+            s.push_str(&format!("-[{}]", removed.join(",")));
+        }
+        (tcut(&s, 160), false)
+    } else {
+        match (&before.thumb, &after.thumb) {
+            (Some(a), Some(b)) => {
+                let pct = frames_diff_pct(a, b);
+                let bg = before.noise.max(after.noise);
+                if bg <= 0.0 {
+                    let s = if pct <= QUIET_PCT {
+                        "none".into()
+                    } else {
+                        format!("pixel({}%)", pct.round() as i32)
+                    };
+                    (s, false)
+                } else if pct <= bg + 5.0 {
+                    ("none".into(), false) // 未压过背景: 记没变化(空击/ban防线照常工作)
+                } else {
+                    let s = format!("pixel({}%)>bg({:.0}%)", pct.round() as i32, bg);
+                    (s, pct <= bg + 13.0) // 刚过背景一点 → 边界区,交给仲裁
+                }
+            }
+            _ => ("none".into(), false),
+        }
+    }
+}
+
+/// ms 仅在计划首个动作上出现(那是模型调用的真实耗时);队列内后续动作无模型开销,不写 ms
+fn log_act(log: &mut Log, n: u32, a: &ActN, by: &str, ms: Option<u64>) {
+    let mut m = serde_json::Map::new();
+    m.insert("r".into(), json!("act"));
+    m.insert("n".into(), json!(n));
+    m.insert("a".into(), json!(a.a));
+    if let Some(v) = a.x { m.insert("x".into(), json!(v)); }
+    if let Some(v) = a.y { m.insert("y".into(), json!(v)); }
+    if let Some(v) = a.x2 { m.insert("x2".into(), json!(v)); }
+    if let Some(v) = a.y2 { m.insert("y2".into(), json!(v)); }
+    if let Some(v) = &a.text { m.insert("text".into(), json!(v)); }
+    m.insert("by".into(), json!(by));
+    if let Some(v) = ms { m.insert("ms".into(), json!(v)); }
+    log.put(Value::Object(m));
+}
+
+fn load_lessons(path: &str) -> Vec<Value> {
+    let Ok(s) = fs::read_to_string(path) else { return vec![] };
+    s.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["r"] == "lesson" && v["t"].as_str().map(|t| !t.is_empty()).unwrap_or(false))
+        .collect()
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ParamsFile {
+    settle_ms: Option<u64>,
+    diff_channel: Option<String>,
+    origin_null_rate: Option<f32>,
+}
+
+pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
+               endless: bool, budget: u32) -> bool {
+    // ── 目录与文件 ──
+    let task_dir = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
+    let run_dir = format!("{}/runs/{}", task_dir, now_tag());
+    if fs::create_dir_all(&run_dir).is_err() {
+        eprintln!("✗ 建不了运行目录 {run_dir}");
+        return false;
+    }
+    let tmp = std::env::temp_dir().join(format!("phonefarm-{}", std::process::id()));
+    let tmp = tmp.to_string_lossy().to_string();
+    let _ = fs::create_dir_all(&tmp);
+    let mut log = Log {
+        f: fs::OpenOptions::new().create(true).append(true)
+            .open(format!("{run_dir}/log.jsonl")).ok(),
+    };
+    log.put(json!({"v": 1}));
+    log.put(json!({"r": "goal", "t": goal}));
+
+    let lessons = load_lessons(&format!("{task_dir}/lessons.jsonl"));
+    let ep_no = fs::read_dir(format!("{task_dir}/runs")).map(|d| d.count()).unwrap_or(1) as i64;
+
+    // ── 感知参数(params.toml 白名单) ──
+    let params_path = format!("{task_dir}/params.toml");
+    let mut settle_ms = cfg.settle_ms;
+    let mut channel = "els".to_string();
+    let mut origin_null: Option<f32> = None;
+    let mut params_active = false;
+    if let Ok(s) = fs::read_to_string(&params_path) {
+        if let Ok(p) = toml::from_str::<ParamsFile>(&s) {
+            if let Some(v) = p.settle_ms { settle_ms = v.clamp(800, 4000); }
+            if let Some(c) = p.diff_channel {
+                if c == "els" || c == "pixel" { channel = c; }
+            }
+            origin_null = p.origin_null_rate;
+            params_active = true;
+            println!("(载入 params.toml: settle={settle_ms}ms 通道={channel})");
+        }
+    }
+
+    let phone = Adb::new(serial, tmp.clone());
+    let mut brain = Brain::new(cfg.providers.clone(), tmp.clone());
+    let (realw, realh) = phone.size();
+
+    // ── 局内状态 ──
+    let mut window: Vec<(String, String)> = Vec::new(); // (act行, diff) 0~999 空间
+    let mut diffs_all: Vec<String> = Vec::new();
+    let mut stream: Vec<String> = Vec::new(); // 复盘材料(全量紧凑流)
+    let mut bans: Vec<Ban> = Vec::new();
+    let mut clusters: Vec<(i32, i32, u32)> = Vec::new(); // 空击计数簇(图片像素)
+    let mut note = String::new();
+    let mut reject_streak = 0u32;
+    let mut stall = 0u32;
+    let mut stall_anchor: Option<String> = None;
+    let mut heal_used = false;
+    let mut heal_origin = "";
+    let mut ban_count = 0u32;
+    let mut exec_steps = 0u32;
+    let mut null_steps = 0u32;
+    let mut dyn_steps = 0u32;   // 定帧时画面未安静的步数
+    let mut arbit_left: u32 = 5; // 边界仲裁余额(每局至多5次)
+    let mut escapes_left: u32 = 10; // 内容过滤盲移余额(每局至多10次)
+    let mut stop_reason: Option<&str> = None;
+    let mut done_claim = false;
+    let mut logged_seq = 0u32;
+    let mut capseq = 1u32;
+
+    // ── 计划队列 ──
+    let mut queue: VecDeque<ActN> = VecDeque::new();
+    let mut taps_hist: VecDeque<(i32, i32)> = VecDeque::new(); // 已执行的连续tap落点(图片像素)
+    let mut plan_by = String::new();
+    let mut plan_ms: Option<u64> = None; // 只随计划首动作入日志
+    let mut pending_note: Option<String> = None;
+
+    let Some(mut cap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms) else {
+        eprintln!("✗ 首屏采集失败");
+        return false;
+    };
+    stream.push(format!("goal: {goal}"));
+    println!("任务[{task}] 局{ep_no} | {goal}");
+    println!("屏{realw}x{realh} 图{}x{} | 通道{channel} 等安静上限{settle_ms}ms 计划上限{} | 经验{}条",
+        cap.w, cap.h, cfg.plan_max, lessons.len());
+    println!("{}", "=".repeat(56));
+
+    let mut n = 0u32;
+    loop {
+        n += 1;
+        if endless {
+            if brain.calls >= budget && queue.is_empty() { stop_reason = Some("budget"); break; }
+        } else if n > cfg.max_steps {
+            stop_reason = Some("max_steps");
+            break;
+        }
+
+        // ① 本轮画面记录(采集在上一动作末尾或开局完成)
+        if cap.seq != logged_seq {
+            let els_img: Vec<Value> = cap.els.iter()
+                .map(|e| json!({"t": e.t, "b": el_img_space(e, &cap, realw, realh)}))
+                .collect();
+            log.put(json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel}));
+            logged_seq = cap.seq;
+        }
+
+        // ②③ 队列空则组装上下文并要一份计划
+        if queue.is_empty() {
+            let user = render_ctx(goal, &lessons, &window, &bans, &note, &cap, realw, realh);
+            let _ = fs::OpenOptions::new().create(true).append(true)
+                .open(format!("{tmp}/ctx.log"))
+                .map(|mut f| writeln!(f, "── 步#{n} ──\n{user}\n"));
+            match plan_call(&mut brain, cfg, &user, &cap.img) {
+                Ok((acts, note_new, by, ms)) => {
+                    if acts.len() > 1 { println!("      📋 {}给出{}步计划", by, acts.len()); }
+                    queue = acts.into();
+                    plan_by = by;
+                    plan_ms = Some(ms);
+                    pending_note = note_new;
+                }
+                Err(e) if e == "内容过滤" && escapes_left > 0 => {
+                    // 画面被安全审核拒绝(确定性): 不等模型,盲滑一步离开,重新采集再决策
+                    escapes_left -= 1;
+                    println!("      🚧 画面被内容过滤拒绝,盲移离开(余{escapes_left}次)");
+                    let esc = ActN { a: "scroll_down".into(), ..Default::default() };
+                    exec(&phone, &esc, &cap, realw, realh);
+                    log_act(&mut log, n, &esc, "(盲移)", None);
+                    let d = "escape(内容过滤)".to_string();
+                    log.put(json!({"r":"diff","n":n,"d":d}));
+                    println!("[{n}] ·盲移 | scroll_down → {d}");
+                    window.push((format!("act#{n} scroll_down(盲移)"), d.clone()));
+                    if window.len() > cfg.window_pairs { window.remove(0); }
+                    diffs_all.push(d.clone());
+                    stream.push(format!("act#{n} scroll_down → escape(内容过滤)"));
+                    stall += 1;
+                    if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
+                    capseq += 1;
+                    match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms) {
+                        Some(c) => cap = c,
+                        None => { stop_reason = Some("capture_fail"); break; }
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    println!("✗ 大脑失联: {e}");
+                    stop_reason = Some("model_fail");
+                    break;
+                }
+            }
+        }
+        let mut act = queue.pop_front().unwrap();
+        let aline = act_line(n, &act); // 0~999 空间的展示行(在gate换算前)
+        let ms_field = plan_ms.take();
+        let ms_disp = ms_field.map(|v| format!("{v}ms")).unwrap_or_else(|| "·计划".into());
+
+        // ④ 门
+        if let Some(reason) = gate(&mut act, &cap, &bans, &taps_hist, cfg, &tmp) {
+            log_act(&mut log, n, &act, &plan_by, ms_field);
+            let d = format!("rejected({reason})");
+            log.put(json!({"r":"diff","n":n,"d":d}));
+            println!("[{n}] {ms_disp} {plan_by} | {aline} ⛔ {d}");
+            window.push((aline.clone(), d.clone()));
+            if window.len() > cfg.window_pairs { window.remove(0); }
+            diffs_all.push(d.clone());
+            stream.push(format!("{aline} → {d}"));
+            reject_streak += 1;
+            if let Some(t) = pending_note.take() {
+                let t = tcut(&t, cfg.note_max_chars);
+                log.put(json!({"r":"note","t":t}));
+                note = t;
+            }
+            // 连续驳回:多半是坐标点在文字旁的空白。给一次强提示,让模型对准或改策略。
+            if reject_streak >= 2 {
+                note = format!("你已连续{reject_streak}次点在空白处被驳回。把坐标对准某个可见文字/图标的正中心,或改用 scroll_down 翻出新内容,不要在原位微调。");
+            }
+            if !queue.is_empty() { println!("      ⏸ 剩余{}步计划作废", queue.len()); queue.clear(); }
+            stall += 1;
+            if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
+            capseq += 1;
+            match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms) {
+                Some(c) => cap = c,
+                None => { stop_reason = Some("capture_fail"); break; }
+            }
+            continue; // 回到第①步
+        }
+        reject_streak = 0; // 过门即清零
+
+        // done: 记录后离开循环, 复核在局末
+        if act.a == "done" {
+            log_act(&mut log, n, &act, &plan_by, ms_field);
+            println!("[{n}] {ms_disp} {plan_by} | done: {}", act.text.as_deref().unwrap_or(""));
+            stream.push(format!("act#{n} done({})", act.text.as_deref().unwrap_or("")));
+            if let Some(t) = pending_note.take() {
+                let t = tcut(&t, cfg.note_max_chars);
+                log.put(json!({"r":"note","t":t}));
+            }
+            done_claim = true;
+            break;
+        }
+
+        // ⑤ 执行(定格并入第⑥步: 采集时等画面安静)
+        exec(&phone, &act, &cap, realw, realh);
+        if act.a == "tap" {
+            taps_hist.push_back((act.x.unwrap_or(0) as i32, act.y.unwrap_or(0) as i32));
+            while taps_hist.len() > 4 { taps_hist.pop_front(); }
+        } else {
+            taps_hist.clear(); // 连点只算"连续tap",夹其他动作即重新数
+        }
+        exec_steps += 1;
+
+        // ⑥ 等画面安静后定帧 + 实测差异(与拉元素列表并行)
+        capseq += 1;
+        let Some(newcap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms) else {
+            stop_reason = Some("capture_fail");
+            break;
+        };
+        if newcap.noise > 0.0 { dyn_steps += 1; }
+        let (d_raw, border) = diff_of(&cap, &newcap, &channel);
+        let d = if border {
+            // 边界区: 差异刚压过背景一点,问一次仲裁(限额内)
+            if arbit_left > 0 {
+                arbit_left -= 1;
+                match arbit_changed(&mut brain, cfg, &cap.img, &newcap.img) {
+                    Some((true, desc, by)) => {
+                        log.put(json!({"r":"hook","kind":"arbit","changed":true,"desc":desc,"by":by}));
+                        println!("      ⚖ 边界仲裁({by}): 变化成立 {desc}");
+                        d_raw
+                    }
+                    Some((false, desc, by)) => {
+                        log.put(json!({"r":"hook","kind":"arbit","changed":false,"desc":desc,"by":by}));
+                        println!("      ⚖ 边界仲裁({by}): 判为背景动静 {desc}");
+                        "none".into()
+                    }
+                    None => {
+                        println!("      ⚖ 边界仲裁调用失败,按背景动静处理");
+                        "none".into()
+                    }
+                }
+            } else {
+                "none".into() // 仲裁额度用尽: 保守按没变化
+            }
+        } else {
+            d_raw
+        };
+        log_act(&mut log, n, &act, &plan_by, ms_field);
+        log.put(json!({"r":"diff","n":n,"d":d}));
+        println!("[{n}] {ms_disp} {plan_by} | {aline} → {d}");
+        if let Some(t) = pending_note.take() {
+            let t = tcut(&t, cfg.note_max_chars);
+            log.put(json!({"r":"note","t":t}));
+            note = t;
+        }
+        window.push((aline.clone(), d.clone()));
+        if window.len() > cfg.window_pairs { window.remove(0); }
+        diffs_all.push(d.clone());
+        stream.push(format!("{aline} → {d}"));
+
+        let is_null = d == "none";
+        if is_null {
+            null_steps += 1;
+            stall += 1;
+            if stall == 1 { stall_anchor = Some(cap.img.clone()); } // 无进展段起点画面
+            if !queue.is_empty() { println!("      ⏸ 动作无变化,剩余{}步计划作废", queue.len()); queue.clear(); }
+        } else {
+            stall = 0;
+            stall_anchor = None;
+        }
+
+        // 空击计数 → 预ban仲裁 → ban
+        if act.a == "tap" && is_null {
+            let (xi, yi) = (act.x.unwrap_or(0) as i32, act.y.unwrap_or(0) as i32);
+            let hit = clusters.iter_mut()
+                .find(|(cx, cy, _)| (*cx - xi).abs() < cfg.ban_radius && (*cy - yi).abs() < cfg.ban_radius);
+            let count = match hit {
+                Some((_, _, c)) => { *c += 1; *c }
+                None => { clusters.push((xi, yi, 1)); 1 }
+            };
+            if count >= cfg.ban_strikes {
+                let mut banned = false;
+                if cfg.hook_for("pre_ban").and_then(|h| cfg.prompt_of(h)).is_some() {
+                    match arbit_changed(&mut brain, cfg, &cap.img, &newcap.img) {
+                        Some((changed, desc, aby)) => {
+                            log.put(json!({"r":"hook","kind":"arbit","changed":changed,"desc":desc,"by":aby}));
+                            stream.push(format!("hook arbit: changed={changed} {desc}"));
+                            println!("      ⚖ 仲裁({aby}): changed={changed} {desc}");
+                            banned = !changed;
+                        }
+                        None => println!("      ⚖ 仲裁调用失败,本轮不落ban"),
+                    }
+                } else {
+                    banned = true; // 未配置仲裁钩子: 两次空击直接ban
+                }
+                if banned {
+                    let why = format!("同点{count}次空击,仲裁确认无变化");
+                    log.put(json!({"r":"ban","a":"tap","x":xi,"y":yi,"rad":cfg.ban_radius,"why":why}));
+                    stream.push(format!("ban: tap({},{}) {why}", to_norm(xi, cap.w), to_norm(yi, cap.h)));
+                    println!("      🚫 ban: tap({xi},{yi})±{}", cfg.ban_radius);
+                    bans.push(Ban { x: xi, y: yi, rad: cfg.ban_radius, why });
+                    ban_count += 1;
+                }
+                clusters.retain(|(cx, cy, _)| (*cx - xi).abs() >= cfg.ban_radius || (*cy - yi).abs() >= cfg.ban_radius);
+            }
+        }
+
+        // 感知自愈(每局一次): ban 累积到阈值 → 清ban + 加长定格 + 换差异通道
+        if ban_count >= cfg.heal_ban_threshold && !heal_used {
+            heal_used = true;
+            heal_origin = "ban溢出";
+            let cleared = bans.len();
+            bans.clear();
+            clusters.clear();
+            settle_ms = if settle_ms < 2000 { 2000 } else { 3000 };
+            channel = if channel == "els" { "pixel".into() } else { "els".into() };
+            log.put(json!({"r":"hook","kind":"heal","cleared":cleared,"settle_ms":settle_ms,"channel":channel}));
+            stream.push(format!("hook heal: cleared={cleared} settle={settle_ms} channel={channel}"));
+            println!("      🩹 感知自愈: 清{cleared}条ban, settle={settle_ms}ms, 通道={channel}");
+        }
+
+        // 看门狗将触发时先仲裁一次: 通道说无进展但画面实际在变 → 通道盲区, 就地自愈
+        if stall >= cfg.stall_limit {
+            let mut rescued = false;
+            if !heal_used {
+                if let (Some(anchor), Some(h)) = (stall_anchor.clone(), cfg.hook_for("pre_ban")) {
+                    if let Some(p) = cfg.prompt_of(h) {
+                        let u = "第一张为若干步之前的截图,第二张为当前截图。".to_string();
+                        for att in 0..2 {
+                            if let Ok(out) = brain.call(p, &u, &[&anchor, &newcap.img], 150, att) {
+                                let objs = extract_objs(&out.text);
+                                if let Some(o) = objs.iter().find(|o| o["r"] == "hook" && o["kind"] == "arbit") {
+                                    let changed = o["changed"].as_bool().unwrap_or(false);
+                                    let desc = o["desc"].as_str().unwrap_or("");
+                                    log.put(json!({"r":"hook","kind":"arbit","changed":changed,"desc":desc,"by":out.by}));
+                                    stream.push(format!("hook arbit(停机前): changed={changed} {desc}"));
+                                    println!("      ⚖ 停机前仲裁({}): changed={changed} {desc}", out.by);
+                                    if changed {
+                                        heal_used = true;
+                                        heal_origin = "通道盲区";
+                                        channel = if channel == "els" { "pixel".into() } else { "els".into() };
+                                        log.put(json!({"r":"hook","kind":"heal","cleared":0,"settle_ms":settle_ms,"channel":channel}));
+                                        stream.push(format!("hook heal: 差异通道盲区 → channel={channel}"));
+                                        println!("      🩹 感知自愈: 通道盲区, 切换差异通道 → {channel}");
+                                        stall = 0;
+                                        stall_anchor = None;
+                                        rescued = true;
+                                    }
+                                    break;
+                                }
+                                brain.blame(&out.by);
+                            }
+                        }
+                    }
+                }
+            }
+            if !rescued {
+                stop_reason = Some("watchdog");
+                cap = newcap;
+                break;
+            }
+        }
+        cap = newcap; // 本帧复用为下一动作第①步
+    }
+
+    // ── 终局画面补记 ──
+    if cap.seq != logged_seq {
+        let els_img: Vec<Value> = cap.els.iter()
+            .map(|e| json!({"t": e.t, "b": el_img_space(e, &cap, realw, realh)}))
+            .collect();
+        log.put(json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel}));
+    }
+
+    // ── 时间点: 非done终止 → budget 记录 ──
+    if let Some(sr) = stop_reason {
+        let limit = if endless { budget } else { cfg.max_steps };
+        log.put(json!({"r":"hook","kind":"budget","spent":brain.calls,"limit":limit,"stop":sr,"stall":stall}));
+        stream.push(format!("hook budget: stop={sr} spent={}", brain.calls));
+        println!("      ⏱ 终止: {sr} (调用{}次)", brain.calls);
+    }
+
+    // ── 时间点: done复核(终局一律复核, 不采信执行者自述) ──
+    let mut achieved = false;
+    let mut verdict_line = "(复核未执行)".to_string();
+    if let Some(h) = cfg.hook_for("done") {
+        if let Some(p) = cfg.prompt_of(h) {
+            let tail: Vec<String> = diffs_all.iter().rev().take(5).rev().cloned().collect();
+            // 覆盖便签一并给复核:执行者的主张,复核仍须与最终画面/差异相互印证,不是照抄。
+            // (此前复核只看得到最近5条差异,停在非汇总页时无法核对覆盖主张,产生过误判)
+            let mut u = format!(
+                "任务: {goal}\n执行者主张的覆盖清单(便签,需与画面印证,不可单方面采信): {}\n最近差异: {}\n最终画面元素:\n",
+                if note.is_empty() { "(无)" } else { &note },
+                tail.join(" | ")
+            );
+            for e in cap.els.iter().take(60) {
+                let bi = el_img_space(e, &cap, realw, realh);
+                u.push_str(&format!("{} [{},{},{},{}]\n", e.t, bi[0], bi[1], bi[2], bi[3]));
+            }
+            u.push_str("(最终截图见图)");
+            let mut got = false;
+            for att in 0..2 {
+                if let Ok(out) = brain.call(p, &u, &[&cap.img], 200, att) {
+                    let objs = extract_objs(&out.text);
+                    if let Some(o) = objs.iter().find(|o| o["r"] == "hook" && o["kind"] == "verdict") {
+                        achieved = o["achieved"].as_bool().unwrap_or(false);
+                        let reason = o["reason"].as_str().unwrap_or("");
+                        log.put(json!({"r":"hook","kind":"verdict","achieved":achieved,"reason":reason,"by":out.by}));
+                        verdict_line = format!("achieved={achieved} {reason}");
+                        stream.push(format!("hook verdict: {verdict_line}"));
+                        println!("      ✔ 复核({}): {verdict_line}", out.by);
+                        got = true;
+                        break;
+                    }
+                    brain.blame(&out.by);
+                }
+            }
+            if !got {
+                verdict_line = "(复核调用失败)".into();
+                println!("      ✔ 复核失败,无verdict记录");
+            }
+        }
+    }
+
+    // ── 时间点: 局末复盘 → lessons.jsonl ──
+    if let Some(h) = cfg.hook_for("episode_end") {
+        if let Some(p) = cfg.prompt_of(h) {
+            let mut u = format!("任务: {goal}\n本局序号: {ep_no}\n复核结论: {verdict_line}\n本局记录:\n{}\n现有经验:\n",
+                stream.join("\n"));
+            if lessons.is_empty() {
+                u.push_str("(无)\n");
+            } else {
+                for l in &lessons {
+                    u.push_str(&format!("{}\n", serde_json::to_string(l).unwrap_or_default()));
+                }
+            }
+            let mut newles: Vec<Value> = Vec::new();
+            for att in 0..2 {
+                if let Ok(out) = brain.call(p, &u, &[], 900, att) {
+                    let objs = extract_objs(&out.text);
+                    let les: Vec<Value> = objs.into_iter()
+                        .filter(|o| o["r"] == "lesson" && o["t"].as_str().map(|t| !t.is_empty()).unwrap_or(false))
+                        .collect();
+                    if !les.is_empty() {
+                        newles = les;
+                        println!("      📔 复盘({}): 经验 {}条 → lessons.jsonl", out.by, newles.len());
+                        break;
+                    }
+                    brain.blame(&out.by);
+                }
+            }
+            if !newles.is_empty() {
+                newles.truncate(cfg.lesson_max_items);
+                // 兜底: reflect 偶尔静默丢掉"本局未涉及"的旧经验(实测连丢三轮收尾教训)。
+                // 漏带的旧条原样补回;要淘汰某条须显式重写其内容,不能靠不写。
+                let new_ids: std::collections::HashSet<i64> =
+                    newles.iter().filter_map(|l| l["id"].as_i64()).collect();
+                for l in &lessons {
+                    if let Some(id) = l["id"].as_i64() {
+                        if !new_ids.contains(&id) && newles.len() < cfg.lesson_max_items {
+                            newles.push(l.clone());
+                        }
+                    }
+                }
+                let mut body = String::from("{\"v\":1}\n");
+                for (i, l) in newles.iter().enumerate() {
+                    let o = json!({
+                        "r": "lesson",
+                        "id": l["id"].as_i64().unwrap_or(i as i64 + 1),
+                        "t": tcut(l["t"].as_str().unwrap_or(""), 120),
+                        "born": l["born"].as_i64().unwrap_or(ep_no),
+                        "win": l["win"].as_i64().unwrap_or(0),
+                        "lose": l["lose"].as_i64().unwrap_or(0)
+                    });
+                    body.push_str(&format!("{o}\n"));
+                }
+                let tmp_path = format!("{task_dir}/lessons.jsonl.tmp");
+                if fs::write(&tmp_path, &body).is_ok() {
+                    let _ = fs::rename(&tmp_path, format!("{task_dir}/lessons.jsonl"));
+                }
+            } else {
+                println!("      📔 复盘无有效经验输出,保留原 lessons.jsonl");
+            }
+        }
+    }
+
+    // ── 感知参数固化 / 回退 ──
+    let null_rate = null_steps as f32 / exec_steps.max(1) as f32;
+    if params_active {
+        if let Some(o) = origin_null {
+            if null_rate > o + 0.05 {
+                let _ = fs::remove_file(&params_path);
+                println!("      ⚙ params.toml 回退删除(空击率{:.0}% > 来源{:.0}%)", null_rate * 100.0, o * 100.0);
+            }
+        }
+    } else if heal_used {
+        let body = format!(
+            "# 感知自愈参数 — 程序按白名单落盘\n# 来历: 局{ep_no}因{heal_origin}触发感知自愈后的参数\n# 回退: 使用本参数的一局空击率高于 origin_null_rate 时,程序删除本文件\n\nsettle_ms = {settle_ms}\ndiff_channel = \"{channel}\"\norigin_null_rate = {null_rate:.2}\n"
+        );
+        if fs::write(&params_path, body).is_ok() {
+            println!("      ⚙ 自愈参数固化 → params.toml (settle={settle_ms} 通道={channel})");
+        }
+    }
+
+    let _ = fs::remove_dir_all(&tmp);
+    println!("{}", "=".repeat(56));
+    println!("局{ep_no}结束 | 步数{n} 执行{exec_steps} 空击{null_steps} 动态屏{dyn_steps} ban{ban_count} | 调用{}次 | done={done_claim} achieved={achieved}",
+        brain.calls);
+    println!("记录: {run_dir}/log.jsonl");
+    achieved
+}
