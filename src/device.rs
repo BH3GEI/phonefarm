@@ -474,6 +474,63 @@ pub fn parse_dump(xml: &str) -> (Vec<Node>, Vec<FullNode>, String) {
     (els, full, pkg)
 }
 
+/// hdc `uitest dumpLayout` 的 JSON → (els文字层, full全量层, 包名)。纯函数,单测钉行为。
+/// 与 parse_dump(Android XML)**同构输出**——下游 fold/探针/断言/吸附/沙盘/里程碑/#20 全部
+/// 原样复用,一行不改。OpenHarmony/Android 的差异到此为止,agent 契约层无感。
+/// 字段映射(真机 dumpLayout 实测): text|description→t(text优先,description=Android的content-desc),
+/// bounds→b(格式 `[x1,y1][x2,y2]` 与Android一字不差,parse_bounds 复用), id→id(OH无包名冒号前缀,原样),
+/// type→class(Text/Image/Flex/RelativeContainer…,担当 fold 的"同class兄弟"结构折叠),
+/// clickable/scrollable/checkable/checked 同义, JSON嵌套层级→depth(天然文档序,比XML深度栈更直接)。
+/// 两个已验缺口: ①description(无文字图标的 t 来源)App常留空——与Android的content-desc同病,
+///   fold 的 icon 行(clickable+id+无文字)本就为此兜底; ②bundleName 极稀疏(dumpLayout 默认合并
+///   多窗口,常只在窗口根出现、且可能混入桌面进程)——取先序首个非空作代表,前台包名的权威来源
+///   是 SysState(hdc 侧 aa/hidumper 单采),树内包名只作 els_pkg 辅助对质。
+pub fn parse_layout_json(json: &str) -> (Vec<Node>, Vec<FullNode>, String) {
+    let mut els: Vec<Node> = Vec::new();
+    let mut full: Vec<FullNode> = Vec::new();
+    let mut pkg = String::new();
+    let root: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return (els, full, pkg),
+    };
+    fn walk(x: &serde_json::Value, depth: u32,
+            els: &mut Vec<Node>, full: &mut Vec<FullNode>, pkg: &mut String) {
+        let a = &x["attributes"];
+        let get = |k: &str| a[k].as_str().unwrap_or("");
+        if pkg.is_empty() {
+            let bn = get("bundleName");
+            if !bn.is_empty() { *pkg = bn.to_string(); }
+        }
+        let text = get("text");
+        let t = if !text.trim().is_empty() { text } else { get("description") };
+        let t = t.trim();
+        if let Some(b) = parse_bounds(get("bounds")) {
+            if b[2] > b[0] && b[3] > b[1] {
+                if !t.is_empty() && els.len() < 70 {
+                    let mut tt = t.to_string();
+                    while tt.chars().count() > 40 { tt.pop(); }
+                    els.push(Node { t: tt, b });
+                }
+                let id = { let s = get("id"); if s.is_empty() { None } else { Some(s.to_string()) } };
+                full.push(FullNode {
+                    t: t.to_string(), b, id,
+                    class: get("type").to_string(),
+                    clickable: get("clickable") == "true",
+                    scrollable: get("scrollable") == "true",
+                    checkable: get("checkable") == "true",
+                    checked: get("checked") == "true",
+                    depth,
+                });
+            }
+        }
+        if let Some(ch) = x["children"].as_array() {
+            for c in ch { walk(c, depth + 1, els, full, pkg); }
+        }
+    }
+    walk(&root, 0, &mut els, &mut full, &mut pkg);
+    (els, full, pkg)
+}
+
 /// dumpsys 焦点/键盘输出 → SysState。纯函数供单测。
 /// 包名解析规则与 foreground_pkg 同源:mCurrentFocus 优先,mFocusedApp 兜底,
 /// " u0 " 后取 token,包名段须形如反域名;Activity 段以 '.' 开头时补全包名。
@@ -556,6 +613,58 @@ mod tests {
         let f_long = full.iter().find(|f| f.t.chars().count() > 40);
         assert!(f_long.is_some(), "full 里长文本原文保留");
         assert!(els.iter().all(|n| n.t.chars().count() <= 40), "els 40字截断不变");
+    }
+
+    const OH_HOME: &str = include_str!("testdata/oh_home.json");
+
+    #[test]
+    fn oh_layout_parses_isomorphic_to_android() {
+        // hdc dumpLayout(真机OpenHarmony) 与 parse_dump 同构: 下游零改动的地基
+        let (els, full, pkg) = parse_layout_json(OH_HOME);
+        assert!(!full.is_empty() && !els.is_empty(), "真机dump应解出节点");
+        // 文字节点提取: 桌面图标名进 els
+        for name in ["设置", "图库", "电话", "信息", "相机"] {
+            assert!(els.iter().any(|n| n.t == name), "桌面文字'{name}'应在els");
+        }
+        // 无文字图标: clickable 无文字容器只进 full 不进 els(fold 靠 clickable+id 兜出 icon 行)
+        let icons: Vec<&FullNode> = full.iter()
+            .filter(|f| f.clickable && f.t.is_empty() && f.id.is_some()).collect();
+        assert!(!icons.is_empty(), "桌面应有无文字可点图标节点");
+        // bounds 格式与 Android 一字不差: 正面积、坐标合理
+        assert!(full.iter().all(|f| f.b[2] >= f.b[0] && f.b[3] >= f.b[1]));
+        // type→class 担当结构折叠(桌面图标是重复的 RelativeContainer)
+        assert!(full.iter().filter(|f| f.class == "RelativeContainer").count() >= 3,
+            "桌面重复图标容器应被识别(fold 同class兄弟折叠的输入)");
+        // depth 由 JSON 嵌套天然给出,子深于父
+        let settings = full.iter().find(|f| f.t == "设置").unwrap();
+        assert!(settings.depth > 0);
+    }
+
+    #[test]
+    fn oh_layout_els_contract_matches_parse_dump() {
+        // els 契约与 Android 逐条对齐: 40字截断、70条上限、有文字才收
+        let long_desc = "占".repeat(50);
+        let json = format!(r#"{{"attributes":{{"bounds":"[0,0][10,10]"}},"children":[
+            {{"attributes":{{"text":"{long_desc}","bounds":"[0,0][100,50]","type":"Text"}}}},
+            {{"attributes":{{"text":"","description":"关闭","bounds":"[90,0][100,10]","type":"Image","clickable":"true","id":"closeBtn"}}}},
+            {{"attributes":{{"text":"","bounds":"[0,0][10,10]","type":"Flex","scrollable":"true"}}}}
+        ]}}"#);
+        let (els, full, _) = parse_layout_json(&json);
+        assert!(els.iter().all(|n| n.t.chars().count() <= 40), "40字截断与Android一致");
+        assert_eq!(els.iter().find(|n| n.t.starts_with('占')).map(|n| n.t.chars().count()), Some(40));
+        // description 兜 t(无文字图标): text空时取description
+        let icon = full.iter().find(|f| f.id.as_deref() == Some("closeBtn")).unwrap();
+        assert_eq!(icon.t, "关闭", "text空则description补位(=content-desc语义)");
+        assert!(icon.clickable && icon.t.chars().count() > 0);
+        // 无文字无desc的可滚容器: 只进full不进els
+        assert!(full.iter().any(|f| f.scrollable && f.t.is_empty()));
+    }
+
+    #[test]
+    fn oh_layout_bad_json_yields_empty() {
+        // 坏JSON/空dump → 全空(空表是合法观测,与 dump_xml 失败同待遇)
+        let (e, f, p) = parse_layout_json("not json{");
+        assert!(e.is_empty() && f.is_empty() && p.is_empty());
     }
 
     #[test]
