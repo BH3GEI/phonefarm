@@ -20,6 +20,9 @@ note_max_chars = 200
 lesson_max_items = 20
 window_pairs = 5          # act/diff 上下文窗口
 
+# 设备自愈(采集失败→重启adb server→仍无心跳按此命令重启模拟器等开机;留空=只重启adb)
+emulator_cmd = "/opt/homebrew/share/android-commandlinetools/emulator/emulator -avd agentphone"
+
 # ══════════════════════════════════════════════════════════════
 # 提示词(原 prompts/ 目录,现内联;多行字符串)
 # ══════════════════════════════════════════════════════════════
@@ -40,6 +43,7 @@ step = """
 - note: 你上一步留给自己的便签
 - map(熟路): 当前页面在交互网的编号与邻页熟路(历史≥3次实测成立),可 goto 直达;
   无此行说明当前页不在网中,正常自行导航即可
+- 沙盘(仅遍历类任务): 已覆盖页数/本页未探索按钮/建议的最近未访目标,优先探索未探索处
 - app: 当前前台应用的包名(带launcher字样即为桌面)
 - screen: 当前元素列表(t=文字, b=[x1,y1,x2,y2]为0~999归一化框)与当前截图。
   元素列表偶尔不可用或不可信,材料中会注明;此时只按截图判断。
@@ -56,6 +60,8 @@ step = """
    动作取值: tap | swipe | scroll_up | scroll_down | type | back | home | launch | goto | wait | done
    tap 需要 x,y,建议附 what=按钮文字(screen清单里的): 程序吸附到该元素准确中心,
    what不在清单会被驳回并附附近候选;不发what时,落点在某元素框内也会自动吸附中心;
+   纯图标按钮(无文字,如×/齿轮/返回箭头)用 what:"icon:<描述>"(如icon:close):
+   程序不吸附,按你的视觉坐标直点,坐标合法性/空白/前科检查照常;
    swipe 需要 x,y,x2,y2(起点到终点,距离要足够大);type 需要 text;
    home 回到桌面(系统按键,任何画面下都有效);launch 需要 text=apps清单中的包名,直接启动该应用;
    goto 需要 text=map行中的页号(如P5): 程序沿熟路零调用直达;必须单发一行(其后计划作废),

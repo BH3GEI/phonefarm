@@ -86,6 +86,11 @@ def main(task):
     def act_label(els, a):
         kind = (a or {}).get("a", "?")
         if kind == "tap":
+            # 纯图标点名(what=icon:xxx): 无文字可回放,单独标签——
+            # tree.rs 的可回放判定只认 点[文字],图标边自动出局
+            w = (a or {}).get("what") or ""
+            if w.startswith("icon:"):
+                return f"点图标[{w[5:][:12]}]"
             x, y = a.get("x", -1), a.get("y", -1)
             best = None
             for e in els:

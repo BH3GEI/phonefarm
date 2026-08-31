@@ -37,6 +37,7 @@ pub struct CallOut {
 pub struct Brain {
     providers: Vec<ProviderCfg>,
     pub calls: u32,
+    pub tokens: u64, // 累计 usage.total_tokens(benchmark 报表用)
     fails: std::collections::HashMap<String, u32>, // 熔断: 本进程内硬失败计数
     tmp: String,
 }
@@ -62,7 +63,7 @@ fn b64(data: &[u8]) -> String {
 
 impl Brain {
     pub fn new(providers: Vec<ProviderCfg>, tmp: String) -> Self {
-        Brain { providers, calls: 0, fails: Default::default(), tmp }
+        Brain { providers, calls: 0, tokens: 0, fails: Default::default(), tmp }
     }
 
     /// 回复无法按契约解析时,调用方记该 provider 一次硬失败
@@ -128,8 +129,9 @@ impl Brain {
                 }
                 let t = Instant::now();
                 match self.post(p, &key, &b) {
-                    Ok(text) => {
+                    Ok((text, tok)) => {
                         self.fails.insert(p.name.clone(), 0);
+                        self.tokens += tok;
                         return Ok(CallOut { text, by: p.name.clone(), ms: t.elapsed().as_millis() as u64 });
                     }
                     Err(e) => {
@@ -152,7 +154,9 @@ impl Brain {
         Err("所有可用 provider 都失败".into())
     }
 
-    fn post(&self, p: &ProviderCfg, key: &str, body: &serde_json::Value) -> Result<String, String> {
+    fn post(&self, p: &ProviderCfg, key: &str, body: &serde_json::Value)
+        -> Result<(String, u64), String>
+    {
         let bp = format!("{}/_req.json", self.tmp);
         std::fs::write(&bp, serde_json::to_string(body).unwrap()).map_err(|e| e.to_string())?;
         let timeout = p.timeout_s.unwrap_or(30).to_string();
@@ -189,6 +193,7 @@ impl Brain {
         if content.trim().is_empty() {
             return Err("空content".into());
         }
-        Ok(content.to_string())
+        let tok = resp["usage"]["total_tokens"].as_u64().unwrap_or(0);
+        Ok((content.to_string(), tok))
     }
 }

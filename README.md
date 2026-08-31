@@ -13,6 +13,11 @@ Rust 内核驱动 Android 模拟器(adb),视觉语言模型(智谱 GLM)做决策
 - **点名吸附**:tap 附 `what=按钮文字`,门按当前元素清单把落点吸附到该元素的准确中心;清单里找不到则驳回并附最近候选——"看图手偏"和"闭眼瞎猜"两头堵(实测点'设置'等按钮从此一发入魂)
 - **OCR文字备胎**: UI树为空的屏(游戏/自绘界面/dump失败)自动改用 macOS 自带 Vision 识别截图文字坐标(`ocr.swift`→`ocr`),点名吸附/页面身份证/熟路小地图全部照常工作;识别帧的差异走像素通道(识别帧间有抖动,不进集合差);工具没编译也不碍事,该通道自动关闭
 - **交互网与熟路直达(goto)**:历史局的(画面,动作,实测结果)离线聚成页面网(`build_tree.py` → `tasks/<任务>/tree.json`,页面身份证=同页多数画面共有的短词,信息流碎片天然出局);运行时注入本地小地图,模型发 `goto 页号` 即沿"走过≥3次且终点稳定"的熟路零模型调用直达,每跳按页面身份证验收,走岔立即交还模型;局末自动重算,新路滚雪球。新场景零成本冷启动:第一局照常问模型,材料顺手落进网
+- **打摆检测**:动作签名(tap 认按钮身份、不认会漂移的裸坐标)识别 `tap↔back` 两拍与 `tap,scroll,back` 三拍进出循环,第 2 轮命中即向模型注入高优先级警报(附"页面标题≠菜单名"实例,如广告设置→"为什么我会看到此广告"),hook 入账;上滑下滑交替翻列表不误报
+- **纯图标放行**:弹窗 ×、齿轮等无文字控件用 `what:"icon:<描述>"`(如 icon:close)——跳过文字清单吸附,按模型视觉坐标直点,坐标合法性/空白死角/前科/连点检查照常;图标边不进熟路回放(无文字找不到按钮)
+- **探索沙盘**:遍历类任务(目标含"遍历/全部/覆盖/逛")把单行小地图升级为进度看板:已覆盖 N/M 页、当前页未探索按钮(骨架短词、历史已点的自动出局)、最近的未访页 goto 建议;信息流碎片靠 ≤6 字过滤+上限 8 条防灌水
+- **设备自愈与原生评测**:`benchmark` 子命令自闭环跑轮次(体检→复活→轮间清理→跑局→`campaign.tsv`/`--json` 报表),全程无 Bash/Python 胶水;采集失败局内自动复活一次(重启 adb server→仍无心跳按 `emulator_cmd` 重启模拟器等开机),brain 累计 token 用量入报表
+- **模型视角存档**:每局 `runs/<局>/ctx.log` 精确存下本局所用的完整提示词与规则,以及每次决策发给模型的全部材料(警报/沙盘/清单/便签原样在内)——复盘"模型当时到底看到了什么"有据可查
 - **计划链**:一次决策最多产出 4 个动作,后续动作不再消耗模型调用(实测免调用步占 26~36%)
 - **经验沉淀**:每局结束复盘,把教训写进 `tasks/<任务>/lessons.jsonl`(带 win/lose 计数),下一局开场即用;代码层兜底防止复盘静默丢条;跨任务通用的教训(scope:global)单独沉到 `tasks/_global/lessons.jsonl`,所有任务共享
 - **独立复核**:局末用终局画面 + 差异记录交叉验证 agent 的"完成"主张——实测抓住过一次谎报
@@ -27,7 +32,7 @@ round.sh              单轮端到端:设备体检→清应用→跑一局→汇
 summarize_run.py      从 log.jsonl 抽取单局汇总
 build_tree.py         离线交互网构建器:汇总全部 runs 的 log.jsonl → tree.json(局末也会自动跑)
 ocr.swift             OCR文字备胎(macOS Vision):UI树为空时识别截图文字坐标,swiftc 编译出 ./ocr
-tasks/<任务>/          各靶子的经验库 lessons.jsonl、交互网 tree.json、逐局 runs/(log.jsonl 入库,截图不入库)
+tasks/<任务>/          各靶子的经验库 lessons.jsonl、交互网 tree.json、评测账 campaign.tsv、逐局 runs/(log.jsonl+ctx.log 入库,截图不入库)
 phonefarm-设计文档-v1.html
 ```
 
@@ -37,9 +42,11 @@ phonefarm-设计文档-v1.html
 2. `cd src && cargo build --release`,把产物 `phonefarm` 放到仓库根目录
    (推荐) `swiftc -O ocr.swift -o ocr` — OCR文字备胎;不编也能跑,该功能自动关闭,程序也会尝试自举编译
 3. 启动 Android 模拟器(AVD 名 `agentphone`),装好目标 App
-4. 单轮:`./round.sh 1`;或直接:
+4. 单轮:`./round.sh 1`(旧脚本,仍可用);或直接:
    `./phonefarm run --task "今日头条遍历" --endless --budget-calls 90 --app com.ss.android.article.news "<目标文本>"`
    (`--app` 可选:声明目标应用包名,开局前台不符时自动按 HOME 归位)
+5. 自闭环评测(推荐,已不依赖任何脚本):每轮体检→复活→轮间清理→跑局→TSV 落账
+   `./phonefarm benchmark --task "今日头条遍历" --rounds 10 --budget-calls 90 --app com.ss.android.article.news --json "<目标文本>"`
 
 ## 战绩(2026-08-29)
 

@@ -122,6 +122,51 @@ impl Tree {
         self.pages.iter().find(|p| p.name == t).map(|p| p.id)
     }
 
+    /// 探索沙盘: 当前页"没点过的按钮" = 骨架短词(≤6字)里,历史从未从本页以 点[该词] 走出过边的。
+    /// 信息流碎片多为长标题,≤6字过滤+上限8条防灌水;历史已走的按钮自然出局。
+    pub fn unexplored(&self, pid: i64, els: &[Node]) -> Vec<String> {
+        let tapped: std::collections::HashSet<&str> = self.edges.iter()
+            .filter(|e| e.from == pid)
+            .filter_map(|e| Tree::tap_text(&e.label))
+            .map(str::trim)
+            .collect();
+        let mut seen: std::collections::HashSet<String> = Default::default();
+        let mut out = Vec::new();
+        for n in els {
+            let t = n.t.trim();
+            if t.chars().count() > 6 || t.is_empty() || tapped.contains(t) { continue; }
+            if seen.insert(t.to_string()) {
+                out.push(crate::runtime::tcut(t, 8));
+                if out.len() >= 8 { break; }
+            }
+        }
+        out
+    }
+
+    /// 探索沙盘: 离当前最近的未访问页(BFS 只过熟路,不再深入未访分支)。
+    /// 返回 (页id, 跳数),全访问过或不可达返回 None。
+    pub fn nearest_unvisited(&self, cur: i64, visited: &std::collections::HashSet<i64>)
+        -> Option<(i64, usize)>
+    {
+        let mut dist: std::collections::HashMap<i64, usize> = Default::default();
+        let mut queue = std::collections::VecDeque::from([(cur, 0usize)]);
+        dist.insert(cur, 0);
+        let mut best: Option<(i64, usize)> = None;
+        while let Some((p, d)) = queue.pop_front() {
+            if p != cur && !visited.contains(&p) {
+                if best.map_or(true, |(_, bd)| d < bd) { best = Some((p, d)); }
+                continue; // 未访页只当目的地,不作为中转
+            }
+            for e in &self.edges {
+                if e.from == p && Self::replayable(e) && !dist.contains_key(&e.to) {
+                    dist.insert(e.to, d + 1);
+                    queue.push_back((e.to, d + 1));
+                }
+            }
+        }
+        best
+    }
+
     /// 边标签 → 按钮文字(仅 点[..] 型)
     pub fn tap_text(label: &str) -> Option<&str> {
         label.strip_prefix("点[").and_then(|s| s.strip_suffix(']'))

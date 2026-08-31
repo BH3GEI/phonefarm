@@ -113,6 +113,67 @@ fn now_tag() -> String {
         .unwrap_or_else(|_| "run".into())
 }
 
+/// 单局结构化成绩单(主程序退出码 / benchmark 报表共用)
+pub struct EpisodeResult {
+    pub achieved: bool,
+    pub run_id: String, // runs/ 下的时间戳目录名
+    pub stop: String,   // done | budget | watchdog | max_steps | model_fail | capture_fail | orient…
+    pub steps: u32,
+    pub calls: u32,
+    pub tokens: u64,
+    pub wall_ms: u64,
+}
+
+/// 打摆警报词(给实例帮助模型举一反三:标题≠菜单名是最常见的"到了不认账")
+const OSCILL_WARN: &str = "【系统警告:打摆干预】你已连续2次进入同一页面又立即返回!注意:页面实际标题往往与菜单名不一致(如点'广告设置'进去后标题是'为什么我会看到此广告')。严禁继续back!请仔细阅读当前页正文寻找目标内容,确认已到达就直接done。";
+
+/// 动作签名(打摆检测): tap认"点了什么"不认裸坐标——坐标每步都在漂,按钮身份才稳。
+/// 未点名的tap按50px粗桶近似(有what时坐标只是线索,吸附后由what定身份)。
+fn act_sig(a: &ActN) -> String {
+    match a.a.as_str() {
+        "tap" => match a.what.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+            Some(w) => format!("tap[{}]", tcut(w, 12)),
+            None => format!("tap({},{})", a.x.unwrap_or(-1) / 50, a.y.unwrap_or(-1) / 50),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// 打摆判定: 两拍 X,Y,X,Y 或三拍 X,Y,Z,X,Y,Z,且拍内含 back/home(进出循环)。
+/// 三拍是实测出来的变体: 警报后模型不秒退了,改成"读一会儿(wait/scroll)再走",照样进出循环。
+/// 上滑下滑交替翻列表是合法探索(无back/home),不报警。
+fn is_oscillating(sigs: &VecDeque<String>) -> bool {
+    let n = sigs.len();
+    if n >= 4 {
+        let (a, b, c, d) = (&sigs[n - 4], &sigs[n - 3], &sigs[n - 2], &sigs[n - 1]);
+        if a == c && b == d && a != b
+            && (a.as_str() == "back" || b.as_str() == "back"
+                || a.as_str() == "home" || b.as_str() == "home")
+        { return true; }
+    }
+    if n >= 6 {
+        let t: Vec<&String> = sigs.iter().skip(n - 6).collect();
+        if t[0] == t[3] && t[1] == t[4] && t[2] == t[5]
+            && !(t[0] == t[1] && t[1] == t[2])
+            && ["back", "home"].iter().any(|k| {
+                t[0].as_str() == *k || t[1].as_str() == *k || t[2].as_str() == *k
+            })
+        { return true; }
+    }
+    false
+}
+
+/// 打摆记账: 推入已执行动作签名(窗口8条);命中进出循环返回 true(fire_at 控制第3轮才再报)
+fn osc_note(sigs: &mut VecDeque<String>, sig: String, fire_at: &mut usize) -> bool {
+    sigs.push_back(sig);
+    while sigs.len() > 8 { sigs.pop_front(); }
+    if sigs.len() >= *fire_at && is_oscillating(sigs) {
+        *fire_at = sigs.len() + 2;
+        return true;
+    }
+    false
+}
+
 /// 后台包是否可安全掐死(force-stop): 目标应用、系统/谷歌家族包、桌面一律不碰
 fn pkg_killable(pkg: &str, target: Option<&str>) -> bool {
     !pkg.is_empty()
@@ -297,6 +358,20 @@ fn log_screen(log: &mut Log, cap: &Cap, n: u32, realw: i32, realh: i32, logged_s
     *logged_seq = cap.seq;
 }
 
+/// 采集,失败则尝试复活设备后重采(每局一次): 模拟器/adb 中途卡死不再直接弃局。
+/// 复活链: 重启adb server → 仍无心跳按 cfg.emulator_cmd 重启模拟器等开机。
+fn capture_or_revive(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64,
+                     realw: i32, realh: i32, target: Option<&str>, revived: &mut bool) -> Option<Cap> {
+    if let Some(c) = capture(phone, run_dir, seq, cfg, tmp, cap_ms, realw, realh, target) {
+        return Some(c);
+    }
+    if *revived { return None; }
+    *revived = true;
+    println!("      🔧 采集失败,尝试设备复活(重启adb/模拟器)");
+    if !phone.revive(&cfg.emulator_cmd) { return None; }
+    capture(phone, run_dir, seq, cfg, tmp, cap_ms, realw, realh, target)
+}
+
 /// 熟路边 → 可执行动作。点[文字] 在当前清单里现找按钮(位置会漂,文字不漂);
 /// 找不到按钮返回 None(这条边现在走不了,交还模型)。
 fn act_from_edge(e: &crate::tree::Edge, cap: &Cap, realw: i32, realh: i32) -> Option<ActN> {
@@ -340,9 +415,12 @@ fn act_line(n: u32, a: &ActN) -> String {
 /// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 最近act/diff窗 + ban + note + 小地图 + 前台应用 + 屏幕
 /// 静态段(goal/经验/apps)在前,动态段在后,保住能保的提示词缓存前缀。
 fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str,
-              map_line: &str, window: &[(String, String)], bans: &[Ban],
+              map_line: &str, alert: &str, window: &[(String, String)], bans: &[Ban],
               note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
     let mut s = format!("goal: {goal}\n");
+    if !alert.is_empty() {
+        s.push_str(&format!("⚠ {alert}\n"));
+    }
     for l in glessons {
         s.push_str(&format!("lesson(通用): {}\n", l["t"].as_str().unwrap_or("")));
     }
@@ -495,6 +573,9 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg:
             let mut yi = (y * cap.h as i64 / NORM) as i32;
             if cap.suspect {
                 // 假树: 清单不可信,不吸附不点名,按原坐标走(空白/前科检查照常)
+            } else if a.what.as_deref().map(str::trim).is_some_and(|w| w.starts_with("icon:")) {
+                // 纯图标按钮(×/齿轮/返回箭头等无文字控件): 清单和OCR都没有它的文字,
+                // 跳过吸附按模型视觉坐标直点;坐标合法性/前科/连点/空白死角检查照常
             } else if let Some(w) = a.what.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
                 match find_el(&cap.els, w, x, y, cap, realw, realh) {
                     Some((_, bi)) => {
@@ -748,13 +829,19 @@ struct ParamsFile {
 }
 
 pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
-               endless: bool, budget: u32, app: Option<String>) -> bool {
+               endless: bool, budget: u32, app: Option<String>) -> EpisodeResult {
+    let t0 = std::time::Instant::now();
+    let fail = |stop: &str, run_id: String| EpisodeResult {
+        achieved: false, run_id, stop: stop.into(), steps: 0, calls: 0, tokens: 0,
+        wall_ms: t0.elapsed().as_millis() as u64,
+    };
     // ── 目录与文件 ──
     let task_dir = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
-    let run_dir = format!("{}/runs/{}", task_dir, now_tag());
+    let run_id = now_tag();
+    let run_dir = format!("{}/runs/{run_id}", task_dir);
     if fs::create_dir_all(&run_dir).is_err() {
         eprintln!("✗ 建不了运行目录 {run_dir}");
-        return false;
+        return fail("mkdir_fail", String::new());
     }
     let tmp = std::env::temp_dir().join(format!("phonefarm-{}", std::process::id()));
     let tmp = tmp.to_string_lossy().to_string();
@@ -765,6 +852,20 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     };
     log.put(json!({"v": 1}));
     log.put(json!({"r": "goal", "t": goal}));
+
+    // 模型视角存档: 本局所用的完整提示词与规则 + 每次决策看到的全部材料,精准落 run_dir/ctx.log
+    // (此前写tmp、局末即删,无法复盘"模型当时到底看到了什么")
+    let ctx_path = format!("{run_dir}/ctx.log");
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&ctx_path) {
+        let _ = writeln!(f, "== 本局提示词与规则([prompts] 全文,顺序无关) ==");
+        let mut keys: Vec<&String> = cfg.prompts.keys().collect();
+        keys.sort();
+        for k in keys {
+            let _ = writeln!(f, "\n--[{k}]--\n{}", cfg.prompts[k]);
+        }
+        let _ = writeln!(f, "\n== 阈值 ==\nsettle_ms={} plan_max={} els_timeout_ms={} ban_radius={} ban_strikes={} stall_limit={}",
+            cfg.settle_ms, cfg.plan_max, cfg.els_timeout_ms, cfg.ban_radius, cfg.ban_strikes, cfg.stall_limit);
+    }
 
     let lessons = load_lessons(&format!("{task_dir}/lessons.jsonl"));
     // 全局经验: 跨任务共享(tasks/_global/),"游戏里用home逃生"这类学费只交一次
@@ -811,11 +912,16 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         let fg = phone.foreground_pkg();
         if !fg.is_empty() && fg != *target && !fg.contains("launcher") {
             let kill = pkg_killable(&fg, Some(target));
-            let act = if kill { "force-stop+home" } else { "home" };
+            let act = if kill { "force-stop+home+launch" } else { "home+launch" };
             println!("(开局归位: 前台{fg} ≠ 目标{target},{act})");
             if kill { phone.force_stop(&fg); }
             phone.home();
             std::thread::sleep(std::time::Duration::from_millis(900));
+            // 冷启动目标应用(整合round.sh轮间清理语义: 统一从主Activity起)
+            if let Some((_, comp)) = apps.iter().find(|(p, _)| p == target) {
+                phone.launch(target, comp);
+                std::thread::sleep(std::time::Duration::from_millis(900));
+            }
             log.put(json!({"r":"hook","kind":"orient","from":fg,"target":target,"act":act}));
         }
     }
@@ -842,6 +948,11 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut done_claim = false;
     let mut logged_seq = 0u32;
     let mut capseq = 1u32;
+    let mut revived = false; // 设备复活每局一次(采集失败→重启adb/模拟器)
+    let mut visited: std::collections::HashSet<i64> = Default::default(); // 沙盘: 本局到访页
+    let mut act_sigs: VecDeque<String> = VecDeque::new(); // 打摆: 已执行动作签名
+    let mut osc_fire_at = 4usize;   // 打摆: 签名窗达此长度才(再)触发
+    let mut alert = String::new();  // 打摆警报(注入下一次决策,用过即清)
 
     // ── 计划队列 ──
     let mut queue: VecDeque<ActN> = VecDeque::new();
@@ -850,9 +961,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut plan_ms: Option<u64> = None; // 只随计划首动作入日志
     let mut pending_note: Option<String> = None;
 
-    let Some(mut cap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref()) else {
-        eprintln!("✗ 首屏采集失败");
-        return false;
+    let Some(mut cap) = capture_or_revive(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref(), &mut revived) else {
+        eprintln!("✗ 首屏采集失败(设备复活无效)");
+        return fail("capture_fail", run_id.clone());
     };
     stream.push(format!("goal: {goal}"));
     println!("任务[{task}] 局{ep_no} | {goal}");
@@ -872,18 +983,47 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
         // ① 本轮画面记录(采集在上一动作末尾或开局完成)
         log_screen(&mut log, &cap, n, realw, realh, &mut logged_seq);
+        // 沙盘: 到访页登记(每轮顶部必经,覆盖goto跳段/驳回重采/盲移等一切路径)
+        if let Some(t) = tree.as_ref() {
+            if let Some(p) = t.page_of(&cap.els) { visited.insert(p.id); }
+        }
 
         // ②③ 队列空则组装上下文并要一份计划
         if queue.is_empty() {
-            // 本地小地图: 当前页的熟路邻居(供模型 goto 直达)
+            // 小地图/探索沙盘: 遍历类任务给沙盘看板(进度+本页未探索+建议目标),普通任务单行小地图
             let map_line = match tree.as_ref().and_then(|t| t.page_of(&cap.els)) {
-                Some(p) => tree.as_ref().unwrap().map_line(p.id).unwrap_or_default(),
+                Some(p) => {
+                    let t = tree.as_ref().unwrap();
+                    let traversal = ["遍历", "全部", "覆盖", "逛"].iter().any(|k| goal.contains(k));
+                    if traversal {
+                        let un = t.unexplored(p.id, &cap.els);
+                        let nxt = t.nearest_unvisited(p.id, &visited);
+                        let mut s = format!("[探索沙盘] 已覆盖 {}/{} 页 | 当前P{}[{}]",
+                            visited.len(), t.pages.len(), p.id, tcut(&p.name, 12));
+                        s.push_str(&format!(" | 本页未探索: [{}]",
+                            if un.is_empty() { "无".to_string() } else { un.join(",") }));
+                        if let Some((nid, h)) = nxt {
+                            let nname = t.page(nid).map(|q| tcut(&q.name, 10)).unwrap_or_default();
+                            s.push_str(&format!(" | 建议最近未访: goto P{nid}[{nname}]({h}跳)"));
+                        }
+                        if let Some(m) = t.map_line(p.id) {
+                            if let Some(i) = m.find(" 熟路: ") {
+                                s.push_str(&m[i..]); // 熟路明细保留,模型可自行导航
+                            }
+                        }
+                        println!("      🗺 {s}");
+                        s
+                    } else {
+                        t.map_line(p.id).unwrap_or_default()
+                    }
+                }
                 None => String::new(),
             };
-            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &map_line, &window, &bans, &note, &cap, realw, realh);
+            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &map_line, &alert, &window, &bans, &note, &cap, realw, realh);
+            // 模型视角存档: 这次决策发给模型的完整上下文(含警报/沙盘/清单/便签)
             let _ = fs::OpenOptions::new().create(true).append(true)
-                .open(format!("{tmp}/ctx.log"))
-                .map(|mut f| writeln!(f, "── 步#{n} ──\n{user}\n"));
+                .open(&ctx_path)
+                .map(|mut f| writeln!(f, "\n══ 步#{n} 决策上下文 ══\n{user}\n"));
             match plan_call(&mut brain, cfg, &user, &cap.img) {
                 Ok((acts, note_new, by, ms)) => {
                     if acts.len() > 1 { println!("      📋 {}给出{}步计划", by, acts.len()); }
@@ -891,6 +1031,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     plan_by = by;
                     plan_ms = Some(ms);
                     pending_note = note_new;
+                    alert.clear(); // 警报已送达本次决策,清掉避免重复轰炸
                 }
                 Err(e) if e == "内容过滤" && escapes_left > 0 => {
                     // 画面被安全审核拒绝(确定性): 不等模型,盲滑一步离开,重新采集再决策
@@ -898,6 +1039,11 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     println!("      🚧 画面被内容过滤拒绝,盲移离开(余{escapes_left}次)");
                     let esc = ActN { a: "scroll_down".into(), ..Default::default() };
                     exec(&phone, &esc, &cap, realw, realh, &apps);
+                    if osc_note(&mut act_sigs, act_sig(&esc), &mut osc_fire_at) {
+                        alert = OSCILL_WARN.to_string();
+                        log.put(json!({"r":"hook","kind":"oscill","at":"escape"}));
+                        println!("      ⚠ 打摆检测命中,警报已注入");
+                    }
                     log_act(&mut log, n, &esc, "(盲移)", None);
                     let d = "escape(内容过滤)".to_string();
                     log.put(json!({"r":"diff","n":n,"d":d}));
@@ -909,7 +1055,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     stall += 1;
                     if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
                     capseq += 1;
-                    match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref()) {
+                    match capture_or_revive(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref(), &mut revived) {
                         Some(c) => cap = c,
                         None => { stop_reason = Some("capture_fail"); break; }
                     }
@@ -951,7 +1097,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             stall += 1;
             if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
             capseq += 1;
-            match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref()) {
+            match capture_or_revive(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref(), &mut revived) {
                 Some(c) => cap = c,
                 None => { stop_reason = Some("capture_fail"); break; }
             }
@@ -1014,6 +1160,11 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 let aline_h = act_line(n, &hact);
                 let ms_h = ms_left.take();
                 exec(&phone, &hact, &cap, realw, realh, &apps);
+                if osc_note(&mut act_sigs, act_sig(&hact), &mut osc_fire_at) {
+                    alert = OSCILL_WARN.to_string();
+                    log.put(json!({"r":"hook","kind":"oscill","at":"goto"}));
+                    println!("      ⚠ 打摆检测命中(goto段),警报已注入");
+                }
                 if hact.a == "tap" {
                     taps_hist.push_back((hact.x.unwrap_or(0) as i32, hact.y.unwrap_or(0) as i32));
                     while taps_hist.len() > 4 { taps_hist.pop_front(); }
@@ -1023,7 +1174,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 exec_steps += 1;
                 capseq += 1;
                 // 跳段用短定格: 到达判定靠页面身份证,不必等画面完全安静
-                let Some(nc) = capture(&phone, &run_dir, capseq, cfg, &tmp, 1200, realw, realh, app.as_deref()) else {
+                let Some(nc) = capture_or_revive(&phone, &run_dir, capseq, cfg, &tmp, 1200, realw, realh, app.as_deref(), &mut revived) else {
                     stop_reason = Some("capture_fail");
                     break;
                 };
@@ -1086,10 +1237,18 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             taps_hist.clear(); // 连点只算"连续tap",夹其他动作即重新数
         }
         exec_steps += 1;
+        // 打摆记账: 已执行动作签名;进出循环(X,Y,X,Y且含back/home)→注入警报
+        if osc_note(&mut act_sigs, act_sig(&act), &mut osc_fire_at) {
+            alert = OSCILL_WARN.to_string();
+            log.put(json!({"r":"hook","kind":"oscill",
+                "pair": format!("{},{}", act_sigs[act_sigs.len() - 2], act_sigs[act_sigs.len() - 1])}));
+            println!("      ⚠ 打摆检测: {}↔{} 进出循环,警报已注入(严禁back,读正文或done)",
+                act_sigs[act_sigs.len() - 2], act_sigs[act_sigs.len() - 1]);
+        }
 
         // ⑥ 等画面安静后定帧 + 实测差异(与拉元素列表并行)
         capseq += 1;
-        let Some(newcap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref()) else {
+        let Some(newcap) = capture_or_revive(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref(), &mut revived) else {
             stop_reason = Some("capture_fail");
             break;
         };
@@ -1433,8 +1592,98 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
     let _ = fs::remove_dir_all(&tmp);
     println!("{}", "=".repeat(56));
-    println!("局{ep_no}结束 | 步数{n} 执行{exec_steps} 空击{null_steps} 动态屏{dyn_steps} ban{ban_count} | 调用{}次 | done={done_claim} achieved={achieved}",
-        brain.calls);
+    println!("局{ep_no}结束 | 步数{n} 执行{exec_steps} 空击{null_steps} 动态屏{dyn_steps} ban{ban_count} | 调用{}次 tokens{} | done={done_claim} achieved={achieved}",
+        brain.calls, brain.tokens);
     println!("记录: {run_dir}/log.jsonl");
-    achieved
+    EpisodeResult {
+        achieved,
+        run_id,
+        stop: stop_reason.unwrap_or("done").to_string(),
+        steps: n,
+        calls: brain.calls,
+        tokens: brain.tokens,
+        wall_ms: t0.elapsed().as_millis() as u64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> Config {
+        toml::from_str(&std::fs::read_to_string("../phonefarm.toml").unwrap()).unwrap()
+    }
+
+    /// 空清单、图片路径不存在的最小Cap: patch_stats拿不到图会跳过空白检查,正好单测门控分流
+    fn cap() -> Cap {
+        Cap {
+            seq: 1, els: vec![], img: "/nonexistent.jpg".into(), img_rel: String::new(),
+            w: 672, h: 1456, thumb: None, noise: 0.0,
+            pkg: "t.app".into(), els_pkg: "t.app".into(), suspect: false, ocr: false,
+        }
+    }
+
+    #[test]
+    fn icon_what_passes_gate_without_list() {
+        // 纯图标: 空清单也能放行,不被"点名不在清单"驳回
+        let mut a = ActN {
+            a: "tap".into(), x: Some(950), y: Some(40),
+            what: Some("icon:close".into()), ..Default::default()
+        };
+        let r = gate(&mut a, &cap(), &[], &VecDeque::new(), &cfg(), "/tmp/pf-test", &[], 1080, 2340);
+        assert!(r.is_none(), "icon: 应放行, 却被驳回: {r:?}");
+        assert!(a.x.is_some() && a.y.is_some(), "坐标应已换算成图片像素");
+    }
+
+    #[test]
+    fn text_what_off_list_rejected() {
+        // 有文字点名但清单为空 → 驳回(与icon分流相反的方向)
+        let mut a = ActN {
+            a: "tap".into(), x: Some(500), y: Some(500),
+            what: Some("设置".into()), ..Default::default()
+        };
+        let r = gate(&mut a, &cap(), &[], &VecDeque::new(), &cfg(), "/tmp/pf-test", &[], 1080, 2340);
+        assert!(r.is_some(), "文字点名不在清单应驳回");
+    }
+
+    #[test]
+    fn oscillation_detected_on_tap_back_loop() {
+        let mut sigs: VecDeque<String> = VecDeque::new();
+        let mut fire_at = 4usize;
+        // 广告设置打摆: tap[广告设置]→back→tap[广告设置]→back,第2轮回合应触发
+        assert!(!osc_note(&mut sigs, "tap[广告设置]".into(), &mut fire_at));
+        assert!(!osc_note(&mut sigs, "back".into(), &mut fire_at));
+        assert!(!osc_note(&mut sigs, "tap[广告设置]".into(), &mut fire_at));
+        assert!(osc_note(&mut sigs, "back".into(), &mut fire_at), "第2轮进出应触发打摆警报");
+        // 触发后立即再判不重复报(fire_at抬到+2)
+        assert!(!osc_note(&mut sigs, "tap[广告设置]".into(), &mut fire_at));
+    }
+
+    #[test]
+    fn scroll_alternation_not_flagged() {
+        // 上滑下滑交替是合法探索,不报警
+        let sigs: VecDeque<String> = ["scroll_up", "scroll_down", "scroll_up", "scroll_down"]
+            .iter().map(|s| s.to_string()).collect();
+        assert!(!is_oscillating(&sigs));
+    }
+
+    #[test]
+    fn three_beat_loop_flagged() {
+        // 警报后的变体: tap→scroll(读一会儿)→back 三拍×2,照样是进出循环
+        let seq = ["tap[广告设置]", "scroll_down", "back", "tap[广告设置]", "scroll_down", "back"];
+        let sigs: VecDeque<String> = seq.iter().map(|s| s.to_string()).collect();
+        assert!(is_oscillating(&sigs));
+        // 三拍里换过按钮(读别的页)不算
+        let seq2 = ["tap[广告设置]", "scroll_down", "back", "tap[个性化推荐设置]", "scroll_down", "back"];
+        let sigs2: VecDeque<String> = seq2.iter().map(|s| s.to_string()).collect();
+        assert!(!is_oscillating(&sigs2));
+    }
+
+    #[test]
+    fn tap_sig_ignores_coord_jitter() {
+        // 坐标漂移(150→160)不改变签名: tap认按钮身份
+        let a = ActN { a: "tap".into(), x: Some(150), y: Some(920), what: Some("广告设置".into()), ..Default::default() };
+        let b = ActN { a: "tap".into(), x: Some(160), y: Some(928), what: Some("广告设置".into()), ..Default::default() };
+        assert_eq!(act_sig(&a), act_sig(&b));
+    }
 }

@@ -50,6 +50,9 @@ pub struct Config {
     pub window_pairs: usize,
     #[serde(default = "d_plan_max")]
     pub plan_max: usize,
+    /// 设备复活用: 模拟器启动命令(空=只重启adb不重启模拟器)
+    #[serde(default)]
+    pub emulator_cmd: String,
     #[serde(default)]
     pub prompts: HashMap<String, String>,
     #[serde(default, rename = "hook")]
@@ -121,11 +124,110 @@ fn main() {
                 eprintln!("phonefarm.toml 缺 [prompts].step");
                 std::process::exit(2);
             }
-            let ok = runtime::episode(&cfg, &task, &goal, serial, endless, budget, app);
-            std::process::exit(if ok { 0 } else { 1 });
+            let res = runtime::episode(&cfg, &task, &goal, serial, endless, budget, app);
+            println!("summary: run={} stop={} steps={} calls={} tokens={} wall={:.1}s achieved={}",
+                res.run_id, res.stop, res.steps, res.calls, res.tokens,
+                res.wall_ms as f64 / 1000.0, res.achieved);
+            std::process::exit(if res.achieved { 0 } else { 1 });
+        }
+        Some("benchmark") => {
+            // 自闭环评测: 每轮 体检→复活→轮间清理→跑局→原生指标入 campaign.tsv;--json 出结构化报告
+            let mut serial: Option<String> = None;
+            let mut goal = String::new();
+            let mut task = String::new();
+            let mut rounds: u32 = 1;
+            let mut budget: u32 = 40;
+            let mut app: Option<String> = None;
+            let mut as_json = false;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--serial" => serial = it.next().cloned(),
+                    "--task" => task = it.next().cloned().unwrap_or_default(),
+                    "--rounds" => rounds = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+                    "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
+                    "--app" => app = it.next().cloned(),
+                    "--json" => as_json = true,
+                    _ => goal = a.clone(),
+                }
+            }
+            if goal.is_empty() || task.is_empty() {
+                eprintln!("用法: phonefarm benchmark --task <任务名> [--rounds N] [--budget-calls N] [--app <包名>] [--json] \"<目标>\"");
+                std::process::exit(2);
+            }
+            let cfg_text = match std::fs::read_to_string("phonefarm.toml") {
+                Ok(s) => s,
+                Err(e) => { eprintln!("读不到 phonefarm.toml: {e}"); std::process::exit(2); }
+            };
+            let cfg: Config = match toml::from_str(&cfg_text) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("phonefarm.toml 解析失败: {e}"); std::process::exit(2); }
+            };
+            if !cfg.prompts.contains_key("step") {
+                eprintln!("phonefarm.toml 缺 [prompts].step");
+                std::process::exit(2);
+            }
+            let task_root = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
+            let _ = std::fs::create_dir_all(&task_root);
+            let tsv = format!("{task_root}/campaign.tsv");
+            if std::fs::metadata(&tsv).is_err() {
+                let _ = std::fs::write(&tsv,
+                    "round\trun_id\texit\tachieved\tstop\tsteps\tcalls\ttokens\twall_s\n");
+            }
+            let append = |line: &str| {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&tsv) {
+                    let _ = writeln!(f, "{line}");
+                }
+            };
+            let tmp = std::env::temp_dir().join("phonefarm-bench").to_string_lossy().to_string();
+            let _ = std::fs::create_dir_all(&tmp);
+            let phone = device::Adb::new(serial.clone(), tmp);
+            let apps = phone.launchable_apps();
+            let mut rows: Vec<serde_json::Value> = Vec::new();
+            for r in 1..=rounds {
+                println!("══ benchmark 第{r}/{rounds}轮 ══");
+                // 体检,不行就地复活(原round.sh职责,已收编)
+                if !phone.health_check(15000) {
+                    phone.revive(&cfg.emulator_cmd);
+                    if !phone.health_check(15000) {
+                        eprintln!("✗ 设备无响应且复活失败,第{r}轮记EMULATOR_DEAD");
+                        append(&format!("{r}\t-\t9\tfalse\tEMULATOR_DEAD\t0\t0\t0\t0"));
+                        rows.push(serde_json::json!({"round": r, "exit": 9, "achieved": false, "stop": "EMULATOR_DEAD"}));
+                        continue;
+                    }
+                }
+                // 轮间清理: 强停→回桌面→冷启主Activity,统一起跑线
+                if let Some(pkg) = &app {
+                    phone.force_stop(pkg);
+                    phone.home();
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    if let Some((_, comp)) = apps.iter().find(|(p, _)| p == pkg) {
+                        phone.launch(pkg, comp);
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(6));
+                }
+                let t0 = std::time::Instant::now();
+                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), true, budget, app.clone());
+                let wall = t0.elapsed().as_secs();
+                append(&format!(
+                    "{r}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{wall}",
+                    res.run_id, if res.achieved { 0 } else { 1 }, res.achieved, res.stop,
+                    res.steps, res.calls, res.tokens));
+                rows.push(serde_json::json!({
+                    "round": r, "run_id": res.run_id, "exit": if res.achieved { 0 } else { 1 },
+                    "achieved": res.achieved, "stop": res.stop, "steps": res.steps,
+                    "calls": res.calls, "tokens": res.tokens, "wall_s": wall
+                }));
+            }
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+            }
+            let last_ok = rows.last().and_then(|r| r["achieved"].as_bool()).unwrap_or(false);
+            std::process::exit(if last_ok { 0 } else { 1 });
         }
         _ => {
-            eprintln!("phonefarm v0.2 — 记录契约 v1 运行时\n  phonefarm run --task <任务名> \"<目标>\"\n  phonefarm devices");
+            eprintln!("phonefarm v0.2 — 记录契约 v1 运行时\n  phonefarm run --task <任务名> \"<目标>\"\n  phonefarm benchmark --task <任务名> [--rounds N] [--app <包名>] [--json] \"<目标>\"\n  phonefarm devices");
             std::process::exit(2);
         }
     }

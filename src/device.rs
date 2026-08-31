@@ -132,6 +132,43 @@ impl Adb {
         self.run(&v);
     }
 
+    /// 设备心跳(限时,防 adb 卡死拖垮全局): echo ok 能回来即活
+    pub fn health_check(&self, ms: u64) -> bool {
+        let out = self.run_timeout(&["shell", "echo", "ok"], ms);
+        String::from_utf8_lossy(&out).trim() == "ok"
+    }
+
+    /// 设备复活: 先重启 adb server;仍无心跳且配置了模拟器命令则重启模拟器等开机。
+    /// 返回复活后是否有心跳。emulator_cmd 形如 "<emulator路径> -avd <名字>"。
+    pub fn revive(&self, emulator_cmd: &str) -> bool {
+        println!("      🔧 设备复活: 重启 adb server…");
+        let _ = self.run(&["kill-server"]);
+        let _ = self.run(&["start-server"]);
+        for _ in 0..10 {
+            if self.health_check(5000) { return true; }
+            sleep(Duration::from_millis(1000));
+        }
+        if emulator_cmd.trim().is_empty() { return false; }
+        println!("      🔧 adb 复活无效,重启模拟器({emulator_cmd})…");
+        let _ = Command::new("pkill").args(["-f", "avd agentphone"]).status();
+        sleep(Duration::from_secs(3));
+        let parts: Vec<&str> = emulator_cmd.split_whitespace().collect();
+        if let Some(bin) = parts.first() {
+            // 模拟器作独立后台进程拉起,父进程(本agent)退出与否不影响它
+            let _ = Command::new(bin)
+                .args(&parts[1..])
+                .stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        }
+        let _ = self.run(&["wait-for-device"]);
+        for _ in 0..90 {
+            let boot = String::from_utf8_lossy(
+                &self.run_timeout(&["shell", "getprop", "sys.boot_completed"], 5000)).trim().to_string();
+            if boot == "1" && self.health_check(5000) { return true; }
+            sleep(Duration::from_secs(2));
+        }
+        self.health_check(5000)
+    }
+
     fn dump_xml(&self, timeout_ms: u64) -> String {
         let out = self.run_timeout(&["exec-out", "uiautomator", "dump", "--compressed", "/dev/tty"], timeout_ms);
         let s = String::from_utf8_lossy(&out).to_string();
