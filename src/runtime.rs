@@ -5,7 +5,7 @@
 //!       边界差异(刚过背景一点)经仲裁裁定,每局限5次。
 //! 程序只写 tasks/<任务>/ 之下: runs/<局>/log.jsonl、runs/<局>/step*.jpg、lessons.jsonl、params.toml。
 use crate::brain::Brain;
-use crate::device::{frames_diff_pct, mode_gray, patch_stats, thumb_gray, Adb, FullNode, Node};
+use crate::device::{frames_diff_pct, mode_gray, patch_stats, thumb_gray, Device, FullNode, Node};
 use crate::tree::Tree;
 use crate::Config;
 use serde_json::{json, Value};
@@ -293,20 +293,22 @@ fn els_sig_of(cap: &Cap) -> Vec<String> {
     v
 }
 
-/// 后台包是否可安全掐死(force-stop): 目标应用、系统/谷歌家族包、桌面一律不碰
+/// 后台包是否可安全掐死(force-stop): 目标应用、系统/谷歌/OH系统家族包、桌面一律不碰
 fn pkg_killable(pkg: &str, target: Option<&str>) -> bool {
     !pkg.is_empty()
         && target.map_or(true, |t| pkg != t)
         && pkg != "android"
         && !pkg.starts_with("com.android.")
         && !pkg.starts_with("com.google.")
+        && !pkg.starts_with("com.ohos.")
         && !pkg.contains("launcher")
+        && !pkg.contains("sceneboard")
 }
 
 /// 双采集(截图与元素列表并行) + 等画面安静:
 /// 连拍小图,连续两张一致(≤QUIET_PCT)即认为停稳(noise=0);
 /// 到 cap_ms 上限仍不一致 → 动态屏,期间小图两两差异的最大值记为背景动静幅度(noise>0)。
-fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64,
+fn capture(phone: &Device, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64,
            realw: i32, realh: i32, target: Option<&str>) -> Option<Cap> {
     let img_rel = format!("step{seq}.jpg");
     let img = format!("{run_dir}/{img_rel}");
@@ -363,9 +365,11 @@ fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms
     // gzip 压缩(shell自带,零依赖);压不动就留明文。与截图同为不进 git 的本地重资产。
     let mut xml_rel = String::new();
     if !xml.is_empty() {
-        let xp = format!("{run_dir}/step{seq}.xml");
+        // 扩展名按内容认: Adb 吐 XML,Hdc 吐 JSON——地面真值名实相符,账本字段名(xml)不动
+        let ext = if xml.trim_start().starts_with('{') { "json" } else { "xml" };
+        let xp = format!("{run_dir}/step{seq}.{ext}");
         if fs::write(&xp, &xml).is_ok() {
-            xml_rel = format!("step{seq}.xml");
+            xml_rel = format!("step{seq}.{ext}");
             let gz = std::process::Command::new("gzip").args(["-f", &xp]).output()
                 .map(|o| o.status.success()).unwrap_or(false);
             if gz && fs::metadata(format!("{xp}.gz")).is_ok() { xml_rel.push_str(".gz"); }
@@ -566,14 +570,14 @@ fn log_raw(log: &mut Log, hook: &str, n: u32, by: &str, ms: u64, text: &str, in_
 
 /// 采集,失败则尝试复活设备后重采(每局一次): 模拟器/adb 中途卡死不再直接弃局。
 /// 复活链: 重启adb server → 仍无心跳按 cfg.emulator_cmd 重启模拟器等开机。
-fn capture_or_revive(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64,
+fn capture_or_revive(phone: &Device, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64,
                      realw: i32, realh: i32, target: Option<&str>, revived: &mut bool) -> Option<Cap> {
     if let Some(c) = capture(phone, run_dir, seq, cfg, tmp, cap_ms, realw, realh, target) {
         return Some(c);
     }
     if *revived { return None; }
     *revived = true;
-    println!("      🔧 采集失败,尝试设备复活(重启adb/模拟器)");
+    println!("      🔧 采集失败,尝试设备复活(重启设备服务/模拟器)");
     if !phone.revive(&cfg.emulator_cmd) { return None; }
     capture(phone, run_dir, seq, cfg, tmp, cap_ms, realw, realh, target)
 }
@@ -1110,7 +1114,7 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32, String
 }
 
 /// ⑤ 执行(图片像素 → 设备像素)
-fn exec(phone: &Adb, a: &ActN, cap: &Cap, realw: i32, realh: i32, apps: &[(String, String)]) {
+fn exec(phone: &Device, a: &ActN, cap: &Cap, realw: i32, realh: i32, apps: &[(String, String)]) {
     let sx = |v: Option<i64>| (v.unwrap_or(0) * realw as i64 / cap.w.max(1) as i64) as i32;
     let sy = |v: Option<i64>| (v.unwrap_or(0) * realh as i64 / cap.h.max(1) as i64) as i32;
     match a.a.as_str() {
@@ -1350,7 +1354,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         }
     }
 
-    let phone = Adb::new(serial, tmp.clone());
+    let phone = Device::new(serial, tmp.clone());
     let mut brain = Brain::new(cfg.providers.clone(), tmp.clone());
     let (realw, realh) = phone.size();
 
@@ -2215,6 +2219,15 @@ mod tests {
 
     fn cfg() -> Config {
         toml::from_str(&std::fs::read_to_string("../phonefarm.toml").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn pkg_killable_protects_oh_system() {
+        // OH 桌面/系统家族在保护名单: 假树重抓的 force-stop 不碰 sceneboard(掐死桌面=灾难)
+        assert!(!pkg_killable("com.ohos.sceneboard", None));
+        assert!(!pkg_killable("com.ohos.settings", Some("com.example.a")));
+        assert!(pkg_killable("com.example.other", Some("com.example.a")), "三方后台包照常可杀");
+        assert!(!pkg_killable("com.example.a", Some("com.example.a")), "目标自身不碰");
     }
 
     /// 空清单、图片路径不存在的最小Cap: patch_stats拿不到图会跳过空白检查,正好单测门控分流

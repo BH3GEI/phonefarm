@@ -1,7 +1,10 @@
-//! Device 层: adb 封装(截屏/元素列表/手势) + 像素工具。临时文件一律进 tmp 目录。
+//! Device 层: adb/hdc 封装(截屏/元素列表/手势) + 像素工具。临时文件一律进 tmp 目录。
+//! 后端由 Device enum 统一分发,serial 带 "hdc:" 前缀走 OpenHarmony,其余走 Android。
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -101,6 +104,17 @@ pub fn frames_diff_pct(a: &[u8], b: &[u8]) -> f32 {
     if a.len() != b.len() || a.is_empty() { return 100.0; }
     let diff = a.iter().zip(b).filter(|(x, y)| (**x as i16 - **y as i16).abs() > 14).count();
     diff as f32 / a.len() as f32 * 100.0
+}
+
+/// sips 读图片像素尺寸(host 侧,与设备后端无关)。
+fn sips_wh(path: &str) -> Option<(i32, i32)> {
+    let out = Command::new("sips")
+        .args(["-g", "pixelWidth", "-g", "pixelHeight", path])
+        .output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).to_string();
+    let w = s.split("pixelWidth:").nth(1)?.split_whitespace().next()?.parse().ok()?;
+    let h = s.split("pixelHeight:").nth(1)?.split_whitespace().next()?.parse().ok()?;
+    Some((w, h))
 }
 
 pub struct Adb {
@@ -383,6 +397,342 @@ impl Adb {
     }
 }
 
+/// OpenHarmony 后端: hdc 封装,方法面与 Adb 逐位同构,由 Device 统一分发。
+/// 命令映射(intel-mac 挂的真机 OH 3.2/arm64 实测):
+///   截屏 `snapshot_display -f <路径>`(强制 .jpeg 后缀) + `file recv`
+///   UI树 `uitest dumpLayout -p <路径>`(JSON) + `file recv` → parse_layout_json
+///   注入 `uitest uiInput click/swipe/keyEvent Back|Home/inputText`
+///   启动 `aa start -b <bundle> -a <ability>` — ability 必须用 bm dump -n 的 mainAbility
+///   全名(猜 EntryAbility 得 10104001),与 Android 从 query-activities 解析组件对称
+///   清单 `bm dump -a`; 心跳 `shell echo`; 复活 `hdc kill/start`
+/// 三个实测软点(设备冒烟局重点观察,机制继承但行为未经长跑验证):
+///   ①前台包名: OH 3.2 无 mCurrentFocus 等价物,sys_state 走 `aa dump -a` 找 FOREGROUND
+///     记录;采不到如实留空——SysState 契约本就容忍空值,开局归位/假树识别相应优雅退化
+///   ②`aa force-stop` 实测报错 → pidof+kill 兜底
+///   ③dumpLayout 卡死/陈旧的失效形态未知 → 沿用"先删旧文件"的假树卫生纪律(Android 同款教训)
+pub struct Hdc {
+    key: Option<String>, // hdc -t <connect key>
+    tmp: String,
+    /// 分辨率缓存: OH 无 wm size,取尺寸要付一趟截屏+回传;物理屏不会中途变,采一次终身用
+    size_cache: OnceLock<(i32, i32)>,
+    /// uiInput inputText 需要坐标(点哪输哪): 记最近一次 tap 落点。契约里 type 紧跟在
+    /// 点输入框之后,落点即输入框(再点一次同框只是重聚焦,无害);没点过则屏幕中心兜底。
+    last_tap: (AtomicI32, AtomicI32),
+}
+
+impl Hdc {
+    pub fn new(key: Option<String>, tmp: String) -> Self {
+        Hdc { key, tmp, size_cache: OnceLock::new(),
+              last_tap: (AtomicI32::new(-1), AtomicI32::new(-1)) }
+    }
+
+    fn base(&self) -> Command {
+        let mut cmd = Command::new("hdc");
+        if let Some(k) = &self.key {
+            cmd.arg("-t").arg(k);
+        }
+        cmd
+    }
+
+    fn run(&self, args: &[&str]) -> Vec<u8> {
+        self.base().args(args).output().map(|o| o.stdout).unwrap_or_default()
+    }
+
+    /// 限时执行(hdc 同样会卡死): 与 Adb::run_timeout 同构,但输出文件带 tag——
+    /// capture 里 els_full 与 quick_thumb 在两个线程并行,共用一个文件会互相截胡
+    fn run_timeout(&self, args: &[&str], ms: u64, tag: &str) -> Vec<u8> {
+        let outfile = format!("{}/_hdc_{tag}.out", self.tmp);
+        let Ok(f) = std::fs::File::create(&outfile) else { return vec![] };
+        let Ok(mut child) = self.base().args(args).stdout(f).stderr(Stdio::null()).spawn() else {
+            return vec![];
+        };
+        let t0 = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return std::fs::read(&outfile).unwrap_or_default(),
+                Ok(None) => {
+                    if t0.elapsed() > Duration::from_millis(ms) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return vec![];
+                    }
+                    sleep(Duration::from_millis(50));
+                }
+                Err(_) => return vec![],
+            }
+        }
+    }
+
+    fn ui_input(&self, args: &[&str]) {
+        let mut v = vec!["shell", "uitest", "uiInput"];
+        v.extend_from_slice(args);
+        self.run_timeout(&v, 8000, "input");
+    }
+
+    /// 拉回设备文件(file recv 是 hdc 顶层命令,非 shell);先删本地旧文件,防陈旧内容冒充
+    fn recv(&self, remote: &str, local: &str, ms: u64, tag: &str) -> bool {
+        let _ = std::fs::remove_file(local);
+        self.run_timeout(&["file", "recv", remote, local], ms, tag);
+        std::fs::metadata(local).map(|m| m.len() > 0).unwrap_or(false)
+    }
+
+    /// 设备心跳(限时): echo ok 能回来即活
+    pub fn health_check(&self, ms: u64) -> bool {
+        let out = self.run_timeout(&["shell", "echo", "ok"], ms, "hc");
+        String::from_utf8_lossy(&out).trim() == "ok"
+    }
+
+    /// 设备复活: 真机走 hdc server 重启;emulator_cmd 是 Android 模拟器专用,OH 侧不适用
+    pub fn revive(&self, _emulator_cmd: &str) -> bool {
+        println!("      🔧 设备复活: 重启 hdc server…");
+        let _ = self.run(&["kill"]);
+        sleep(Duration::from_millis(800));
+        let _ = self.run(&["start"]);
+        for _ in 0..10 {
+            if self.health_check(5000) { return true; }
+            sleep(Duration::from_millis(1000));
+        }
+        false
+    }
+
+    /// UI树(JSON): 先删旧文件再 dump——陈旧文件冒充本步观测是 Android 假树的主源,
+    /// 同款卫生纪律照搬;dump 失败即 recv 不到,空表是合法观测
+    fn dump_layout(&self, timeout_ms: u64) -> String {
+        const REMOTE: &str = "/data/local/tmp/pf_layout.json";
+        self.run_timeout(&["shell", "rm", "-f", REMOTE], 3000, "els");
+        self.run_timeout(&["shell", "uitest", "dumpLayout", "-p", REMOTE], timeout_ms, "els");
+        let local = format!("{}/_layout.json", self.tmp);
+        if !self.recv(REMOTE, &local, 5000, "els") { return String::new(); }
+        let s = std::fs::read_to_string(&local).unwrap_or_default();
+        if s.trim_start().starts_with('{') { s } else { String::new() }
+    }
+
+    /// 元素采集: 契约与 Adb::els_full 逐位对齐,第4元是原始 JSON(调用方落盘作地面真值)
+    pub fn els_full(&self, timeout_ms: u64) -> (Vec<Node>, Vec<FullNode>, String, String) {
+        let json = self.dump_layout(timeout_ms);
+        if json.is_empty() {
+            return (vec![], vec![], String::new(), String::new());
+        }
+        let (els, full, pkg) = parse_layout_json(&json);
+        (els, full, pkg, json)
+    }
+
+    /// 系统级状态(软点①): aa dump -a 找前台 AbilityRecord。键盘状态 OH 无采法,如实 None
+    pub fn sys_state(&self) -> SysState {
+        let out = self.run_timeout(&["shell", "aa", "dump", "-a"], 4000, "sys");
+        let (pkg, ability) = parse_aa_dump(&String::from_utf8_lossy(&out));
+        SysState { pkg, activity: ability, ime: None }
+    }
+
+    pub fn foreground_pkg(&self) -> String {
+        self.sys_state().pkg
+    }
+
+    /// OH 无 shell 剪贴板读法(cmd clipboard 是 Android 的),如实 None
+    pub fn clipboard(&self) -> Option<String> {
+        None
+    }
+
+    /// 应用清单: bm dump -a 全量 bundle 名。OH 拿不到"桌面可见"这层过滤,系统 bundle 会
+    /// 混入——launch 门槛只看清单成员资格、目标选择权在模型,污染无害且 com.ohos.* 已进
+    /// pkg_killable 保护名单;组件位留空,launch 时按需 bm dump -n 解析(逐个预解析要 N 趟往返)
+    pub fn launchable_apps(&self) -> Vec<(String, String)> {
+        let out = self.run_timeout(&["shell", "bm", "dump", "-a"], 6000, "apps");
+        parse_bm_bundles(&String::from_utf8_lossy(&out))
+            .into_iter().map(|b| (b, String::new())).collect()
+    }
+
+    /// 截屏到本地(整幅 jpeg): snapshot_display 强制 .jpeg 后缀(实测),再 file recv
+    fn shot(&self, local: &str, tag: &str) -> bool {
+        const REMOTE: &str = "/data/local/tmp/pf_shot.jpeg";
+        self.run_timeout(&["shell", "snapshot_display", "-f", REMOTE], 8000, tag);
+        self.recv(REMOTE, local, 8000, tag)
+    }
+
+    /// 截屏并压成 672 宽 jpg 写到 out_jpg; 返回 (宽, 高)——与 Adb::screen 同契约
+    pub fn screen(&self, out_jpg: &str) -> Option<(i32, i32)> {
+        let raw = format!("{}/_raw.jpeg", self.tmp);
+        if !self.shot(&raw, "shot") { return None; }
+        Command::new("sips")
+            .args(["--resampleWidth", "672", "-s", "format", "jpeg",
+                   "-s", "formatOptions", "85", &raw, "--out", out_jpg])
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .status().ok()?;
+        sips_wh(out_jpg)
+    }
+
+    /// 快照小图: 64px 灰度(等画面安静用)。比 adb 版多付一趟 file recv,settle 循环
+    /// 的轮询频率随之自然放缓——cap_ms 是墙钟上限,契约不变
+    pub fn quick_thumb(&self, tag: &str) -> Option<Vec<u8>> {
+        let raw = format!("{}/_qt{tag}.jpeg", self.tmp);
+        if !self.shot(&raw, "thumb") { return None; }
+        let out = format!("{}/_qt{tag}.bmp", self.tmp);
+        Command::new("sips")
+            .args(["-Z", "64", "-s", "format", "bmp", &raw, "--out", &out])
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .status().ok()?;
+        bmp_gray(&out)
+    }
+
+    /// 物理屏幕尺寸: OH 无 wm size,从整幅截屏实测并缓存;取不到用 720x1280 兜底(OH 设备常见档)
+    pub fn size(&self) -> (i32, i32) {
+        *self.size_cache.get_or_init(|| {
+            let raw = format!("{}/_size.jpeg", self.tmp);
+            if self.shot(&raw, "size") {
+                if let Some(wh) = sips_wh(&raw) { return wh; }
+            }
+            (720, 1280)
+        })
+    }
+
+    pub fn tap(&self, x: i32, y: i32) {
+        self.last_tap.0.store(x, Ordering::Relaxed);
+        self.last_tap.1.store(y, Ordering::Relaxed);
+        self.ui_input(&["click", &x.to_string(), &y.to_string()]);
+    }
+
+    /// uiInput swipe 用速度(px/s)而非时长: 按 Android 350ms 手势的手感换算,夹在合法区间
+    pub fn swipe(&self, x: i32, y: i32, x2: i32, y2: i32) {
+        let dist = (((x2 - x) as f64).hypot((y2 - y) as f64)).max(1.0);
+        let v = ((dist / 0.35) as i32).clamp(200, 40000);
+        self.ui_input(&["swipe", &x.to_string(), &y.to_string(),
+                        &x2.to_string(), &y2.to_string(), &v.to_string()]);
+    }
+
+    /// 滚动: Adb 版坐标按 1080x2340 写死,这里按实测分辨率等比换算(比例同源)
+    pub fn scroll_down(&self) {
+        let (w, h) = self.size();
+        self.swipe(w / 2, h * 1700 / 2340, w / 2, h * 600 / 2340);
+    }
+    pub fn scroll_up(&self) {
+        let (w, h) = self.size();
+        self.swipe(w / 2, h * 700 / 2340, w / 2, h * 1800 / 2340);
+    }
+
+    /// 文本输入: uiInput inputText 要坐标,用最近 tap 落点(见 last_tap 注),中心兜底。
+    /// 含空白整体包引号防远端 shell 分词;引号/换行压成空格(t 行式投影同款纪律)
+    pub fn type_text(&self, text: &str) {
+        let (mut x, mut y) = (self.last_tap.0.load(Ordering::Relaxed),
+                              self.last_tap.1.load(Ordering::Relaxed));
+        if x < 0 || y < 0 {
+            let (w, h) = self.size();
+            x = w / 2;
+            y = h / 2;
+        }
+        let t = text.replace(['"', '\n', '\r'], " ");
+        let quoted = if t.contains(char::is_whitespace) { format!("\"{t}\"") } else { t };
+        self.ui_input(&["inputText", &x.to_string(), &y.to_string(), &quoted]);
+    }
+
+    pub fn back(&self) {
+        self.ui_input(&["keyEvent", "Back"]);
+    }
+    pub fn home(&self) {
+        self.ui_input(&["keyEvent", "Home"]);
+    }
+
+    /// 强停(软点②): aa force-stop 在 OH 3.2 实测报错,标准命令先试、pidof+kill 兜底
+    /// (成功则 pidof 落空,兜底自然无操作)。系统 bundle 不碰的关卡在调用方 pkg_killable。
+    pub fn force_stop(&self, pkg: &str) {
+        if pkg.is_empty() { return; }
+        self.run_timeout(&["shell", "aa", "force-stop", pkg], 6000, "stop");
+        // 整句交远端 shell 解释($() 在设备侧展开)
+        let cmd = format!("p=$(pidof {pkg}); [ -n \"$p\" ] && kill -9 $p");
+        self.run_timeout(&["shell", &cmd], 4000, "stop");
+    }
+
+    /// 启动: ability 必须是 bm dump -n 的 mainAbility 全名(实测坑)。comp 有值直接用;
+    /// 空则现场解析——Android 侧"query-activities 解析组件"的对称物。解析不到就不动(OH 无 monkey)
+    pub fn launch(&self, pkg: &str, comp: &str) {
+        if pkg.is_empty() { return; }
+        let ability = if comp.is_empty() { self.main_ability_of(pkg) } else { comp.to_string() };
+        if ability.is_empty() { return; }
+        self.run_timeout(&["shell", "aa", "start", "-b", pkg, "-a", &ability], 8000, "start");
+    }
+
+    fn main_ability_of(&self, bundle: &str) -> String {
+        let out = self.run_timeout(&["shell", "bm", "dump", "-n", bundle], 6000, "bm");
+        parse_main_ability(&String::from_utf8_lossy(&out))
+    }
+}
+
+/// 设备后端统一分发。调用方一律持 Device,方法面与 Adb 逐位同构;选择按 serial 前缀:
+/// "hdc:<connect key>" → Hdc(OpenHarmony),其余(含 None)→ Adb。
+/// Android 零扰动由构造保证: 不带前缀时行为与旧 Adb 直连一字不差。
+pub enum Device {
+    Adb(Adb),
+    Hdc(Hdc),
+}
+
+impl Device {
+    pub fn new(serial: Option<String>, tmp: String) -> Self {
+        match serial {
+            Some(s) if s.starts_with("hdc:") => {
+                let key = s["hdc:".len()..].trim().to_string();
+                Device::Hdc(Hdc::new(if key.is_empty() { None } else { Some(key) }, tmp))
+            }
+            other => Device::Adb(Adb::new(other, tmp)),
+        }
+    }
+    pub fn health_check(&self, ms: u64) -> bool {
+        match self { Device::Adb(d) => d.health_check(ms), Device::Hdc(d) => d.health_check(ms) }
+    }
+    pub fn revive(&self, emulator_cmd: &str) -> bool {
+        match self { Device::Adb(d) => d.revive(emulator_cmd), Device::Hdc(d) => d.revive(emulator_cmd) }
+    }
+    pub fn els_full(&self, timeout_ms: u64) -> (Vec<Node>, Vec<FullNode>, String, String) {
+        match self { Device::Adb(d) => d.els_full(timeout_ms), Device::Hdc(d) => d.els_full(timeout_ms) }
+    }
+    pub fn foreground_pkg(&self) -> String {
+        match self { Device::Adb(d) => d.foreground_pkg(), Device::Hdc(d) => d.foreground_pkg() }
+    }
+    pub fn sys_state(&self) -> SysState {
+        match self { Device::Adb(d) => d.sys_state(), Device::Hdc(d) => d.sys_state() }
+    }
+    pub fn clipboard(&self) -> Option<String> {
+        match self { Device::Adb(d) => d.clipboard(), Device::Hdc(d) => d.clipboard() }
+    }
+    pub fn launchable_apps(&self) -> Vec<(String, String)> {
+        match self { Device::Adb(d) => d.launchable_apps(), Device::Hdc(d) => d.launchable_apps() }
+    }
+    pub fn screen(&self, out_jpg: &str) -> Option<(i32, i32)> {
+        match self { Device::Adb(d) => d.screen(out_jpg), Device::Hdc(d) => d.screen(out_jpg) }
+    }
+    pub fn quick_thumb(&self, tag: &str) -> Option<Vec<u8>> {
+        match self { Device::Adb(d) => d.quick_thumb(tag), Device::Hdc(d) => d.quick_thumb(tag) }
+    }
+    pub fn size(&self) -> (i32, i32) {
+        match self { Device::Adb(d) => d.size(), Device::Hdc(d) => d.size() }
+    }
+    pub fn tap(&self, x: i32, y: i32) {
+        match self { Device::Adb(d) => d.tap(x, y), Device::Hdc(d) => d.tap(x, y) }
+    }
+    pub fn swipe(&self, x: i32, y: i32, x2: i32, y2: i32) {
+        match self { Device::Adb(d) => d.swipe(x, y, x2, y2), Device::Hdc(d) => d.swipe(x, y, x2, y2) }
+    }
+    pub fn scroll_down(&self) {
+        match self { Device::Adb(d) => d.scroll_down(), Device::Hdc(d) => d.scroll_down() }
+    }
+    pub fn scroll_up(&self) {
+        match self { Device::Adb(d) => d.scroll_up(), Device::Hdc(d) => d.scroll_up() }
+    }
+    pub fn type_text(&self, text: &str) {
+        match self { Device::Adb(d) => d.type_text(text), Device::Hdc(d) => d.type_text(text) }
+    }
+    pub fn back(&self) {
+        match self { Device::Adb(d) => d.back(), Device::Hdc(d) => d.back() }
+    }
+    pub fn home(&self) {
+        match self { Device::Adb(d) => d.home(), Device::Hdc(d) => d.home() }
+    }
+    pub fn force_stop(&self, pkg: &str) {
+        match self { Device::Adb(d) => d.force_stop(pkg), Device::Hdc(d) => d.force_stop(pkg) }
+    }
+    pub fn launch(&self, pkg: &str, comp: &str) {
+        match self { Device::Adb(d) => d.launch(pkg, comp), Device::Hdc(d) => d.launch(pkg, comp) }
+    }
+}
+
 fn parse_bounds(b: &str) -> Option<[i32; 4]> {
     // "[x1,y1][x2,y2]"
     let nums: Vec<i32> = b
@@ -566,6 +916,62 @@ pub fn parse_sys_state(s: &str) -> SysState {
     SysState { pkg, activity, ime }
 }
 
+/// OH `aa dump -a` → 前台 (bundle, ability全名)。纯函数供单测。
+/// AbilityRecord 块内 "bundle name [x]"/"main name [y]" 先于 "state #FOREGROUND" 行出现,
+/// 顺序扫描、见 FOREGROUND 即提交最近一对;解析不到返回空对(SysState 契约容忍空值)。
+/// 真机格式成色属软点①,冒烟局验证后如有出入只改这一个函数。
+pub fn parse_aa_dump(s: &str) -> (String, String) {
+    let (mut bundle, mut ability) = (String::new(), String::new());
+    for line in s.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix("bundle name [") {
+            bundle = v.trim_end_matches(']').to_string();
+        } else if let Some(v) = l.strip_prefix("main name [") {
+            ability = v.trim_end_matches(']').to_string();
+        } else if l.contains("state #FOREGROUND") && !bundle.is_empty() {
+            return (bundle, ability);
+        }
+    }
+    (String::new(), String::new())
+}
+
+/// OH `bm dump -a` → bundle 名列表。纯函数供单测。
+/// 输出按行给 bundle 名,可能混标头("OK!"/"ID: 100"等): 只收形如反域名的整行 token,去重排序。
+pub fn parse_bm_bundles(s: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    for line in s.lines() {
+        let l = line.trim();
+        if !l.is_empty() && l.contains('.')
+            && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+            && !v.iter().any(|p| p == l)
+        {
+            v.push(l.to_string());
+        }
+    }
+    v.sort();
+    v
+}
+
+/// OH `bm dump -n <bundle>` → mainAbility 全名。纯函数供单测。
+/// 3.2 字段名 "mainAbility"(新版可能是 "mainElementName",双认);输出混着非 JSON 标头行,
+/// 不整体反序列化,按键扫描取冒号后第一个非空引号串。
+pub fn parse_main_ability(s: &str) -> String {
+    for key in ["\"mainAbility\"", "\"mainElementName\""] {
+        let mut from = 0;
+        while let Some(i) = s[from..].find(key) {
+            let rest = &s[from + i + key.len()..];
+            if let Some(q1) = rest.find('"') {
+                if let Some(q2) = rest[q1 + 1..].find('"') {
+                    let val = &rest[q1 + 1..q1 + 1 + q2];
+                    if !val.is_empty() { return val.to_string(); }
+                }
+            }
+            from += i + key.len();
+        }
+    }
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +1080,35 @@ mod tests {
         assert_eq!(st.pkg, "com.ss.android.article.news");
         assert_eq!(st.activity, "com.ss.android.article.news.activity.MainActivity");
         assert_eq!(st.ime, Some(true));
+    }
+
+    #[test]
+    fn device_dispatch_by_serial_prefix() {
+        // "hdc:" 前缀走 Hdc,其余(真机serial/None)走 Adb——Android 零扰动的地基
+        assert!(matches!(Device::new(Some("hdc:5ce1227d".into()), "/tmp".into()), Device::Hdc(_)));
+        assert!(matches!(Device::new(Some("emulator-5554".into()), "/tmp".into()), Device::Adb(_)));
+        assert!(matches!(Device::new(None, "/tmp".into()), Device::Adb(_)));
+    }
+
+    #[test]
+    fn aa_dump_foreground_record() {
+        // 属性行先于 state 行: 见 FOREGROUND 提交最近一对,BACKGROUND 记录跳过
+        let s = "User ID #100\n  AbilityRecord ID #4\n    app name [com.ohos.settings]\n    main name [com.ohos.settings.MainAbility]\n    bundle name [com.ohos.settings]\n    state #BACKGROUND  start time [123]\n  AbilityRecord ID #7\n    app name [com.example.hello]\n    main name [EntryAbility]\n    bundle name [com.example.hello]\n    state #FOREGROUND  start time [456]\n";
+        let (b, a) = parse_aa_dump(s);
+        assert_eq!(b, "com.example.hello");
+        assert_eq!(a, "EntryAbility");
+        let (b2, a2) = parse_aa_dump("no records here");
+        assert!(b2.is_empty() && a2.is_empty(), "解析不到如实留空,不装");
+    }
+
+    #[test]
+    fn bm_bundle_list_and_main_ability() {
+        let v = parse_bm_bundles("OK!\ncom.example.hello\n\tcom.ohos.sceneboard\nID: 100\ncom.example.hello\n");
+        assert_eq!(v, vec!["com.example.hello".to_string(), "com.ohos.sceneboard".to_string()],
+            "去重+滤掉非bundle行");
+        let j = r#"{ "name": "com.x", "mainAbility": "", "hapModuleInfos": [ { "mainAbility": "com.x.MainAbility" } ] }"#;
+        assert_eq!(parse_main_ability(j), "com.x.MainAbility", "空值跳过,取第一个非空");
+        assert_eq!(parse_main_ability("{}"), "");
     }
 
     #[test]

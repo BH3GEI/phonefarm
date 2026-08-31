@@ -52,6 +52,10 @@ phonefarm-设计文档-v1.html
    (`--app` 可选:声明目标应用包名,开局前台不符时自动按 HOME 归位;`--assert "词1,词2"` 可选:契约式到达断言,实测到验收词即注入"已到达"事实)
 5. 自闭环评测(推荐,已不依赖任何脚本):每轮体检→复活→轮间清理→跑局→TSV 落账
    `./phonefarm benchmark --task "今日头条遍历" --rounds 10 --budget-calls 90 --app com.ss.android.article.news --json "<目标文本>"`
+6. OpenHarmony 设备(hdc 后端):`--serial hdc:<connect key>` 即切换,其余参数不变
+   (`./phonefarm devices` 两族并列,hdc 目标直接以该形态给出;bounds/els/full 与 Android 同构,
+   fold/探针/断言/沙盘/#20 零改动继承。软点:前台包名走 aa dump 尽力解析、aa force-stop 用 pid 兜底、
+   假树形态未经长跑验证——冒烟局重点看这三处)
 
 ## 战绩(2026-08-29)
 

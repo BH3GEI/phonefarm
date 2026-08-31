@@ -2,6 +2,7 @@
 //! 用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] "<目标>"
 //!       phonefarm devices
 //! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
+//! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod brain;
 mod device;
 mod fold;
@@ -88,8 +89,19 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("devices") => {
-            let out = std::process::Command::new("adb").arg("devices").output().unwrap();
-            print!("{}", String::from_utf8_lossy(&out.stdout));
+            // 两族并列,各自 best-effort(某族工具不在 PATH 就跳过):
+            // hdc 目标直接以 "hdc:<key>" 形态给出,拷进 --serial 即用
+            if let Ok(out) = std::process::Command::new("adb").arg("devices").output() {
+                print!("{}", String::from_utf8_lossy(&out.stdout));
+            }
+            if let Ok(out) = std::process::Command::new("hdc").args(["list", "targets"]).output() {
+                for l in String::from_utf8_lossy(&out.stdout).lines() {
+                    let l = l.trim();
+                    if !l.is_empty() && l != "[Empty]" {
+                        println!("hdc:{l}");
+                    }
+                }
+            }
         }
         Some("run") => {
             let mut serial: Option<String> = None;
@@ -202,7 +214,7 @@ fn main() {
             };
             let tmp = std::env::temp_dir().join("phonefarm-bench").to_string_lossy().to_string();
             let _ = std::fs::create_dir_all(&tmp);
-            let phone = device::Adb::new(serial.clone(), tmp);
+            let phone = device::Device::new(serial.clone(), tmp);
             let apps = phone.launchable_apps();
             let mut rows: Vec<serde_json::Value> = Vec::new();
             for r in 1..=rounds {
