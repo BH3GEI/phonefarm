@@ -54,8 +54,13 @@ phonefarm-设计文档-v1.html
    `./phonefarm benchmark --task "今日头条遍历" --rounds 10 --budget-calls 90 --app com.ss.android.article.news --json "<目标文本>"`
 6. OpenHarmony 设备(hdc 后端):`--serial hdc:<connect key>` 即切换,其余参数不变
    (`./phonefarm devices` 两族并列,hdc 目标直接以该形态给出;bounds/els/full 与 Android 同构,
-   fold/探针/断言/沙盘/#20 零改动继承。软点:前台包名走 aa dump 尽力解析、aa force-stop 用 pid 兜底、
-   假树形态未经长跑验证——冒烟局重点看这三处)
+   fold/探针/断言/沙盘/#20 零改动继承——真机冒烟已双过,机制账见 tasks/OH设置冒烟)。
+   真机实测坐死的三件事:①前台权威源=dumpLayout 顶窗包名(z序顶窗在前,弹窗场景对;
+   aa dump 的 mission 序不分层只作兜底);②系统应用 aa start 有权限墙(10107101),
+   靠桌面图标点击进入,三方应用可正常 aa start(ability 无 mainAbility 键时按
+   MainAbility/EntryAbility/MainActivity 后缀兜底解析);③台架要求:设备须解锁亮屏
+   (急速息屏+锁屏会把整局毒成"树=锁屏层/aa=背后app"的假分歧;跑长局前
+   `power-shell timeout -o 1800000` 或起个 wakeup pinger,冒烟设备已留 30 分钟息屏设定)
 
 ## 战绩(2026-08-29)
 
