@@ -6,6 +6,7 @@
 //! 程序只写 tasks/<任务>/ 之下: runs/<局>/log.jsonl、runs/<局>/step*.jpg、lessons.jsonl、params.toml。
 use crate::brain::Brain;
 use crate::device::{frames_diff_pct, mode_gray, patch_stats, thumb_gray, Adb, Node};
+use crate::tree::Tree;
 use crate::Config;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -38,6 +39,7 @@ struct ActN {
     x2: Option<i64>,
     y2: Option<i64>,
     text: Option<String>,
+    what: Option<String>, // tap 的点名: 意图点中的元素文字,门按清单吸附到其准确中心
 }
 
 struct Ban {
@@ -58,7 +60,7 @@ impl Log {
     }
 }
 
-fn tcut(s: &str, n: usize) -> String {
+pub fn tcut(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
@@ -191,23 +193,120 @@ fn to_norm(v: i32, span: i32) -> i64 {
     (v as i64 * NORM / span.max(1) as i64).clamp(0, NORM)
 }
 
+/// 元素框(设备px) → 图片px
+fn el_img_of(n: &Node, cap: &Cap, realw: i32, realh: i32) -> [i32; 4] {
+    el_img_space(n, cap, realw, realh)
+}
+
+/// 元素框 → 0~999 空间
+fn el_norm(n: &Node, cap: &Cap, realw: i32, realh: i32) -> [i64; 4] {
+    let b = el_img_space(n, cap, realw, realh);
+    [to_norm(b[0], cap.w), to_norm(b[1], cap.h), to_norm(b[2], cap.w), to_norm(b[3], cap.h)]
+}
+
+/// 按文字找元素: 精确等值优先,退而含串(≥2字)。
+/// 多个命中取离 (hx,hy)@0~999 最近者 —— 模型给的坐标是"哪一个同名元素"的线索。
+/// 返回 (元素, 图片px框)。
+fn find_el<'a>(els: &'a [Node], w: &str, hx: i64, hy: i64, cap: &Cap, realw: i32, realh: i32)
+    -> Option<(&'a Node, [i32; 4])>
+{
+    let wt = w.trim();
+    let mut pool: Vec<&Node> = els.iter().filter(|n| n.t.trim() == wt).collect();
+    if pool.is_empty() && wt.chars().count() >= 2 {
+        pool = els.iter().filter(|n| n.t.contains(wt)).collect();
+    }
+    pool.into_iter()
+        .min_by_key(|n| {
+            let b = el_norm(n, cap, realw, realh);
+            ((b[0] + b[2]) / 2 - hx).abs() + ((b[1] + b[3]) / 2 - hy).abs()
+        })
+        .map(|n| (n, el_img_of(n, cap, realw, realh)))
+}
+
+/// (x,y)@0~999 落在哪个元素框内 → 该框(图片px);取最小框(最内层元素)
+fn box_at(els: &[Node], x: i64, y: i64, cap: &Cap, realw: i32, realh: i32) -> Option<[i32; 4]> {
+    els.iter()
+        .filter(|n| {
+            let b = el_norm(n, cap, realw, realh);
+            x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]
+        })
+        .map(|n| (el_norm(n, cap, realw, realh), el_img_of(n, cap, realw, realh)))
+        .min_by_key(|(bn, _)| (bn[2] - bn[0]) * (bn[3] - bn[1]))
+        .map(|(_, bi)| bi)
+}
+
+/// 附近元素候选(驳回时给模型指路): 距 (x,y)@0~999 最近的3个 "文字(x,y)"
+fn nearby_els(els: &[Node], x: i64, y: i64, cap: &Cap, realw: i32, realh: i32) -> String {
+    let mut v: Vec<(i64, String)> = els
+        .iter()
+        .map(|n| {
+            let b = el_norm(n, cap, realw, realh);
+            let d = ((b[0] + b[2]) / 2 - x).abs() + ((b[1] + b[3]) / 2 - y).abs();
+            (d, format!("{}({},{})", tcut(n.t.trim(), 10), (b[0] + b[2]) / 2, (b[1] + b[3]) / 2))
+        })
+        .collect();
+    v.sort_by_key(|(d, _)| *d);
+    v.into_iter().take(3).map(|(_, s)| s).collect::<Vec<_>>().join("、")
+}
+
+/// 本帧画面入记录流(seq 去重)。主循环顶部、goto跳段、终局三处共用同一节奏。
+fn log_screen(log: &mut Log, cap: &Cap, n: u32, realw: i32, realh: i32, logged_seq: &mut u32) {
+    if cap.seq == *logged_seq { return; }
+    let els_img: Vec<Value> = cap
+        .els
+        .iter()
+        .map(|e| json!({"t": e.t, "b": el_img_space(e, cap, realw, realh)}))
+        .collect();
+    let mut rec = json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel,"pkg":cap.pkg});
+    if cap.suspect { rec["suspect"] = json!(true); }
+    log.put(rec);
+    *logged_seq = cap.seq;
+}
+
+/// 熟路边 → 可执行动作。点[文字] 在当前清单里现找按钮(位置会漂,文字不漂);
+/// 找不到按钮返回 None(这条边现在走不了,交还模型)。
+fn act_from_edge(e: &crate::tree::Edge, cap: &Cap, realw: i32, realh: i32) -> Option<ActN> {
+    match e.label.as_str() {
+        "返回" => Some(ActN { a: "back".into(), ..Default::default() }),
+        "上滑" => Some(ActN { a: "scroll_up".into(), ..Default::default() }),
+        "下滑" => Some(ActN { a: "scroll_down".into(), ..Default::default() }),
+        "回桌面" => Some(ActN { a: "home".into(), ..Default::default() }),
+        label => {
+            let t = Tree::tap_text(label)?;
+            let (node, bi) = find_el(&cap.els, t, 500, 500, cap, realw, realh)?;
+            Some(ActN {
+                a: "tap".into(),
+                x: Some(((bi[0] + bi[2]) / 2) as i64),
+                y: Some(((bi[1] + bi[3]) / 2) as i64),
+                what: Some(node.t.trim().to_string()),
+                ..Default::default()
+            })
+        }
+    }
+}
+
 fn act_line(n: u32, a: &ActN) -> String {
     match a.a.as_str() {
-        "tap" => format!("act#{n} tap({},{})", a.x.unwrap_or(-1), a.y.unwrap_or(-1)),
+        "tap" => format!(
+            "act#{n} tap({},{}){}",
+            a.x.unwrap_or(-1), a.y.unwrap_or(-1),
+            a.what.as_deref().map(|w| format!("[{}]", tcut(w, 10))).unwrap_or_default()
+        ),
         "swipe" => format!(
             "act#{n} swipe({},{}→{},{})",
             a.x.unwrap_or(-1), a.y.unwrap_or(-1), a.x2.unwrap_or(-1), a.y2.unwrap_or(-1)
         ),
         "type" => format!("act#{n} type({})", tcut(a.text.as_deref().unwrap_or(""), 20)),
         "launch" => format!("act#{n} launch({})", tcut(a.text.as_deref().unwrap_or(""), 40)),
+        "goto" => format!("act#{n} goto({})", tcut(a.text.as_deref().unwrap_or(""), 16)),
         o => format!("act#{n} {o}"),
     }
 }
 
-/// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 最近act/diff窗 + ban + note + 前台应用 + 屏幕
+/// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 最近act/diff窗 + ban + note + 小地图 + 前台应用 + 屏幕
 /// 静态段(goal/经验/apps)在前,动态段在后,保住能保的提示词缓存前缀。
 fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str,
-              window: &[(String, String)], bans: &[Ban],
+              map_line: &str, window: &[(String, String)], bans: &[Ban],
               note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
     let mut s = format!("goal: {goal}\n");
     for l in glessons {
@@ -237,6 +336,11 @@ fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str
     }
     if !note.is_empty() {
         s.push_str(&format!("note: {note}\n"));
+    }
+    if !map_line.is_empty() {
+        s.push_str(&format!(
+            "{map_line} | goto直达: {{\"r\":\"act\",\"a\":\"goto\",\"text\":\"P页号\"}}\n"
+        ));
     }
     if cap.noise > 0.0 {
         s.push_str(&format!(
@@ -301,6 +405,7 @@ fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str)
                 x2: num(&o["x2"]),
                 y2: num(&o["y2"]),
                 text: o["text"].as_str().map(String::from),
+                what: o["what"].as_str().map(String::from),
             });
             if is_done || acts.len() >= cfg.plan_max { break; }
         }
@@ -309,6 +414,10 @@ fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str)
             // 前面的动作执行完画面会变,必须重新看过画面才能宣判(防 [back,done] 落在登录层)。
             if let Some(di) = acts.iter().position(|a| a.a == "done") {
                 acts.truncate(if di == 0 { 1 } else { di });
+            }
+            // goto 只能是最后一步: 它会连跳几屏,排在后面的动作全成马后炮
+            if let Some(gi) = acts.iter().position(|a| a.a == "goto") {
+                acts.truncate(gi + 1);
             }
             return Ok((acts, note, out.by, out.ms));
         }
@@ -323,10 +432,12 @@ fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str)
     Err("连续3家回复都无法解析".into())
 }
 
-/// ④ 确定性门(值域/前科/连点/空白/launch目标)。通过返回 None, 驳回返回原因。坐标就地转成图片像素。
+/// ④ 确定性门(值域/点名吸附/前科/连点/空白/launch目标)。通过返回 None, 驳回返回原因。坐标就地转成图片像素。
+/// 点名制: tap 附 what=元素文字 → 吸附到该元素(清单)的准确中心;找不到则驳回并附附近候选。
+/// 未点名但落点在某元素框内 → 也吸附中心(修手偏,零成本)。清单不可信(假树)时不吸附。
 fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg: &Config, tmp: &str,
-        apps: &[(String, String)]) -> Option<String> {
-    let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "back", "home", "launch", "wait", "done"];
+        apps: &[(String, String)], realw: i32, realh: i32) -> Option<String> {
+    let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "back", "home", "launch", "goto", "wait", "done"];
     if !known.contains(&a.a.as_str()) {
         return Some(format!("未知动作:{}", tcut(&a.a, 12)));
     }
@@ -343,8 +454,28 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg:
                 (Ok(x), Ok(y)) => (x, y),
                 (Err(e), _) | (_, Err(e)) => return Some(e),
             };
-            let xi = (x * cap.w as i64 / NORM) as i32;
-            let yi = (y * cap.h as i64 / NORM) as i32;
+            let mut xi = (x * cap.w as i64 / NORM) as i32;
+            let mut yi = (y * cap.h as i64 / NORM) as i32;
+            if cap.suspect {
+                // 假树: 清单不可信,不吸附不点名,按原坐标走(空白/前科检查照常)
+            } else if let Some(w) = a.what.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+                match find_el(&cap.els, w, x, y, cap, realw, realh) {
+                    Some((_, bi)) => {
+                        xi = (bi[0] + bi[2]) / 2;
+                        yi = (bi[1] + bi[3]) / 2;
+                    }
+                    None => {
+                        return Some(format!(
+                            "点名'{}'不在screen清单;附近元素: {}",
+                            tcut(w, 12),
+                            nearby_els(&cap.els, x, y, cap, realw, realh)
+                        ));
+                    }
+                }
+            } else if let Some(bi) = box_at(&cap.els, x, y, cap, realw, realh) {
+                xi = (bi[0] + bi[2]) / 2;
+                yi = (bi[1] + bi[3]) / 2;
+            }
             if let Some(b) = bans.iter().find(|b| (b.x - xi).abs() < b.rad && (b.y - yi).abs() < b.rad) {
                 return Some(format!("前科:距ban({},{})不足{}px", to_norm(b.x, cap.w), to_norm(b.y, cap.h), b.rad));
             }
@@ -361,7 +492,10 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg:
                 (patch_stats(&cap.img, xi, yi, tmp), cap.thumb.as_ref().map(|t| mode_gray(t) as f32))
             {
                 if sd < 6.0 && (mean - bg).abs() < 22.0 {
-                    return Some(format!("空白背景:σ{sd:.1}亮度{mean:.0}≈背景{bg:.0}"));
+                    return Some(format!(
+                        "空白背景:σ{sd:.1}亮度{mean:.0}≈背景{bg:.0};清单附近元素: {}",
+                        nearby_els(&cap.els, x, y, cap, realw, realh)
+                    ));
                 }
             }
             a.x = Some(xi as i64);
@@ -385,6 +519,11 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg:
         "type" => {
             if a.text.as_deref().unwrap_or("").is_empty() {
                 return Some("type缺text".into());
+            }
+        }
+        "goto" => {
+            if a.text.as_deref().unwrap_or("").trim().is_empty() {
+                return Some("goto缺text(目标页号如P5,取自map行)".into());
             }
         }
         "launch" => {
@@ -549,6 +688,7 @@ fn log_act(log: &mut Log, n: u32, a: &ActN, by: &str, ms: Option<u64>) {
     if let Some(v) = a.x2 { m.insert("x2".into(), json!(v)); }
     if let Some(v) = a.y2 { m.insert("y2".into(), json!(v)); }
     if let Some(v) = &a.text { m.insert("text".into(), json!(v)); }
+    if let Some(v) = &a.what { m.insert("what".into(), json!(v)); }
     m.insert("by".into(), json!(by));
     if let Some(v) = ms { m.insert("ms".into(), json!(v)); }
     log.put(Value::Object(m));
@@ -592,6 +732,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     // 全局经验: 跨任务共享(tasks/_global/),"游戏里用home逃生"这类学费只交一次
     let global_dir = format!("{}/tasks/_global", cfg.data_dir.trim_end_matches('/'));
     let glessons = load_lessons(&format!("{global_dir}/lessons.jsonl"));
+    // 交互网(build_tree.py 离线产出,局末自动重算): 页面身份证+熟路。没有也能跑,只是没有goto
+    let tree = Tree::load(&format!("{task_dir}/tree.json"));
+    if tree.is_some() { println!("(载入交互网: {}页/{}边)", tree.as_ref().unwrap().pages.len(), tree.as_ref().unwrap().edges.len()); }
     let ep_no = fs::read_dir(format!("{task_dir}/runs")).map(|d| d.count()).unwrap_or(1) as i64;
 
     // ── 感知参数(params.toml 白名单) ──
@@ -685,19 +828,16 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         }
 
         // ① 本轮画面记录(采集在上一动作末尾或开局完成)
-        if cap.seq != logged_seq {
-            let els_img: Vec<Value> = cap.els.iter()
-                .map(|e| json!({"t": e.t, "b": el_img_space(e, &cap, realw, realh)}))
-                .collect();
-            let mut rec = json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel,"pkg":cap.pkg});
-            if cap.suspect { rec["suspect"] = json!(true); }
-            log.put(rec);
-            logged_seq = cap.seq;
-        }
+        log_screen(&mut log, &cap, n, realw, realh, &mut logged_seq);
 
         // ②③ 队列空则组装上下文并要一份计划
         if queue.is_empty() {
-            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &window, &bans, &note, &cap, realw, realh);
+            // 本地小地图: 当前页的熟路邻居(供模型 goto 直达)
+            let map_line = match tree.as_ref().and_then(|t| t.page_of(&cap.els)) {
+                Some(p) => tree.as_ref().unwrap().map_line(p.id).unwrap_or_default(),
+                None => String::new(),
+            };
+            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &map_line, &window, &bans, &note, &cap, realw, realh);
             let _ = fs::OpenOptions::new().create(true).append(true)
                 .open(format!("{tmp}/ctx.log"))
                 .map(|mut f| writeln!(f, "── 步#{n} ──\n{user}\n"));
@@ -745,7 +885,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         let ms_disp = ms_field.map(|v| format!("{v}ms")).unwrap_or_else(|| "·计划".into());
 
         // ④ 门
-        if let Some(reason) = gate(&mut act, &cap, &bans, &taps_hist, cfg, &tmp, &apps) {
+        if let Some(reason) = gate(&mut act, &cap, &bans, &taps_hist, cfg, &tmp, &apps, realw, realh) {
             log_act(&mut log, n, &act, &plan_by, ms_field);
             let d = format!("rejected({reason})");
             log.put(json!({"r":"diff","n":n,"d":d}));
@@ -775,6 +915,111 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             continue; // 回到第①步
         }
         reject_streak = 0; // 过门即清零
+
+        // 🧭 goto: 沿熟路零模型调用直达。计划里 goto 已被截为最后一步;
+        // 走完/走断都把画面交还模型重新决策(网是参考不是权威)。
+        if act.a == "goto" {
+            let tgt = act.text.clone().unwrap_or_default();
+            let route = tree.as_ref().and_then(|t| {
+                let to = t.resolve(&tgt)?;
+                let from = t.page_of(&cap.els).map(|p| p.id)?;
+                t.route(from, to).map(|r| (r, to))
+            });
+            let Some((hops, to)) = route else {
+                // 当页不在网中/目标不存在/无熟路: 驳回交还模型(画面没动,不重采)
+                log_act(&mut log, n, &act, &plan_by, ms_field);
+                let d = format!(
+                    "rejected(goto {}不可达: {};自行导航)",
+                    tcut(&tgt, 8),
+                    if tree.as_ref().and_then(|t| t.page_of(&cap.els)).is_some() {
+                        "无熟路连通"
+                    } else {
+                        "当前页不在网中"
+                    }
+                );
+                log.put(json!({"r":"diff","n":n,"d":d}));
+                println!("[{n}] {ms_disp} {plan_by} | {aline} ⛔ {d}");
+                window.push((aline.clone(), d.clone()));
+                if window.len() > cfg.window_pairs { window.remove(0); }
+                diffs_all.push(d.clone());
+                stream.push(format!("{aline} → {d}"));
+                stall += 1;
+                if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
+                continue;
+            };
+            if hops.is_empty() {
+                println!("      🧭 goto P{to}: 已在目的地");
+            } else {
+                println!("      🧭 goto P{to}: {}段熟路,零模型调用", hops.len());
+            }
+            let mut ms_left = ms_field; // goto那次模型调用的耗时记在首段上
+            let mut walked_all = true;
+            for hop in &hops {
+                log_screen(&mut log, &cap, n, realw, realh, &mut logged_seq);
+                let Some(hact) = act_from_edge(hop, &cap, realw, realh) else {
+                    println!("      🧭 熟路断了: 当前清单里找不到 {}", hop.label);
+                    let d = format!("树✗(找不到按钮{})", hop.label);
+                    log.put(json!({"r":"diff","n":n,"d":d}));
+                    println!("[{n}] ·熟路 | goto断 → {d}");
+                    window.push((format!("act#{n} goto·断"), d.clone()));
+                    if window.len() > cfg.window_pairs { window.remove(0); }
+                    diffs_all.push(d.clone());
+                    stream.push(format!("act#{n} goto断({}) → {d}", hop.label));
+                    walked_all = false;
+                    break;
+                };
+                let aline_h = act_line(n, &hact);
+                let ms_h = ms_left.take();
+                exec(&phone, &hact, &cap, realw, realh, &apps);
+                if hact.a == "tap" {
+                    taps_hist.push_back((hact.x.unwrap_or(0) as i32, hact.y.unwrap_or(0) as i32));
+                    while taps_hist.len() > 4 { taps_hist.pop_front(); }
+                } else {
+                    taps_hist.clear();
+                }
+                exec_steps += 1;
+                capseq += 1;
+                // 跳段用短定格: 到达判定靠页面身份证,不必等画面完全安静
+                let Some(nc) = capture(&phone, &run_dir, capseq, cfg, &tmp, 1200, app.as_deref()) else {
+                    stop_reason = Some("capture_fail");
+                    break;
+                };
+                let landed = tree.as_ref().and_then(|t| t.page_of(&nc.els).map(|p| (p.id, p.name.clone())));
+                let (d, hop_ok) = match &landed {
+                    Some((pid, pname)) if *pid == hop.to =>
+                        (format!("树✓P{}[{}]", hop.to, tcut(pname, 10)), true),
+                    Some((pid, pname)) => (format!("树✗到了P{}[{}]", pid, tcut(pname, 10)), false),
+                    None => ("树✗陌生页".to_string(), false),
+                };
+                log_act(&mut log, n, &hact, "(树)", ms_h);
+                log.put(json!({"r":"diff","n":n,"d":d}));
+                println!("[{n}] ·熟路 | {aline_h} → {d}");
+                window.push((aline_h.clone(), d.clone()));
+                if window.len() > cfg.window_pairs { window.remove(0); }
+                diffs_all.push(d.clone());
+                stream.push(format!("{aline_h} → {d}"));
+                cap = nc;
+                n += 1;
+                if !hop_ok {
+                    walked_all = false;
+                    break;
+                }
+            }
+            if stop_reason.is_some() { break; }
+            if walked_all {
+                stall = 0;
+                stall_anchor = None;
+            } else {
+                stall += 1;
+                if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
+            }
+            if let Some(t) = pending_note.take() {
+                let t = tcut(&t, cfg.note_max_chars);
+                log.put(json!({"r":"note","t":t}));
+                note = t;
+            }
+            continue;
+        }
 
         // done: 记录后离开循环, 复核在局末
         if act.a == "done" {
@@ -952,14 +1197,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     }
 
     // ── 终局画面补记 ──
-    if cap.seq != logged_seq {
-        let els_img: Vec<Value> = cap.els.iter()
-            .map(|e| json!({"t": e.t, "b": el_img_space(e, &cap, realw, realh)}))
-            .collect();
-        let mut rec = json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel,"pkg":cap.pkg});
-        if cap.suspect { rec["suspect"] = json!(true); }
-        log.put(rec);
-    }
+    log_screen(&mut log, &cap, n, realw, realh, &mut logged_seq);
 
     // ── 时间点: 非done终止 → budget 记录 ──
     if let Some(sr) = stop_reason {
@@ -1112,6 +1350,22 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 }
             } else {
                 println!("      📔 复盘无有效经验输出,保留原 lessons.jsonl");
+            }
+        }
+    }
+
+    // ── 局末: 交互网重算(build_tree.py 汇总全部runs含本局,<1s;下一局开场即用上新路) ──
+    if std::path::Path::new("build_tree.py").exists()
+        && fs::metadata(format!("{task_dir}/runs")).is_ok()
+    {
+        if let Ok(o) = std::process::Command::new("python3")
+            .arg("build_tree.py")
+            .arg(&task_dir)
+            .output()
+        {
+            if o.status.success() {
+                log.put(json!({"r":"hook","kind":"tree","rebuilt":true}));
+                println!("      🧭 交互网已重算 → {task_dir}/tree.json");
             }
         }
     }

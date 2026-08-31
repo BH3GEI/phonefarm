@@ -5,6 +5,7 @@
 mod brain;
 mod device;
 mod runtime;
+mod tree;
 
 use serde::Deserialize;
 use std::collections::HashMap;
