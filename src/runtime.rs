@@ -1391,6 +1391,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut clusters: Vec<(i32, i32, u32)> = Vec::new(); // 空击计数簇(图片像素)
     let mut note = String::new();
     let mut reject_streak = 0u32;
+    let mut done_reflected = false; // #21 done预检: 一局仅一次
     let mut stall = 0u32;
     let mut stall_anchor: Option<String> = None;
     let mut heal_used = false;
@@ -1782,6 +1783,22 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         }
 
         // done: 记录后离开循环, 复核在局末
+        // #21 done预检(实录:抖音局4覆盖历轮最广却停在首页feed被复核驳回——模型"走得够远
+        // 就算完成"的收官习惯): 第一次done不定局,注入事实给一次终态自查机会。只喂事实
+        // 不拦截不替它决定——再发done即定局进复核;goal无终态要求时代价仅+1调用。
+        if act.a == "done" && cfg.done_reflect && !done_reflected {
+            done_reflected = true;
+            let claim = act.text.as_deref().unwrap_or("");
+            println!("      🔁 #21 done预检: 事实注入,模型终态自查一次(再发done即定局)");
+            log.put(json!({"r":"hook","kind":"done_reflect","n":n,"claim":tcut(claim, 120)}));
+            stream.push(format!("act#{n} done预检(#21)"));
+            let msg = format!(
+                "【done预检,一局一次】你上一步宣布done(主张:{}),尚未定局。复核将按goal的终态/收官要求对照最终画面判定。当前前台[{}]。若goal有终态要求且当前页不符,可先导航归位再done;若认为已符合、或终态因客观受限不可达,请再发done并在文本里写明依据(复核会看)。",
+                tcut(claim, 80), if cap.pkg.is_empty() { "未知" } else { &cap.pkg });
+            alert = if alert.is_empty() { msg } else { format!("{alert}
+⚠ {msg}") };
+            continue;
+        }
         if act.a == "done" {
             log_act(&mut log, n, &act, &plan_by, ms_field);
             println!("[{n}] {ms_disp} {plan_by} | done: {}", act.text.as_deref().unwrap_or(""));

@@ -55,6 +55,9 @@ pub struct Config {
     /// 设备复活用: 模拟器启动命令(空=只重启adb不重启模拟器)
     #[serde(default)]
     pub emulator_cmd: String,
+    /// #21 done预检: 首次done不定局,注入事实给模型一次终态自查(默认开;false=旧行为)
+    #[serde(default = "d_done_reflect")]
+    pub done_reflect: bool,
     #[serde(default)]
     pub prompts: HashMap<String, String>,
     #[serde(default, rename = "hook")]
@@ -73,6 +76,7 @@ fn d_note_max() -> usize { 200 }
 fn d_lesson_max() -> usize { 20 }
 fn d_window() -> usize { 5 }
 fn d_plan_max() -> usize { 4 }
+fn d_done_reflect() -> bool { true }
 
 impl Config {
     pub fn hook_for(&self, on: &str) -> Option<&HookCfg> {
