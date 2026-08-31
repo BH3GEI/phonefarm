@@ -5,7 +5,7 @@
 //!       边界差异(刚过背景一点)经仲裁裁定,每局限5次。
 //! 程序只写 tasks/<任务>/ 之下: runs/<局>/log.jsonl、runs/<局>/step*.jpg、lessons.jsonl、params.toml。
 use crate::brain::Brain;
-use crate::device::{frames_diff_pct, mode_gray, patch_stats, thumb_gray, Adb, Node};
+use crate::device::{frames_diff_pct, mode_gray, patch_stats, thumb_gray, Adb, FullNode, Node};
 use crate::tree::Tree;
 use crate::Config;
 use serde_json::{json, Value};
@@ -20,13 +20,17 @@ const QUIET_PCT: f32 = 0.6;
 struct Cap {
     seq: u32,
     els: Vec<Node>, // 设备像素空间
+    full: Vec<FullNode>, // 全量属性层(无损,含无文字容器;OCR帧为空)
     img: String,    // jpg 绝对路径
     img_rel: String,
+    xml_rel: String, // 原始XML落盘文件名(stepN.xml[.gz]);没dump到为空
     w: i32,
     h: i32,
     thumb: Option<Vec<u8>>,
     noise: f32,       // 采集时量到的背景动静幅度(%);0=画面安静
     pkg: String,      // 前台应用包名(采不到为空)
+    activity: String, // 前台Activity全类名(采不到为空)
+    ime: Option<bool>, // 软键盘是否弹起(读不到为None)
     els_pkg: String,  // 元素树的多数包名
     suspect: bool,    // 假树: 树包名≠前台包名且重抓无效 → 本步文字通道不可信
     ocr: bool,        // 本帧清单来自截图文字识别(UI树为空时的备胎)
@@ -192,7 +196,7 @@ fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms
     let img_rel = format!("step{seq}.jpg");
     let img = format!("{run_dir}/{img_rel}");
     let (wh, elsres, noise) = std::thread::scope(|s| {
-        let h_els = s.spawn(|| phone.els(cfg.els_timeout_ms));
+        let h_els = s.spawn(|| phone.els_full(cfg.els_timeout_ms));
         let mut prev = phone.quick_thumb("a");
         let mut noise = 0.0f32;
         let t0 = std::time::Instant::now();
@@ -213,8 +217,9 @@ fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms
         (wh, h_els.join().unwrap_or_default(), noise)
     });
     let (w, h) = wh?;
-    let (mut els, mut els_pkg) = elsres;
-    let mut fg = phone.foreground_pkg();
+    let (mut els, mut full, mut els_pkg, mut xml) = elsres;
+    let st = phone.sys_state();
+    let (mut fg, mut activity, mut ime) = (st.pkg, st.activity, st.ime);
     let mut suspect = false;
     // 假树识别: uiautomator 在应用切换瞬间会吐出上一个应用的陈旧树。
     // 画面安静(像素)≠树已刷新;树的多数包名与前台不符即判陈旧,重抓至多2次。
@@ -228,15 +233,27 @@ fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms
         for retry in 1..=2 {
             println!("      👻 元素树({els_pkg})≠前台({fg}),疑似陈旧树,重抓#{retry}");
             std::thread::sleep(std::time::Duration::from_millis(250));
-            let (e2, p2) = phone.els(cfg.els_timeout_ms);
-            if !e2.is_empty() { els = e2; els_pkg = p2; }
-            let f2 = phone.foreground_pkg();
-            if !f2.is_empty() { fg = f2; }
+            let (e2, f2n, p2, x2) = phone.els_full(cfg.els_timeout_ms);
+            if !e2.is_empty() { els = e2; full = f2n; els_pkg = p2; xml = x2; }
+            let s2 = phone.sys_state();
+            if !s2.pkg.is_empty() { fg = s2.pkg; activity = s2.activity; ime = s2.ime; }
             if els.is_empty() || els_pkg.is_empty() || els_pkg == fg { break; }
         }
         suspect = !els.is_empty() && !els_pkg.is_empty() && els_pkg != fg;
         if suspect {
             println!("      👻 重抓后仍不符,本步文字通道降级(只信截图)");
+        }
+    }
+    // 原始XML落盘(账本地面真值): 解析器也是投影,parser 漏抓任何属性都不再是数据损失。
+    // gzip 压缩(shell自带,零依赖);压不动就留明文。与截图同为不进 git 的本地重资产。
+    let mut xml_rel = String::new();
+    if !xml.is_empty() {
+        let xp = format!("{run_dir}/step{seq}.xml");
+        if fs::write(&xp, &xml).is_ok() {
+            xml_rel = format!("step{seq}.xml");
+            let gz = std::process::Command::new("gzip").args(["-f", &xp]).output()
+                .map(|o| o.status.success()).unwrap_or(false);
+            if gz && fs::metadata(format!("{xp}.gz")).is_ok() { xml_rel.push_str(".gz"); }
         }
     }
     // 文字备胎: UI树为空(游戏/自绘界面/dump失败)→ 用本机Vision识别截图文字补清单,
@@ -251,7 +268,8 @@ fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms
         }
     }
     let thumb = thumb_gray(&img, tmp, &format!("{}", seq % 2));
-    Some(Cap { seq, els, img, img_rel, w, h, thumb, noise, pkg: fg, els_pkg, suspect, ocr })
+    Some(Cap { seq, els, full, img, img_rel, xml_rel, w, h, thumb, noise,
+               pkg: fg, activity, ime, els_pkg, suspect, ocr })
 }
 
 /// OCR文字备胎: UI树为空时调本机Vision(ocr二进制,由ocr.swift编译)识别截图文字。
@@ -275,11 +293,16 @@ fn ocr_els(img: &str, capw: i32, caph: i32, realw: i32, realh: i32) -> Vec<Node>
     v
 }
 
-/// 元素框: 设备像素 → 图片像素
-fn el_img_space(n: &Node, cap: &Cap, realw: i32, realh: i32) -> [i32; 4] {
+/// 坐标框: 设备像素 → 图片像素
+fn b_img_space(b: [i32; 4], cap: &Cap, realw: i32, realh: i32) -> [i32; 4] {
     let sx = |v: i32| (v as i64 * cap.w as i64 / realw.max(1) as i64) as i32;
     let sy = |v: i32| (v as i64 * cap.h as i64 / realh.max(1) as i64) as i32;
-    [sx(n.b[0]), sy(n.b[1]), sx(n.b[2]), sy(n.b[3])]
+    [sx(b[0]), sy(b[1]), sx(b[2]), sy(b[3])]
+}
+
+/// 元素框: 设备像素 → 图片像素
+fn el_img_space(n: &Node, cap: &Cap, realw: i32, realh: i32) -> [i32; 4] {
+    b_img_space(n.b, cap, realw, realh)
 }
 
 /// 图片像素 → 0~999
@@ -343,7 +366,16 @@ fn nearby_els(els: &[Node], x: i64, y: i64, cap: &Cap, realw: i32, realh: i32) -
     v.into_iter().take(3).map(|(_, s)| s).collect::<Vec<_>>().join("、")
 }
 
+/// 控件类名缩短: android 官方包前缀冗余,去掉;三方自绘类保留全名。原文在 XML 落盘里。
+fn class_short(c: &str) -> &str {
+    c.strip_prefix("android.widget.")
+        .or_else(|| c.strip_prefix("android.view."))
+        .unwrap_or(c)
+}
+
 /// 本帧画面入记录流(seq 去重)。主循环顶部、goto跳段、终局三处共用同一节奏。
+/// els 保持旧形态(build_tree.py 契约);nodes 为全量属性层(仅记账,暂无运行时消费方);
+/// activity/ime_shown/xml 一并入账。
 fn log_screen(log: &mut Log, cap: &Cap, n: u32, realw: i32, realh: i32, logged_seq: &mut u32) {
     if cap.seq == *logged_seq { return; }
     let els_img: Vec<Value> = cap
@@ -352,10 +384,42 @@ fn log_screen(log: &mut Log, cap: &Cap, n: u32, realw: i32, realh: i32, logged_s
         .map(|e| json!({"t": e.t, "b": el_img_space(e, cap, realw, realh)}))
         .collect();
     let mut rec = json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel,"pkg":cap.pkg});
+    if !cap.full.is_empty() {
+        let nodes_img: Vec<Value> = cap.full.iter().map(|f| {
+            let mut m = serde_json::Map::new();
+            if !f.t.is_empty() { m.insert("t".into(), json!(f.t)); }
+            m.insert("b".into(), json!(b_img_space(f.b, cap, realw, realh)));
+            if let Some(id) = &f.id { m.insert("id".into(), json!(id)); }
+            if !f.class.is_empty() { m.insert("c".into(), json!(class_short(&f.class))); }
+            if f.clickable { m.insert("clickable".into(), json!(true)); }
+            if f.scrollable { m.insert("scrollable".into(), json!(true)); }
+            if f.checkable { m.insert("checked".into(), json!(f.checked)); }
+            m.insert("d".into(), json!(f.depth));
+            Value::Object(m)
+        }).collect();
+        rec["nodes"] = json!(nodes_img);
+    }
+    if !cap.activity.is_empty() { rec["activity"] = json!(cap.activity); }
+    if let Some(v) = cap.ime { rec["ime_shown"] = json!(v); }
+    if !cap.xml_rel.is_empty() { rec["xml"] = json!(cap.xml_rel); }
     if cap.suspect { rec["suspect"] = json!(true); }
     if cap.ocr { rec["ocr"] = json!(true); }
     log.put(rec);
     *logged_seq = cap.seq;
+}
+
+/// 模型原文落账: 每次真实调用的完整回包原文(含JSON外的说明文字),按调用点分类。
+/// in_ctx: step 的输入侧已全量在 ctx.log,不重复;verdict/reflect 的输入仅此一份,一并入账。
+fn log_raw(log: &mut Log, hook: &str, n: u32, by: &str, ms: u64, text: &str, in_ctx: Option<&str>) {
+    let mut m = serde_json::Map::new();
+    m.insert("r".into(), json!("raw"));
+    m.insert("hook".into(), json!(hook));
+    m.insert("n".into(), json!(n));
+    m.insert("by".into(), json!(by));
+    m.insert("ms".into(), json!(ms));
+    if let Some(u) = in_ctx { m.insert("in".into(), json!(u)); }
+    m.insert("t".into(), json!(text));
+    log.put(Value::Object(m));
 }
 
 /// 采集,失败则尝试复活设备后重采(每局一次): 模拟器/adb 中途卡死不再直接弃局。
@@ -415,13 +479,25 @@ fn act_line(n: u32, a: &ActN) -> String {
 /// 契约式到达断言(--assert): 逐元素子串匹配,不跨元素拼接——"广告"+"设置"分居两处凑不成"广告设置"。
 /// 断言权在测试契约手里: 命中即注入"实测事实",不靠模型对标题的语义猜认
 /// (局31: 到了广告设置页却因页内标题是"为什么我会看到此广告"死不认账,烧光22次调用)
-fn assert_hits(els: &[Node], asserts: &[String]) -> Vec<String> {
+fn assert_hits_texts<'a>(texts: impl Iterator<Item = &'a str> + Clone, asserts: &[String])
+    -> Vec<String>
+{
     asserts.iter().filter_map(|w| {
         let w = w.trim();
-        if !w.is_empty() && els.iter().any(|e| e.t.trim().contains(w)) {
+        if !w.is_empty() && texts.clone().any(|t| t.trim().contains(w)) {
             Some(w.to_string())
         } else { None }
     }).collect()
+}
+
+/// 断言在全量层上测: 无70条/40字截断盲区(验收词落在第71个元素或长文40字后不再假阴性)。
+/// OCR帧没有全量层,退回文字清单。
+fn assert_hits(cap: &Cap, asserts: &[String]) -> Vec<String> {
+    if cap.full.is_empty() {
+        assert_hits_texts(cap.els.iter().map(|n| n.t.as_str()), asserts)
+    } else {
+        assert_hits_texts(cap.full.iter().map(|f| f.t.as_str()), asserts)
+    }
 }
 
 /// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 最近act/diff窗 + ban + note + 小地图 + 前台应用 + 屏幕
@@ -507,12 +583,14 @@ fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str
 }
 
 /// ③ 决策调用: 返回按序计划(1~plan_max个act,done截断) + note。换人重问最多3家。
-fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str)
+/// 每次真实回包原文先落账再解析——解析不动的违约样本恰是最该留档的。
+fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str, log: &mut Log, n: u32)
     -> Result<(Vec<ActN>, Option<String>, String, u64), String>
 {
     let sys = cfg.prompts.get("step").map(|s| s.as_str()).unwrap_or("");
     for attempt in 0..3 {
         let out = brain.call(sys, user, &[img], 500, attempt)?;
+        log_raw(log, "step", n, &out.by, out.ms, &out.text, None);
         let objs = extract_objs(&out.text);
         let mut acts: Vec<ActN> = Vec::new();
         // note 两种来法都收: 正常的 r=note,以及把便签误当动作发的 r=act,a=note(契约口子,不判死)
@@ -717,13 +795,14 @@ fn exec(phone: &Adb, a: &ActN, cap: &Cap, realw: i32, realh: i32, apps: &[(Strin
 }
 
 /// 仲裁: 前后两张截图给模型,问"有没有真实变化"。返回 (changed, desc, 由谁判)。
-fn arbit_changed(brain: &mut Brain, cfg: &Config, img_a: &str, img_b: &str)
+fn arbit_changed(brain: &mut Brain, cfg: &Config, img_a: &str, img_b: &str, log: &mut Log, n: u32)
     -> Option<(bool, String, String)>
 {
     let p = cfg.hook_for("pre_ban").and_then(|h| cfg.prompt_of(h))?;
     let u = "第一张为点击前截图,第二张为点击后截图。".to_string();
     for att in 0..2 {
         if let Ok(out) = brain.call(p, &u, &[img_a, img_b], 150, att) {
+            log_raw(log, "arbit", n, &out.by, out.ms, &out.text, None);
             let objs = extract_objs(&out.text);
             if let Some(o) = objs.iter().find(|o| o["r"] == "hook" && o["kind"] == "arbit") {
                 return Some((
@@ -741,8 +820,11 @@ fn arbit_changed(brain: &mut Brain, cfg: &Config, img_a: &str, img_b: &str)
 /// ⑥ 画面差异: els 集合差 / 像素通道回退。
 /// 动态屏(任一端noise>0)下像素差异需压过背景才算有效:
 ///   ≤bg+5% → none;bg+5%~bg+13% → 边界区(返回border=true,交仲裁);>bg+13% → 有效。
-/// 返回 (差异串, 是否边界区)。
-fn diff_of(before: &Cap, after: &Cap, channel: &str) -> (String, bool) {
+/// 返回 (差异串, 是否边界区, 变化元素坐标框)。差异串契约不变(喂模型/窗口);
+/// 坐标框只进账本(add/del 各至多8条,图片像素空间),像素通道无框(Null)。
+fn diff_of(before: &Cap, after: &Cap, channel: &str, realw: i32, realh: i32)
+    -> (String, bool, Value)
+{
     // 假树(suspect)的元素集不可用于集合差 —— 用它算 diff 会把上个应用的文字当成本步变化
     // OCR清单同理: 识别帧间有抖动(同一处文字两帧识成两样),集合差会凭空出假差异 → 走像素
     let use_pixel = channel == "pixel" || before.els.is_empty() || after.els.is_empty()
@@ -754,28 +836,30 @@ fn diff_of(before: &Cap, after: &Cap, channel: &str) -> (String, bool) {
             m
         };
         let (mb, ma) = (count(&before.els), count(&after.els));
-        let mut added: Vec<String> = Vec::new();
-        let mut removed: Vec<String> = Vec::new();
+        let mut added_keys: Vec<&String> = Vec::new();
+        let mut removed_keys: Vec<&String> = Vec::new();
         for (t, ca) in &ma {
             let cb = mb.get(t).unwrap_or(&0);
-            if ca > cb { added.push(tcut(t, 18)); }
+            if ca > cb { added_keys.push(t); }
         }
         for (t, cb) in &mb {
             let ca = ma.get(t).unwrap_or(&0);
-            if cb > ca { removed.push(tcut(t, 18)); }
+            if cb > ca { removed_keys.push(t); }
         }
-        if added.is_empty() && removed.is_empty() {
+        if added_keys.is_empty() && removed_keys.is_empty() {
             // 矛盾检测: 树说"没变"但像素大变(压过背景) → 同应用内树未刷新,改采像素结论,
             // 防止把真实生效的动作记成空击、误落 ban
             if let (Some(a), Some(b)) = (&before.thumb, &after.thumb) {
                 let pct = frames_diff_pct(a, b);
                 let bg = before.noise.max(after.noise);
                 if pct > bg + 13.0 && pct > 10.0 {
-                    return (format!("pixel({}%,元素树未更新)", pct.round() as i32), false);
+                    return (format!("pixel({}%,元素树未更新)", pct.round() as i32), false, Value::Null);
                 }
             }
-            return ("none".into(), false);
+            return ("none".into(), false, Value::Null);
         }
+        let mut added: Vec<String> = added_keys.iter().map(|t| tcut(t, 18)).collect();
+        let mut removed: Vec<String> = removed_keys.iter().map(|t| tcut(t, 18)).collect();
         added.sort();
         removed.sort();
         added.truncate(4);
@@ -786,7 +870,21 @@ fn diff_of(before: &Cap, after: &Cap, channel: &str) -> (String, bool) {
             if !s.is_empty() { s.push(' '); }
             s.push_str(&format!("-[{}]", removed.join(",")));
         }
-        (tcut(&s, 160), false)
+        // 变化框: 每个变化词在对应端清单里的首个同文元素框
+        let boxes_of = |keys: &mut Vec<&String>, side: &Cap| -> Vec<Value> {
+            keys.sort();
+            keys.iter().take(8).filter_map(|t| {
+                side.els.iter().find(|n| &n.t == *t)
+                    .map(|n| json!([tcut(t, 18), el_img_space(n, side, realw, realh)]))
+            }).collect()
+        };
+        let ab = boxes_of(&mut added_keys, after);
+        let db = boxes_of(&mut removed_keys, before);
+        let mut bm = serde_json::Map::new();
+        if !ab.is_empty() { bm.insert("add".into(), json!(ab)); }
+        if !db.is_empty() { bm.insert("del".into(), json!(db)); }
+        let boxes = if bm.is_empty() { Value::Null } else { Value::Object(bm) };
+        (tcut(&s, 160), false, boxes)
     } else {
         match (&before.thumb, &after.thumb) {
             (Some(a), Some(b)) => {
@@ -798,15 +896,15 @@ fn diff_of(before: &Cap, after: &Cap, channel: &str) -> (String, bool) {
                     } else {
                         format!("pixel({}%)", pct.round() as i32)
                     };
-                    (s, false)
+                    (s, false, Value::Null)
                 } else if pct <= bg + 5.0 {
-                    ("none".into(), false) // 未压过背景: 记没变化(空击/ban防线照常工作)
+                    ("none".into(), false, Value::Null) // 未压过背景: 记没变化(空击/ban防线照常工作)
                 } else {
                     let s = format!("pixel({}%)>bg({:.0}%)", pct.round() as i32, bg);
-                    (s, pct <= bg + 13.0) // 刚过背景一点 → 边界区,交给仲裁
+                    (s, pct <= bg + 13.0, Value::Null) // 刚过背景一点 → 边界区,交给仲裁
                 }
             }
-            _ => ("none".into(), false),
+            _ => ("none".into(), false, Value::Null),
         }
     }
 }
@@ -1005,7 +1103,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         }
 
         // 契约式到达断言: 验收词全部在当前屏实测到 → 注入事实行(假树不测,防止拿旧屏谎报命中)
-        let hits = if cap.suspect { Vec::new() } else { assert_hits(&cap.els, &asserts) };
+        let hits = if cap.suspect { Vec::new() } else { assert_hits(&cap, &asserts) };
         let assert_line = if asserts.is_empty() || hits.len() < asserts.len() {
             assert_hit_prev = false;
             String::new()
@@ -1055,7 +1153,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             let _ = fs::OpenOptions::new().create(true).append(true)
                 .open(&ctx_path)
                 .map(|mut f| writeln!(f, "\n══ 步#{n} 决策上下文 ══\n{user}\n"));
-            match plan_call(&mut brain, cfg, &user, &cap.img) {
+            match plan_call(&mut brain, cfg, &user, &cap.img, &mut log, n) {
                 Ok((acts, note_new, by, ms)) => {
                     if acts.len() > 1 { println!("      📋 {}给出{}步计划", by, acts.len()); }
                     queue = acts.into();
@@ -1284,12 +1382,12 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             break;
         };
         if newcap.noise > 0.0 { dyn_steps += 1; }
-        let (d_raw, border) = diff_of(&cap, &newcap, &channel);
+        let (d_raw, border, dboxes) = diff_of(&cap, &newcap, &channel, realw, realh);
         let d = if border {
             // 边界区: 差异刚压过背景一点,问一次仲裁(限额内)
             if arbit_left > 0 {
                 arbit_left -= 1;
-                match arbit_changed(&mut brain, cfg, &cap.img, &newcap.img) {
+                match arbit_changed(&mut brain, cfg, &cap.img, &newcap.img, &mut log, n) {
                     Some((true, desc, by)) => {
                         log.put(json!({"r":"hook","kind":"arbit","changed":true,"desc":desc,"by":by}));
                         println!("      ⚖ 边界仲裁({by}): 变化成立 {desc}");
@@ -1312,7 +1410,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             d_raw
         };
         log_act(&mut log, n, &act, &plan_by, ms_field);
-        log.put(json!({"r":"diff","n":n,"d":d}));
+        let mut drec = json!({"r":"diff","n":n,"d":d});
+        if !dboxes.is_null() { drec["boxes"] = dboxes; } // 变化元素坐标框只进账本,不进上下文
+        log.put(drec);
         println!("[{n}] {ms_disp} {plan_by} | {aline} → {d}");
         if let Some(t) = pending_note.take() {
             let t = tcut(&t, cfg.note_max_chars);
@@ -1347,7 +1447,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             if count >= cfg.ban_strikes {
                 let mut banned = false;
                 if cfg.hook_for("pre_ban").and_then(|h| cfg.prompt_of(h)).is_some() {
-                    match arbit_changed(&mut brain, cfg, &cap.img, &newcap.img) {
+                    match arbit_changed(&mut brain, cfg, &cap.img, &newcap.img, &mut log, n) {
                         Some((changed, desc, aby)) => {
                             log.put(json!({"r":"hook","kind":"arbit","changed":changed,"desc":desc,"by":aby}));
                             stream.push(format!("hook arbit: changed={changed} {desc}"));
@@ -1394,6 +1494,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                         let u = "第一张为若干步之前的截图,第二张为当前截图。".to_string();
                         for att in 0..2 {
                             if let Ok(out) = brain.call(p, &u, &[&anchor, &newcap.img], 150, att) {
+                                log_raw(&mut log, "arbit", n, &out.by, out.ms, &out.text, None);
                                 let objs = extract_objs(&out.text);
                                 if let Some(o) = objs.iter().find(|o| o["r"] == "hook" && o["kind"] == "arbit") {
                                     let changed = o["changed"].as_bool().unwrap_or(false);
@@ -1459,7 +1560,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 if cap.suspect {
                     u.push_str("(元素列表不可信,请按最终截图自行核对验收词)\n");
                 } else {
-                    let final_hits = assert_hits(&cap.els, &asserts);
+                    let final_hits = assert_hits(&cap, &asserts);
                     u.push_str(&format!(" | 程序在最终画面实测: {}\n", if final_hits.len() == asserts.len() {
                         format!("全部命中 —— 契约语义:命中即可判达成")
                     } else {
@@ -1484,6 +1585,8 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             let mut got = false;
             for att in 0..2 {
                 if let Ok(out) = brain.call(p, &u, &[&cap.img], 200, att) {
+                    // 复核的输入材料别处没有存,连同原文一并落账
+                    log_raw(&mut log, "verdict", n, &out.by, out.ms, &out.text, Some(&u));
                     let objs = extract_objs(&out.text);
                     if let Some(o) = objs.iter().find(|o| o["r"] == "hook" && o["kind"] == "verdict") {
                         achieved = o["achieved"].as_bool().unwrap_or(false);
@@ -1526,6 +1629,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             let mut newles: Vec<Value> = Vec::new();
             for att in 0..2 {
                 if let Ok(out) = brain.call(p, &u, &[], 900, att) {
+                    log_raw(&mut log, "reflect", n, &out.by, out.ms, &out.text, Some(&u));
                     let objs = extract_objs(&out.text);
                     let les: Vec<Value> = objs.into_iter()
                         .filter(|o| o["r"] == "lesson" && o["t"].as_str().map(|t| !t.is_empty()).unwrap_or(false))
@@ -1662,9 +1766,11 @@ mod tests {
     /// 空清单、图片路径不存在的最小Cap: patch_stats拿不到图会跳过空白检查,正好单测门控分流
     fn cap() -> Cap {
         Cap {
-            seq: 1, els: vec![], img: "/nonexistent.jpg".into(), img_rel: String::new(),
+            seq: 1, els: vec![], full: vec![], img: "/nonexistent.jpg".into(),
+            img_rel: String::new(), xml_rel: String::new(),
             w: 672, h: 1456, thumb: None, noise: 0.0,
-            pkg: "t.app".into(), els_pkg: "t.app".into(), suspect: false, ocr: false,
+            pkg: "t.app".into(), activity: String::new(), ime: None,
+            els_pkg: "t.app".into(), suspect: false, ocr: false,
         }
     }
 
@@ -1734,28 +1840,46 @@ mod tests {
 
     fn nd(t: &str) -> Node { Node { t: t.into(), b: [0, 0, 0, 0] } }
 
+    fn fnode(t: &str) -> FullNode {
+        FullNode {
+            t: t.into(), b: [0, 0, 1, 1], id: None, class: String::new(),
+            clickable: false, scrollable: false, checkable: false, checked: false, depth: 1,
+        }
+    }
+
     #[test]
     fn assert_word_matched_by_substring_within_one_element() {
         // 局31场景: 页内元素是"个性化广告推荐"这类长文,验收词"个性化广告"子串命中即算
-        let els = [nd("个性化广告推荐"), nd("清理缓存")];
         let ws = vec!["个性化广告".to_string()];
-        assert_eq!(assert_hits(&els, &ws), vec!["个性化广告".to_string()]);
+        assert_eq!(assert_hits_texts(["个性化广告推荐", "清理缓存"].iter().copied(), &ws),
+                   vec!["个性化广告".to_string()]);
     }
 
     #[test]
     fn assert_requires_all_words_present() {
         // 多个验收词必须全中,缺一不注入(合取=更严,防单词撞车假阳性)
-        let els = [nd("个性化广告推荐")];
         let ws = vec!["个性化广告".to_string(), "程序化广告".to_string()];
-        assert_eq!(assert_hits(&els, &ws).len(), 1);
-        let els2 = [nd("个性化广告"), nd("程序化广告设置")];
-        assert_eq!(assert_hits(&els2, &ws).len(), 2);
+        assert_eq!(assert_hits_texts(["个性化广告推荐"].iter().copied(), &ws).len(), 1);
+        assert_eq!(assert_hits_texts(["个性化广告", "程序化广告设置"].iter().copied(), &ws).len(), 2);
     }
 
     #[test]
     fn assert_words_not_stitched_across_elements() {
         // "广告"和"设置"分居两处,不得拼接成"广告设置"算命中
-        let els = [nd("广告"), nd("设置")];
-        assert!(assert_hits(&els, &vec!["广告设置".to_string()]).is_empty());
+        assert!(assert_hits_texts(["广告", "设置"].iter().copied(),
+                                  &vec!["广告设置".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn assert_reads_full_layer_beyond_els_truncation() {
+        // 验收词落在长文第40字之后: 文字层被截断看不见,全量层实测命中(#17盲区根治)
+        let long = format!("{}广告设置", "占".repeat(45));
+        let mut c = cap();
+        c.els = vec![nd(&long.chars().take(40).collect::<String>())];
+        c.full = vec![fnode(&long)];
+        let ws = vec!["广告设置".to_string()];
+        assert_eq!(assert_hits(&c, &ws), vec!["广告设置".to_string()], "全量层无截断盲区");
+        c.full.clear();
+        assert!(assert_hits(&c, &ws).is_empty(), "无全量层(OCR帧)退回文字清单,如实测不到就不注入");
     }
 }

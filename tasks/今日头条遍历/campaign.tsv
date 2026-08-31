@@ -1,3 +1,4 @@
 round	run_id	exit	achieved	stop	steps	calls	tokens	wall_s
 1	20260831-041717	1	false	budget	25	22	81210	274
 1	-	9	false	EMULATOR_DEAD	0	0	0	0
+1	20260831-055549	0	true	done	6	10	34351	164

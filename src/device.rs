@@ -11,6 +11,29 @@ pub struct Node {
     pub b: [i32; 4],
 }
 
+/// 全属性节点(账本层): 无文字的容器/纯图标节点也在内,文字不截断。
+/// 只喂账本/断言(将来折叠与探针也吃它),不进任何既有消费方——els 契约原样保留。
+#[derive(Debug, Clone)]
+pub struct FullNode {
+    pub t: String,           // text 或 content-desc(text优先),trim后不截断,可为空
+    pub b: [i32; 4],         // 设备坐标框
+    pub id: Option<String>,  // resource-id 去掉包名前缀,如 "id/close_btn"
+    pub class: String,       // 控件类名全称
+    pub clickable: bool,
+    pub scrollable: bool,
+    pub checkable: bool,
+    pub checked: bool,
+    pub depth: u32,          // XML 嵌套深度(容器折叠的依据)
+}
+
+/// 系统级状态(dumpsys): 前台包名 + Activity 全名 + 软键盘是否弹起。
+/// 任何一项采不到就如实留空/None,不装。
+pub struct SysState {
+    pub pkg: String,
+    pub activity: String,
+    pub ime: Option<bool>,
+}
+
 /// 解析 BMP 为灰度像素(sips 输出的 24/32bpp)
 fn bmp_gray(path: &str) -> Option<Vec<u8>> {
     let d = std::fs::read(path).ok()?;
@@ -188,54 +211,17 @@ impl Adb {
         String::new()
     }
 
-    /// 元素列表(限时)。采不到返回空表 —— 空表本身是有效观测(canvas 页面即如此)。
-    /// 同时返回树的多数包名,供假树识别(uiautomator 偶发吐出上一个应用的陈旧树)。
-    pub fn els(&self, timeout_ms: u64) -> (Vec<Node>, String) {
+    /// 元素采集(限时): (els文字层, full全量层, 多数包名, 原始XML)。
+    /// 采不到返回全空 —— 空表本身是有效观测(canvas 页面即如此)。
+    /// els 保持既有契约(有文字、40字截断、上限70条),渲染/吸附/身份证/沙盘零感知;
+    /// full 无损(容器与纯图标在内、不截断);xml 原文由调用方落盘——解析器也是投影,地面真值以 XML 为准。
+    pub fn els_full(&self, timeout_ms: u64) -> (Vec<Node>, Vec<FullNode>, String, String) {
         let xml = self.dump_xml(timeout_ms);
         if xml.is_empty() {
-            return (vec![], String::new());
+            return (vec![], vec![], String::new(), String::new());
         }
-        let mut nodes = Vec::new();
-        let mut pkg_hist: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let mut reader = Reader::from_str(&xml);
-        loop {
-            match reader.read_event() {
-                Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
-                    let mut text = String::new();
-                    let mut desc = String::new();
-                    let mut bounds = String::new();
-                    for a in e.attributes().flatten() {
-                        let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
-                        let val = String::from_utf8_lossy(&a.value).to_string();
-                        match key.as_str() {
-                            "text" => text = val,
-                            "content-desc" => desc = val,
-                            "bounds" => bounds = val,
-                            "package" => { *pkg_hist.entry(val).or_insert(0) += 1; }
-                            _ => {}
-                        }
-                    }
-                    let t = if !text.trim().is_empty() { text } else { desc };
-                    let t = t.trim();
-                    if !t.is_empty() {
-                        if let Some(b) = parse_bounds(&bounds) {
-                            if b[2] > b[0] && b[3] > b[1] {
-                                let mut tt = t.to_string();
-                                while tt.chars().count() > 40 { tt.pop(); }
-                                nodes.push(Node { t: tt, b });
-                            }
-                        }
-                    }
-                }
-                Ok(Event::Eof) => break,
-                Err(_) => break,
-                _ => {}
-            }
-        }
-        nodes.truncate(70);
-        let pkg = pkg_hist.into_iter().max_by_key(|(_, c)| *c)
-            .map(|(p, _)| p).unwrap_or_default();
-        (nodes, pkg)
+        let (els, full, pkg) = parse_dump(&xml);
+        (els, full, pkg, xml)
     }
 
     /// 前台应用包名(dumpsys window 焦点窗口)。采不到返回空串。
@@ -257,6 +243,15 @@ impl Adb {
             }
         }
         String::new()
+    }
+
+    /// 系统级状态一次采齐: 焦点窗口(包名+Activity) + 软键盘状态。
+    /// 两条 dumpsys 合进一次 adb shell,省一趟往返;失败各自留空/None。
+    pub fn sys_state(&self) -> SysState {
+        let out = self.run_timeout(&["shell",
+            "dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp'; \
+             dumpsys input_method 2>/dev/null | grep -E 'mInputShown|isInputViewShown'"], 4000);
+        parse_sys_state(&String::from_utf8_lossy(&out))
     }
 
     /// 可启动应用清单 (包名, 启动组件)。桌面/抽屉里能看到的应用即在此列。
@@ -388,5 +383,181 @@ fn parse_bounds(b: &str) -> Option<[i32; 4]> {
         Some([nums[0], nums[1], nums[2], nums[3]])
     } else {
         None
+    }
+}
+
+/// dump XML → (els文字层, full全量层, 多数包名)。纯函数,单测钉行为:
+/// els 与旧版逐字节等价(有文字、trim、40字截断、前70条、正面积);
+/// full 对每个有效框的节点无损收录(含无文字容器),depth 记 XML 嵌套层级。
+pub fn parse_dump(xml: &str) -> (Vec<Node>, Vec<FullNode>, String) {
+    let mut els: Vec<Node> = Vec::new();
+    let mut full: Vec<FullNode> = Vec::new();
+    let mut pkg_hist: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut reader = Reader::from_str(xml);
+    let mut depth: u32 = 0;
+    loop {
+        let ev = reader.read_event();
+        let (e, d) = match &ev {
+            Ok(Event::Start(e)) => { depth += 1; (e, depth) }
+            Ok(Event::Empty(e)) => (e, depth + 1),
+            Ok(Event::End(_)) => { depth = depth.saturating_sub(1); continue; }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => continue,
+        };
+        let mut text = String::new();
+        let mut desc = String::new();
+        let mut bounds = String::new();
+        let mut id: Option<String> = None;
+        let mut class = String::new();
+        let (mut clickable, mut scrollable, mut checkable, mut checked) = (false, false, false, false);
+        for a in e.attributes().flatten() {
+            let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
+            let val = String::from_utf8_lossy(&a.value).to_string();
+            match key.as_str() {
+                "text" => text = val,
+                "content-desc" => desc = val,
+                "bounds" => bounds = val,
+                "package" => { *pkg_hist.entry(val).or_insert(0) += 1; }
+                "resource-id" => {
+                    if !val.is_empty() {
+                        // "com.pkg:id/name" → "id/name"(包名前缀冗余;原始值在 XML 落盘里)
+                        id = Some(val.split_once(':').map(|(_, r)| r.to_string()).unwrap_or(val));
+                    }
+                }
+                "class" => class = val,
+                "clickable" => clickable = val == "true",
+                "scrollable" => scrollable = val == "true",
+                "checkable" => checkable = val == "true",
+                "checked" => checked = val == "true",
+                _ => {}
+            }
+        }
+        let t = if !text.trim().is_empty() { text } else { desc };
+        let t = t.trim();
+        if let Some(b) = parse_bounds(&bounds) {
+            if b[2] > b[0] && b[3] > b[1] {
+                if !t.is_empty() && els.len() < 70 {
+                    let mut tt = t.to_string();
+                    while tt.chars().count() > 40 { tt.pop(); }
+                    els.push(Node { t: tt, b });
+                }
+                full.push(FullNode {
+                    t: t.to_string(), b, id, class,
+                    clickable, scrollable, checkable, checked, depth: d,
+                });
+            }
+        }
+    }
+    let pkg = pkg_hist.into_iter().max_by_key(|(_, c)| *c)
+        .map(|(p, _)| p).unwrap_or_default();
+    (els, full, pkg)
+}
+
+/// dumpsys 焦点/键盘输出 → SysState。纯函数供单测。
+/// 包名解析规则与 foreground_pkg 同源:mCurrentFocus 优先,mFocusedApp 兜底,
+/// " u0 " 后取 token,包名段须形如反域名;Activity 段以 '.' 开头时补全包名。
+pub fn parse_sys_state(s: &str) -> SysState {
+    let mut pkg = String::new();
+    let mut activity = String::new();
+    'outer: for key in ["mCurrentFocus", "mFocusedApp"] {
+        for line in s.lines().filter(|l| l.contains(key)) {
+            let Some(i) = line.find(" u0 ") else { continue };
+            let tok: String = line[i + 4..].chars()
+                .take_while(|c| *c != '}' && *c != ' ')
+                .collect();
+            let (p, a) = match tok.split_once('/') {
+                Some((p, a)) => (p.to_string(), a.to_string()),
+                None => (tok, String::new()),
+            };
+            if p.contains('.')
+                && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+            {
+                activity = if a.starts_with('.') { format!("{p}{a}") } else { a };
+                pkg = p;
+                break 'outer;
+            }
+        }
+    }
+    let mut ime = None;
+    for k in ["mInputShown=", "isInputViewShown="] {
+        if let Some(i) = s.find(k) {
+            ime = Some(s[i + k.len()..].starts_with("true"));
+            break;
+        }
+    }
+    SysState { pkg, activity, ime }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_layer_keeps_containers_and_attrs() {
+        // 容器(RecyclerView,无文字)只进 full 不进 els;属性与深度如实解析
+        let xml = r#"<?xml version='1.0'?><hierarchy>
+<node text="" class="androidx.recyclerview.widget.RecyclerView" package="t.app" bounds="[0,100][1080,2000]" scrollable="true" clickable="false">
+<node text="头条新闻" resource-id="t.app:id/title" class="android.widget.TextView" package="t.app" bounds="[10,110][500,160]" clickable="true"/>
+<node text="" content-desc="关闭" class="android.widget.ImageView" package="t.app" bounds="[900,110][960,160]" clickable="true" checkable="true" checked="true"/>
+</node></hierarchy>"#;
+        let (els, full, pkg) = parse_dump(xml);
+        assert_eq!(pkg, "t.app");
+        assert_eq!(els.len(), 2, "els 只收有文字的(text或desc)");
+        assert_eq!(full.len(), 3, "full 连无文字容器一起收");
+        let rec = &full[0];
+        assert!(rec.scrollable && !rec.clickable && rec.t.is_empty());
+        assert!(rec.class.ends_with("RecyclerView"));
+        let title = &full[1];
+        assert_eq!(title.id.as_deref(), Some("id/title"), "resource-id 去包名前缀");
+        assert!(title.clickable);
+        assert!(title.depth > rec.depth, "子节点深度大于容器");
+        let icon = &full[2];
+        assert_eq!(icon.t, "关闭");
+        assert!(icon.checkable && icon.checked);
+    }
+
+    #[test]
+    fn els_truncation_preserved_full_lossless() {
+        // els 保留旧契约(70条/40字),full 无损——账本层不再吃截断的亏
+        let long = "这是一条超过四十个字的超长文本用来验证四十字截断在文字层仍然生效而全量层原文完整保留丝毫不丢";
+        assert!(long.chars().count() > 40);
+        let mut xml = String::from("<?xml version='1.0'?><hierarchy>");
+        for i in 0..72 {
+            xml.push_str(&format!(
+                r#"<node text="词{i}" class="c" package="t.app" bounds="[0,{}][100,{}]" />"#,
+                i * 10, i * 10 + 9));
+        }
+        xml.push_str(&format!(
+            r#"<node text="{long}" class="c" package="t.app" bounds="[0,900][500,950]"/></hierarchy>"#));
+        let (els, full, _) = parse_dump(&xml);
+        assert_eq!(els.len(), 70, "els 上限70条不变");
+        assert_eq!(full.len(), 73, "full 全量收录");
+        let f_long = full.iter().find(|f| f.t.chars().count() > 40);
+        assert!(f_long.is_some(), "full 里长文本原文保留");
+        assert!(els.iter().all(|n| n.t.chars().count() <= 40), "els 40字截断不变");
+    }
+
+    #[test]
+    fn sys_state_parses_activity_and_ime() {
+        let s = "  mCurrentFocus=Window{5b0f0 u0 com.ss.android.article.news/com.ss.android.article.news.activity.MainActivity}\n  mInputShown=true\n";
+        let st = parse_sys_state(s);
+        assert_eq!(st.pkg, "com.ss.android.article.news");
+        assert_eq!(st.activity, "com.ss.android.article.news.activity.MainActivity");
+        assert_eq!(st.ime, Some(true));
+    }
+
+    #[test]
+    fn sys_state_relative_activity_and_no_ime() {
+        // 相对写法 ".MainActivity" 补全包名;无键盘行 → None(不装)
+        let s = "  mFocusedApp=ActivityRecord{abc u0 com.demo.app/.MainActivity t12}\n";
+        let st = parse_sys_state(s);
+        assert_eq!(st.pkg, "com.demo.app");
+        assert_eq!(st.activity, "com.demo.app.MainActivity");
+        assert_eq!(st.ime, None);
+        let s2 = "mCurrentFocus=Window{x u0 StatusBar}\nisInputViewShown=false";
+        let st2 = parse_sys_state(s2);
+        assert_eq!(st2.pkg, "", "StatusBar 不是包名,拒收");
+        assert_eq!(st2.ime, Some(false));
     }
 }

@@ -6,8 +6,10 @@ secrets.env
 /ocr
 src/target/
 
-# 运行截图(每局几十张,共 ~180MB,不入库;log.jsonl 保留)
+# 运行截图与原始XML dump(本地重资产账本,不入库;log.jsonl/ctx.log 保留)
 tasks/**/*.jpg
 tasks/**/*.png
+tasks/**/*.xml
+tasks/**/*.xml.gz
 
 .DS_Store
