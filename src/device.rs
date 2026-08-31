@@ -254,6 +254,17 @@ impl Adb {
         parse_sys_state(&String::from_utf8_lossy(&out))
     }
 
+    /// 剪贴板(best-effort): 新版Android常拒绝后台读,读不到如实返回None,不装
+    pub fn clipboard(&self) -> Option<String> {
+        let out = self.run_timeout(&["shell", "cmd", "clipboard", "get-primary-clip"], 3000);
+        let s = String::from_utf8_lossy(&out).trim().to_string();
+        if s.is_empty() || s.contains("Exception") || s.contains("denied") || s.contains("Error") {
+            None
+        } else {
+            Some(s.chars().take(80).collect())
+        }
+    }
+
     /// 可启动应用清单 (包名, 启动组件)。桌面/抽屉里能看到的应用即在此列。
     pub fn launchable_apps(&self) -> Vec<(String, String)> {
         let out = self.run_timeout(

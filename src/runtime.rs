@@ -176,6 +176,11 @@ fn act_sig(a: &ActN) -> String {
             Some(w) => format!("tap[{}]", tcut(w, 12)),
             None => format!("tap({},{})", a.x.unwrap_or(-1) / 50, a.y.unwrap_or(-1) / 50),
         },
+        // 探针认"问了什么": 同一问题反复问与反复点同一按钮同罪,进打摆账
+        "inspect" | "find" | "history" => match a.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => format!("{}[{}]", a.a, tcut(t, 12)),
+            None => format!("{}({},{})", a.a, a.x.unwrap_or(-1) / 50, a.y.unwrap_or(-1) / 50),
+        },
         other => other.to_string(),
     }
 }
@@ -536,6 +541,11 @@ fn act_line(n: u32, a: &ActN) -> String {
         "type" => format!("act#{n} type({})", tcut(a.text.as_deref().unwrap_or(""), 20)),
         "launch" => format!("act#{n} launch({})", tcut(a.text.as_deref().unwrap_or(""), 40)),
         "goto" => format!("act#{n} goto({})", tcut(a.text.as_deref().unwrap_or(""), 16)),
+        "inspect" | "find" | "history" => format!(
+            "act#{n} {}({})", a.a,
+            a.text.as_deref().map(|t| tcut(t, 12))
+                .unwrap_or_else(|| format!("{},{}", a.x.unwrap_or(-1), a.y.unwrap_or(-1)))
+        ),
         o => format!("act#{n} {o}"),
     }
 }
@@ -564,10 +574,108 @@ fn assert_hits(cap: &Cap, asserts: &[String]) -> Vec<String> {
     }
 }
 
+/// 探针应答(v0.6 Step 3): 四个只读查询,不动屏幕不重采,纯函数供单测。
+/// inspect=展开子树(命中叶子上溯至有内容容器) find=全量层全屏搜索 get_state=系统状态 history=里程碑展开。
+/// 假树/OCR帧没有可信全量层,如实拒答——探针不说谎。
+fn probe_answer(a: &ActN, cap: &Cap, runs: &[PageRun], clip: Option<String>, realw: i32, realh: i32) -> String {
+    if a.a == "get_state" {
+        let ime = match cap.ime { Some(true) => "弹起", Some(false) => "收起", None => "未知" };
+        return format!("activity={} 键盘={} 剪贴板={} 前台={}",
+            if cap.activity.is_empty() { "未知" } else { &cap.activity }, ime,
+            clip.map(|c| format!("\"{}\"", tcut(&c, 60))).unwrap_or_else(|| "空/不可读".into()),
+            if cap.pkg.is_empty() { "未知" } else { &cap.pkg });
+    }
+    if a.a == "history" {
+        let q = a.text.as_deref().unwrap_or("").trim();
+        let pnum = q.trim_start_matches('P').parse::<i64>().ok();
+        // 旧页段里找(当前页本就全量展开不重复);同页多段取最近一段
+        let hit = runs.iter().enumerate().rev().skip(1).find(|(_, r)| match pnum {
+            Some(id) => r.key.1 == id,
+            None => !q.is_empty() && r.label.contains(q),
+        });
+        return match hit {
+            Some((i, r)) => {
+                let mut s = format!("[里程碑{}] {} 逐步细节:\n", i + 1, r.label);
+                for (al, d) in r.lines.iter().take(15) { s.push_str(&format!("{al} → {d}\n")); }
+                if r.lines.len() > 15 { s.push_str(&format!("(另有{}步)", r.lines.len() - 15)); }
+                s
+            }
+            None => {
+                let labels: Vec<&str> = runs.iter().rev().skip(1).take(8).map(|r| r.label.as_str()).collect();
+                format!("无匹配里程碑'{}';可查: {}", tcut(q, 10),
+                    if labels.is_empty() { "无(本局尚未换过页)".into() } else { labels.join(",") })
+            }
+        };
+    }
+    // inspect / find 需要可信全量层
+    if cap.suspect { return "元素树本步不可信(假树),探针无数据;只按截图判断".into(); }
+    if cap.full.is_empty() { return "本屏无UI树(OCR/空树帧),探针无数据".into(); }
+    if a.a == "find" {
+        let q = a.text.as_deref().unwrap_or("").trim();
+        let all: Vec<&FullNode> = cap.full.iter().filter(|f| !f.t.is_empty() && f.t.contains(q)).collect();
+        if all.is_empty() {
+            return format!("当前屏未找到'{}';可scroll后再找,或目标在别页", tcut(q, 12));
+        }
+        let hits: Vec<String> = all.iter().take(6).map(|f| {
+            let bn = b_norm(f.b, cap, realw, realh);
+            format!("\"{}\" [{},{},{},{}]{}", tcut(&f.t, 30), bn[0], bn[1], bn[2], bn[3],
+                if f.clickable { "(可点)" } else { "" })
+        }).collect();
+        return format!("'{}'命中{}处: {}", tcut(q, 12), all.len(), hits.join(" ; "));
+    }
+    // inspect: 定位目标(id/文字/坐标) → 子树文字与图标行全展开(含折叠内)
+    let (kids, _) = crate::fold::tree_of(&cap.full);
+    let mut parent = vec![usize::MAX; cap.full.len()];
+    for (p, ks) in kids.iter().enumerate() { for &k in ks { parent[k] = p; } }
+    let found = if let Some(q) = a.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        cap.full.iter().position(|f| f.id.as_deref().is_some_and(|i| i == q || i.ends_with(q)))
+            .or_else(|| cap.full.iter().position(|f| !f.t.is_empty() && f.t.contains(q)))
+    } else {
+        let dx = (a.x.unwrap_or(0) * realw as i64 / NORM) as i32;
+        let dy = (a.y.unwrap_or(0) * realh as i64 / NORM) as i32;
+        cap.full.iter().enumerate()
+            .filter(|(_, f)| f.b[0] <= dx && dx <= f.b[2] && f.b[1] <= dy && dy <= f.b[3])
+            .min_by_key(|(_, f)| (f.b[2] - f.b[0]) as i64 * (f.b[3] - f.b[1]) as i64)
+            .map(|(i, _)| i)
+    };
+    let Some(mut ti) = found else {
+        return format!("inspect目标'{}'不在当前屏", tcut(a.text.as_deref().unwrap_or("(该坐标)"), 12));
+    };
+    // 子树=文档序连续段(i..j while depth>d);命中叶子(折叠头行文字)时上溯至有内容的容器
+    let sub_end = |i: usize| {
+        let d = cap.full[i].depth;
+        let mut j = i + 1;
+        while j < cap.full.len() && cap.full[j].depth > d { j += 1; }
+        j
+    };
+    for _ in 0..2 {
+        let texts = cap.full[ti..sub_end(ti)].iter().filter(|f| !f.t.is_empty()).count();
+        if texts >= 3 || parent[ti] == usize::MAX { break; }
+        ti = parent[ti];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for f in &cap.full[ti..sub_end(ti)] {
+        if f.t.is_empty() && !(f.clickable && f.id.is_some()) { continue; }
+        let bn = b_norm(f.b, cap, realw, realh);
+        let mut marks = String::new();
+        if f.clickable { marks.push_str("可点"); }
+        if f.checkable { marks.push_str(if f.checked { " 已开" } else { " 已关" }); }
+        let name = if f.t.is_empty() { format!("[icon {}]", f.id.as_deref().unwrap_or("?")) }
+                   else { tcut(&f.t, 40) };
+        lines.push(format!("{name} [{},{},{},{}]{}", bn[0], bn[1], bn[2], bn[3],
+            if marks.is_empty() { String::new() } else { format!("({marks})") }));
+    }
+    let total = lines.len();
+    lines.truncate(22);
+    let mut s = format!("inspect展开({}条):\n{}", total, lines.join("\n"));
+    if total > 22 { s.push_str(&format!("\n(另有{}条)", total - 22)); }
+    s
+}
+
 /// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 里程碑+当前页act/diff + ban + note + 小地图 + 前台应用 + 屏幕
 /// 静态段(goal/经验/apps)在前,动态段在后,保住能保的提示词缓存前缀。
 fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str, budget_line: &str,
-              map_line: &str, assert_line: &str, alert: &str, runs: &[PageRun], bans: &[Ban],
+              map_line: &str, assert_line: &str, alert: &str, probe_line: &str, runs: &[PageRun], bans: &[Ban],
               note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
     let mut s = format!("goal: {goal}\n");
     if !assert_line.is_empty() {
@@ -575,6 +683,10 @@ fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str
     }
     if !alert.is_empty() {
         s.push_str(&format!("⚠ {alert}\n"));
+    }
+    // 探针应答: 一次性注入(仅本轮可见),要留存的事实模型自己写note
+    if !probe_line.is_empty() {
+        s.push_str(&format!("probe应答(你上一步的探针查询,仅本轮可见):\n{probe_line}\n"));
     }
     for l in glessons {
         s.push_str(&format!("lesson(通用): {}\n", l["t"].as_str().unwrap_or("")));
@@ -697,7 +809,7 @@ fn parse_plan(text: &str, plan_max: usize) -> (Vec<ActN>, Option<String>) {
             continue;
         }
         let is_done = name == "done";
-        acts.push(ActN {
+        let mut act = ActN {
             a: name,
             x: num(&o["x"]),
             y: num(&o["y"]),
@@ -705,7 +817,12 @@ fn parse_plan(text: &str, plan_max: usize) -> (Vec<ActN>, Option<String>) {
             y2: num(&o["y2"]),
             text: o["text"].as_str().map(String::from),
             what: o["what"].as_str().map(String::from),
-        });
+        };
+        // 探针别名参数: inspect 的 id / history 的 page 都归到 text
+        if act.text.is_none() {
+            act.text = o["id"].as_str().or_else(|| o["page"].as_str()).map(String::from);
+        }
+        acts.push(act);
         if is_done || acts.len() >= plan_max { break; }
     }
     // 契约容错(#19, 局35原文实录): 模型判断对了但违约格式——裸"done"与 {"r":"done",...}
@@ -732,9 +849,16 @@ fn parse_plan(text: &str, plan_max: usize) -> (Vec<ActN>, Option<String>) {
         if let Some(gi) = acts.iter().position(|a| a.a == "goto") {
             acts.truncate(gi + 1);
         }
+        // 探针同理只能收尾: 结果到下一轮决策才可见,排在其后的动作全是盲动
+        if let Some(pi) = acts.iter().position(|a| PROBES.contains(&a.a.as_str())) {
+            acts.truncate(pi + 1);
+        }
     }
     (acts, note)
 }
+
+/// 探针动作集(v0.6 Step 3): 只读查询,不动屏幕,不重采画面
+const PROBES: [&str; 4] = ["inspect", "find", "get_state", "history"];
 
 /// ③ 决策调用: 返回按序计划(1~plan_max个act,done截断) + note。换人重问最多3家。
 /// 每次真实回包原文先落账再解析——解析不动的违约样本恰是最该留档的。
@@ -765,7 +889,8 @@ fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str, log: &mut L
 /// 未点名但落点在某元素框内 → 也吸附中心(修手偏,零成本)。清单不可信(假树)时不吸附。
 fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32, String)>, cfg: &Config, tmp: &str,
         apps: &[(String, String)], realw: i32, realh: i32) -> Option<String> {
-    let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "back", "home", "launch", "goto", "wait", "done"];
+    let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "back", "home", "launch", "goto", "wait", "done",
+                 "inspect", "find", "get_state", "history"];
     if !known.contains(&a.a.as_str()) {
         return Some(format!("未知动作:{}", tcut(&a.a, 12)));
     }
@@ -862,6 +987,20 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32, String
                 return Some("goto缺text(目标页号如P5,取自map行)".into());
             }
         }
+        "inspect" => {
+            // 寻址二选一: id/文字(text) 或 坐标。坐标保持0~999屏幕空间,探针不转像素
+            if a.text.as_deref().map(str::trim).filter(|t| !t.is_empty()).is_none() {
+                match (chk(a.x, "x"), chk(a.y, "y")) {
+                    (Ok(x), Ok(y)) => { a.x = Some(x); a.y = Some(y); }
+                    (Err(e), _) | (_, Err(e)) => return Some(format!("inspect需text(卡片头行文字或id)或坐标: {e}")),
+                }
+            }
+        }
+        "find" | "history" => {
+            if a.text.as_deref().unwrap_or("").trim().is_empty() {
+                return Some(format!("{}缺text", a.a));
+            }
+        }
         "launch" => {
             let t = a.text.as_deref().unwrap_or("").trim().to_string();
             if t.is_empty() {
@@ -891,6 +1030,7 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32, String
     match a.a.as_str() {
         "tap" => { a.x2 = None; a.y2 = None; }
         "swipe" => {}
+        "inspect" => { a.x2 = None; a.y2 = None; } // 坐标寻址时保留(0~999)
         _ => { a.x = None; a.y = None; a.x2 = None; a.y2 = None; }
     }
     None
@@ -1194,6 +1334,8 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut osc_fire_at = 4usize;   // 打摆: 签名窗达此长度才(再)触发
     let mut alert = String::new();  // 打摆警报(注入下一次决策,用过即清)
     let mut assert_hit_prev = false; // 验收词命中上升沿(只在新命中时记账,避免每步刷屏)
+    let mut probe_streak = 0u32;    // 探针连击计数(上限3防空转,任一物理动作清零)
+    let mut probe_ans = String::new(); // 探针应答(注入下一次决策,用过即清)
 
     // ── 计划队列 ──
     let mut queue: VecDeque<ActN> = VecDeque::new();
@@ -1306,7 +1448,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             } else {
                 format!("进度: 第{n}/{}步", cfg.max_steps)
             };
-            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &budget_line, &map_line, &assert_line, &alert, &runs, &bans, &note, &cap, realw, realh);
+            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &budget_line, &map_line, &assert_line, &alert, &probe_ans, &runs, &bans, &note, &cap, realw, realh);
             ctx_bytes += user.len() as u64;
             ctx_calls += 1;
             // 模型视角存档: 这次决策发给模型的完整上下文(含警报/沙盘/清单/便签)
@@ -1321,6 +1463,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     plan_ms = Some(ms);
                     pending_note = note_new;
                     alert.clear(); // 警报已送达本次决策,清掉避免重复轰炸
+                    probe_ans.clear(); // 探针应答同为一次性投递
                 }
                 Err(e) if e == "内容过滤" && escapes_left > 0 => {
                     // 画面被安全审核拒绝(确定性): 不等模型,盲滑一步离开,重新采集再决策
@@ -1392,6 +1535,44 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         }
         reject_streak = 0; // 过门即清零
 
+        // 🔍 探针(v0.6 Step 3): 只读查询,不动屏幕不重采,答案注入下一轮决策。
+        // 连续上限3次防空转——探针替代的是乱撞,不是行动;探针签名照进打摆账。
+        if PROBES.contains(&act.a.as_str()) {
+            probe_streak += 1;
+            if probe_streak > 3 {
+                log_act(&mut log, n, &act, &plan_by, ms_field);
+                let d = "rejected(连续探针达3次上限:先基于已获信息行动)".to_string();
+                log.put(json!({"r":"diff","n":n,"d":d}));
+                println!("[{n}] {ms_disp} {plan_by} | {aline} ⛔ {d}");
+                run_push(&mut runs, aline.clone(), d.clone());
+                diffs_all.push(d.clone());
+                stream.push(format!("{aline} → {d}"));
+                stall += 1;
+                if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
+                continue;
+            }
+            let clip = if act.a == "get_state" { phone.clipboard() } else { None };
+            let ans = tcut(&probe_answer(&act, &cap, &runs, clip, realw, realh), 1200);
+            log_act(&mut log, n, &act, &plan_by, ms_field);
+            log.put(json!({"r":"probe","n":n,"a":act.a,"q":act.text,"ans":ans}));
+            println!("[{n}] {ms_disp} {plan_by} | {aline} → probe✓({}字)", ans.chars().count());
+            run_push(&mut runs, aline.clone(), format!("probe✓({})", tcut(&ans.replace('\n', " "), 24)));
+            diffs_all.push(format!("probe({})", act.a));
+            stream.push(format!("{aline} → probe: {}", tcut(&ans.replace('\n', " "), 80)));
+            if osc_note(&mut act_sigs, act_sig(&act), &mut osc_fire_at) {
+                alert = OSCILL_WARN.to_string();
+                log.put(json!({"r":"hook","kind":"oscill","at":"probe"}));
+                println!("      ⚠ 打摆检测命中(探针),警报已注入");
+            }
+            probe_ans = format!("{aline} → {ans}");
+            if let Some(t) = pending_note.take() {
+                let t = tcut(&t, cfg.note_max_chars);
+                log.put(json!({"r":"note","t":t}));
+                note = t;
+            }
+            continue; // 画面没动: 同一cap直接进下一轮,不重采
+        }
+
         // 🧭 goto: 沿熟路零模型调用直达。计划里 goto 已被截为最后一步;
         // 走完/走断都把画面交还模型重新决策(网是参考不是权威)。
         if act.a == "goto" {
@@ -1427,6 +1608,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             } else {
                 println!("      🧭 goto P{to}: {}段熟路,零模型调用", hops.len());
             }
+            probe_streak = 0; // 物理导航,探针连击清零
             let mut ms_left = ms_field; // goto那次模型调用的耗时记在首段上
             let mut walked_all = true;
             for hop in &hops {
@@ -1521,6 +1703,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
         exec(&phone, &act, &cap, realw, realh, &apps);
+        probe_streak = 0; // 物理动作落地,探针连击清零
         if act.a == "tap" {
             taps_hist.push_back((act.x.unwrap_or(0) as i32, act.y.unwrap_or(0) as i32, act_sig(&act)));
             while taps_hist.len() > 4 { taps_hist.pop_front(); }
@@ -2108,6 +2291,74 @@ mod tests {
         let hit = find_el(&c, "广告设置入口", 500, 500, 1080, 2340);
         assert!(hit.is_some(), "40字截断之外的文字应可点名吸附");
         assert_eq!(hit.unwrap().0, long.trim());
+    }
+
+    #[test]
+    fn plan_probe_alias_and_tail_truncation() {
+        // 探针别名参数(id/page→text);探针后的计划作废(答案下一轮才可见)
+        let (a, _) = parse_plan(r#"{"r":"act","a":"inspect","id":"news_list"}"#, 4);
+        assert_eq!((a.len(), a[0].a.as_str(), a[0].text.as_deref()), (1, "inspect", Some("news_list")));
+        let (b, _) = parse_plan(
+            "{\"r\":\"act\",\"a\":\"find\",\"text\":\"注销\"}\n{\"r\":\"act\",\"a\":\"tap\",\"x\":1,\"y\":2}", 4);
+        assert_eq!((b.len(), b[0].a.as_str()), (1, "find"), "探针后计划作废");
+        let (c, _) = parse_plan(r#"{"r":"act","a":"history","page":"P2"}"#, 4);
+        assert_eq!(c[0].text.as_deref(), Some("P2"));
+    }
+
+    #[test]
+    fn probe_gate_validation() {
+        // get_state 无参放行;inspect 无寻址驳回;探针坐标保持0~999不转像素
+        let mut ok = ActN { a: "get_state".into(), ..Default::default() };
+        assert!(gate(&mut ok, &cap(), &[], &VecDeque::new(), &cfg(), "/tmp/pf-test", &[], 1080, 2340).is_none());
+        let mut bad = ActN { a: "inspect".into(), ..Default::default() };
+        assert!(gate(&mut bad, &cap(), &[], &VecDeque::new(), &cfg(), "/tmp/pf-test", &[], 1080, 2340).is_some());
+        let mut co = ActN { a: "inspect".into(), x: Some(500), y: Some(300), ..Default::default() };
+        assert!(gate(&mut co, &cap(), &[], &VecDeque::new(), &cfg(), "/tmp/pf-test", &[], 1080, 2340).is_none());
+        assert_eq!((co.x, co.y), (Some(500), Some(300)));
+    }
+
+    #[test]
+    fn probe_inspect_expands_folded_card() {
+        // 折叠头行文字寻址 → 上溯容器 → 折缝内文字与图标全展开;id寻址同样可用
+        let xml = r#"<?xml version='1.0'?><hierarchy>
+<node text="" class="c.Wrap" package="t.app" bounds="[0,100][1080,600]">
+<node text="标题大文字" class="c.T" package="t.app" bounds="[10,110][1000,200]"/>
+<node text="小雅" class="c.T" package="t.app" bounds="[10,210][200,260]"/>
+<node text="328赞" class="c.T" package="t.app" bounds="[210,210][400,260]"/>
+<node text="" resource-id="t.app:id/more" class="c.I" package="t.app" bounds="[900,210][1000,260]" clickable="true"/>
+</node></hierarchy>"#;
+        let (els, full, _) = crate::device::parse_dump(xml);
+        let mut c = cap();
+        c.els = els; c.full = full;
+        let a = ActN { a: "inspect".into(), text: Some("标题大文字".into()), ..Default::default() };
+        let ans = probe_answer(&a, &c, &[], None, 1080, 2340);
+        for w in ["小雅", "328赞", "icon id/more"] {
+            assert!(ans.contains(w), "inspect应展开'{w}': {ans}");
+        }
+        let b = ActN { a: "inspect".into(), text: Some("id/more".into()), ..Default::default() };
+        assert!(probe_answer(&b, &c, &[], None, 1080, 2340).contains("小雅"), "id寻址(叶子)也应上溯展开");
+    }
+
+    #[test]
+    fn probe_find_beyond_els_and_history() {
+        // find 在全量层搜索: 40字截断之外照样命中;history 按页号展开旧里程碑
+        let long = format!("{}账号注销入口", "占".repeat(45));
+        let mut c = cap();
+        c.full = vec![fnode(&long)];
+        let a = ActN { a: "find".into(), text: Some("注销".into()), ..Default::default() };
+        assert!(probe_answer(&a, &c, &[], None, 1080, 2340).contains("命中1处"));
+        let miss = ActN { a: "find".into(), text: Some("乌有词".into()), ..Default::default() };
+        assert!(probe_answer(&miss, &c, &[], None, 1080, 2340).contains("未找到"));
+        let runs = vec![
+            PageRun { key: ("com.a.Main".into(), 2), label: "P2[设置]".into(),
+                      lines: vec![("act#3 tap(1,2)[设置]".into(), "+[通用]".into())] },
+            PageRun { key: ("com.a.Main".into(), 5), label: "P5[通用]".into(), lines: vec![] },
+        ];
+        let h = ActN { a: "history".into(), text: Some("P2".into()), ..Default::default() };
+        let ans = probe_answer(&h, &cap(), &runs, None, 1080, 2340);
+        assert!(ans.contains("act#3") && ans.contains("+[通用]"), "{ans}");
+        let h9 = ActN { a: "history".into(), text: Some("P9".into()), ..Default::default() };
+        assert!(probe_answer(&h9, &cap(), &runs, None, 1080, 2340).contains("无匹配"));
     }
 
     #[test]

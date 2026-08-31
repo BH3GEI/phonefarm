@@ -1,0 +1,3 @@
+{"v":1}
+{"born":1,"id":1,"lose":0,"r":"lesson","t":"必须实际调用note动作把probe(inspect)看到的作者名或互动数据写入note，不能只在done的text里声称已记入；note和done是两个独立动作，都要执行","win":0}
+{"born":1,"id":2,"lose":0,"r":"lesson","t":"inspect探针用法：text填卡片头行文字（不带▸和折字样），probe应答会展开显示折叠内容；若应答只有话题标题而无作者名或互动数据，就如实写明未见这些数据","win":0}

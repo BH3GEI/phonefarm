@@ -117,10 +117,9 @@ fn emit(i: usize, full: &[FullNode], kids: &[Vec<usize>], out: &mut Vec<Line>) {
     }
 }
 
-/// 折叠主入口: full 为文档序+depth 的扁平全量层(device::parse_dump 产物)。
-pub fn fold(full: &[FullNode]) -> Vec<Line> {
-    if full.is_empty() { return vec![]; }
-    // 建树: parent = 最近的更浅前驱(文档序 + 深度栈)
+/// 树重建(折叠与inspect探针共用): parent = 最近的更浅前驱(文档序 + 深度栈)。
+/// 返回 (每节点的子索引表, 根索引表)。
+pub fn tree_of(full: &[FullNode]) -> (Vec<Vec<usize>>, Vec<usize>) {
     let mut kids: Vec<Vec<usize>> = vec![Vec::new(); full.len()];
     let mut roots: Vec<usize> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
@@ -132,6 +131,13 @@ pub fn fold(full: &[FullNode]) -> Vec<Line> {
         }
         stack.push(i);
     }
+    (kids, roots)
+}
+
+/// 折叠主入口: full 为文档序+depth 的扁平全量层(device::parse_dump 产物)。
+pub fn fold(full: &[FullNode]) -> Vec<Line> {
+    if full.is_empty() { return vec![]; }
+    let (kids, roots) = tree_of(full);
     let mut out = Vec::new();
     for &r in &roots { emit(r, full, &kids, &mut out); }
     out
