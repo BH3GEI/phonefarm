@@ -1,3 +1,4 @@
 round	run_id	exit	achieved	stop	steps	calls	tokens	wall_s
 1	20260831-085642	1	false	watchdog	21	21	78273	428
 2	20260831-090400	1	false	done	44	41	186925	854
+1	20260831-095300	1	false	done	51	52	230875	901
