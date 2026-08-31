@@ -680,6 +680,62 @@ fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str
     s
 }
 
+/// 模型回复原文 → (计划acts, note)。纯函数,单测钉契约。
+/// note 两种来法都收: 正常的 r=note,以及把便签误当动作发的 r=act,a=note(契约口子,不判死)。
+fn parse_plan(text: &str, plan_max: usize) -> (Vec<ActN>, Option<String>) {
+    let objs = extract_objs(text);
+    let mut acts: Vec<ActN> = Vec::new();
+    let mut note = objs.iter().find(|o| o["r"] == "note")
+        .and_then(|o| o["t"].as_str()).map(String::from);
+    for o in &objs {
+        if o["r"] != "act" { continue; }
+        let name = o["a"].as_str().unwrap_or("").to_string();
+        if name.is_empty() { continue; }
+        if name == "note" {
+            let t = o["t"].as_str().or_else(|| o["text"].as_str()).map(String::from);
+            if t.is_some() && note.is_none() { note = t; }
+            continue;
+        }
+        let is_done = name == "done";
+        acts.push(ActN {
+            a: name,
+            x: num(&o["x"]),
+            y: num(&o["y"]),
+            x2: num(&o["x2"]),
+            y2: num(&o["y2"]),
+            text: o["text"].as_str().map(String::from),
+            what: o["what"].as_str().map(String::from),
+        });
+        if is_done || acts.len() >= plan_max { break; }
+    }
+    // 契约容错(#19, 局35原文实录): 模型判断对了但违约格式——裸"done"与 {"r":"done",...}
+    // 两种实测形态收编为合法done(与"便签误当动作"同一先例,白烧过2次调用+40秒);
+    // 其余违约仍不收,换人重问的防线不动。
+    if acts.is_empty() {
+        if let Some(o) = objs.iter().find(|o| o["r"] == "done") {
+            acts.push(ActN {
+                a: "done".into(),
+                text: o["text"].as_str().or_else(|| o["t"].as_str()).map(String::from),
+                ..Default::default()
+            });
+        } else if objs.is_empty() && text.trim().eq_ignore_ascii_case("done") {
+            acts.push(ActN { a: "done".into(), text: Some("(裸done,契约容错)".into()), ..Default::default() });
+        }
+    }
+    if !acts.is_empty() {
+        // done 只能单发: 计划里 done 前面还有动作时,截到 done 之前——
+        // 前面的动作执行完画面会变,必须重新看过画面才能宣判(防 [back,done] 落在登录层)。
+        if let Some(di) = acts.iter().position(|a| a.a == "done") {
+            acts.truncate(if di == 0 { 1 } else { di });
+        }
+        // goto 只能是最后一步: 它会连跳几屏,排在后面的动作全成马后炮
+        if let Some(gi) = acts.iter().position(|a| a.a == "goto") {
+            acts.truncate(gi + 1);
+        }
+    }
+    (acts, note)
+}
+
 /// ③ 决策调用: 返回按序计划(1~plan_max个act,done截断) + note。换人重问最多3家。
 /// 每次真实回包原文先落账再解析——解析不动的违约样本恰是最该留档的。
 fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str, log: &mut Log, n: u32)
@@ -689,42 +745,8 @@ fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str, log: &mut L
     for attempt in 0..3 {
         let out = brain.call(sys, user, &[img], 500, attempt)?;
         log_raw(log, "step", n, &out.by, out.ms, &out.text, None);
-        let objs = extract_objs(&out.text);
-        let mut acts: Vec<ActN> = Vec::new();
-        // note 两种来法都收: 正常的 r=note,以及把便签误当动作发的 r=act,a=note(契约口子,不判死)
-        let mut note = objs.iter().find(|o| o["r"] == "note")
-            .and_then(|o| o["t"].as_str()).map(String::from);
-        for o in &objs {
-            if o["r"] != "act" { continue; }
-            let name = o["a"].as_str().unwrap_or("").to_string();
-            if name.is_empty() { continue; }
-            if name == "note" {
-                let t = o["t"].as_str().or_else(|| o["text"].as_str()).map(String::from);
-                if t.is_some() && note.is_none() { note = t; }
-                continue;
-            }
-            let is_done = name == "done";
-            acts.push(ActN {
-                a: name,
-                x: num(&o["x"]),
-                y: num(&o["y"]),
-                x2: num(&o["x2"]),
-                y2: num(&o["y2"]),
-                text: o["text"].as_str().map(String::from),
-                what: o["what"].as_str().map(String::from),
-            });
-            if is_done || acts.len() >= cfg.plan_max { break; }
-        }
+        let (acts, note) = parse_plan(&out.text, cfg.plan_max);
         if !acts.is_empty() {
-            // done 只能单发: 计划里 done 前面还有动作时,截到 done 之前——
-            // 前面的动作执行完画面会变,必须重新看过画面才能宣判(防 [back,done] 落在登录层)。
-            if let Some(di) = acts.iter().position(|a| a.a == "done") {
-                acts.truncate(if di == 0 { 1 } else { di });
-            }
-            // goto 只能是最后一步: 它会连跳几屏,排在后面的动作全成马后炮
-            if let Some(gi) = acts.iter().position(|a| a.a == "goto") {
-                acts.truncate(gi + 1);
-            }
             return Ok((acts, note, out.by, out.ms));
         }
         if let Some(t) = note {
@@ -2014,6 +2036,29 @@ mod tests {
         // "广告"和"设置"分居两处,不得拼接成"广告设置"算命中
         assert!(assert_hits_texts(["广告", "设置"].iter().copied(),
                                   &vec!["广告设置".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn plan_tolerates_contract_violating_done() {
+        // #19(局35原文实录): 裸"done"与 {"r":"done"} 是模型判断正确但违约格式的两种真实形态
+        let (a1, _) = parse_plan("done", 4);
+        assert_eq!((a1.len(), a1[0].a.as_str()), (1, "done"), "裸done收编");
+        let (a2, _) = parse_plan(r#"{"r":"done","text":"验收词已实测命中"}"#, 4);
+        assert_eq!((a2.len(), a2[0].a.as_str()), (1, "done"));
+        assert_eq!(a2[0].text.as_deref(), Some("验收词已实测命中"), "理由字段一并收");
+        // 防线不松: 其他胡言仍不收;正常契约不受影响
+        assert!(parse_plan("我觉得任务完成了", 4).0.is_empty());
+        let (a3, _) = parse_plan(r#"{"r":"act","a":"tap","x":1,"y":2,"what":"设置"}"#, 4);
+        assert_eq!(a3[0].a, "tap");
+    }
+
+    #[test]
+    fn plan_done_single_and_goto_tail_preserved() {
+        // 既有截断契约在纯函数里原样保留: done单发、goto断尾
+        let (a, _) = parse_plan("{\"r\":\"act\",\"a\":\"back\"}\n{\"r\":\"act\",\"a\":\"done\"}", 4);
+        assert_eq!((a.len(), a[0].a.as_str()), (1, "back"), "done被截到重看画面之后");
+        let (g, _) = parse_plan("{\"r\":\"act\",\"a\":\"goto\",\"text\":\"P5\"}\n{\"r\":\"act\",\"a\":\"tap\",\"x\":1,\"y\":2}", 4);
+        assert_eq!((g.len(), g[0].a.as_str()), (1, "goto"), "goto后的计划作废");
     }
 
     #[test]
