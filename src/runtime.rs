@@ -21,6 +21,7 @@ struct Cap {
     seq: u32,
     els: Vec<Node>, // 设备像素空间
     full: Vec<FullNode>, // 全量属性层(无损,含无文字容器;OCR帧为空)
+    folded: Vec<crate::fold::Line>, // 折叠投影(纯函数f(full),采集时算一次;渲染/沙盘共用)
     img: String,    // jpg 绝对路径
     img_rel: String,
     xml_rel: String, // 原始XML落盘文件名(stepN.xml[.gz]);没dump到为空
@@ -34,6 +35,7 @@ struct Cap {
     els_pkg: String,  // 元素树的多数包名
     suspect: bool,    // 假树: 树包名≠前台包名且重抓无效 → 本步文字通道不可信
     ocr: bool,        // 本帧清单来自截图文字识别(UI树为空时的备胎)
+    webview: bool,    // 本页主体为WebView(框架类语义+占屏过半): 网页黑盒,原生树只见外框
 }
 
 #[derive(Clone, Default)]
@@ -52,6 +54,41 @@ struct Ban {
     y: i32,
     rad: i32,
     why: String,
+}
+
+/// 历史里程碑折叠(v0.6 Step 2): 本局按页面分段,旧页压成单行里程碑,当前页全量展开。
+/// 废除 window=5——上下文从 O(步数) 变 O(换页数),且当前页细节分毫不丢。
+struct PageRun {
+    key: (String, i64), // (activity, 身份证页id);未知分量为 ""/-1
+    label: String,      // 展示名: P{id}[{页名}] 或 activity 短名
+    lines: Vec<(String, String)>, // (act行, diff) —— 与旧window同一行格式
+}
+
+/// 换页判定: (activity, 页面身份证) 合取——任一【已知】分量变化即翻页。
+/// 未知分量(dumpsys偶发失败=空activity;不在网中=-1页)不触发,防假里程碑。
+/// activity 管跨Activity跳转(设置链实测区分度极好),身份证管单Activity内的页面切换(feed标签)。
+fn page_boundary(prev: &(String, i64), cur: &(String, i64)) -> bool {
+    let act = !prev.0.is_empty() && !cur.0.is_empty() && prev.0 != cur.0;
+    let page = prev.1 >= 0 && cur.1 >= 0 && prev.1 != cur.1;
+    act || page
+}
+
+fn run_label(activity: &str, pid: i64, pname: &str) -> String {
+    if pid >= 0 {
+        format!("P{}[{}]", pid, tcut(pname, 8))
+    } else if !activity.is_empty() {
+        activity.rsplit('.').next().unwrap_or(activity).to_string()
+    } else {
+        "?".into()
+    }
+}
+
+/// 行入账: 永远append到当前页段(驳回/盲移/goto断点都算当前页的经历)
+fn run_push(runs: &mut Vec<PageRun>, aline: String, d: String) {
+    if runs.is_empty() {
+        runs.push(PageRun { key: (String::new(), -1), label: "?".into(), lines: vec![] });
+    }
+    runs.last_mut().unwrap().lines.push((aline, d));
 }
 
 struct Log {
@@ -268,8 +305,15 @@ fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms
         }
     }
     let thumb = thumb_gray(&img, tmp, &format!("{}", seq % 2));
-    Some(Cap { seq, els, full, img, img_rel, xml_rel, w, h, thumb, noise,
-               pkg: fg, activity, ime, els_pkg, suspect, ocr })
+    // 折叠投影: 假树帧不折(全量层来自陈旧树,折出来的骨架是上个应用的)
+    let folded = if suspect { vec![] } else { crate::fold::fold(&full) };
+    // WebView主导页判定: 框架类名(含X5等子类)+占屏过半——网页内按钮对原生树是黑盒,
+    // H5活动页常拿JS拦back。类名是Android框架语义,非App特判。
+    let webview = full.iter().any(|f| f.class.contains("WebView")
+        && (f.b[2] - f.b[0]).max(0) as i64 * (f.b[3] - f.b[1]).max(0) as i64
+            >= realw as i64 * realh as i64 / 2);
+    Some(Cap { seq, els, full, folded, img, img_rel, xml_rel, w, h, thumb, noise,
+               pkg: fg, activity, ime, els_pkg, suspect, ocr, webview })
 }
 
 /// OCR文字备胎: UI树为空时调本机Vision(ocr二进制,由ocr.swift编译)识别截图文字。
@@ -310,56 +354,76 @@ fn to_norm(v: i32, span: i32) -> i64 {
     (v as i64 * NORM / span.max(1) as i64).clamp(0, NORM)
 }
 
-/// 元素框(设备px) → 图片px
-fn el_img_of(n: &Node, cap: &Cap, realw: i32, realh: i32) -> [i32; 4] {
-    el_img_space(n, cap, realw, realh)
+/// 坐标框(设备px) → 0~999 空间
+fn b_norm(b: [i32; 4], cap: &Cap, realw: i32, realh: i32) -> [i64; 4] {
+    let bi = b_img_space(b, cap, realw, realh);
+    [to_norm(bi[0], cap.w), to_norm(bi[1], cap.h), to_norm(bi[2], cap.w), to_norm(bi[3], cap.h)]
 }
 
-/// 元素框 → 0~999 空间
-fn el_norm(n: &Node, cap: &Cap, realw: i32, realh: i32) -> [i64; 4] {
-    let b = el_img_space(n, cap, realw, realh);
-    [to_norm(b[0], cap.w), to_norm(b[1], cap.h), to_norm(b[2], cap.w), to_norm(b[3], cap.h)]
+/// 吸附/点名/落点判定的锚点源: 全量层的文字节点(无70条/40字截断——折叠渲染出的
+/// 头行文字必须能吸附回其元素,否则模型看得见却点不着);OCR帧无全量层,用els(识别清单)。
+fn anchors(cap: &Cap) -> Vec<(&str, [i32; 4])> {
+    if cap.full.is_empty() {
+        cap.els.iter().map(|n| (n.t.as_str(), n.b)).collect()
+    } else {
+        cap.full.iter().filter(|f| !f.t.is_empty()).map(|f| (f.t.as_str(), f.b)).collect()
+    }
+}
+
+/// 沙盘候选源: 折叠后骨架的普通文字行——卡片内部噪音(点赞数/作者名)已收进折叠头,
+/// 天然不进沙盘(#18 根治);无折叠层(OCR帧)退回els清单,即v0.5现状。
+fn sandbox_texts(cap: &Cap) -> Vec<&str> {
+    if cap.folded.is_empty() {
+        cap.els.iter().map(|n| n.t.as_str()).collect()
+    } else {
+        cap.folded.iter()
+            .filter(|l| l.kind == crate::fold::Kind::Plain)
+            .map(|l| l.t.as_str())
+            .collect()
+    }
 }
 
 /// 按文字找元素: 精确等值优先,退而含串(≥2字)。
 /// 多个命中取离 (hx,hy)@0~999 最近者 —— 模型给的坐标是"哪一个同名元素"的线索。
-/// 返回 (元素, 图片px框)。
-fn find_el<'a>(els: &'a [Node], w: &str, hx: i64, hy: i64, cap: &Cap, realw: i32, realh: i32)
-    -> Option<(&'a Node, [i32; 4])>
+/// 返回 (元素文字, 图片px框)。
+fn find_el(cap: &Cap, w: &str, hx: i64, hy: i64, realw: i32, realh: i32)
+    -> Option<(String, [i32; 4])>
 {
+    let anc = anchors(cap);
     let wt = w.trim();
-    let mut pool: Vec<&Node> = els.iter().filter(|n| n.t.trim() == wt).collect();
+    let mut pool: Vec<&(&str, [i32; 4])> = anc.iter().filter(|(t, _)| t.trim() == wt).collect();
     if pool.is_empty() && wt.chars().count() >= 2 {
-        pool = els.iter().filter(|n| n.t.contains(wt)).collect();
+        pool = anc.iter().filter(|(t, _)| t.contains(wt)).collect();
     }
     pool.into_iter()
-        .min_by_key(|n| {
-            let b = el_norm(n, cap, realw, realh);
-            ((b[0] + b[2]) / 2 - hx).abs() + ((b[1] + b[3]) / 2 - hy).abs()
+        .min_by_key(|(_, b)| {
+            let bn = b_norm(*b, cap, realw, realh);
+            ((bn[0] + bn[2]) / 2 - hx).abs() + ((bn[1] + bn[3]) / 2 - hy).abs()
         })
-        .map(|n| (n, el_img_of(n, cap, realw, realh)))
+        .map(|(t, b)| (t.trim().to_string(), b_img_space(*b, cap, realw, realh)))
 }
 
-/// (x,y)@0~999 落在哪个元素框内 → 该框(图片px);取最小框(最内层元素)
-fn box_at(els: &[Node], x: i64, y: i64, cap: &Cap, realw: i32, realh: i32) -> Option<[i32; 4]> {
-    els.iter()
-        .filter(|n| {
-            let b = el_norm(n, cap, realw, realh);
-            x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]
+/// (x,y)@0~999 落在哪个文字元素框内 → 该框(图片px);取最小框(最内层元素)。
+/// 只认文字锚点(与旧els语义一致): 无字容器不参与,防止空白落点被吸去容器中心。
+fn box_at(cap: &Cap, x: i64, y: i64, realw: i32, realh: i32) -> Option<[i32; 4]> {
+    anchors(cap).into_iter()
+        .filter(|(_, b)| {
+            let bn = b_norm(*b, cap, realw, realh);
+            x >= bn[0] && x <= bn[2] && y >= bn[1] && y <= bn[3]
         })
-        .map(|n| (el_norm(n, cap, realw, realh), el_img_of(n, cap, realw, realh)))
+        .map(|(_, b)| (b_norm(b, cap, realw, realh), b_img_space(b, cap, realw, realh)))
         .min_by_key(|(bn, _)| (bn[2] - bn[0]) * (bn[3] - bn[1]))
         .map(|(_, bi)| bi)
 }
 
 /// 附近元素候选(驳回时给模型指路): 距 (x,y)@0~999 最近的3个 "文字(x,y)"
-fn nearby_els(els: &[Node], x: i64, y: i64, cap: &Cap, realw: i32, realh: i32) -> String {
-    let mut v: Vec<(i64, String)> = els
-        .iter()
-        .map(|n| {
-            let b = el_norm(n, cap, realw, realh);
-            let d = ((b[0] + b[2]) / 2 - x).abs() + ((b[1] + b[3]) / 2 - y).abs();
-            (d, format!("{}({},{})", tcut(n.t.trim(), 10), (b[0] + b[2]) / 2, (b[1] + b[3]) / 2))
+fn nearby_els(cap: &Cap, x: i64, y: i64, realw: i32, realh: i32) -> String {
+    let mut v: Vec<(i64, String)> = anchors(cap)
+        .into_iter()
+        .map(|(t, b)| {
+            let bn = b_norm(b, cap, realw, realh);
+            let d = ((bn[0] + bn[2]) / 2 - x).abs() + ((bn[1] + bn[3]) / 2 - y).abs();
+            (d, format!("{}({},{})", tcut(t.trim(), 10), (bn[0] + bn[2]) / 2, (bn[1] + bn[3]) / 2))
         })
         .collect();
     v.sort_by_key(|(d, _)| *d);
@@ -446,12 +510,12 @@ fn act_from_edge(e: &crate::tree::Edge, cap: &Cap, realw: i32, realh: i32) -> Op
         "回桌面" => Some(ActN { a: "home".into(), ..Default::default() }),
         label => {
             let t = Tree::tap_text(label)?;
-            let (node, bi) = find_el(&cap.els, t, 500, 500, cap, realw, realh)?;
+            let (txt, bi) = find_el(cap, t, 500, 500, realw, realh)?;
             Some(ActN {
                 a: "tap".into(),
                 x: Some(((bi[0] + bi[2]) / 2) as i64),
                 y: Some(((bi[1] + bi[3]) / 2) as i64),
-                what: Some(node.t.trim().to_string()),
+                what: Some(txt),
                 ..Default::default()
             })
         }
@@ -500,10 +564,10 @@ fn assert_hits(cap: &Cap, asserts: &[String]) -> Vec<String> {
     }
 }
 
-/// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 最近act/diff窗 + ban + note + 小地图 + 前台应用 + 屏幕
+/// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 里程碑+当前页act/diff + ban + note + 小地图 + 前台应用 + 屏幕
 /// 静态段(goal/经验/apps)在前,动态段在后,保住能保的提示词缓存前缀。
-fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str,
-              map_line: &str, assert_line: &str, alert: &str, window: &[(String, String)], bans: &[Ban],
+fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str, budget_line: &str,
+              map_line: &str, assert_line: &str, alert: &str, runs: &[PageRun], bans: &[Ban],
               note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
     let mut s = format!("goal: {goal}\n");
     if !assert_line.is_empty() {
@@ -527,8 +591,25 @@ fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str
     if !apps_line.is_empty() {
         s.push_str(&format!("apps(可launch的包名): {apps_line}\n"));
     }
-    for (a, d) in window {
-        s.push_str(&format!("{a} → diff: {d}\n"));
+    // 预算事实(局38教训: 模型被要求管理预算却看不见预算,烧穿也不知道收尾)
+    if !budget_line.is_empty() {
+        s.push_str(&format!("{budget_line}\n"));
+    }
+    // 历史: 旧页折成单行里程碑,当前页全量展开(含驳回行)
+    for (i, r) in runs.iter().enumerate() {
+        if i + 1 == runs.len() {
+            if runs.len() > 1 && !r.lines.is_empty() {
+                s.push_str(&format!("当前页{}:\n", r.label));
+            }
+            for (a, d) in &r.lines {
+                s.push_str(&format!("{a} → diff: {d}\n"));
+            }
+        } else if let Some((last, _)) = r.lines.last() {
+            s.push_str(&format!(
+                "[里程碑{}] {} ×{}步 → {}\n",
+                i + 1, r.label, r.lines.len(), tcut(last, 30)
+            ));
+        }
     }
     for b in bans.iter().rev().take(8) {
         s.push_str(&format!(
@@ -556,11 +637,28 @@ fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str
         s.push_str(&format!("app: {}{desk}\n", cap.pkg));
     }
     s.push_str("screen:\n");
+    if cap.webview && !cap.suspect {
+        s.push_str("(本页主体为WebView网页: 网页内按钮不在原生清单里,点图标/关闭用what:\"icon:描述\"按截图坐标直点;back可能被网页JS拦截,连续back无效时程序会自动升级为快速连按两次)\n");
+    }
     if cap.suspect {
         s.push_str(&format!(
             "(元素列表不可信:树来自{}而前台是{},本步只看截图判断)\n",
             cap.els_pkg, cap.pkg
         ));
+    } else if !cap.folded.is_empty() {
+        // 折叠投影: 骨架/简单项全展开,复合重复项收成头行,折缝有账(折N条M字)
+        for l in cap.folded.iter().take(60) {
+            let bi = b_img_space(l.b, cap, realw, realh);
+            s.push_str(&format!(
+                "{} [{},{},{},{}]\n",
+                l.t,
+                to_norm(bi[0], cap.w), to_norm(bi[1], cap.h),
+                to_norm(bi[2], cap.w), to_norm(bi[3], cap.h)
+            ));
+        }
+        if cap.folded.len() > 60 {
+            s.push_str(&format!("(另有{}行未显示)\n", cap.folded.len() - 60));
+        }
     } else {
         if cap.ocr {
             s.push_str("(元素列表来自截图文字识别OCR:坐标即屏幕文字位置;无文字的图标/图片按钮仍只能按截图定位)\n");
@@ -643,7 +741,7 @@ fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str, log: &mut L
 /// ④ 确定性门(值域/点名吸附/前科/连点/空白/launch目标)。通过返回 None, 驳回返回原因。坐标就地转成图片像素。
 /// 点名制: tap 附 what=元素文字 → 吸附到该元素(清单)的准确中心;找不到则驳回并附附近候选。
 /// 未点名但落点在某元素框内 → 也吸附中心(修手偏,零成本)。清单不可信(假树)时不吸附。
-fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg: &Config, tmp: &str,
+fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32, String)>, cfg: &Config, tmp: &str,
         apps: &[(String, String)], realw: i32, realh: i32) -> Option<String> {
     let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "back", "home", "launch", "goto", "wait", "done"];
     if !known.contains(&a.a.as_str()) {
@@ -670,7 +768,7 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg:
                 // 纯图标按钮(×/齿轮/返回箭头等无文字控件): 清单和OCR都没有它的文字,
                 // 跳过吸附按模型视觉坐标直点;坐标合法性/前科/连点/空白死角检查照常
             } else if let Some(w) = a.what.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
-                match find_el(&cap.els, w, x, y, cap, realw, realh) {
+                match find_el(cap, w, x, y, realw, realh) {
                     Some((_, bi)) => {
                         xi = (bi[0] + bi[2]) / 2;
                         yi = (bi[1] + bi[3]) / 2;
@@ -679,24 +777,29 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg:
                         return Some(format!(
                             "点名'{}'不在screen清单;附近元素: {}",
                             tcut(w, 12),
-                            nearby_els(&cap.els, x, y, cap, realw, realh)
+                            nearby_els(cap, x, y, realw, realh)
                         ));
                     }
                 }
-            } else if let Some(bi) = box_at(&cap.els, x, y, cap, realw, realh) {
+            } else if let Some(bi) = box_at(cap, x, y, realw, realh) {
                 xi = (bi[0] + bi[2]) / 2;
                 yi = (bi[1] + bi[3]) / 2;
             }
             if let Some(b) = bans.iter().find(|b| (b.x - xi).abs() < b.rad && (b.y - yi).abs() < b.rad) {
                 return Some(format!("前科:距ban({},{})不足{}px", to_norm(b.x, cap.w), to_norm(b.y, cap.h), b.rad));
             }
-            // 同点连点: 前两个已执行动作都是tap且都落在同一点 → 这将是第3次,直接驳回。
-            // 证据: 2048抖动、"我的"登录振荡、(70,88)直播页连点,三次同型。
-            let near = |p: &(i32, i32)| (p.0 - xi).abs() < cfg.ban_radius && (p.1 - yi).abs() < cfg.ban_radius;
+            // 同点连点认身份不认裸坐标(局40教训: 频道栏自动居中,连点"财经→军事→国际"
+            // 三个不同按钮物理落点相同且每次真实切页——同点不是罪,同一目标同点三连才是)。
+            // 2048抖动/登录振荡/直播页连点仍被拦: 它们要么同名,要么无名同坐标桶。
+            let sig_now = match a.what.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+                Some(w) => format!("tap[{}]", tcut(w, 12)),
+                None => format!("tap({},{})", xi as i64 / 50, yi as i64 / 50),
+            };
+            let near = |p: &(i32, i32, String)| (p.0 - xi).abs() < cfg.ban_radius && (p.1 - yi).abs() < cfg.ban_radius;
             let mut rev = taps.iter().rev();
             if let (Some(p1), Some(p2)) = (rev.next(), rev.next()) {
-                if near(p1) && near(p2) {
-                    return Some("同点连点3次:换个目标,或用back/scroll_down离开当前位置".into());
+                if near(p1) && near(p2) && p1.2 == sig_now && p2.2 == sig_now {
+                    return Some("同一目标同点连点3次:换个目标,或用back/scroll_down离开当前位置".into());
                 }
             }
             if let (Some((sd, mean)), Some(bg)) =
@@ -705,7 +808,7 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg:
                 if sd < 6.0 && (mean - bg).abs() < 22.0 {
                     return Some(format!(
                         "空白背景:σ{sd:.1}亮度{mean:.0}≈背景{bg:.0};清单附近元素: {}",
-                        nearby_els(&cap.els, x, y, cap, realw, realh)
+                        nearby_els(cap, x, y, realw, realh)
                     ));
                 }
             }
@@ -1040,7 +1143,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     }
 
     // ── 局内状态 ──
-    let mut window: Vec<(String, String)> = Vec::new(); // (act行, diff) 0~999 空间
+    let mut runs: Vec<PageRun> = Vec::new(); // 里程碑折叠: 按页分段的(act行, diff)全量历史
+    let mut ctx_bytes: u64 = 0; // 决策上下文体积账(投影层验收指标: 字节/步不随步数涨)
+    let mut ctx_calls: u32 = 0;
     let mut diffs_all: Vec<String> = Vec::new();
     let mut stream: Vec<String> = Vec::new(); // 复盘材料(全量紧凑流)
     let mut bans: Vec<Ban> = Vec::new();
@@ -1070,7 +1175,8 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
     // ── 计划队列 ──
     let mut queue: VecDeque<ActN> = VecDeque::new();
-    let mut taps_hist: VecDeque<(i32, i32)> = VecDeque::new(); // 已执行的连续tap落点(图片像素)
+    let mut taps_hist: VecDeque<(i32, i32, String)> = VecDeque::new(); // 已执行的连续tap(落点图片像素+动作签名)
+    let mut back_eaten = false; // WebView页back无效(JS拦截)标记 → 下次back升级连按两次
     let mut plan_by = String::new();
     let mut plan_ms: Option<u64> = None; // 只随计划首动作入日志
     let mut pending_note: Option<String> = None;
@@ -1101,6 +1207,26 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         if let Some(t) = tree.as_ref() {
             if let Some(p) = t.page_of(&cap.els) { visited.insert(p.id); }
         }
+        // 里程碑: 换页判定与页段维护((activity,身份证)合取,未知分量不触发)
+        {
+            let (pid, pname) = tree.as_ref().and_then(|t| t.page_of(&cap.els))
+                .map(|p| (p.id, p.name.clone())).unwrap_or((-1, String::new()));
+            let cur_key = (cap.activity.clone(), pid);
+            match runs.last_mut() {
+                Some(r) if !page_boundary(&r.key, &cur_key) => {
+                    // 同段内补全先前未知的分量(首帧activity采失败等),顺带修正展示名
+                    if (r.key.0.is_empty() && !cur_key.0.is_empty()) || (r.key.1 < 0 && pid >= 0) {
+                        if r.key.0.is_empty() { r.key.0 = cur_key.0.clone(); }
+                        if r.key.1 < 0 { r.key.1 = pid; }
+                        r.label = run_label(&r.key.0, r.key.1, &pname);
+                    }
+                }
+                _ => runs.push(PageRun {
+                    label: run_label(&cap.activity, pid, &pname),
+                    key: cur_key, lines: vec![],
+                }),
+            }
+        }
 
         // 契约式到达断言: 验收词全部在当前屏实测到 → 注入事实行(假树不测,防止拿旧屏谎报命中)
         let hits = if cap.suspect { Vec::new() } else { assert_hits(&cap, &asserts) };
@@ -1125,7 +1251,12 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     let t = tree.as_ref().unwrap();
                     let traversal = ["遍历", "全部", "覆盖", "逛"].iter().any(|k| goal.contains(k));
                     if traversal {
-                        let un = t.unexplored(p.id, &cap.els);
+                        // WebView活动页的H5文字不作探索分支: 位置漂、每秒变、原生树锚不住
+                        let un = if cap.webview {
+                            vec!["(WebView活动页,网页内容不作探索分支,看毕即撤)".to_string()]
+                        } else {
+                            t.unexplored(p.id, &sandbox_texts(&cap))
+                        };
                         let nxt = t.nearest_unvisited(p.id, &visited);
                         let mut s = format!("[探索沙盘] 已覆盖 {}/{} 页 | 当前P{}[{}]",
                             visited.len(), t.pages.len(), p.id, tcut(&p.name, 12));
@@ -1148,7 +1279,14 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 }
                 None => String::new(),
             };
-            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &map_line, &assert_line, &alert, &window, &bans, &note, &cap, realw, realh);
+            let budget_line = if endless {
+                format!("预算: 已用{}/{budget}次模型调用", brain.calls)
+            } else {
+                format!("进度: 第{n}/{}步", cfg.max_steps)
+            };
+            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &budget_line, &map_line, &assert_line, &alert, &runs, &bans, &note, &cap, realw, realh);
+            ctx_bytes += user.len() as u64;
+            ctx_calls += 1;
             // 模型视角存档: 这次决策发给模型的完整上下文(含警报/沙盘/清单/便签)
             let _ = fs::OpenOptions::new().create(true).append(true)
                 .open(&ctx_path)
@@ -1177,8 +1315,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     let d = "escape(内容过滤)".to_string();
                     log.put(json!({"r":"diff","n":n,"d":d}));
                     println!("[{n}] ·盲移 | scroll_down → {d}");
-                    window.push((format!("act#{n} scroll_down(盲移)"), d.clone()));
-                    if window.len() > cfg.window_pairs { window.remove(0); }
+                    run_push(&mut runs, format!("act#{n} scroll_down(盲移)"), d.clone());
                     diffs_all.push(d.clone());
                     stream.push(format!("act#{n} scroll_down → escape(内容过滤)"));
                     stall += 1;
@@ -1208,8 +1345,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             let d = format!("rejected({reason})");
             log.put(json!({"r":"diff","n":n,"d":d}));
             println!("[{n}] {ms_disp} {plan_by} | {aline} ⛔ {d}");
-            window.push((aline.clone(), d.clone()));
-            if window.len() > cfg.window_pairs { window.remove(0); }
+            run_push(&mut runs, aline.clone(), d.clone());
             diffs_all.push(d.clone());
             stream.push(format!("{aline} → {d}"));
             reject_streak += 1;
@@ -1257,8 +1393,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 );
                 log.put(json!({"r":"diff","n":n,"d":d}));
                 println!("[{n}] {ms_disp} {plan_by} | {aline} ⛔ {d}");
-                window.push((aline.clone(), d.clone()));
-                if window.len() > cfg.window_pairs { window.remove(0); }
+                run_push(&mut runs, aline.clone(), d.clone());
                 diffs_all.push(d.clone());
                 stream.push(format!("{aline} → {d}"));
                 stall += 1;
@@ -1279,8 +1414,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     let d = format!("树✗(找不到按钮{})", hop.label);
                     log.put(json!({"r":"diff","n":n,"d":d}));
                     println!("[{n}] ·熟路 | goto断 → {d}");
-                    window.push((format!("act#{n} goto·断"), d.clone()));
-                    if window.len() > cfg.window_pairs { window.remove(0); }
+                    run_push(&mut runs, format!("act#{n} goto·断"), d.clone());
                     diffs_all.push(d.clone());
                     stream.push(format!("act#{n} goto断({}) → {d}", hop.label));
                     walked_all = false;
@@ -1295,7 +1429,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     println!("      ⚠ 打摆检测命中(goto段),警报已注入");
                 }
                 if hact.a == "tap" {
-                    taps_hist.push_back((hact.x.unwrap_or(0) as i32, hact.y.unwrap_or(0) as i32));
+                    taps_hist.push_back((hact.x.unwrap_or(0) as i32, hact.y.unwrap_or(0) as i32, act_sig(&hact)));
                     while taps_hist.len() > 4 { taps_hist.pop_front(); }
                 } else {
                     taps_hist.clear();
@@ -1317,8 +1451,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 log_act(&mut log, n, &hact, "(树)", ms_h);
                 log.put(json!({"r":"diff","n":n,"d":d}));
                 println!("[{n}] ·熟路 | {aline_h} → {d}");
-                window.push((aline_h.clone(), d.clone()));
-                if window.len() > cfg.window_pairs { window.remove(0); }
+                run_push(&mut runs, aline_h.clone(), d.clone());
                 diffs_all.push(d.clone());
                 stream.push(format!("{aline_h} → {d}"));
                 cap = nc;
@@ -1358,9 +1491,16 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         }
 
         // ⑤ 执行(定格并入第⑥步: 采集时等画面安静)
+        // WebView返回死锁破解: 上一记back在网页页无效(前端JS拦截单次back),本次back升级为快速连按两次
+        if act.a == "back" && back_eaten {
+            println!("      🕸 WebView页back曾被吞,升级为快速连按两次");
+            log.put(json!({"r":"hook","kind":"webview_back2","n":n}));
+            phone.back();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
         exec(&phone, &act, &cap, realw, realh, &apps);
         if act.a == "tap" {
-            taps_hist.push_back((act.x.unwrap_or(0) as i32, act.y.unwrap_or(0) as i32));
+            taps_hist.push_back((act.x.unwrap_or(0) as i32, act.y.unwrap_or(0) as i32, act_sig(&act)));
             while taps_hist.len() > 4 { taps_hist.pop_front(); }
         } else {
             taps_hist.clear(); // 连点只算"连续tap",夹其他动作即重新数
@@ -1419,12 +1559,13 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             log.put(json!({"r":"note","t":t}));
             note = t;
         }
-        window.push((aline.clone(), d.clone()));
-        if window.len() > cfg.window_pairs { window.remove(0); }
+        run_push(&mut runs, aline.clone(), d.clone());
         diffs_all.push(d.clone());
         stream.push(format!("{aline} → {d}"));
 
         let is_null = d == "none";
+        // WebView back被吞检测: 网页页上back无效 → 立旗,下一记back自动连按两次
+        back_eaten = act.a == "back" && is_null && cap.webview;
         if is_null {
             null_steps += 1;
             stall += 1;
@@ -1740,9 +1881,14 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     }
 
     let _ = fs::remove_dir_all(&tmp);
+    // 上下文体积账(投影层验收指标): 决策上下文的均值字节入账,campaign 间可比
+    if ctx_calls > 0 {
+        log.put(json!({"r":"hook","kind":"ctx_stat","bytes":ctx_bytes,"calls":ctx_calls,
+                       "avg":ctx_bytes / ctx_calls as u64}));
+    }
     println!("{}", "=".repeat(56));
-    println!("局{ep_no}结束 | 步数{n} 执行{exec_steps} 空击{null_steps} 动态屏{dyn_steps} ban{ban_count} | 调用{}次 tokens{} | done={done_claim} achieved={achieved}",
-        brain.calls, brain.tokens);
+    println!("局{ep_no}结束 | 步数{n} 执行{exec_steps} 空击{null_steps} 动态屏{dyn_steps} ban{ban_count} | 调用{}次 tokens{} ctx均{}B | done={done_claim} achieved={achieved}",
+        brain.calls, brain.tokens, if ctx_calls > 0 { ctx_bytes / ctx_calls as u64 } else { 0 });
     println!("记录: {run_dir}/log.jsonl");
     EpisodeResult {
         achieved,
@@ -1766,11 +1912,11 @@ mod tests {
     /// 空清单、图片路径不存在的最小Cap: patch_stats拿不到图会跳过空白检查,正好单测门控分流
     fn cap() -> Cap {
         Cap {
-            seq: 1, els: vec![], full: vec![], img: "/nonexistent.jpg".into(),
+            seq: 1, els: vec![], full: vec![], folded: vec![], img: "/nonexistent.jpg".into(),
             img_rel: String::new(), xml_rel: String::new(),
             w: 672, h: 1456, thumb: None, noise: 0.0,
             pkg: "t.app".into(), activity: String::new(), ime: None,
-            els_pkg: "t.app".into(), suspect: false, ocr: false,
+            els_pkg: "t.app".into(), suspect: false, ocr: false, webview: false,
         }
     }
 
@@ -1868,6 +2014,55 @@ mod tests {
         // "广告"和"设置"分居两处,不得拼接成"广告设置"算命中
         assert!(assert_hits_texts(["广告", "设置"].iter().copied(),
                                   &vec!["广告设置".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn same_point_different_targets_not_rejected() {
+        // 局40: 频道栏自动居中,不同按钮先后占据同一物理落点且每次真实切页——同点不同身份放行
+        let mut hist: VecDeque<(i32, i32, String)> = VecDeque::new();
+        hist.push_back((370, 211, "tap[财经]".into()));
+        hist.push_back((371, 211, "tap[军事]".into()));
+        let mut a = ActN { a: "tap".into(), x: Some(550), y: Some(145),
+                           what: Some("icon:国际".into()), ..Default::default() };
+        let r = gate(&mut a, &cap(), &[], &hist, &cfg(), "/tmp/pf-test", &[], 1080, 2340);
+        assert!(r.is_none(), "同点但不同身份应放行: {r:?}");
+    }
+
+    #[test]
+    fn same_point_same_target_third_tap_rejected() {
+        // 同一身份三连同点仍拦(2048抖动/登录振荡的原保护不丢)
+        let mut hist: VecDeque<(i32, i32, String)> = VecDeque::new();
+        hist.push_back((369, 210, "tap[icon:刷新]".into()));
+        hist.push_back((370, 212, "tap[icon:刷新]".into()));
+        let mut a = ActN { a: "tap".into(), x: Some(550), y: Some(145),
+                           what: Some("icon:刷新".into()), ..Default::default() };
+        let r = gate(&mut a, &cap(), &[], &hist, &cfg(), "/tmp/pf-test", &[], 1080, 2340);
+        assert!(r.as_deref().is_some_and(|m| m.contains("同一目标")), "同身份三连同点应驳回: {r:?}");
+    }
+
+    #[test]
+    fn page_boundary_conjunction_of_known_components() {
+        let k = |a: &str, p: i64| (a.to_string(), p);
+        // 已知分量变化即翻页: activity 变 / 身份证变
+        assert!(page_boundary(&k("com.a.Main", 0), &k("com.a.Settings", 0)));
+        assert!(page_boundary(&k("com.a.Main", 0), &k("com.a.Main", 3)), "单Activity内标签切换靠身份证");
+        // 未知分量不触发(dumpsys偶发失败/页不在网中 → 不造假里程碑)
+        assert!(!page_boundary(&k("com.a.Main", 0), &k("", 0)));
+        assert!(!page_boundary(&k("", -1), &k("com.a.Main", 2)));
+        assert!(!page_boundary(&k("com.a.Main", -1), &k("com.a.Main", 5)));
+        assert!(!page_boundary(&k("com.a.Main", 5), &k("com.a.Main", 5)));
+    }
+
+    #[test]
+    fn find_el_reaches_beyond_els_truncation() {
+        // 折叠渲染出的文字必须能吸附: 全量层锚点无70条/40字盲区
+        let mut c = cap();
+        let long = format!("{}广告设置入口", "占".repeat(45));
+        c.full = vec![fnode(&long)];
+        c.els = vec![]; // els 层看不见它
+        let hit = find_el(&c, "广告设置入口", 500, 500, 1080, 2340);
+        assert!(hit.is_some(), "40字截断之外的文字应可点名吸附");
+        assert_eq!(hit.unwrap().0, long.trim());
     }
 
     #[test]

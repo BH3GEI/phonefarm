@@ -4,6 +4,7 @@
 //! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
 mod brain;
 mod device;
+mod fold;
 mod runtime;
 mod tree;
 

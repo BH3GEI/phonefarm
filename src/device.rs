@@ -386,6 +386,15 @@ fn parse_bounds(b: &str) -> Option<[i32; 4]> {
     }
 }
 
+/// 属性值解码: XML转义(&#10;/&quot;等)还原为真实字符,再把换行/制表压成空格——
+/// t 是行式投影(一行一元素,不能出现真实换行),字符级原文永远在落盘的XML里。
+fn attr_str(a: &quick_xml::events::attributes::Attribute) -> String {
+    let s = a.unescape_value()
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| String::from_utf8_lossy(&a.value).to_string());
+    if s.contains(['\n', '\r', '\t']) { s.replace(['\n', '\r', '\t'], " ") } else { s }
+}
+
 /// dump XML → (els文字层, full全量层, 多数包名)。纯函数,单测钉行为:
 /// els 与旧版逐字节等价(有文字、trim、40字截断、前70条、正面积);
 /// full 对每个有效框的节点无损收录(含无文字容器),depth 记 XML 嵌套层级。
@@ -413,7 +422,7 @@ pub fn parse_dump(xml: &str) -> (Vec<Node>, Vec<FullNode>, String) {
         let (mut clickable, mut scrollable, mut checkable, mut checked) = (false, false, false, false);
         for a in e.attributes().flatten() {
             let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
-            let val = String::from_utf8_lossy(&a.value).to_string();
+            let val = attr_str(&a);
             match key.as_str() {
                 "text" => text = val,
                 "content-desc" => desc = val,
