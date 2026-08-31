@@ -418,12 +418,20 @@ pub struct Hdc {
     /// uiInput inputText 需要坐标(点哪输哪): 记最近一次 tap 落点。契约里 type 紧跟在
     /// 点输入框之后,落点即输入框(再点一次同框只是重聚焦,无害);没点过则屏幕中心兜底。
     last_tap: (AtomicI32, AtomicI32),
+    /// 前台包名缓存(真机对拍实证): dumpLayout 合并窗口按 z 序顶窗在前——首个非空
+    /// bundleName 就是用户眼中的前台(弹窗在时正确给出弹窗进程);而 aa dump 的 mission
+    /// 序不分层(实测把被弹窗盖住的 app 排在前)。故 OH 前台权威源=最近一次树的顶窗包名,
+    /// aa dump 只作树里完全没有包名时的兜底。els_full 每步刷新,与树同源自洽——
+    /// Android 的假树病根(陈旧dump文件)在 OH 不存在(每次 rm 后现 dump),树≠前台的
+    /// 对质在 OH 因此自然失效,这是设计而非疏漏。
+    fg_cache: std::sync::Mutex<Option<String>>,
 }
 
 impl Hdc {
     pub fn new(key: Option<String>, tmp: String) -> Self {
         Hdc { key, tmp, size_cache: OnceLock::new(),
-              last_tap: (AtomicI32::new(-1), AtomicI32::new(-1)) }
+              last_tap: (AtomicI32::new(-1), AtomicI32::new(-1)),
+              fg_cache: std::sync::Mutex::new(None) }
     }
 
     fn base(&self) -> Command {
@@ -507,18 +515,38 @@ impl Hdc {
         if s.trim_start().starts_with('{') { s } else { String::new() }
     }
 
-    /// 元素采集: 契约与 Adb::els_full 逐位对齐,第4元是原始 JSON(调用方落盘作地面真值)
+    /// 元素采集: 契约与 Adb::els_full 逐位对齐,第4元是原始 JSON(调用方落盘作地面真值)。
+    /// 顺手刷新前台缓存(树顶窗包名,见 fg_cache 注)。
     pub fn els_full(&self, timeout_ms: u64) -> (Vec<Node>, Vec<FullNode>, String, String) {
         let json = self.dump_layout(timeout_ms);
         if json.is_empty() {
             return (vec![], vec![], String::new(), String::new());
         }
         let (els, full, pkg) = parse_layout_json(&json);
+        if !pkg.is_empty() {
+            if let Ok(mut c) = self.fg_cache.lock() { *c = Some(pkg.clone()); }
+        }
         (els, full, pkg, json)
     }
 
-    /// 系统级状态(软点①): aa dump -a 找前台 AbilityRecord。键盘状态 OH 无采法,如实 None
+    /// 系统级状态: 前台包名走树顶窗缓存(权威源,见 fg_cache 注);缓存空(如开局归位
+    /// 早于首次采集)则现场轻采一棵树;树里完全没包名才落到 aa dump 兜底(mission 序
+    /// 不分层,弹窗场景会给错)。activity 在 OH 侧无可靠对应(窗口 abilityName 实测常空),
+    /// 如实留空;键盘状态无采法,如实 None。
     pub fn sys_state(&self) -> SysState {
+        if let Ok(c) = self.fg_cache.lock() {
+            if let Some(p) = c.as_ref() {
+                return SysState { pkg: p.clone(), activity: String::new(), ime: None };
+            }
+        }
+        let json = self.dump_layout(2500);
+        if !json.is_empty() {
+            let (_, _, pkg) = parse_layout_json(&json);
+            if !pkg.is_empty() {
+                if let Ok(mut c) = self.fg_cache.lock() { *c = Some(pkg.clone()); }
+                return SysState { pkg, activity: String::new(), ime: None };
+            }
+        }
         let out = self.run_timeout(&["shell", "aa", "dump", "-a"], 4000, "sys");
         let (pkg, ability) = parse_aa_dump(&String::from_utf8_lossy(&out));
         SysState { pkg, activity: ability, ime: None }
@@ -952,9 +980,11 @@ pub fn parse_bm_bundles(s: &str) -> Vec<String> {
     v
 }
 
-/// OH `bm dump -n <bundle>` → mainAbility 全名。纯函数供单测。
-/// 3.2 字段名 "mainAbility"(新版可能是 "mainElementName",双认);输出混着非 JSON 标头行,
-/// 不整体反序列化,按键扫描取冒号后第一个非空引号串。
+/// OH `bm dump -n <bundle>` → 主入口 ability 全名。纯函数供单测。
+/// 老版字段 "mainAbility"/"mainElementName" 优先;新版 bundleInfo(真机 API20 实测)
+/// 两个键都没有 → 启发式兜底: 扫 "name" 值,取首个以 MainAbility/EntryAbility/
+/// MainActivity 结尾的(真机 settings 的 abilities 首项是 OobeLocalUserTestAbility,
+/// 靠"取第一个"会拿错,后缀匹配才对)。输出混非 JSON 标头行,不整体反序列化。
 pub fn parse_main_ability(s: &str) -> String {
     for key in ["\"mainAbility\"", "\"mainElementName\""] {
         let mut from = 0;
@@ -968,6 +998,21 @@ pub fn parse_main_ability(s: &str) -> String {
             }
             from += i + key.len();
         }
+    }
+    let mut from = 0;
+    while let Some(i) = s[from..].find("\"name\"") {
+        let rest = &s[from + i + 6..];
+        if let Some(q1) = rest.find('"') {
+            if let Some(q2) = rest[q1 + 1..].find('"') {
+                let val = &rest[q1 + 1..q1 + 1 + q2];
+                for suf in ["MainAbility", "EntryAbility", "MainActivity"] {
+                    if val.ends_with(suf) {
+                        return val.to_string();
+                    }
+                }
+            }
+        }
+        from += i + 6;
     }
     String::new()
 }
@@ -1109,6 +1154,14 @@ mod tests {
         let j = r#"{ "name": "com.x", "mainAbility": "", "hapModuleInfos": [ { "mainAbility": "com.x.MainAbility" } ] }"#;
         assert_eq!(parse_main_ability(j), "com.x.MainAbility", "空值跳过,取第一个非空");
         assert_eq!(parse_main_ability("{}"), "");
+        // 新版 bundleInfo(API20 真机): 无 mainAbility 键 → 启发式后缀匹配。
+        // settings 实测 abilities 首项是 OobeLocalUserTestAbility,取第一个会拿错
+        let j2 = r#"{ "name": "com.ohos.settings", "abilities": [
+            { "name": "OobeLocalUserTestAbility" },
+            { "name": "com.ohos.settings.ExternalWifiSettingsAbility" },
+            { "name": "com.ohos.settings.MainAbility" } ] }"#;
+        assert_eq!(parse_main_ability(j2), "com.ohos.settings.MainAbility",
+            "无 mainAbility 键时按 MainAbility/EntryAbility/MainActivity 后缀兜底");
     }
 
     #[test]
