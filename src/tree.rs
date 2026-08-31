@@ -125,7 +125,7 @@ impl Tree {
     /// 探索沙盘: 当前页"没点过的按钮" = 骨架短词(≤6字)里,历史从未从本页以 点[该词] 走出过边的。
     /// v0.6: 输入改为折叠后骨架的普通文字行——卡片内部噪音(点赞数/作者名)已收进折叠头,
     /// 天然出局(#18 根治);≤6字+上限8条的防灌水规则保留。历史已走的按钮自然出局。
-    pub fn unexplored(&self, pid: i64, texts: &[&str]) -> Vec<String> {
+    pub fn unexplored(&self, pid: i64, texts: &[&str], blocked: &[String]) -> Vec<String> {
         let tapped: std::collections::HashSet<&str> = self.edges.iter()
             .filter(|e| e.from == pid)
             .filter_map(|e| Tree::tap_text(&e.label))
@@ -135,7 +135,8 @@ impl Tree {
         let mut out = Vec::new();
         for t in texts {
             let t = t.trim();
-            if t.chars().count() > 6 || t.is_empty() || tapped.contains(t) { continue; }
+            if t.chars().count() > 6 || t.is_empty() || tapped.contains(t)
+                || blocked.iter().any(|b| b.trim() == t) { continue; }
             if seen.insert(t.to_string()) {
                 out.push(crate::runtime::tcut(t, 8));
                 if out.len() >= 8 { break; }

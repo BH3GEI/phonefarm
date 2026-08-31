@@ -220,6 +220,76 @@ fn osc_note(sigs: &mut VecDeque<String>, sig: String, fire_at: &mut usize) -> bo
     false
 }
 
+/// #20 边级推进度守卫(抖音决战局1/2教训——侧栏全登录墙循环躲过全部三道防线:
+/// 同点门要同身份、打摆要往返节拍、看门狗每步都有diff,而这个循环异身份、单向、步步有diff)。
+/// 通用几何信号,不认"登录"二字: 从稳定页点入口,外出途中没得到任何新页覆盖,又带着
+/// 原封不动的文字集弹回原页 = 一次bounce。登录墙/VIP墙/实名墙/弹窗轰炸同表现同治法。
+/// 两道护栏防误伤: ①外出见过新页(哪怕是第一次见的墙页)不追责——"进去看一眼就回"是遍历
+/// 的合法动作; ②回到原页但文字集变了(开关/展开等原地操作)不追责。
+/// 后果: 同(页,入口)弹回≥2次 → 沙盘划掉该入口; 同页累计≥3次 → 连坐拉黑+整区受限警报(每页一次)。
+struct BounceGuard {
+    /// (起始页key, 入口名, 起始文字集, 起始步号, 外出是否见过新页)
+    pending: Option<((String, i64), String, Vec<String>, u32, bool)>,
+    counts: std::collections::HashMap<((String, i64), String), u32>,
+    alerted: std::collections::HashSet<(String, i64)>,
+}
+
+impl BounceGuard {
+    fn new() -> Self {
+        BounceGuard { pending: None, counts: Default::default(), alerted: Default::default() }
+    }
+    /// 稳定页(key有已知分量)上执行了文字点名tap → 立案观察
+    fn on_tap(&mut self, key: &(String, i64), entry: &str, els_sig: Vec<String>, step: u32) {
+        if key.0.is_empty() && key.1 < 0 { return; }
+        self.pending = Some((key.clone(), entry.to_string(), els_sig, step, false));
+    }
+    /// 每轮决策点报到。返回 Some((入口, 累计次数)) 表示判定了一次bounce。
+    fn on_arrive(&mut self, key: &(String, i64), els_sig: &[String], is_new_page: bool, step: u32)
+        -> Option<(String, u32)>
+    {
+        let Some((ok, entry, osig, ostep, mut saw_new)) = self.pending.take() else { return None };
+        if is_new_page { saw_new = true; }
+        if step.saturating_sub(ostep) > 4 { return None; } // 窗口过期: 长途外出不追责
+        if *key == ok {
+            if !saw_new && osig.as_slice() == els_sig {
+                let c = self.counts.entry((ok, entry.clone())).or_insert(0);
+                *c += 1;
+                return Some((entry, *c));
+            }
+            return None; // 回到原页但有新页覆盖/文字集变化: 结案不追责
+        }
+        self.pending = Some((ok, entry, osig, ostep, saw_new)); // 外出途中,继续观察
+        None
+    }
+    fn page_total(&self, key: &(String, i64)) -> u32 {
+        self.counts.iter().filter(|((k, _), _)| k == key).map(|(_, c)| *c).sum()
+    }
+    /// 当前页已拉黑的入口: 单入口≥2次,或整区受限(页累计≥3)时≥1次连坐
+    fn blocked_of(&self, key: &(String, i64)) -> Vec<String> {
+        let heavy = self.page_total(key) >= 3;
+        let mut v: Vec<String> = self.counts.iter()
+            .filter(|((k, _), c)| k == key && (**c >= 2 || (heavy && **c >= 1)))
+            .map(|((_, e), _)| e.clone()).collect();
+        v.sort();
+        v
+    }
+    /// 整区受限警报(同页累计≥3次弹回,每页只发一次)
+    fn region_alert(&mut self, key: &(String, i64)) -> bool {
+        if self.page_total(key) >= 3 && !self.alerted.contains(key) {
+            self.alerted.insert(key.clone());
+            return true;
+        }
+        false
+    }
+}
+
+/// 页面文字集签名(bounce净零判定用): els文字排序全集,严格相等才算"原封不动"
+fn els_sig_of(cap: &Cap) -> Vec<String> {
+    let mut v: Vec<String> = cap.els.iter().map(|n| n.t.clone()).collect();
+    v.sort();
+    v
+}
+
 /// 后台包是否可安全掐死(force-stop): 目标应用、系统/谷歌家族包、桌面一律不碰
 fn pkg_killable(pkg: &str, target: Option<&str>) -> bool {
     !pkg.is_empty()
@@ -1336,6 +1406,8 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut assert_hit_prev = false; // 验收词命中上升沿(只在新命中时记账,避免每步刷屏)
     let mut probe_streak = 0u32;    // 探针连击计数(上限3防空转,任一物理动作清零)
     let mut probe_ans = String::new(); // 探针应答(注入下一次决策,用过即清)
+    let mut bounce = BounceGuard::new(); // #20 边级推进度守卫(入口弹回记账)
+    let mut seen_keys: std::collections::HashSet<(String, i64)> = Default::default(); // 本局见过的页key(推进度=覆盖增长)
 
     // ── 计划队列 ──
     let mut queue: VecDeque<ActN> = VecDeque::new();
@@ -1376,6 +1448,23 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             let (pid, pname) = tree.as_ref().and_then(|t| t.page_of(&cap.els))
                 .map(|p| (p.id, p.name.clone())).unwrap_or((-1, String::new()));
             let cur_key = (cap.activity.clone(), pid);
+            // #20 推进度报到: 新页覆盖登记 → bounce判定 → 整区受限警报(在页段维护前,cur_key未被移动)
+            let known = !cur_key.0.is_empty() || cur_key.1 >= 0;
+            let is_new = known && seen_keys.insert(cur_key.clone());
+            if let Some((entry, c)) = bounce.on_arrive(&cur_key, &els_sig_of(&cap), is_new, n) {
+                log.put(json!({"r":"hook","kind":"bounce","entry":entry,"count":c,
+                    "page": format!("{}|{}", cur_key.0.rsplit('.').next().unwrap_or(""), cur_key.1)}));
+                println!("      ↩ 入口弹回: '{entry}'第{c}次(净零回到原页,无新覆盖)");
+            }
+            if bounce.region_alert(&cur_key) {
+                let blk = bounce.blocked_of(&cur_key);
+                println!("      ⛔ 整区受限警报: 本页{}个入口全部弹回", blk.len());
+                log.put(json!({"r":"hook","kind":"bounce_region","blocked":blk}));
+                if alert.is_empty() {
+                    alert = format!("【系统提示:入口阻塞】本页入口[{}]点进去均被弹回本页(累计{}次)。该区域疑似整体受限(登录/权限/付费等,原因不重要),停止逐个尝试:改探索其他区域,或按任务要求收官。",
+                        bounce.blocked_of(&cur_key).join(","), bounce.page_total(&cur_key));
+                }
+            }
             match runs.last_mut() {
                 Some(r) if !page_boundary(&r.key, &cur_key) => {
                     // 同段内补全先前未知的分量(首帧activity采失败等),顺带修正展示名
@@ -1416,16 +1505,21 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     let traversal = ["遍历", "全部", "覆盖", "逛"].iter().any(|k| goal.contains(k));
                     if traversal {
                         // WebView活动页的H5文字不作探索分支: 位置漂、每秒变、原生树锚不住
+                        // #20: 已判弹回的入口从探索建议里划掉,并向模型注明缘由
+                        let blk = runs.last().map(|r| bounce.blocked_of(&r.key)).unwrap_or_default();
                         let un = if cap.webview {
                             vec!["(WebView活动页,网页内容不作探索分支,看毕即撤)".to_string()]
                         } else {
-                            t.unexplored(p.id, &sandbox_texts(&cap))
+                            t.unexplored(p.id, &sandbox_texts(&cap), &blk)
                         };
                         let nxt = t.nearest_unvisited(p.id, &visited);
                         let mut s = format!("[探索沙盘] 已覆盖 {}/{} 页 | 当前P{}[{}]",
                             visited.len(), t.pages.len(), p.id, tcut(&p.name, 12));
                         s.push_str(&format!(" | 本页未探索: [{}]",
                             if un.is_empty() { "无".to_string() } else { un.join(",") }));
+                        if !blk.is_empty() {
+                            s.push_str(&format!(" | 阻塞入口(点进即弹回,勿再试): [{}]", blk.join(",")));
+                        }
                         if let Some((nid, h)) = nxt {
                             let nname = t.page(nid).map(|q| tcut(&q.name, 10)).unwrap_or_default();
                             s.push_str(&format!(" | 建议最近未访: goto P{nid}[{nname}]({h}跳)"));
@@ -1705,6 +1799,13 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         exec(&phone, &act, &cap, realw, realh, &apps);
         probe_streak = 0; // 物理动作落地,探针连击清零
         if act.a == "tap" {
+            // #20 立案: 稳定页上的文字入口外出,交推进度守卫观察(icon无稳定名不立案)
+            if let (Some(w), Some(r)) = (
+                act.what.as_deref().map(str::trim).filter(|w| !w.is_empty() && !w.starts_with("icon:")),
+                runs.last(),
+            ) {
+                bounce.on_tap(&r.key, w, els_sig_of(&cap), n);
+            }
             taps_hist.push_back((act.x.unwrap_or(0) as i32, act.y.unwrap_or(0) as i32, act_sig(&act)));
             while taps_hist.len() > 4 { taps_hist.pop_front(); }
         } else {
@@ -2359,6 +2460,50 @@ mod tests {
         assert!(ans.contains("act#3") && ans.contains("+[通用]"), "{ans}");
         let h9 = ActN { a: "history".into(), text: Some("P9".into()), ..Default::default() };
         assert!(probe_answer(&h9, &cap(), &runs, None, 1080, 2340).contains("无匹配"));
+    }
+
+    #[test]
+    fn bounce_guard_blocks_walls_spares_visits_and_toggles() {
+        let mut g = BounceGuard::new();
+        let p = ("com.a.Side".to_string(), 7i64);
+        let sig: Vec<String> = ["优惠券", "小程序", "设置"].iter().map(|s| s.to_string()).collect();
+        // 护栏①"进去看一眼就回": 外出途中见过新页(哪怕是第一次见的登录墙),弹回不追责
+        g.on_tap(&p, "设置", sig.clone(), 1);
+        assert!(g.on_arrive(&("com.a.Login".to_string(), -1), &[], true, 2).is_none());
+        assert!(g.on_arrive(&p, &sig, false, 3).is_none(), "外出有新覆盖,不算bounce");
+        // 净零弹回×2 → 入口拉黑
+        g.on_tap(&p, "优惠券", sig.clone(), 4);
+        assert_eq!(g.on_arrive(&p, &sig, false, 5), Some(("优惠券".into(), 1)));
+        g.on_tap(&p, "优惠券", sig.clone(), 6);
+        assert_eq!(g.on_arrive(&p, &sig, false, 7), Some(("优惠券".into(), 2)));
+        assert_eq!(g.blocked_of(&p), vec!["优惠券".to_string()]);
+        // 护栏②原地开关: 回到本页但文字集变了,不追责
+        g.on_tap(&p, "深色模式", sig.clone(), 8);
+        let sig2: Vec<String> = ["优惠券", "小程序", "已开启"].iter().map(|s| s.to_string()).collect();
+        assert!(g.on_arrive(&p, &sig2, false, 9).is_none(), "文字集变化=原地操作,非弹回");
+        // 窗口过期: 长途外出不追责
+        g.on_tap(&p, "设置", sig.clone(), 10);
+        assert!(g.on_arrive(&p, &sig, false, 20).is_none(), "超4步窗口不追责");
+    }
+
+    #[test]
+    fn bounce_region_alert_and_collective_block() {
+        // 抖音局2实录形态: 设置→优惠券→小程序各弹回一次(异身份单向,三道旧防线全漏)
+        // → 页级累计3次触发整区警报,单次弹回的入口连坐拉黑,同页警报只发一次
+        let mut g = BounceGuard::new();
+        let p = ("com.a.Side".to_string(), -1i64);
+        let sig: Vec<String> = vec!["菜单".into()];
+        for (i, e) in ["设置", "优惠券", "小程序"].iter().enumerate() {
+            let s = i as u32 * 2;
+            g.on_tap(&p, e, sig.clone(), s);
+            assert!(g.on_arrive(&p, &sig, false, s + 1).is_some());
+        }
+        assert!(g.region_alert(&p), "页级3次弹回应触发整区警报");
+        assert!(!g.region_alert(&p), "同页警报只发一次");
+        assert_eq!(g.blocked_of(&p).len(), 3, "整区受限时单次弹回入口连坐拉黑");
+        // 全未知页不立案
+        g.on_tap(&(String::new(), -1), "入口", sig.clone(), 30);
+        assert!(g.on_arrive(&(String::new(), -1), &sig, false, 31).is_none());
     }
 
     #[test]
