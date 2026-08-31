@@ -638,7 +638,10 @@ impl Hdc {
     }
 
     /// 文本输入: uiInput inputText 要坐标,用最近 tap 落点(见 last_tap 注),中心兜底。
-    /// 含空白整体包引号防远端 shell 分词;引号/换行压成空格(t 行式投影同款纪律)
+    /// 真机实测三件事定形: ①inputText 自带落点点击+光标追加(ASCII/中文均直落,无需预聚焦);
+    /// ②hdc 参数按空白切分且引号不设防——含空格整体发送必炸(uitest 报参数数量错,一字不落);
+    /// ③空格走 keyEvent 2050(OH KEYCODE_SPACE)可落位。故逐词 inputText、逐空格 keyEvent,
+    /// 连续空格按个数保真;引号/换行/制表压成空格(t 行式投影同款纪律,引号在 hdc 通道不可表达)。
     pub fn type_text(&self, text: &str) {
         let (mut x, mut y) = (self.last_tap.0.load(Ordering::Relaxed),
                               self.last_tap.1.load(Ordering::Relaxed));
@@ -647,9 +650,17 @@ impl Hdc {
             x = w / 2;
             y = h / 2;
         }
-        let t = text.replace(['"', '\n', '\r'], " ");
-        let quoted = if t.contains(char::is_whitespace) { format!("\"{t}\"") } else { t };
-        self.ui_input(&["inputText", &x.to_string(), &y.to_string(), &quoted]);
+        let t = text.replace(['"', '\n', '\r', '\t'], " ");
+        let mut first = true;
+        for seg in t.split(' ') {
+            if !first {
+                self.ui_input(&["keyEvent", "2050"]);
+            }
+            first = false;
+            if !seg.is_empty() {
+                self.ui_input(&["inputText", &x.to_string(), &y.to_string(), seg]);
+            }
+        }
     }
 
     pub fn back(&self) {
