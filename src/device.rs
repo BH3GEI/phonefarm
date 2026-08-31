@@ -138,7 +138,10 @@ impl Adb {
         if let (Some(i), Some(j)) = (s.find("<?xml"), s.rfind("</hierarchy>")) {
             return s[i..j + 12].to_string();
         }
-        // 回退: 落到 sdcard 再取
+        // 回退: 落到 sdcard 再取。必须先删旧文件: dump 失败(could not get idle state)时
+        // 不写新文件,直接 cat 会把上一次留下的陈旧树当成本步观测——这是"假树"的真正主源,
+        // 实测该文件能跨应用切换、甚至跨源应用进程死亡存活。删掉后失败即得空表,空表是合法观测。
+        self.run(&["shell", "rm", "-f", "/sdcard/ui.xml"]);
         self.run_timeout(&["shell", "uiautomator", "dump", "--compressed", "/sdcard/ui.xml"], timeout_ms);
         let out = self.run(&["exec-out", "cat", "/sdcard/ui.xml"]);
         let s = String::from_utf8_lossy(&out).to_string();
@@ -149,12 +152,14 @@ impl Adb {
     }
 
     /// 元素列表(限时)。采不到返回空表 —— 空表本身是有效观测(canvas 页面即如此)。
-    pub fn els(&self, timeout_ms: u64) -> Vec<Node> {
+    /// 同时返回树的多数包名,供假树识别(uiautomator 偶发吐出上一个应用的陈旧树)。
+    pub fn els(&self, timeout_ms: u64) -> (Vec<Node>, String) {
         let xml = self.dump_xml(timeout_ms);
         if xml.is_empty() {
-            return vec![];
+            return (vec![], String::new());
         }
         let mut nodes = Vec::new();
+        let mut pkg_hist: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         let mut reader = Reader::from_str(&xml);
         loop {
             match reader.read_event() {
@@ -169,6 +174,7 @@ impl Adb {
                             "text" => text = val,
                             "content-desc" => desc = val,
                             "bounds" => bounds = val,
+                            "package" => { *pkg_hist.entry(val).or_insert(0) += 1; }
                             _ => {}
                         }
                     }
@@ -190,7 +196,59 @@ impl Adb {
             }
         }
         nodes.truncate(70);
-        nodes
+        let pkg = pkg_hist.into_iter().max_by_key(|(_, c)| *c)
+            .map(|(p, _)| p).unwrap_or_default();
+        (nodes, pkg)
+    }
+
+    /// 前台应用包名(dumpsys window 焦点窗口)。采不到返回空串。
+    pub fn foreground_pkg(&self) -> String {
+        let out = self.run_timeout(
+            &["shell", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"], 4000);
+        let s = String::from_utf8_lossy(&out);
+        for key in ["mCurrentFocus", "mFocusedApp"] {
+            for line in s.lines().filter(|l| l.contains(key)) {
+                let Some(i) = line.find(" u0 ") else { continue };
+                let tok: String = line[i + 4..].chars()
+                    .take_while(|c| *c != '/' && *c != '}' && *c != ' ')
+                    .collect();
+                if tok.contains('.')
+                    && tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+                {
+                    return tok;
+                }
+            }
+        }
+        String::new()
+    }
+
+    /// 可启动应用清单 (包名, 启动组件)。桌面/抽屉里能看到的应用即在此列。
+    pub fn launchable_apps(&self) -> Vec<(String, String)> {
+        let out = self.run_timeout(
+            &["shell", "cmd", "package", "query-activities",
+              "-a", "android.intent.action.MAIN",
+              "-c", "android.intent.category.LAUNCHER", "--brief"], 6000);
+        let s = String::from_utf8_lossy(&out);
+        let mut v: Vec<(String, String)> = Vec::new();
+        for line in s.lines() {
+            let l = line.trim();
+            if !l.contains('/') || l.contains(' ') || l.contains('=') { continue; }
+            let pkg = l.split('/').next().unwrap_or("").to_string();
+            if pkg.contains('.') && !v.iter().any(|(p, _)| p == &pkg) {
+                v.push((pkg, l.to_string()));
+            }
+        }
+        if v.is_empty() {
+            // cmd 不可用的旧系统: 退化为三方包列表(无组件,launch 时走 monkey)
+            let out = self.run(&["shell", "pm", "list", "packages", "-3"]);
+            for line in String::from_utf8_lossy(&out).lines() {
+                if let Some(p) = line.trim().strip_prefix("package:") {
+                    if p.contains('.') { v.push((p.to_string(), String::new())); }
+                }
+            }
+        }
+        v.sort();
+        v
     }
 
     /// 截屏并压成 672 宽 jpg 写到 out_jpg; 返回 (宽, 高)
@@ -260,6 +318,25 @@ impl Adb {
     }
     pub fn back(&self) {
         self.input(&["keyevent", "4"]);
+    }
+    /// 回桌面: 系统级 HOME 键,与设备导航方式(手势/三键)无关,全屏应用也拦不住
+    pub fn home(&self) {
+        self.input(&["keyevent", "3"]);
+    }
+    /// 掐死后台应用(假树/无障碍事件风暴的源头)。目标应用与系统包不碰——调用方过 pkg_killable 把关
+    pub fn force_stop(&self, pkg: &str) {
+        if !pkg.is_empty() {
+            self.run_timeout(&["shell", "am", "force-stop", pkg], 6000);
+        }
+    }
+    /// 直接启动应用: 有组件走 am start,否则 monkey 兜底
+    pub fn launch(&self, pkg: &str, comp: &str) {
+        if !comp.is_empty() {
+            self.run_timeout(&["shell", "am", "start", "-n", comp], 8000);
+        } else if !pkg.is_empty() {
+            self.run_timeout(&["shell", "monkey", "-p", pkg,
+                               "-c", "android.intent.category.LAUNCHER", "1"], 8000);
+        }
     }
 }
 

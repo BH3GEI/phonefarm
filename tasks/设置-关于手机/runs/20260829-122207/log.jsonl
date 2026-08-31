@@ -1,0 +1,10 @@
+{"v":1}
+{"r":"goal","t":"打开设置,进入'关于手机'页面,停在该页面"}
+{"act":"force-stop+home","from":"com.ss.android.article.news","kind":"orient","r":"hook","target":"com.android.settings"}
+{"els":[{"b":[46,84,625,253],"t":"At a glance"},{"b":[46,146,211,184],"t":"Sat, Aug 29"},{"b":[194,871,322,1040],"t":"Gmail"},{"b":[349,871,477,1040],"t":"Photos"},{"b":[504,871,632,1040],"t":"YouTube"},{"b":[0,84,672,1414],"t":"Home"},{"b":[47,1112,160,1240],"t":"Phone"},{"b":[202,1112,315,1240],"t":"Messages"},{"b":[357,1112,470,1240],"t":"Chrome"},{"b":[512,1112,624,1240],"t":"Settings"},{"b":[51,1276,620,1384],"t":"Google search"},{"b":[58,1289,140,1371],"t":"Google app"},{"b":[449,1276,531,1384],"t":"Voice search"},{"b":[531,1276,613,1384],"t":"Google Lens"}],"img":"step1.jpg","n":1,"pkg":"com.google.android.apps.nexuslauncher","r":"screen"}
+{"a":"tap","by":"glm-53-flash","ms":6756,"n":1,"r":"act","x":567,"y":1174}
+{"d":"pixel(91%)","n":1,"r":"diff"}
+{"r":"note","t":"已点dock栏Settings打开设置；下一步需下滑约3屏到列表底部找About emulated device，点击前核对文字矩形"}
+{"els":[],"img":"step2.jpg","n":2,"pkg":"com.android.settings","r":"screen"}
+{"a":"done","by":"glm-53-flash","ms":4758,"n":2,"r":"act","text":"已进入About emulated device页面，任务达成"}
+{"achieved":true,"by":"glm-53-flash","kind":"verdict","r":"hook","reason":"前台为设置应用，最终画面显示About emulated device页面详情"}

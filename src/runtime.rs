@@ -24,7 +24,10 @@ struct Cap {
     w: i32,
     h: i32,
     thumb: Option<Vec<u8>>,
-    noise: f32, // 采集时量到的背景动静幅度(%);0=画面安静
+    noise: f32,       // 采集时量到的背景动静幅度(%);0=画面安静
+    pkg: String,      // 前台应用包名(采不到为空)
+    els_pkg: String,  // 元素树的多数包名
+    suspect: bool,    // 假树: 树包名≠前台包名且重抓无效 → 本步文字通道不可信
 }
 
 #[derive(Clone, Default)]
@@ -107,13 +110,24 @@ fn now_tag() -> String {
         .unwrap_or_else(|_| "run".into())
 }
 
+/// 后台包是否可安全掐死(force-stop): 目标应用、系统/谷歌家族包、桌面一律不碰
+fn pkg_killable(pkg: &str, target: Option<&str>) -> bool {
+    !pkg.is_empty()
+        && target.map_or(true, |t| pkg != t)
+        && pkg != "android"
+        && !pkg.starts_with("com.android.")
+        && !pkg.starts_with("com.google.")
+        && !pkg.contains("launcher")
+}
+
 /// 双采集(截图与元素列表并行) + 等画面安静:
 /// 连拍小图,连续两张一致(≤QUIET_PCT)即认为停稳(noise=0);
 /// 到 cap_ms 上限仍不一致 → 动态屏,期间小图两两差异的最大值记为背景动静幅度(noise>0)。
-fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64) -> Option<Cap> {
+fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64,
+           target: Option<&str>) -> Option<Cap> {
     let img_rel = format!("step{seq}.jpg");
     let img = format!("{run_dir}/{img_rel}");
-    let (wh, els, noise) = std::thread::scope(|s| {
+    let (wh, elsres, noise) = std::thread::scope(|s| {
         let h_els = s.spawn(|| phone.els(cfg.els_timeout_ms));
         let mut prev = phone.quick_thumb("a");
         let mut noise = 0.0f32;
@@ -135,8 +149,34 @@ fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms
         (wh, h_els.join().unwrap_or_default(), noise)
     });
     let (w, h) = wh?;
+    let (mut els, mut els_pkg) = elsres;
+    let mut fg = phone.foreground_pkg();
+    let mut suspect = false;
+    // 假树识别: uiautomator 在应用切换瞬间会吐出上一个应用的陈旧树。
+    // 画面安静(像素)≠树已刷新;树的多数包名与前台不符即判陈旧,重抓至多2次。
+    if !fg.is_empty() && !els.is_empty() && !els_pkg.is_empty() && els_pkg != fg {
+        // 治本: 假树来自后台应用且可杀 → force-stop 掐死事件风暴源头,账本立刻翻页
+        if pkg_killable(&els_pkg, target) {
+            println!("      🔪 假树源头在后台({els_pkg}),force-stop 掐死再重抓");
+            phone.force_stop(&els_pkg);
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+        for retry in 1..=2 {
+            println!("      👻 元素树({els_pkg})≠前台({fg}),疑似陈旧树,重抓#{retry}");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let (e2, p2) = phone.els(cfg.els_timeout_ms);
+            if !e2.is_empty() { els = e2; els_pkg = p2; }
+            let f2 = phone.foreground_pkg();
+            if !f2.is_empty() { fg = f2; }
+            if els.is_empty() || els_pkg.is_empty() || els_pkg == fg { break; }
+        }
+        suspect = !els.is_empty() && !els_pkg.is_empty() && els_pkg != fg;
+        if suspect {
+            println!("      👻 重抓后仍不符,本步文字通道降级(只信截图)");
+        }
+    }
     let thumb = thumb_gray(&img, tmp, &format!("{}", seq % 2));
-    Some(Cap { seq, els, img, img_rel, w, h, thumb, noise })
+    Some(Cap { seq, els, img, img_rel, w, h, thumb, noise, pkg: fg, els_pkg, suspect })
 }
 
 /// 元素框: 设备像素 → 图片像素
@@ -159,14 +199,20 @@ fn act_line(n: u32, a: &ActN) -> String {
             a.x.unwrap_or(-1), a.y.unwrap_or(-1), a.x2.unwrap_or(-1), a.y2.unwrap_or(-1)
         ),
         "type" => format!("act#{n} type({})", tcut(a.text.as_deref().unwrap_or(""), 20)),
+        "launch" => format!("act#{n} launch({})", tcut(a.text.as_deref().unwrap_or(""), 40)),
         o => format!("act#{n} {o}"),
     }
 }
 
-/// ② 上下文组装: goal + 全部经验 + 最近act/diff窗 + ban + note + 屏幕
-fn render_ctx(goal: &str, lessons: &[Value], window: &[(String, String)], bans: &[Ban],
+/// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 最近act/diff窗 + ban + note + 前台应用 + 屏幕
+/// 静态段(goal/经验/apps)在前,动态段在后,保住能保的提示词缓存前缀。
+fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str,
+              window: &[(String, String)], bans: &[Ban],
               note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
     let mut s = format!("goal: {goal}\n");
+    for l in glessons {
+        s.push_str(&format!("lesson(通用): {}\n", l["t"].as_str().unwrap_or("")));
+    }
     for l in lessons {
         s.push_str(&format!(
             "lesson#{}(win{}/lose{}): {}\n",
@@ -175,6 +221,9 @@ fn render_ctx(goal: &str, lessons: &[Value], window: &[(String, String)], bans: 
             l["lose"].as_i64().unwrap_or(0),
             l["t"].as_str().unwrap_or("")
         ));
+    }
+    if !apps_line.is_empty() {
+        s.push_str(&format!("apps(可launch的包名): {apps_line}\n"));
     }
     for (a, d) in window {
         s.push_str(&format!("{a} → diff: {d}\n"));
@@ -195,18 +244,29 @@ fn render_ctx(goal: &str, lessons: &[Value], window: &[(String, String)], bans: 
             cap.noise
         ));
     }
-    s.push_str("screen:\n");
-    for n in cap.els.iter().take(60) {
-        let bi = el_img_space(n, cap, realw, realh);
-        s.push_str(&format!(
-            "{} [{},{},{},{}]\n",
-            n.t,
-            to_norm(bi[0], cap.w), to_norm(bi[1], cap.h),
-            to_norm(bi[2], cap.w), to_norm(bi[3], cap.h)
-        ));
+    if !cap.pkg.is_empty() {
+        let desk = if cap.pkg.contains("launcher") { " (即桌面)" } else { "" };
+        s.push_str(&format!("app: {}{desk}\n", cap.pkg));
     }
-    if cap.els.is_empty() {
-        s.push_str("(元素列表为空,只看截图)\n");
+    s.push_str("screen:\n");
+    if cap.suspect {
+        s.push_str(&format!(
+            "(元素列表不可信:树来自{}而前台是{},本步只看截图判断)\n",
+            cap.els_pkg, cap.pkg
+        ));
+    } else {
+        for n in cap.els.iter().take(60) {
+            let bi = el_img_space(n, cap, realw, realh);
+            s.push_str(&format!(
+                "{} [{},{},{},{}]\n",
+                n.t,
+                to_norm(bi[0], cap.w), to_norm(bi[1], cap.h),
+                to_norm(bi[2], cap.w), to_norm(bi[3], cap.h)
+            ));
+        }
+        if cap.els.is_empty() {
+            s.push_str("(元素列表为空,只看截图)\n");
+        }
     }
     s.push_str("(当前截图见图)");
     s
@@ -263,9 +323,10 @@ fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str)
     Err("连续3家回复都无法解析".into())
 }
 
-/// ④ 确定性门(值域/前科/连点/空白)。通过返回 None, 驳回返回原因。坐标就地转成图片像素。
-fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg: &Config, tmp: &str) -> Option<String> {
-    let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "back", "wait", "done"];
+/// ④ 确定性门(值域/前科/连点/空白/launch目标)。通过返回 None, 驳回返回原因。坐标就地转成图片像素。
+fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg: &Config, tmp: &str,
+        apps: &[(String, String)]) -> Option<String> {
+    let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "back", "home", "launch", "wait", "done"];
     if !known.contains(&a.a.as_str()) {
         return Some(format!("未知动作:{}", tcut(&a.a, 12)));
     }
@@ -326,6 +387,29 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg:
                 return Some("type缺text".into());
             }
         }
+        "launch" => {
+            let t = a.text.as_deref().unwrap_or("").trim().to_string();
+            if t.is_empty() {
+                return Some("launch缺text(目标包名,从apps清单里选)".into());
+            }
+            if apps.is_empty() {
+                // 清单采集失败的兜底: 只要求形如包名
+                if !t.contains('.') {
+                    return Some(format!("launch目标'{}'不是包名", tcut(&t, 30)));
+                }
+            } else if let Some((p, _)) = apps.iter().find(|(p, _)| *p == t) {
+                a.text = Some(p.clone());
+            } else {
+                // 唯一子串匹配放行(模型偶尔只写后半段)
+                let subs: Vec<&(String, String)> =
+                    apps.iter().filter(|(p, _)| p.contains(&t)).collect();
+                if subs.len() == 1 {
+                    a.text = Some(subs[0].0.clone());
+                } else {
+                    return Some(format!("launch目标'{}'不在apps清单", tcut(&t, 30)));
+                }
+            }
+        }
         _ => {}
     }
     // 字段归位: 与动作无关的字段不入日志(模型偶尔多填,空间口径会混)
@@ -338,7 +422,7 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32)>, cfg:
 }
 
 /// ⑤ 执行(图片像素 → 设备像素)
-fn exec(phone: &Adb, a: &ActN, cap: &Cap, realw: i32, realh: i32) {
+fn exec(phone: &Adb, a: &ActN, cap: &Cap, realw: i32, realh: i32, apps: &[(String, String)]) {
     let sx = |v: Option<i64>| (v.unwrap_or(0) * realw as i64 / cap.w.max(1) as i64) as i32;
     let sy = |v: Option<i64>| (v.unwrap_or(0) * realh as i64 / cap.h.max(1) as i64) as i32;
     match a.a.as_str() {
@@ -347,6 +431,13 @@ fn exec(phone: &Adb, a: &ActN, cap: &Cap, realw: i32, realh: i32) {
         "scroll_up" => phone.scroll_up(),
         "scroll_down" => phone.scroll_down(),
         "back" => phone.back(),
+        "home" => phone.home(),
+        "launch" => {
+            let pkg = a.text.as_deref().unwrap_or("");
+            let comp = apps.iter().find(|(p, _)| p == pkg)
+                .map(|(_, c)| c.as_str()).unwrap_or("");
+            phone.launch(pkg, comp);
+        }
         "type" => phone.type_text(a.text.as_deref().unwrap_or("")),
         "wait" => std::thread::sleep(std::time::Duration::from_millis(2500)),
         _ => {}
@@ -380,7 +471,9 @@ fn arbit_changed(brain: &mut Brain, cfg: &Config, img_a: &str, img_b: &str)
 ///   ≤bg+5% → none;bg+5%~bg+13% → 边界区(返回border=true,交仲裁);>bg+13% → 有效。
 /// 返回 (差异串, 是否边界区)。
 fn diff_of(before: &Cap, after: &Cap, channel: &str) -> (String, bool) {
-    let use_pixel = channel == "pixel" || before.els.is_empty() || after.els.is_empty();
+    // 假树(suspect)的元素集不可用于集合差 —— 用它算 diff 会把上个应用的文字当成本步变化
+    let use_pixel = channel == "pixel" || before.els.is_empty() || after.els.is_empty()
+        || before.suspect || after.suspect;
     if !use_pixel {
         let count = |v: &Vec<Node>| {
             let mut m = std::collections::HashMap::new();
@@ -399,6 +492,15 @@ fn diff_of(before: &Cap, after: &Cap, channel: &str) -> (String, bool) {
             if cb > ca { removed.push(tcut(t, 18)); }
         }
         if added.is_empty() && removed.is_empty() {
+            // 矛盾检测: 树说"没变"但像素大变(压过背景) → 同应用内树未刷新,改采像素结论,
+            // 防止把真实生效的动作记成空击、误落 ban
+            if let (Some(a), Some(b)) = (&before.thumb, &after.thumb) {
+                let pct = frames_diff_pct(a, b);
+                let bg = before.noise.max(after.noise);
+                if pct > bg + 13.0 && pct > 10.0 {
+                    return (format!("pixel({}%,元素树未更新)", pct.round() as i32), false);
+                }
+            }
             return ("none".into(), false);
         }
         added.sort();
@@ -468,7 +570,7 @@ struct ParamsFile {
 }
 
 pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
-               endless: bool, budget: u32) -> bool {
+               endless: bool, budget: u32, app: Option<String>) -> bool {
     // ── 目录与文件 ──
     let task_dir = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
     let run_dir = format!("{}/runs/{}", task_dir, now_tag());
@@ -487,6 +589,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     log.put(json!({"r": "goal", "t": goal}));
 
     let lessons = load_lessons(&format!("{task_dir}/lessons.jsonl"));
+    // 全局经验: 跨任务共享(tasks/_global/),"游戏里用home逃生"这类学费只交一次
+    let global_dir = format!("{}/tasks/_global", cfg.data_dir.trim_end_matches('/'));
+    let glessons = load_lessons(&format!("{global_dir}/lessons.jsonl"));
     let ep_no = fs::read_dir(format!("{task_dir}/runs")).map(|d| d.count()).unwrap_or(1) as i64;
 
     // ── 感知参数(params.toml 白名单) ──
@@ -510,6 +615,24 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let phone = Adb::new(serial, tmp.clone());
     let mut brain = Brain::new(cfg.providers.clone(), tmp.clone());
     let (realw, realh) = phone.size();
+
+    // ── 安装清单(局内静态,注入上下文供 launch 选择) ──
+    let apps = phone.launchable_apps();
+    let apps_line = apps.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(",");
+
+    // ── 开局归位(确定性,零模型调用): 声明了目标应用且前台不符 → 掐掉可杀的前台,回桌面 ──
+    if let Some(target) = &app {
+        let fg = phone.foreground_pkg();
+        if !fg.is_empty() && fg != *target && !fg.contains("launcher") {
+            let kill = pkg_killable(&fg, Some(target));
+            let act = if kill { "force-stop+home" } else { "home" };
+            println!("(开局归位: 前台{fg} ≠ 目标{target},{act})");
+            if kill { phone.force_stop(&fg); }
+            phone.home();
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            log.put(json!({"r":"hook","kind":"orient","from":fg,"target":target,"act":act}));
+        }
+    }
 
     // ── 局内状态 ──
     let mut window: Vec<(String, String)> = Vec::new(); // (act行, diff) 0~999 空间
@@ -541,14 +664,14 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut plan_ms: Option<u64> = None; // 只随计划首动作入日志
     let mut pending_note: Option<String> = None;
 
-    let Some(mut cap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms) else {
+    let Some(mut cap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, app.as_deref()) else {
         eprintln!("✗ 首屏采集失败");
         return false;
     };
     stream.push(format!("goal: {goal}"));
     println!("任务[{task}] 局{ep_no} | {goal}");
-    println!("屏{realw}x{realh} 图{}x{} | 通道{channel} 等安静上限{settle_ms}ms 计划上限{} | 经验{}条",
-        cap.w, cap.h, cfg.plan_max, lessons.len());
+    println!("屏{realw}x{realh} 图{}x{} | 通道{channel} 等安静上限{settle_ms}ms 计划上限{} | 经验{}条+通用{}条 | 应用{}个",
+        cap.w, cap.h, cfg.plan_max, lessons.len(), glessons.len(), apps.len());
     println!("{}", "=".repeat(56));
 
     let mut n = 0u32;
@@ -566,13 +689,15 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             let els_img: Vec<Value> = cap.els.iter()
                 .map(|e| json!({"t": e.t, "b": el_img_space(e, &cap, realw, realh)}))
                 .collect();
-            log.put(json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel}));
+            let mut rec = json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel,"pkg":cap.pkg});
+            if cap.suspect { rec["suspect"] = json!(true); }
+            log.put(rec);
             logged_seq = cap.seq;
         }
 
         // ②③ 队列空则组装上下文并要一份计划
         if queue.is_empty() {
-            let user = render_ctx(goal, &lessons, &window, &bans, &note, &cap, realw, realh);
+            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &window, &bans, &note, &cap, realw, realh);
             let _ = fs::OpenOptions::new().create(true).append(true)
                 .open(format!("{tmp}/ctx.log"))
                 .map(|mut f| writeln!(f, "── 步#{n} ──\n{user}\n"));
@@ -589,7 +714,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     escapes_left -= 1;
                     println!("      🚧 画面被内容过滤拒绝,盲移离开(余{escapes_left}次)");
                     let esc = ActN { a: "scroll_down".into(), ..Default::default() };
-                    exec(&phone, &esc, &cap, realw, realh);
+                    exec(&phone, &esc, &cap, realw, realh, &apps);
                     log_act(&mut log, n, &esc, "(盲移)", None);
                     let d = "escape(内容过滤)".to_string();
                     log.put(json!({"r":"diff","n":n,"d":d}));
@@ -601,7 +726,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     stall += 1;
                     if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
                     capseq += 1;
-                    match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms) {
+                    match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, app.as_deref()) {
                         Some(c) => cap = c,
                         None => { stop_reason = Some("capture_fail"); break; }
                     }
@@ -620,7 +745,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         let ms_disp = ms_field.map(|v| format!("{v}ms")).unwrap_or_else(|| "·计划".into());
 
         // ④ 门
-        if let Some(reason) = gate(&mut act, &cap, &bans, &taps_hist, cfg, &tmp) {
+        if let Some(reason) = gate(&mut act, &cap, &bans, &taps_hist, cfg, &tmp, &apps) {
             log_act(&mut log, n, &act, &plan_by, ms_field);
             let d = format!("rejected({reason})");
             log.put(json!({"r":"diff","n":n,"d":d}));
@@ -643,7 +768,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             stall += 1;
             if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
             capseq += 1;
-            match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms) {
+            match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, app.as_deref()) {
                 Some(c) => cap = c,
                 None => { stop_reason = Some("capture_fail"); break; }
             }
@@ -665,7 +790,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         }
 
         // ⑤ 执行(定格并入第⑥步: 采集时等画面安静)
-        exec(&phone, &act, &cap, realw, realh);
+        exec(&phone, &act, &cap, realw, realh, &apps);
         if act.a == "tap" {
             taps_hist.push_back((act.x.unwrap_or(0) as i32, act.y.unwrap_or(0) as i32));
             while taps_hist.len() > 4 { taps_hist.pop_front(); }
@@ -676,7 +801,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
         // ⑥ 等画面安静后定帧 + 实测差异(与拉元素列表并行)
         capseq += 1;
-        let Some(newcap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms) else {
+        let Some(newcap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, app.as_deref()) else {
             stop_reason = Some("capture_fail");
             break;
         };
@@ -831,7 +956,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         let els_img: Vec<Value> = cap.els.iter()
             .map(|e| json!({"t": e.t, "b": el_img_space(e, &cap, realw, realh)}))
             .collect();
-        log.put(json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel}));
+        let mut rec = json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel,"pkg":cap.pkg});
+        if cap.suspect { rec["suspect"] = json!(true); }
+        log.put(rec);
     }
 
     // ── 时间点: 非done终止 → budget 记录 ──
@@ -855,9 +982,18 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 if note.is_empty() { "(无)" } else { &note },
                 tail.join(" | ")
             );
-            for e in cap.els.iter().take(60) {
-                let bi = el_img_space(e, &cap, realw, realh);
-                u.push_str(&format!("{} [{},{},{},{}]\n", e.t, bi[0], bi[1], bi[2], bi[3]));
+            if cap.suspect {
+                // 假树不给复核员 —— 上一版曾把上个应用的陈旧树当"最终画面元素"送审
+                u.push_str(&format!("(元素列表不可信:树来自{}而前台是{},请只以最终截图为准)\n",
+                    cap.els_pkg, cap.pkg));
+            } else {
+                for e in cap.els.iter().take(60) {
+                    let bi = el_img_space(e, &cap, realw, realh);
+                    u.push_str(&format!("{} [{},{},{},{}]\n", e.t, bi[0], bi[1], bi[2], bi[3]));
+                }
+            }
+            if !cap.pkg.is_empty() {
+                u.push_str(&format!("当前前台应用: {}\n", cap.pkg));
             }
             u.push_str("(最终截图见图)");
             let mut got = false;
@@ -896,6 +1032,12 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     u.push_str(&format!("{}\n", serde_json::to_string(l).unwrap_or_default()));
                 }
             }
+            if !glessons.is_empty() {
+                u.push_str("现有通用经验(跨任务共享,已存在,勿重复输出):\n");
+                for l in &glessons {
+                    u.push_str(&format!("{}\n", l["t"].as_str().unwrap_or("")));
+                }
+            }
             let mut newles: Vec<Value> = Vec::new();
             for att in 0..2 {
                 if let Ok(out) = brain.call(p, &u, &[], 900, att) {
@@ -909,6 +1051,34 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                         break;
                     }
                     brain.blame(&out.by);
+                }
+            }
+            // scope=global 的条目不占本任务名额,分流进共享经验库(上限10条,按内容去重)
+            let (glob_new, task_new): (Vec<Value>, Vec<Value>) =
+                newles.into_iter().partition(|l| l["scope"] == "global");
+            let mut newles = task_new;
+            if !glob_new.is_empty() {
+                let _ = fs::create_dir_all(&global_dir);
+                let gpath = format!("{global_dir}/lessons.jsonl");
+                let mut gall = load_lessons(&gpath);
+                let mut added = 0usize;
+                for l in glob_new {
+                    let t = tcut(l["t"].as_str().unwrap_or(""), 120);
+                    if t.is_empty() || gall.iter().any(|e| e["t"].as_str() == Some(t.as_str())) {
+                        continue;
+                    }
+                    if gall.len() >= 10 { break; }
+                    gall.push(json!({"r":"lesson","scope":"global","t":t,"from":task}));
+                    added += 1;
+                }
+                if added > 0 {
+                    let mut body = String::from("{\"v\":1}\n");
+                    for l in &gall { body.push_str(&format!("{l}\n")); }
+                    let gtmp = format!("{gpath}.tmp");
+                    if fs::write(&gtmp, &body).is_ok() {
+                        let _ = fs::rename(&gtmp, &gpath);
+                        println!("      📔 通用经验 +{added}条 → tasks/_global/lessons.jsonl");
+                    }
                 }
             }
             if !newles.is_empty() {

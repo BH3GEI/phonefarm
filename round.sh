@@ -60,7 +60,7 @@ sleep 6
 # ── 跑一局 ──
 t0=$(date +%s)
 echo "[round$N] $(date +%H:%M:%S) 开跑" >> "$OUT"
-./phonefarm run --task "$TASK" --endless --budget-calls 90 "$GOAL" >> "$OUT" 2>&1
+./phonefarm run --task "$TASK" --endless --budget-calls 90 --app "$PKG" "$GOAL" >> "$OUT" 2>&1
 rc=$?
 wall=$(( $(date +%s) - t0 ))
 

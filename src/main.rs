@@ -1,6 +1,7 @@
 //! phonefarm v0.2 — 记录契约 v1 运行时
-//! 用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] "<目标>"
+//! 用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] "<目标>"
 //!       phonefarm devices
+//! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
 mod brain;
 mod device;
 mod runtime;
@@ -91,6 +92,7 @@ fn main() {
             let mut task = String::new();
             let mut endless = false;
             let mut budget: u32 = 40;
+            let mut app: Option<String> = None;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -98,11 +100,12 @@ fn main() {
                     "--task" => task = it.next().cloned().unwrap_or_default(),
                     "--endless" => endless = true,
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
+                    "--app" => app = it.next().cloned(),
                     _ => goal = a.clone(),
                 }
             }
             if goal.is_empty() || task.is_empty() {
-                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] \"<目标>\"");
+                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] \"<目标>\"");
                 std::process::exit(2);
             }
             let cfg_text = match std::fs::read_to_string("phonefarm.toml") {
@@ -117,7 +120,7 @@ fn main() {
                 eprintln!("phonefarm.toml 缺 [prompts].step");
                 std::process::exit(2);
             }
-            let ok = runtime::episode(&cfg, &task, &goal, serial, endless, budget);
+            let ok = runtime::episode(&cfg, &task, &goal, serial, endless, budget, app);
             std::process::exit(if ok { 0 } else { 1 });
         }
         _ => {
