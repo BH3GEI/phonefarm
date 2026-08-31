@@ -11,6 +11,7 @@ Rust 内核驱动 Android 模拟器(adb),视觉语言模型(智谱 GLM)做决策
 - **应用感知**:上下文注入当前前台包名 + 设备可启动应用清单;`home`(系统键,与导航方式无关)与 `launch`(按包名直达)让 agent 从任何无关画面一步脱身;`--app` 声明目标应用后开局自动归位
 - **信任门**:空白点击驳回、同一坐标连点驳回、未知动作驳回、预算看门狗;像素差异拿不准时由视觉模型仲裁
 - **点名吸附**:tap 附 `what=按钮文字`,门按当前元素清单把落点吸附到该元素的准确中心;清单里找不到则驳回并附最近候选——"看图手偏"和"闭眼瞎猜"两头堵(实测点'设置'等按钮从此一发入魂)
+- **OCR文字备胎**: UI树为空的屏(游戏/自绘界面/dump失败)自动改用 macOS 自带 Vision 识别截图文字坐标(`ocr.swift`→`ocr`),点名吸附/页面身份证/熟路小地图全部照常工作;识别帧的差异走像素通道(识别帧间有抖动,不进集合差);工具没编译也不碍事,该通道自动关闭
 - **交互网与熟路直达(goto)**:历史局的(画面,动作,实测结果)离线聚成页面网(`build_tree.py` → `tasks/<任务>/tree.json`,页面身份证=同页多数画面共有的短词,信息流碎片天然出局);运行时注入本地小地图,模型发 `goto 页号` 即沿"走过≥3次且终点稳定"的熟路零模型调用直达,每跳按页面身份证验收,走岔立即交还模型;局末自动重算,新路滚雪球。新场景零成本冷启动:第一局照常问模型,材料顺手落进网
 - **计划链**:一次决策最多产出 4 个动作,后续动作不再消耗模型调用(实测免调用步占 26~36%)
 - **经验沉淀**:每局结束复盘,把教训写进 `tasks/<任务>/lessons.jsonl`(带 win/lose 计数),下一局开场即用;代码层兜底防止复盘静默丢条;跨任务通用的教训(scope:global)单独沉到 `tasks/_global/lessons.jsonl`,所有任务共享
@@ -25,6 +26,7 @@ phonefarm.toml        阈值、提示词、provider 链配置(密钥走环境变
 round.sh              单轮端到端:设备体检→清应用→跑一局→汇总一行账
 summarize_run.py      从 log.jsonl 抽取单局汇总
 build_tree.py         离线交互网构建器:汇总全部 runs 的 log.jsonl → tree.json(局末也会自动跑)
+ocr.swift             OCR文字备胎(macOS Vision):UI树为空时识别截图文字坐标,swiftc 编译出 ./ocr
 tasks/<任务>/          各靶子的经验库 lessons.jsonl、交互网 tree.json、逐局 runs/(log.jsonl 入库,截图不入库)
 phonefarm-设计文档-v1.html
 ```
@@ -33,6 +35,7 @@ phonefarm-设计文档-v1.html
 
 1. `cp secrets.env.example secrets.env`,填入智谱 key(Coding 套餐)
 2. `cd src && cargo build --release`,把产物 `phonefarm` 放到仓库根目录
+   (推荐) `swiftc -O ocr.swift -o ocr` — OCR文字备胎;不编也能跑,该功能自动关闭,程序也会尝试自举编译
 3. 启动 Android 模拟器(AVD 名 `agentphone`),装好目标 App
 4. 单轮:`./round.sh 1`;或直接:
    `./phonefarm run --task "今日头条遍历" --endless --budget-calls 90 --app com.ss.android.article.news "<目标文本>"`

@@ -50,6 +50,9 @@ if ! health_ok; then
   exit 9
 fi
 
+# ── OCR文字备胎(UI树为空时用): 没编译过就编一次 ──
+[ -x "$ROOT/ocr" ] || swiftc -O "$ROOT/ocr.swift" -o "$ROOT/ocr"
+
 # ── 轮间清理: 强停应用回桌面,统一从 MainActivity 起 ──
 adb -s $SER shell am force-stop $PKG
 adb -s $SER shell input keyevent 3

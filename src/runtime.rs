@@ -29,6 +29,7 @@ struct Cap {
     pkg: String,      // 前台应用包名(采不到为空)
     els_pkg: String,  // 元素树的多数包名
     suspect: bool,    // 假树: 树包名≠前台包名且重抓无效 → 本步文字通道不可信
+    ocr: bool,        // 本帧清单来自截图文字识别(UI树为空时的备胎)
 }
 
 #[derive(Clone, Default)]
@@ -126,7 +127,7 @@ fn pkg_killable(pkg: &str, target: Option<&str>) -> bool {
 /// 连拍小图,连续两张一致(≤QUIET_PCT)即认为停稳(noise=0);
 /// 到 cap_ms 上限仍不一致 → 动态屏,期间小图两两差异的最大值记为背景动静幅度(noise>0)。
 fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64,
-           target: Option<&str>) -> Option<Cap> {
+           realw: i32, realh: i32, target: Option<&str>) -> Option<Cap> {
     let img_rel = format!("step{seq}.jpg");
     let img = format!("{run_dir}/{img_rel}");
     let (wh, elsres, noise) = std::thread::scope(|s| {
@@ -177,8 +178,40 @@ fn capture(phone: &Adb, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms
             println!("      👻 重抓后仍不符,本步文字通道降级(只信截图)");
         }
     }
+    // 文字备胎: UI树为空(游戏/自绘界面/dump失败)→ 用本机Vision识别截图文字补清单,
+    // 框换回设备像素空间,点名吸附/页面身份证/熟路小地图全部照常工作
+    let mut ocr = false;
+    if els.is_empty() {
+        let o = ocr_els(&img, w, h, realw, realh);
+        if !o.is_empty() {
+            println!("      🔤 UI树为空,OCR文字备胎({}条)", o.len());
+            els = o;
+            ocr = true;
+        }
+    }
     let thumb = thumb_gray(&img, tmp, &format!("{}", seq % 2));
-    Some(Cap { seq, els, img, img_rel, w, h, thumb, noise, pkg: fg, els_pkg, suspect })
+    Some(Cap { seq, els, img, img_rel, w, h, thumb, noise, pkg: fg, els_pkg, suspect, ocr })
+}
+
+/// OCR文字备胎: UI树为空时调本机Vision(ocr二进制,由ocr.swift编译)识别截图文字。
+/// 框从图片像素换回设备像素(与el_img_space互逆),els契约不变;
+/// 任何失败静默返回空——备胎坏了不能拖垮主流程。
+fn ocr_els(img: &str, capw: i32, caph: i32, realw: i32, realh: i32) -> Vec<Node> {
+    // "./ocr": 仓库根目录下的本地工具(不在PATH里;目录契约就是二进制+工具+tasks/同层)
+    let Ok(o) = std::process::Command::new("./ocr").arg(img).output() else { return vec![] };
+    if !o.status.success() { return vec![] }
+    let sx = |v: i64| (v * realw as i64 / capw.max(1) as i64) as i32;
+    let sy = |v: i64| (v * realh as i64 / caph.max(1) as i64) as i32;
+    let mut v: Vec<Node> = String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| {
+        let j: Value = serde_json::from_str(l).ok()?;
+        let t = j["t"].as_str()?.trim().to_string();
+        let b: Vec<i64> = j["b"].as_array()?.iter().filter_map(|x| x.as_i64()).collect();
+        if t.is_empty() || b.len() != 4 { return None; }
+        Some(Node { t, b: [sx(b[0]), sy(b[1]), sx(b[2]), sy(b[3])] })
+    }).collect();
+    v.sort_by_key(|n| ((n.b[1] + n.b[3]) / 2, (n.b[0] + n.b[2]) / 2)); // 上到下、左到右
+    v.truncate(80);
+    v
 }
 
 /// 元素框: 设备像素 → 图片像素
@@ -259,6 +292,7 @@ fn log_screen(log: &mut Log, cap: &Cap, n: u32, realw: i32, realh: i32, logged_s
         .collect();
     let mut rec = json!({"r":"screen","n":n,"els":els_img,"img":cap.img_rel,"pkg":cap.pkg});
     if cap.suspect { rec["suspect"] = json!(true); }
+    if cap.ocr { rec["ocr"] = json!(true); }
     log.put(rec);
     *logged_seq = cap.seq;
 }
@@ -359,6 +393,9 @@ fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str
             cap.els_pkg, cap.pkg
         ));
     } else {
+        if cap.ocr {
+            s.push_str("(元素列表来自截图文字识别OCR:坐标即屏幕文字位置;无文字的图标/图片按钮仍只能按截图定位)\n");
+        }
         for n in cap.els.iter().take(60) {
             let bi = el_img_space(n, cap, realw, realh);
             s.push_str(&format!(
@@ -611,8 +648,9 @@ fn arbit_changed(brain: &mut Brain, cfg: &Config, img_a: &str, img_b: &str)
 /// 返回 (差异串, 是否边界区)。
 fn diff_of(before: &Cap, after: &Cap, channel: &str) -> (String, bool) {
     // 假树(suspect)的元素集不可用于集合差 —— 用它算 diff 会把上个应用的文字当成本步变化
+    // OCR清单同理: 识别帧间有抖动(同一处文字两帧识成两样),集合差会凭空出假差异 → 走像素
     let use_pixel = channel == "pixel" || before.els.is_empty() || after.els.is_empty()
-        || before.suspect || after.suspect;
+        || before.suspect || after.suspect || before.ocr || after.ocr;
     if !use_pixel {
         let count = |v: &Vec<Node>| {
             let mut m = std::collections::HashMap::new();
@@ -735,6 +773,11 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     // 交互网(build_tree.py 离线产出,局末自动重算): 页面身份证+熟路。没有也能跑,只是没有goto
     let tree = Tree::load(&format!("{task_dir}/tree.json"));
     if tree.is_some() { println!("(载入交互网: {}页/{}边)", tree.as_ref().unwrap().pages.len(), tree.as_ref().unwrap().edges.len()); }
+    // OCR文字备胎自举: 没编译过就现场编一次(几秒;失败不碍事,该通道自动关闭)
+    if !std::path::Path::new("ocr").exists() && std::path::Path::new("ocr.swift").exists() {
+        println!("(编译OCR文字备胎 ocr.swift…)");
+        let _ = std::process::Command::new("swiftc").args(["-O", "ocr.swift", "-o", "ocr"]).output();
+    }
     let ep_no = fs::read_dir(format!("{task_dir}/runs")).map(|d| d.count()).unwrap_or(1) as i64;
 
     // ── 感知参数(params.toml 白名单) ──
@@ -807,7 +850,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut plan_ms: Option<u64> = None; // 只随计划首动作入日志
     let mut pending_note: Option<String> = None;
 
-    let Some(mut cap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, app.as_deref()) else {
+    let Some(mut cap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref()) else {
         eprintln!("✗ 首屏采集失败");
         return false;
     };
@@ -866,7 +909,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     stall += 1;
                     if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
                     capseq += 1;
-                    match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, app.as_deref()) {
+                    match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref()) {
                         Some(c) => cap = c,
                         None => { stop_reason = Some("capture_fail"); break; }
                     }
@@ -908,7 +951,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             stall += 1;
             if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
             capseq += 1;
-            match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, app.as_deref()) {
+            match capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref()) {
                 Some(c) => cap = c,
                 None => { stop_reason = Some("capture_fail"); break; }
             }
@@ -980,7 +1023,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 exec_steps += 1;
                 capseq += 1;
                 // 跳段用短定格: 到达判定靠页面身份证,不必等画面完全安静
-                let Some(nc) = capture(&phone, &run_dir, capseq, cfg, &tmp, 1200, app.as_deref()) else {
+                let Some(nc) = capture(&phone, &run_dir, capseq, cfg, &tmp, 1200, realw, realh, app.as_deref()) else {
                     stop_reason = Some("capture_fail");
                     break;
                 };
@@ -1046,7 +1089,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
         // ⑥ 等画面安静后定帧 + 实测差异(与拉元素列表并行)
         capseq += 1;
-        let Some(newcap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, app.as_deref()) else {
+        let Some(newcap) = capture(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref()) else {
             stop_reason = Some("capture_fail");
             break;
         };
