@@ -97,6 +97,7 @@ fn main() {
             let mut endless = false;
             let mut budget: u32 = 40;
             let mut app: Option<String> = None;
+            let mut asserts: Vec<String> = Vec::new();
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -105,11 +106,20 @@ fn main() {
                     "--endless" => endless = true,
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--app" => app = it.next().cloned(),
+                    "--assert" => {
+                        // 验收词(可逗号分隔多个,英文/中文逗号都认): 契约式到达断言
+                        if let Some(v) = it.next() {
+                            for w in v.split(|c| c == ',' || c == '、') {
+                                let w = w.trim();
+                                if !w.is_empty() { asserts.push(w.to_string()); }
+                            }
+                        }
+                    }
                     _ => goal = a.clone(),
                 }
             }
             if goal.is_empty() || task.is_empty() {
-                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] \"<目标>\"");
+                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] [--assert \"词1,词2\"] \"<目标>\"");
                 std::process::exit(2);
             }
             let cfg_text = match std::fs::read_to_string("phonefarm.toml") {
@@ -124,7 +134,7 @@ fn main() {
                 eprintln!("phonefarm.toml 缺 [prompts].step");
                 std::process::exit(2);
             }
-            let res = runtime::episode(&cfg, &task, &goal, serial, endless, budget, app);
+            let res = runtime::episode(&cfg, &task, &goal, serial, endless, budget, app, asserts);
             println!("summary: run={} stop={} steps={} calls={} tokens={} wall={:.1}s achieved={}",
                 res.run_id, res.stop, res.steps, res.calls, res.tokens,
                 res.wall_ms as f64 / 1000.0, res.achieved);
@@ -138,6 +148,7 @@ fn main() {
             let mut rounds: u32 = 1;
             let mut budget: u32 = 40;
             let mut app: Option<String> = None;
+            let mut asserts: Vec<String> = Vec::new();
             let mut as_json = false;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
@@ -147,12 +158,20 @@ fn main() {
                     "--rounds" => rounds = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--app" => app = it.next().cloned(),
+                    "--assert" => {
+                        if let Some(v) = it.next() {
+                            for w in v.split(|c| c == ',' || c == '、') {
+                                let w = w.trim();
+                                if !w.is_empty() { asserts.push(w.to_string()); }
+                            }
+                        }
+                    }
                     "--json" => as_json = true,
                     _ => goal = a.clone(),
                 }
             }
             if goal.is_empty() || task.is_empty() {
-                eprintln!("用法: phonefarm benchmark --task <任务名> [--rounds N] [--budget-calls N] [--app <包名>] [--json] \"<目标>\"");
+                eprintln!("用法: phonefarm benchmark --task <任务名> [--rounds N] [--budget-calls N] [--app <包名>] [--assert \"词1,词2\"] [--json] \"<目标>\"");
                 std::process::exit(2);
             }
             let cfg_text = match std::fs::read_to_string("phonefarm.toml") {
@@ -208,7 +227,7 @@ fn main() {
                     std::thread::sleep(std::time::Duration::from_secs(6));
                 }
                 let t0 = std::time::Instant::now();
-                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), true, budget, app.clone());
+                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), true, budget, app.clone(), asserts.clone());
                 let wall = t0.elapsed().as_secs();
                 append(&format!(
                     "{r}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{wall}",
@@ -227,7 +246,7 @@ fn main() {
             std::process::exit(if last_ok { 0 } else { 1 });
         }
         _ => {
-            eprintln!("phonefarm v0.2 — 记录契约 v1 运行时\n  phonefarm run --task <任务名> \"<目标>\"\n  phonefarm benchmark --task <任务名> [--rounds N] [--app <包名>] [--json] \"<目标>\"\n  phonefarm devices");
+            eprintln!("phonefarm v0.2 — 记录契约 v1 运行时\n  phonefarm run --task <任务名> [--assert \"词1,词2\"] \"<目标>\"\n  phonefarm benchmark --task <任务名> [--rounds N] [--app <包名>] [--assert \"词1,词2\"] [--json] \"<目标>\"\n  phonefarm devices");
             std::process::exit(2);
         }
     }

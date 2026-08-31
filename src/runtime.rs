@@ -412,12 +412,27 @@ fn act_line(n: u32, a: &ActN) -> String {
     }
 }
 
+/// 契约式到达断言(--assert): 逐元素子串匹配,不跨元素拼接——"广告"+"设置"分居两处凑不成"广告设置"。
+/// 断言权在测试契约手里: 命中即注入"实测事实",不靠模型对标题的语义猜认
+/// (局31: 到了广告设置页却因页内标题是"为什么我会看到此广告"死不认账,烧光22次调用)
+fn assert_hits(els: &[Node], asserts: &[String]) -> Vec<String> {
+    asserts.iter().filter_map(|w| {
+        let w = w.trim();
+        if !w.is_empty() && els.iter().any(|e| e.t.trim().contains(w)) {
+            Some(w.to_string())
+        } else { None }
+    }).collect()
+}
+
 /// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 最近act/diff窗 + ban + note + 小地图 + 前台应用 + 屏幕
 /// 静态段(goal/经验/apps)在前,动态段在后,保住能保的提示词缓存前缀。
 fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str,
-              map_line: &str, alert: &str, window: &[(String, String)], bans: &[Ban],
+              map_line: &str, assert_line: &str, alert: &str, window: &[(String, String)], bans: &[Ban],
               note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
     let mut s = format!("goal: {goal}\n");
+    if !assert_line.is_empty() {
+        s.push_str(&format!("✔ {assert_line}\n"));
+    }
     if !alert.is_empty() {
         s.push_str(&format!("⚠ {alert}\n"));
     }
@@ -829,7 +844,7 @@ struct ParamsFile {
 }
 
 pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
-               endless: bool, budget: u32, app: Option<String>) -> EpisodeResult {
+               endless: bool, budget: u32, app: Option<String>, asserts: Vec<String>) -> EpisodeResult {
     let t0 = std::time::Instant::now();
     let fail = |stop: &str, run_id: String| EpisodeResult {
         achieved: false, run_id, stop: stop.into(), steps: 0, calls: 0, tokens: 0,
@@ -953,6 +968,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut act_sigs: VecDeque<String> = VecDeque::new(); // 打摆: 已执行动作签名
     let mut osc_fire_at = 4usize;   // 打摆: 签名窗达此长度才(再)触发
     let mut alert = String::new();  // 打摆警报(注入下一次决策,用过即清)
+    let mut assert_hit_prev = false; // 验收词命中上升沿(只在新命中时记账,避免每步刷屏)
 
     // ── 计划队列 ──
     let mut queue: VecDeque<ActN> = VecDeque::new();
@@ -988,6 +1004,21 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             if let Some(p) = t.page_of(&cap.els) { visited.insert(p.id); }
         }
 
+        // 契约式到达断言: 验收词全部在当前屏实测到 → 注入事实行(假树不测,防止拿旧屏谎报命中)
+        let hits = if cap.suspect { Vec::new() } else { assert_hits(&cap.els, &asserts) };
+        let assert_line = if asserts.is_empty() || hits.len() < asserts.len() {
+            assert_hit_prev = false;
+            String::new()
+        } else {
+            if !assert_hit_prev {
+                assert_hit_prev = true;
+                log.put(json!({"r":"hook","kind":"assert","hit":hits}));
+                println!("      ✔ 验收词实测命中: [{}]", hits.join(","));
+            }
+            format!("验收条件已满足:程序在当前屏实测到任务验收词 [{}] —— 目标画面已到达,核对无遗漏后即可done,不必寻找与任务字面一致的标题",
+                hits.join(","))
+        };
+
         // ②③ 队列空则组装上下文并要一份计划
         if queue.is_empty() {
             // 小地图/探索沙盘: 遍历类任务给沙盘看板(进度+本页未探索+建议目标),普通任务单行小地图
@@ -1019,7 +1050,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 }
                 None => String::new(),
             };
-            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &map_line, &alert, &window, &bans, &note, &cap, realw, realh);
+            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &map_line, &assert_line, &alert, &window, &bans, &note, &cap, realw, realh);
             // 模型视角存档: 这次决策发给模型的完整上下文(含警报/沙盘/清单/便签)
             let _ = fs::OpenOptions::new().create(true).append(true)
                 .open(&ctx_path)
@@ -1422,6 +1453,20 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 if note.is_empty() { "(无)" } else { &note },
                 tail.join(" | ")
             );
+            // 契约式到达断言也交给复核: 验收词+程序对终局的实测结果,契约语义=全部命中即可判达成
+            if !asserts.is_empty() {
+                u.push_str(&format!("任务契约验收词: [{}]", asserts.join("、")));
+                if cap.suspect {
+                    u.push_str("(元素列表不可信,请按最终截图自行核对验收词)\n");
+                } else {
+                    let final_hits = assert_hits(&cap.els, &asserts);
+                    u.push_str(&format!(" | 程序在最终画面实测: {}\n", if final_hits.len() == asserts.len() {
+                        format!("全部命中 —— 契约语义:命中即可判达成")
+                    } else {
+                        format!("未全部命中(仅[{}])", final_hits.join(","))
+                    }));
+                }
+            }
             if cap.suspect {
                 // 假树不给复核员 —— 上一版曾把上个应用的陈旧树当"最终画面元素"送审
                 u.push_str(&format!("(元素列表不可信:树来自{}而前台是{},请只以最终截图为准)\n",
@@ -1685,5 +1730,32 @@ mod tests {
         let a = ActN { a: "tap".into(), x: Some(150), y: Some(920), what: Some("广告设置".into()), ..Default::default() };
         let b = ActN { a: "tap".into(), x: Some(160), y: Some(928), what: Some("广告设置".into()), ..Default::default() };
         assert_eq!(act_sig(&a), act_sig(&b));
+    }
+
+    fn nd(t: &str) -> Node { Node { t: t.into(), b: [0, 0, 0, 0] } }
+
+    #[test]
+    fn assert_word_matched_by_substring_within_one_element() {
+        // 局31场景: 页内元素是"个性化广告推荐"这类长文,验收词"个性化广告"子串命中即算
+        let els = [nd("个性化广告推荐"), nd("清理缓存")];
+        let ws = vec!["个性化广告".to_string()];
+        assert_eq!(assert_hits(&els, &ws), vec!["个性化广告".to_string()]);
+    }
+
+    #[test]
+    fn assert_requires_all_words_present() {
+        // 多个验收词必须全中,缺一不注入(合取=更严,防单词撞车假阳性)
+        let els = [nd("个性化广告推荐")];
+        let ws = vec!["个性化广告".to_string(), "程序化广告".to_string()];
+        assert_eq!(assert_hits(&els, &ws).len(), 1);
+        let els2 = [nd("个性化广告"), nd("程序化广告设置")];
+        assert_eq!(assert_hits(&els2, &ws).len(), 2);
+    }
+
+    #[test]
+    fn assert_words_not_stitched_across_elements() {
+        // "广告"和"设置"分居两处,不得拼接成"广告设置"算命中
+        let els = [nd("广告"), nd("设置")];
+        assert!(assert_hits(&els, &vec!["广告设置".to_string()]).is_empty());
     }
 }
