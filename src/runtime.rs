@@ -226,7 +226,9 @@ fn osc_note(sigs: &mut VecDeque<String>, sig: String, fire_at: &mut usize) -> bo
 /// 原封不动的文字集弹回原页 = 一次bounce。登录墙/VIP墙/实名墙/弹窗轰炸同表现同治法。
 /// 两道护栏防误伤: ①外出见过新页(哪怕是第一次见的墙页)不追责——"进去看一眼就回"是遍历
 /// 的合法动作; ②回到原页但文字集变了(开关/展开等原地操作)不追责。
-/// 后果: 同(页,入口)弹回≥2次 → 沙盘划掉该入口; 同页累计≥3次 → 连坐拉黑+整区受限警报(每页一次)。
+/// 后果: 仅反复弹回(≥2次)的入口从沙盘划走(单次弹回是偶发,保留第二次机会,绝不连坐——
+/// 3个入口需登录 ≠ 整菜单需登录,没试够的真入口不能被误杀); 本页≥3个不同入口受阻 →
+/// 一条温和事实提示(告知已发现几个、其余未探索仍可试),继续与否由模型判断,运行时不替它放弃整区。
 struct BounceGuard {
     /// (起始页key, 入口名, 起始文字集, 起始步号, 外出是否见过新页)
     pending: Option<((String, i64), String, Vec<String>, u32, bool)>,
@@ -261,21 +263,22 @@ impl BounceGuard {
         self.pending = Some((ok, entry, osig, ostep, saw_new)); // 外出途中,继续观察
         None
     }
-    fn page_total(&self, key: &(String, i64)) -> u32 {
-        self.counts.iter().filter(|((k, _), _)| k == key).map(|(_, c)| *c).sum()
+    /// 本页弹回过的不同入口数(区分"3个入口各弹1次"与"1个入口弹3次";前者才是"多入口受阻"信号)
+    fn blocked_entry_count(&self, key: &(String, i64)) -> usize {
+        self.counts.iter().filter(|((k, _), c)| k == key && **c >= 1).count()
     }
-    /// 当前页已拉黑的入口: 单入口≥2次,或整区受限(页累计≥3)时≥1次连坐
+    /// 当前页从沙盘划走的入口: 仅反复弹回(≥2次)的。单次弹回是偶发,保留第二次机会;
+    /// 绝不因"本页别处有墙"就连坐没试够的入口——3个入口需登录 ≠ 整菜单需登录。
     fn blocked_of(&self, key: &(String, i64)) -> Vec<String> {
-        let heavy = self.page_total(key) >= 3;
         let mut v: Vec<String> = self.counts.iter()
-            .filter(|((k, _), c)| k == key && (**c >= 2 || (heavy && **c >= 1)))
+            .filter(|((k, _), c)| k == key && **c >= 2)
             .map(|((_, e), _)| e.clone()).collect();
         v.sort();
         v
     }
-    /// 整区受限警报(同页累计≥3次弹回,每页只发一次)
+    /// 多入口受阻提示(本页≥3个不同入口弹回过,每页只发一次): 只陈述事实,不下停止令
     fn region_alert(&mut self, key: &(String, i64)) -> bool {
-        if self.page_total(key) >= 3 && !self.alerted.contains(key) {
+        if self.blocked_entry_count(key) >= 3 && !self.alerted.contains(key) {
             self.alerted.insert(key.clone());
             return true;
         }
@@ -1457,12 +1460,11 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 println!("      ↩ 入口弹回: '{entry}'第{c}次(净零回到原页,无新覆盖)");
             }
             if bounce.region_alert(&cur_key) {
-                let blk = bounce.blocked_of(&cur_key);
-                println!("      ⛔ 整区受限警报: 本页{}个入口全部弹回", blk.len());
-                log.put(json!({"r":"hook","kind":"bounce_region","blocked":blk}));
+                let nblk = bounce.blocked_entry_count(&cur_key);
+                println!("      ⚠ 多入口受阻: 本页已发现{nblk}个入口点进即弹回");
+                log.put(json!({"r":"hook","kind":"bounce_region","blocked_entries":nblk}));
                 if alert.is_empty() {
-                    alert = format!("【系统提示:入口阻塞】本页入口[{}]点进去均被弹回本页(累计{}次)。该区域疑似整体受限(登录/权限/付费等,原因不重要),停止逐个尝试:改探索其他区域,或按任务要求收官。",
-                        bounce.blocked_of(&cur_key).join(","), bounce.page_total(&cur_key));
+                    alert = format!("【提示:多个入口受阻】本页已发现{nblk}个入口点进去即弹回本页(疑似需登录/权限/付费等)。反复弹回的已从探索建议划走;本页其余未探索入口仍可一试,或按任务收官——是否继续、去哪继续,由你判断。");
                 }
             }
             match runs.last_mut() {
@@ -2487,9 +2489,9 @@ mod tests {
     }
 
     #[test]
-    fn bounce_region_alert_and_collective_block() {
-        // 抖音局2实录形态: 设置→优惠券→小程序各弹回一次(异身份单向,三道旧防线全漏)
-        // → 页级累计3次触发整区警报,单次弹回的入口连坐拉黑,同页警报只发一次
+    fn bounce_alerts_without_collateral_block() {
+        // 用户修正: 3个入口各弹回1次 ≠ 整菜单需登录。不连坐——单次弹回一个都不划掉
+        // (没试够的真入口不能被误杀),只发"多入口受阻"事实提示;唯反复弹回(≥2)的才从沙盘划走。
         let mut g = BounceGuard::new();
         let p = ("com.a.Side".to_string(), -1i64);
         let sig: Vec<String> = vec!["菜单".into()];
@@ -2498,9 +2500,14 @@ mod tests {
             g.on_tap(&p, e, sig.clone(), s);
             assert!(g.on_arrive(&p, &sig, false, s + 1).is_some());
         }
-        assert!(g.region_alert(&p), "页级3次弹回应触发整区警报");
-        assert!(!g.region_alert(&p), "同页警报只发一次");
-        assert_eq!(g.blocked_of(&p).len(), 3, "整区受限时单次弹回入口连坐拉黑");
+        assert!(g.blocked_of(&p).is_empty(), "单次弹回一个都不划,不误杀没试够的真入口");
+        assert_eq!(g.blocked_entry_count(&p), 3);
+        assert!(g.region_alert(&p), "3个不同入口受阻→事实提示");
+        assert!(!g.region_alert(&p), "同页提示只发一次");
+        // 其中一个再弹一次 → 达反复弹回,只划掉它这一个,其余照旧可试
+        g.on_tap(&p, "设置", sig.clone(), 10);
+        assert!(g.on_arrive(&p, &sig, false, 11).is_some());
+        assert_eq!(g.blocked_of(&p), vec!["设置".to_string()], "只划反复弹回的那一个");
         // 全未知页不立案
         g.on_tap(&(String::new(), -1), "入口", sig.clone(), 30);
         assert!(g.on_arrive(&(String::new(), -1), &sig, false, 31).is_none());
