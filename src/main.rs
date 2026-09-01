@@ -287,7 +287,7 @@ fn main() {
                 }
             }
             ensure_keys(&cfg);
-            let res = runtime::episode(&cfg, &task, &goal, serial, endless, budget, app, asserts);
+            let res = runtime::episode(&cfg, &task, &goal, serial, None, endless, budget, app, asserts);
             println!("summary: run={} stop={} steps={} calls={} tokens={} wall={:.1}s achieved={}",
                 res.run_id, res.stop, res.steps, res.calls, res.tokens,
                 res.wall_ms as f64 / 1000.0, res.achieved);
@@ -387,17 +387,19 @@ fn main() {
                     }
                 }
                 // 轮间清理: 强停→回桌面→冷启主Activity,统一起跑线
+                let mut cold_ms: Option<i64> = None;
                 if let Some(pkg) = &app {
                     phone.force_stop(pkg);
                     phone.home();
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     if let Some((_, comp)) = apps.iter().find(|(p, _)| p == pkg) {
-                        let _ = phone.launch(pkg, comp); // 冷启动毫秒由 run 内的遥测层消费,benchmark 不重复记
+                        // 这次启动就是本轮的冷启动: 计时递给局内遥测(orient 不会再触发)
+                        cold_ms = phone.launch(pkg, comp);
                     }
                     std::thread::sleep(std::time::Duration::from_secs(6));
                 }
                 let t0 = std::time::Instant::now();
-                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), true, budget, app.clone(), asserts.clone());
+                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), cold_ms, true, budget, app.clone(), asserts.clone());
                 let wall = t0.elapsed().as_secs();
                 append(&format!(
                     "{r}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{wall}",

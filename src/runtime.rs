@@ -1336,6 +1336,7 @@ struct ParamsFile {
 }
 
 pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
+               ext_cold_ms: Option<i64>,
                endless: bool, budget: u32, app: Option<String>, asserts: Vec<String>) -> EpisodeResult {
     let t0 = std::time::Instant::now();
     let fail = |stop: &str, run_id: String| EpisodeResult {
@@ -1442,7 +1443,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut tele_prev_frames: Option<(i64, std::time::Instant)> = None; // fps 差值基准
     let mut tele_prev_ev: (Option<i32>, Option<i32>, Option<i32>, Option<i32>) = (None, None, None, None); // crash/anr/fd/net_conn
     let mut tele_last_t = std::time::Instant::now();
-    let mut tele_cold: Option<i64> = None; // 开局归位的冷启动毫秒,并入下一条遥测记录
+    // 冷启动毫秒: benchmark 轮间清理已把 App 拉起时,orient 不会再触发——启动计时由
+    // 调用方(ext_cold_ms)递进来;局内 orient 自己启动时覆盖。并入下一条遥测记录。
+    let mut tele_cold: Option<i64> = ext_cold_ms;
     let mut last_api_ms: i64 = 0;
 
     // ── 开局归位(确定性,零模型调用): 声明了目标应用且前台不符 → 掐掉可杀的前台,回桌面 ──

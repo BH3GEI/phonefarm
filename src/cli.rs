@@ -629,6 +629,9 @@ fn cmd_stats(a: &Args) -> Result<(), String> {
             v => println!("  {label}: 均值{} p50={} p95={}", v[0], v[1], v[2]),
         }
     }
+    if let Some(c) = tele.iter().find_map(|t| t["cold_start_ms"].as_i64()) {
+        println!("  冷启动: {c}ms");
+    }
     for (k, label) in [("mem_avail_kb", "可用内存kB"), ("vm_rss_kb", "AppRSSkB"), ("batt_temp_c", "电池℃")] {
         let v = &out[k];
         if v["min"].as_f64().is_some_and(|f| !f.is_nan()) {
