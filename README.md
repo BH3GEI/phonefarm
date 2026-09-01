@@ -33,6 +33,10 @@ cd src && cargo build --release && cp target/release/phonefarm ..
 # 5. 运行 OpenHarmony 真机任务
 ./phonefarm devices                        # 列出当前连接的 adb 与 hdc 设备
 ./phonefarm run --serial hdc:<serial_id> --task OH设置冒烟 --budget-calls 30 "<目标>"
+
+# 6. 多设备并行（每设备独立一局，stdout 逐行带 [设备] 前缀，任一失败整体退出码非 0）
+./phonefarm parallel --job "任务A|目标A|emulator-5554|com.pkg" --job "任务B|目标B|hdc:<key>" --budget-calls 60
+# 同一任务名派给多台设备会被拒绝（经验库 lessons/tree 会互踩）——用不同任务名分开，合并语义留后续
 ```
 
 ## 数据查询与 CLI 交互

@@ -154,6 +154,18 @@ fn now_tag() -> String {
         .unwrap_or_else(|_| "run".into())
 }
 
+/// 局序号(进程内自增): run_id 与 tmp 目录的防撞组件(PARALLEL_SPEC 任务1/2)。
+fn run_seq() -> u32 {
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 运行目录名: 秒级时间戳-<PID>-<局序号>。同进程多局、多进程同秒起跑都不撞目录;
+/// CLI 局ID 前缀模糊匹配天然兼容(只多后缀)。
+fn make_run_id(seq: u32) -> String {
+    format!("{}-{}-{seq}", now_tag(), std::process::id())
+}
+
 /// 单局结构化成绩单(主程序退出码 / benchmark 报表共用)
 pub struct EpisodeResult {
     pub achieved: bool,
@@ -1327,13 +1339,15 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     };
     // ── 目录与文件 ──
     let task_dir = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
-    let run_id = now_tag();
+    let seq = run_seq();
+    let run_id = make_run_id(seq);
     let run_dir = format!("{}/runs/{run_id}", task_dir);
     if fs::create_dir_all(&run_dir).is_err() {
         eprintln!("✗ 建不了运行目录 {run_dir}");
         return fail("mkdir_fail", String::new());
     }
-    let tmp = std::env::temp_dir().join(format!("phonefarm-{}", std::process::id()));
+    // tmp 按 PID+局序号隔离(多进程并行、同进程多局中间文件 _raw/_cmd.out 都不互踩)
+    let tmp = std::env::temp_dir().join(format!("phonefarm-{}-{seq}", std::process::id()));
     let tmp = tmp.to_string_lossy().to_string();
     let _ = fs::create_dir_all(&tmp);
     let mut log = Log {
@@ -2355,6 +2369,15 @@ mod tests {
 
     fn cfg() -> Config {
         toml::from_str(&std::fs::read_to_string("../phonefarm.toml").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn run_id_unique_across_calls() {
+        // 同秒双局: 序号自增保证目录名不同;格式带 PID 保证跨进程不撞
+        let a = make_run_id(run_seq());
+        let b = make_run_id(run_seq());
+        assert_ne!(a, b);
+        assert!(a.contains(&format!("-{}-", std::process::id())));
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod brain;
 mod cli;
+mod parallel;
 mod device;
 mod fold;
 mod runtime;
@@ -102,6 +103,7 @@ impl Config {
 const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--app P] [--assert \"词1,词2\"] \"<目标>\"
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
+并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
 设备:  devices | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
@@ -171,6 +173,10 @@ fn ensure_keys(cfg: &Config) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
+        Some("parallel") => {
+            // 多设备并行(PARALLEL_SPEC): 自进程 fan-out,行级设备前缀,任一失败整体非0
+            std::process::exit(parallel::run_parallel(&args[1..]));
+        }
         Some("devices") => {
             // 两族并列,各自 best-effort(某族工具不在 PATH 就跳过):
             // hdc 目标直接以 "hdc:<key>" 形态给出,拷进 --serial 即用
