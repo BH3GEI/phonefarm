@@ -105,6 +105,7 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
 设备:  devices | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
+后台:  run/benchmark 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)";
@@ -170,6 +171,32 @@ fn ensure_keys(cfg: &Config) {
     }
 }
 
+/// detach 参数剥离(纯函数供单测): 子进程用同参重入,仅去掉 --detach 本身
+fn strip_detach(args: &[String]) -> Vec<String> {
+    args.iter().filter(|a| a.as_str() != "--detach").cloned().collect()
+}
+
+/// 后台分离自进程: 同参重入(去 --detach),stdout/stderr 归 console 文件,
+/// 新进程组免受调用方作业信号牵连(nohup 收编)。返回子进程 pid。
+fn spawn_detached(console: &str, envs: &[(&str, &str)]) -> std::io::Result<u32> {
+    let exe = std::env::current_exe()?;
+    let args = strip_detach(&std::env::args().skip(1).collect::<Vec<_>>());
+    let f = std::fs::File::create(console)?;
+    let f2 = f.try_clone()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&args)
+        .stdout(f).stderr(f2).stdin(std::process::Stdio::null());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    Ok(cmd.spawn()?.id())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
@@ -204,12 +231,14 @@ fn main() {
             let mut budget: u32 = 40;
             let mut app: Option<String> = None;
             let mut asserts: Vec<String> = Vec::new();
+            let mut detach = false;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--serial" => serial = it.next().cloned(),
                     "--task" => task = it.next().cloned().unwrap_or_default(),
                     "--endless" => endless = true,
+                    "--detach" => detach = true,
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--app" => app = it.next().cloned(),
                     "--assert" => {
@@ -240,6 +269,23 @@ fn main() {
                 eprintln!("phonefarm.toml 缺 [prompts].step");
                 std::process::exit(2);
             }
+            if detach {
+                // 先起跑回头取结果: 预分配局ID→建目录→分离子进程→立即回报(取结果走 status/show)
+                let id = runtime::alloc_run_id();
+                let run_dir = format!("{}/tasks/{}/runs/{}", cfg.data_dir.trim_end_matches('/'), task, id);
+                if std::fs::create_dir_all(&run_dir).is_err() {
+                    eprintln!("✗ 建不了运行目录 {run_dir}");
+                    std::process::exit(2);
+                }
+                let console = format!("{run_dir}/console.log");
+                match spawn_detached(&console, &[("PF_RUN_ID", &id)]) {
+                    Ok(pid) => {
+                        println!("已后台起跑: run={id}\n目录: {run_dir}\n控制台: {console}\npid: {pid}\n取结果: phonefarm status {id} | show {id}");
+                        std::process::exit(0);
+                    }
+                    Err(e) => { eprintln!("detach 失败: {e}"); std::process::exit(2); }
+                }
+            }
             ensure_keys(&cfg);
             let res = runtime::episode(&cfg, &task, &goal, serial, endless, budget, app, asserts);
             println!("summary: run={} stop={} steps={} calls={} tokens={} wall={:.1}s achieved={}",
@@ -257,11 +303,13 @@ fn main() {
             let mut app: Option<String> = None;
             let mut asserts: Vec<String> = Vec::new();
             let mut as_json = false;
+            let mut detach = false;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--serial" => serial = it.next().cloned(),
                     "--task" => task = it.next().cloned().unwrap_or_default(),
+                    "--detach" => detach = true,
                     "--rounds" => rounds = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--app" => app = it.next().cloned(),
@@ -293,8 +341,22 @@ fn main() {
                 eprintln!("phonefarm.toml 缺 [prompts].step");
                 std::process::exit(2);
             }
+            let task_root_early = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
+            if detach {
+                // 多轮评测后台化: console 沿用 campaign_<stamp>.out 命名惯例;进度用 runs/campaign/status --task 轮询
+                let _ = std::fs::create_dir_all(&task_root_early);
+                let stamp = runtime::alloc_run_id();
+                let console = format!("{task_root_early}/campaign_{stamp}.out");
+                match spawn_detached(&console, &[]) {
+                    Ok(pid) => {
+                        println!("已后台起跑 benchmark: 任务[{task}] {rounds}轮\n控制台: {console}\npid: {pid}\n进度: phonefarm status --task {task} | runs --task {task} | campaign --task {task}");
+                        std::process::exit(0);
+                    }
+                    Err(e) => { eprintln!("detach 失败: {e}"); std::process::exit(2); }
+                }
+            }
             ensure_keys(&cfg);
-            let task_root = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
+            let task_root = task_root_early;
             let _ = std::fs::create_dir_all(&task_root);
             let tsv = format!("{task_root}/campaign.tsv");
             if std::fs::metadata(&tsv).is_err() {

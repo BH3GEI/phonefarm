@@ -23,6 +23,7 @@ const SCHEMA_MD: &str = r#"# log.jsonl 记录契约 (schema)
 | telemetry | 每步性能快照(平铺字段) | n seq heavy + 系统/渲染/App/Root/PSI/流量/传感器/IPC/Host 各层(采不到即缺席) |
 | app_event | 遥测差值事件 | kind=crash/anr/fd_growth/net_conn n from to pkg |
 | trace | 深度产物指针(按需抓取) | kind n file=trace/stepN.*.txt |
+| start | 局开跑标记(status 活性判定的地基) | pid ts |
 | end | 局级收官结论 | stop achieved steps exec_steps calls tokens wall_ms done_claim |
 
 跨局产物: tree.json(交互网:pages/edges/steps_total) lessons.jsonl(经验库) campaign*.tsv(评测账)。
@@ -126,6 +127,54 @@ fn run_summary(recs: &[Value]) -> Value {
     })
 }
 
+/// 局状态三态判定(活性探测注入供单测): 有end→finished;有start且pid活→running;
+/// 有start且pid死→died(中断);都无→finished(旧局无标记,历史局必已结束)
+fn status_of(recs: &[Value], pid_alive: impl Fn(i64) -> bool) -> (&'static str, Option<i64>) {
+    if recs.iter().any(|r| r["r"] == "end") {
+        return ("finished", None);
+    }
+    if let Some(st) = recs.iter().find(|r| r["r"] == "start") {
+        let pid = st["pid"].as_i64().unwrap_or(-1);
+        return if pid > 0 && pid_alive(pid) { ("running", Some(pid)) } else { ("died", Some(pid)) };
+    }
+    ("finished", None)
+}
+
+/// pid 活性(ps -p,macOS/Linux 通用,无依赖)
+fn pid_alive_ps(pid: i64) -> bool {
+    std::process::Command::new("ps").args(["-p", &pid.to_string()])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false)
+}
+
+fn cmd_status(a: &Args) -> Result<(), String> {
+    let (task, run, dir) = match a.positional() {
+        Some(id) => resolve_run(&id, a.opt("--task").as_deref())?,
+        None => {
+            let t = task_or_latest(a)?;
+            let r = runs_of(&t).pop().ok_or(format!("任务 {t} 没有局"))?;
+            let d = data_root().join(&t).join("runs").join(&r);
+            (t, r, d)
+        }
+    };
+    let recs = read_jsonl(&dir.join("log.jsonl"));
+    let (st, pid) = status_of(&recs, pid_alive_ps);
+    let max_n = recs.iter().filter_map(|r| r["n"].as_i64()).max().unwrap_or(0);
+    if a.flag("--json") {
+        println!("{}", json!({"task":task,"run":run,"status":st,"pid":pid,
+            "steps_so_far":max_n,"summary":(st=="finished").then(|| run_summary(&recs))}));
+        return Ok(());
+    }
+    match st {
+        "running" => println!("局 {run} (任务 {task}): 运行中 pid={} 已至第{max_n}步
+目录: {}", pid.unwrap_or(-1), dir.display()),
+        "died" => println!("局 {run} (任务 {task}): 中断(进程已不在,无收官记录) 停在第{max_n}步
+目录: {}", dir.display()),
+        _ => println!("{}", fmt_summary(&task, &run, &dir, &run_summary(&recs))),
+    }
+    Ok(())
+}
+
 fn goal_of(recs: &[Value]) -> String {
     recs.iter().find(|r| r["r"] == "goal")
         .and_then(|r| r["t"].as_str()).unwrap_or("").to_string()
@@ -200,6 +249,12 @@ fn cmd_last(a: &Args) -> Result<(), String> {
     } else {
         let g: String = goal_of(&recs).chars().take(120).collect();
         println!("{}\ngoal: {}", fmt_summary(&task, &run, &dir, &s), g);
+        if s["derived"].as_bool().unwrap_or(false) {
+            let (st, pid) = status_of(&recs, pid_alive_ps);
+            if st != "finished" {
+                println!("状态: {}", if st == "running" { format!("运行中 pid={}", pid.unwrap_or(-1)) } else { "中断(无收官记录且进程已不在)".into() });
+            }
+        }
     }
     Ok(())
 }
@@ -611,6 +666,7 @@ pub fn dispatch(cmd: &str, rest: &[String]) -> Option<i32> {
         "tasks" => cmd_tasks(&a),
         "config" => cmd_config(&a),
         "stats" => cmd_stats(&a),
+        "status" => cmd_status(&a),
         "probe" => cmd_device_shell(&a, true),
         "exec" => cmd_device_shell(&a, false),
         _ => return None,
@@ -691,6 +747,22 @@ mod tests {
                    "telemetry", "app_event", "end", "trace", "note"] {
             assert!(SCHEMA_MD.contains(&format!("| {ty} ")), "schema 缺 {ty}");
         }
+    }
+
+    #[test]
+    fn status_three_states() {
+        // end→finished;start+活pid→running;start+死pid→died;无标记旧局→finished
+        let fin = vec![json!({"r":"end","stop":"done"})];
+        assert_eq!(status_of(&fin, |_| true).0, "finished");
+        let me = std::process::id() as i64;
+        let run = vec![json!({"r":"start","pid":me})];
+        assert_eq!(status_of(&run, |p| p == me).0, "running");
+        assert_eq!(status_of(&run, |_| false), ("died", Some(me)));
+        let old: Vec<Value> = vec![json!({"r":"goal"})];
+        assert_eq!(status_of(&old, |_| true).0, "finished", "旧局无标记按已结束");
+        // detach 参数剥离: 只去 --detach,其余原样(含顺序)
+        let args: Vec<String> = ["run","--task","T","--detach","目标"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(crate::strip_detach(&args), vec!["run","--task","T","目标"]);
     }
 
     #[test]

@@ -166,6 +166,11 @@ fn make_run_id(seq: u32) -> String {
     format!("{}-{}-{seq}", now_tag(), std::process::id())
 }
 
+/// 外部预分配 run_id(--detach 父进程先拿 ID 再拉起子进程,经 PF_RUN_ID 传入)
+pub fn alloc_run_id() -> String {
+    make_run_id(run_seq())
+}
+
 /// 单局结构化成绩单(主程序退出码 / benchmark 报表共用)
 pub struct EpisodeResult {
     pub achieved: bool,
@@ -1340,7 +1345,11 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     // ── 目录与文件 ──
     let task_dir = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
     let seq = run_seq();
-    let run_id = make_run_id(seq);
+    // PF_RUN_ID: detach 父进程预分配的局ID(先回报后开跑);常规路径局内自生成
+    let run_id = match std::env::var("PF_RUN_ID") {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => make_run_id(seq),
+    };
     let run_dir = format!("{}/runs/{run_id}", task_dir);
     if fs::create_dir_all(&run_dir).is_err() {
         eprintln!("✗ 建不了运行目录 {run_dir}");
@@ -1355,6 +1364,10 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             .open(format!("{run_dir}/log.jsonl")).ok(),
     };
     log.put(json!({"v": 1}));
+    // 开跑标记(r=end 的对偶面): status 靠"有 start 无 end"+pid 活性区分 运行中/中断
+    log.put(json!({"r": "start", "pid": std::process::id(),
+        "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64).unwrap_or(0)}));
     log.put(json!({"r": "goal", "t": goal}));
 
     // 模型视角存档: 本局所用的完整提示词与规则 + 每次决策看到的全部材料,精准落 run_dir/ctx.log

@@ -7,7 +7,7 @@ Agent 自动化移动端并行、测试、采集工具：由 Rust 内核驱动�
 > **🤖🤖🤖 For AI Agents (recommended)**: This project ships with an agent manual at `skills/phonefarm/SKILL.md`. Copy the prompt below to your agent (Claude Code / Codex / Cindy / octos etc.) to start using the project immediately:
 >
 > ```
-> Read https://raw.githubusercontent.com/BH3GEI/phonefarm/main/skills/phonefarm/SKILL.md and strictly follow its rules (especially: quote token cost before spending model calls, and never push to git unless the user asks). Then drive the phonefarm tool accordingly. Run `phonefarm last` first to verify the environment, then report the current device status to me.
+> Read https://raw.githubusercontent.com/BH3GEI/phonefarm/main/skills/phonefarm/SKILL.md and strictly follow its rules. Then drive the phonefarm tool accordingly. Run `phonefarm last` first to verify the environment, then report the current device status to me.
 > ```
 
 ## 核心功能
