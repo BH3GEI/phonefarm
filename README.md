@@ -1,88 +1,88 @@
 # phonefarm
 
-让 AI 自己玩手机:一个自动遍历 Android App 的 agent。
+让 AI 自己操作手机的自动化测试框架：一个 Rust 内核驱动设备（Android 模拟器 / OpenHarmony 真机），
+用视觉语言模型做决策，自动把 App 的功能页面逛一遍，产出可复盘的完整记录。
 
-Rust 内核驱动 Android 模拟器(adb),视觉语言模型(智谱 GLM)做决策,跑一个六步循环:**采集屏幕 → 拼材料 → 模型决策 → 执行前检查 → 执行 → 验收**。目标是不用人管,把一个 App 的全部功能页面自己逛一遍,并产出覆盖清单。
+核心思路是**弱模型 + 强骨架**：模型只负责'看屏幕、决定下一步'，
+其余（采集、校验、防卡死、记账、复盘、性能监控）全由确定性代码兜底。
 
-## 它靠什么活着
+## 能干什么
 
-- **双通道感知**:UI 元素树(文字+坐标,主通道)+ 截图像素对比(兜底);"等画面安静"采样 + 背景噪声扣除,能正确对付视频自动播放、动画等永不静止的画面
-- **假树防线(三层)**:uiautomator dump 在动画/事件风暴中会失败,失败的回退路径曾把 sdcard 上残留的旧树文件当观测吃进来(实测该假树能跨应用切换、跨源进程死亡存活)——①根治:回退 dump 先删旧文件,失败即得空表(空表=合法观测,该步只看截图);②对质:树的多数包名与前台包名(dumpsys)不符即重抓,且 force-stop 掐死可杀的后台源头;③隔离:仍不符则标 suspect,污染不进 diff/空击/ban/复核
-- **应用感知**:上下文注入当前前台包名 + 设备可启动应用清单;`home`(系统键,与导航方式无关)与 `launch`(按包名直达)让 agent 从任何无关画面一步脱身;`--app` 声明目标应用后开局自动归位
-- **信任门**:空白点击驳回、同一坐标连点驳回、未知动作驳回、预算看门狗;像素差异拿不准时由视觉模型仲裁
-- **点名吸附**:tap 附 `what=按钮文字`,门按当前元素清单把落点吸附到该元素的准确中心;清单里找不到则驳回并附最近候选——"看图手偏"和"闭眼瞎猜"两头堵(实测点'设置'等按钮从此一发入魂)
-- **OCR文字备胎**: UI树为空的屏(游戏/自绘界面/dump失败)自动改用 macOS 自带 Vision 识别截图文字坐标(`ocr.swift`→`ocr`),点名吸附/页面身份证/熟路小地图全部照常工作;识别帧的差异走像素通道(识别帧间有抖动,不进集合差);工具没编译也不碍事,该通道自动关闭
-- **交互网与熟路直达(goto)**:历史局的(画面,动作,实测结果)离线聚成页面网(`build_tree.py` → `tasks/<任务>/tree.json`,页面身份证=同页多数画面共有的短词,信息流碎片天然出局);运行时注入本地小地图,模型发 `goto 页号` 即沿"走过≥3次且终点稳定"的熟路零模型调用直达,每跳按页面身份证验收,走岔立即交还模型;局末自动重算,新路滚雪球。新场景零成本冷启动:第一局照常问模型,材料顺手落进网
-- **打摆检测**:动作签名(tap 认按钮身份、不认会漂移的裸坐标)识别 `tap↔back` 两拍与 `tap,scroll,back` 三拍进出循环,第 2 轮命中即向模型注入高优先级警报(附"页面标题≠菜单名"实例,如广告设置→"为什么我会看到此广告"),hook 入账;上滑下滑交替翻列表不误报
-- **纯图标放行**:弹窗 ×、齿轮等无文字控件用 `what:"icon:<描述>"`(如 icon:close)——跳过文字清单吸附,按模型视觉坐标直点,坐标合法性/空白死角/前科/连点检查照常;图标边不进熟路回放(无文字找不到按钮)
-- **探索沙盘**:遍历类任务(目标含"遍历/全部/覆盖/逛")把单行小地图升级为进度看板:已覆盖 N/M 页、当前页未探索按钮(骨架短词、历史已点的自动出局)、最近的未访页 goto 建议;信息流碎片靠 ≤6 字过滤+上限 8 条防灌水
-- **设备自愈与原生评测**:`benchmark` 子命令自闭环跑轮次(体检→复活→轮间清理→跑局→`campaign.tsv`/`--json` 报表),全程无 Bash/Python 胶水;采集失败局内自动复活一次(重启 adb server→仍无心跳按 `emulator_cmd` 重启模拟器等开机),brain 累计 token 用量入报表
-- **契约式到达断言(--assert)**:任务带验收词(如 `--assert "个性化广告,程序化广告"`)时,程序每屏逐元素子串实测(不跨元素拼接),全部命中即向模型注入"验收条件已满足"的实测事实——断言权在测试契约手里,不靠模型对页面标题的语义猜认(实测:同一"广告设置"场景,标题是"为什么我会看到此广告"的死不认账局烧光 22 次调用,带验收词后 4 步 6 调用直接 done);命中上升沿入 hook 账,复核材料同附验收词与程序终局实测
-- **模型视角存档**:每局 `runs/<局>/ctx.log` 精确存下本局所用的完整提示词与规则,以及每次决策发给模型的全部材料(警报/沙盘/清单/便签原样在内)——复盘"模型当时到底看到了什么"有据可查
-- **纯折叠投影层(v0.6 Step 2)**:呈现铁律=纯折叠、零过滤、零App特判、零模型参与。折叠是纯函数(`fold.rs`),同一棵树永远同一份渲染,四张真实页面dump钉在单测里;class只做相等比较,代码不含任何具体控件类名。①**屏幕折叠**:列表项判定双触发——scrollable容器的直接子项(系统语义,异构wrapper的信息流卡片也覆盖;护栏:单子容器不算、满幅子项不折)∪同class兄弟≥3(结构自相似);子树文字≥4条或≥60字的"复合项"各自收成一行头`▸ 标题 (折N条M字)`(头=子树中面积最大的文字=天然tap锚,折缝有账),简单项(菜单行/Tab)永不折叠——设置页逐字保留;另有容器注解`[列表 id 共N项↕]`与无文字图标行`[icon id/x]`。②**历史里程碑折叠**:换页=(activity,页面身份证)合取判定(未知分量不触发),旧页压成单行`[里程碑k]`,当前页act→diff全量展开,废除window=5——不再失忆,上下文从O(步数)变O(换页数)(实测88步长局51条里程碑,ctx均值3.4K→5.8K缓增)。③沙盘候选改从折叠骨架取,信息流点赞数/作者名天然出局(#18根治,实测沙盘建议全为结构按钮)。④点名吸附迁至全量层(折叠渲染出的文字必须点得着)。⑤**预算事实行**:`预算: 已用X/Y次模型调用`——局38教训:模型被要求管理预算却看不见预算,覆盖冠绝历史却烧穿未收官。⑥**连点门认身份**(局40教训:频道栏自动居中,连点财经→军事→国际三个不同按钮物理落点相同且每次真实切页,裸坐标连点门误杀后模型换名重试至看门狗——改为同一动作签名三连同点才驳回,2048抖动/登录振荡的原保护不丢)。⑦**契约容错(#19)**:裸done与{"r":"done"}两种实录违约形态收编为合法done(局35白烧2调用+40秒的现场,与便签容错同先例,其余违约仍换人重问)。⑧**WebView通用应对**(零App特判,框架类语义):WebView类节点占屏过半即判黑盒页,上下文标注"网页按钮不在原生清单,用icon:视觉点击";back在网页页无效(前端JS拦截)时下一记back自动升级200ms连按两次;H5内容不进沙盘探索分支(位置漂/每秒变,锚不住)
-- **渐进式探针(v0.6 Step 3)**:四个只读查询动作,模型可主动要数据而不必乱撞。`inspect`(text=折叠头行文字/元素id,或x,y坐标:展开该卡片/容器折缝内全部文字与图标行,命中叶子自动上溯至有内容容器)、`find`(在全量层全屏搜关键词——含折叠内与40字截断外,返回位置与可点性)、`get_state`(activity/键盘/剪贴板)、`history`(按里程碑页号展开旧页的逐步细节)。探针不动屏幕、不重采、不耗物理步,答案(≤1200字)以probe应答行一次性注入下一轮决策(要留存的模型自己写note);探针只能作计划最后一步(其后动作作废),连续3次强制驳回防空转,探针签名进打摆账(同一问题反复问与反复点同一按钮同罪);假树/OCR帧如实拒答——探针不说谎。实测:定向冒烟局(tasks/探针冒烟/局1)模型主动inspect信息流卡片,probe✓取回折缝内容并在下一轮决策中逐字引用,全程零点击5调用38秒;常规局45(12调用17步)零探针滥用零回归。行为级验收(打摆警报/局、watchdog终止数是否下降)留待下次campaign一并量
-- **边级推进度守卫(#20)**:抖音决战暴露的新循环形态——侧栏每个入口点进去都弹登录墙,关掉回原页,换下一个入口再试,步步"有变化"却原地打转,**三道旧防线全漏**(同点门要同身份、打摆要往返节拍、看门狗每步都有diff)。通用几何信号,不认"登录"二字:从稳定页点文字入口,外出途中没得到任何新页覆盖,又带着原封不动的文字集(els排序全集严格相等)弹回原页=一次bounce;登录墙/VIP墙/实名墙/弹窗轰炸同表现同治法。两道护栏防误伤:①外出见过新页(含第一次见的墙页)不追责——"进去看一眼就回"是遍历的合法动作;②回原页但文字集变了(开关等原地操作)不追责;窗口4步,超时不追责。后果:仅反复弹回(≥2次)的入口从沙盘划走并注明"点进即弹回,勿再试"——单次弹回是偶发,保留第二次机会,**绝不因本页别处有墙就连坐没试够的真入口**(3个入口需登录≠整菜单需登录);本页≥3个不同入口受阻时,注入一条温和事实提示(告知已发现N个受阻、其余未探索仍可一试),是否继续、去哪继续由模型判断,运行时不替它放弃整区。头条无全墙区域,该逻辑只会空转,回归安全
-- **无损记账层(v0.6 Step 1)**:落盘铁律=100% 原始事实 append-only,呈现另算。①screen 记录带全量属性节点层 `nodes`(无文字容器/纯图标在内,resource-id/class/clickable/scrollable/checked/XML深度,文字不截断——旧 `els` 契约原样保留,老消费方零感知);②每屏原始 uiautomator XML gzip 落盘(`stepN.xml.gz`,压缩率约9成,与截图同为不进 git 的本地账)——解析器也是投影,parser 漏抓属性不再是数据损失;③前台 `activity` 全类名+软键盘 `ime_shown` 入账(实测设置类页面 activity 区分度极好,feed 内标签切换仍需页面身份证合取);④四个模型调用点(决策/仲裁/复核/复盘)完整回包原文入账(`r:"raw"`,解析失败的违约样本恰好留档——首局实测就抓到模型裸答 done 两个字白烧2次调用的现场);⑤diff 附变化元素坐标框。`--assert` 断言改在全量层实测,消除70条/40字截断盲区。A/A 实测:局35 与局34 同链收官(✔实测命中→done引实测事实→复核引契约),行为零漂移
-- **计划链**:一次决策最多产出 4 个动作,后续动作不再消耗模型调用(实测免调用步占 26~36%)
-- **经验沉淀**:每局结束复盘,把教训写进 `tasks/<任务>/lessons.jsonl`(带 win/lose 计数),下一局开场即用;代码层兜底防止复盘静默丢条;跨任务通用的教训(scope:global)单独沉到 `tasks/_global/lessons.jsonl`,所有任务共享
-- **独立复核**:局末用终局画面 + 差异记录交叉验证 agent 的"完成"主张——实测抓住过一次谎报
-- **韧性**:provider 链式回退、两级限流冷静期(45s+90s)、内容审核拒图时"盲滑逃离"、模拟器死机自动重启;`done` 只许单独发出,宣判前必须重新看过屏幕
+- **自动遍历 App**：不登录、弹窗按规则处理、底部标签/频道/设置子页逐个探索，产出页面覆盖清单
+- **越跑越熟**：每局结束自动复盘写经验（`lessons.jsonl`），跨局共享交互网（`tree.json`）
+- **看得见过程**：每步截图 + 原始 UI 树 + 模型原文 + 系统判定全落盘，`phonefarm show` 逐层回放
+- **测性能**：每步采集 68 项遥测（帧率/CPU/内存/温度/电压/GPU/IO/fd…），`phonefarm stats` 出汇总
+- **双端适配**：Android（adb）和 OpenHarmony（hdc）同一套逻辑，`--serial hdc:<key>` 一键切换
 
-## 目录
+## 快速开始
 
-```
-src/                  Rust 内核(main / runtime / brain / device / tree)
-phonefarm.toml        阈值、提示词、provider 链配置(密钥走环境变量)
-round.sh              单轮端到端:设备体检→清应用→跑一局→汇总一行账
-summarize_run.py      从 log.jsonl 抽取单局汇总
-build_tree.py         离线交互网构建器:汇总全部 runs 的 log.jsonl → tree.json(局末也会自动跑)
-ocr.swift             OCR文字备胎(macOS Vision):UI树为空时识别截图文字坐标,swiftc 编译出 ./ocr
-tasks/<任务>/          各靶子的经验库 lessons.jsonl、交互网 tree.json、评测账 campaign.tsv、逐局 runs/(log.jsonl+ctx.log 入库,截图不入库)
-docs/DESIGN.md           设计文档v1(Markdown归档; HTML原档保留在仓库根)
+```bash
+# 1. 配 key
+cp secrets.env.example secrets.env   # 填入 GLM_KEY(智谱 Coding 套餐)
+# 不填也能启动——程序自动读 ./secrets.env; 仍缺 key 时打印格式说明后退出
+
+# 2. 编译
+cd src && cargo build --release && cp target/release/phonefarm ..
+# adb 自动定位: ADB_BIN > 仓库根 platform-tools/ > PATH > 常见安装点; 找不到会提示
+# OCR 备胎首跑自动编译(需 swiftc); 编不出则该通道自动关闭, 不影响主流程
+
+# 3. 跑一局(Android 模拟器 agentphone 需已启动)
+./phonefarm run --task 今日头条遍历 --endless --budget-calls 90 --app com.ss.android.article.news "<目标文本>"
+
+# 4. 跑多轮评测(推荐)
+./phonefarm benchmark --task 今日头条遍历 --rounds 10 --budget-calls 90 --app com.ss.android.article.news --json "<目标文本>"
+
+# 5. OpenHarmony 设备(可选)
+./phonefarm devices                        # 列出 adb + hdc 两族设备
+./phonefarm run --serial hdc:<connect key> --task OH设置冒烟 --budget-calls 30 "<目标>"
 ```
 
-## 跑起来
+## 查看结果（CLI 即入口）
 
-1. `cp secrets.env.example secrets.env`,填入智谱 key(Coding 套餐)——不填也能启动,程序会
-   自动读 ./secrets.env 补进环境;仍缺 key 时打印格式说明后退出,不会裸 401
-2. `cd src && cargo build --release`,把产物 `phonefarm` 放到仓库根目录
-   - adb 自动定位: ADB_BIN 显式指定 > 仓库根自带 platform-tools/ 目录(clone 即跑) > PATH > 常见 SDK 安装点;都找不到给可操作提示
-   - OCR 文字备胎首跑自动编译(有 swiftc 即可,限时+原子替换);编不出该通道自动关闭照常跑
-3. 启动 Android 模拟器(AVD 名 `agentphone`),装好目标 App
-4. 单轮:`./round.sh 1`(旧脚本,仍可用);或直接:
-   `./phonefarm run --task "今日头条遍历" --endless --budget-calls 90 --app com.ss.android.article.news "<目标文本>"`
-   (`--app` 可选:声明目标应用包名,开局前台不符时自动按 HOME 归位;`--assert "词1,词2"` 可选:契约式到达断言,实测到验收词即注入"已到达"事实)
-5. 自闭环评测(推荐,已不依赖任何脚本):每轮体检→复活→轮间清理→跑局→TSV 落账
-   `./phonefarm benchmark --task "今日头条遍历" --rounds 10 --budget-calls 90 --app com.ss.android.article.news --json "<目标文本>"`
-6. OpenHarmony 设备(hdc 后端):`--serial hdc:<connect key>` 即切换,其余参数不变
-   (`./phonefarm devices` 两族并列,hdc 目标直接以该形态给出;bounds/els/full 与 Android 同构,
-   fold/探针/断言/沙盘/#20 零改动继承——真机冒烟已双过,机制账见 tasks/OH设置冒烟)。
-   真机实测坐死的三件事:①前台权威源=dumpLayout 顶窗包名(z序顶窗在前,弹窗场景对;
-   aa dump 的 mission 序不分层只作兜底);②系统应用 aa start 有权限墙(10107101),
-   靠桌面图标点击进入,三方应用可正常 aa start(ability 无 mainAbility 键时按
-   MainAbility/EntryAbility/MainActivity 后缀兜底解析);③台架要求:设备须解锁亮屏
-   (急速息屏+锁屏会把整局毒成"树=锁屏层/aa=背后app"的假分歧;跑长局前
-   `power-shell timeout -o 1800000` 或起个 wakeup pinger,冒烟设备已留 30 分钟息屏设定)
+所有产物都在盘上，用命令取，不用翻目录：
 
-## CLI(查看层: 万事万物一条命令可取)
-
-数据全在盘上,CLI 只是发现路径;查看命令只读盘、不烧 token、不改状态。全部支持 `--json`。
-
-```
-phonefarm last                     最近一局结论(入口)     phonefarm tasks    全部任务统计
-phonefarm runs [--task T]          某任务全部局           phonefarm tree     交互网(页/边/熟路)
-phonefarm show <局ID> [--step N]   局概要/单步钻取        phonefarm lessons  经验库(win/lose)
-phonefarm show <局ID> --raw/--hooks/--events/--crashes/--anr/--trace        phonefarm campaign 评测账
-phonefarm cat <路径> [--grep/--head/--tail]  万能文件打印(.gz解压/.jsonl美化/.jpg报尺寸)
-phonefarm stats <局ID>             局内统计+遥测汇总(帧率/CPU/步耗时分位/内存曲线/事件数)
-phonefarm schema [--type r类型]    log.jsonl 记录契约      phonefarm config [--key k] 生效配置
-phonefarm probe --serial S "只读命令"   设备直连调试;exec 同形但高危,必须 --yes
+```bash
+phonefarm last                       # 最近一局结论(入口)
+phonefarm runs [--task T]            # 某任务全部局
+phonefarm show <局ID>                # 局概要: goal/动作/判定/文件清单
+phonefarm show <局ID> --step 5       # 第5步: 截图+元素+遥测
+phonefarm show <局ID> --raw          # 模型回包原文   --hooks 系统判定
+phonefarm show <局ID> --events       # 崩溃/ANR/fd增长事件流
+phonefarm show <局ID> --crashes --anr --trace   # 深度调试产物
+phonefarm cat <路径>                 # 万能打印: .gz解压/.jsonl美化/.jpg报尺寸
+phonefarm stats <局ID>               # 遥测汇总: 帧率/CPU/内存/温度分布
+phonefarm schema                     # log.jsonl 全部记录类型说明
+phonefarm tasks | tree | lessons | campaign | config
+phonefarm probe --serial S "只读命令"  # 设备直连调试; exec 同形但高危需 --yes
 ```
 
-局ID 前缀即可(多命中报候选);`--task` 缺省=最近有局的任务。零背景钻取链:
-`phonefarm last` → `show <局ID> --step 5` → `cat tasks/<T>/runs/<局>/step5.xml.gz`。
-遥测(r=telemetry)与事件(r=app_event)同账,`show --step` 看单步性能,`stats` 看整局分布。
+零背景钻取链：`phonefarm last` → `show <局ID> --step 5` → `cat .../step5.xml.gz`。
+局 ID 打前缀即可（多命中会列候选）；所有查看命令只读盘、不烧 token、支持 `--json`。
 
-## 战绩(2026-08-29)
+## 目录结构
 
-今日头条全功能遍历,10 轮端到端连跑:**5 轮"完成+复核"双过,最后三轮连续通过**;共 442 步、311 次模型调用、76 分钟;全程暴露并修复 6 个真实缺陷(便签当动作、复盘丢经验、模型图像通道劣化、内容审核拒图、back+done 连发、限流误判)。明细见 `tasks/今日头条遍历/campaign10.tsv` 与各局 `log.jsonl`。
+```
+src/                   Rust 内核(main / runtime / brain / device / tree / fold / cli / telemetry)
+phonefarm.toml         配置: 阈值、提示词、provider 链(key 走环境变量)
+docs/DESIGN.md         设计文档 v1(架构真理: 记录契约/六步循环/任务隔离)
+round.sh               旧版单轮脚本(仍可用; 新流程用 benchmark 直跑)
+build_tree.py          离线构建交互网: runs/*/log.jsonl → tree.json(局末自动重算)
+summarize_run.py       从 log.jsonl 抽一行汇总(旧脚本, 已被 CLI stats 取代)
+ocr.swift / ocr        OCR 文字备胎(macOS Vision, 首跑自动编译)
+tasks/<任务>/          各靶子: lessons.jsonl(经验) tree.json(交互网) campaign.tsv(评测账)
+                    runs/<局ID>/(log.jsonl + ctx.log + stepN.jpg/.xml.gz, 截图与树不入 git)
+```
+
+## 它怎么工作（30 秒版）
+
+每步六拍：**采集**（截图 + UI 树，并行）→ **组装**（上下文 = 目标 + 经验 + 最近几步 + 当前画面）→
+**模型决策**（一次最多 4 个动作，后续动作不耗调用）→ **执行前检查**（值域/前科/空白点击，三道确定性门）→
+**执行**（换算坐标、等画面安静）→ **验收**（对比差异，判定有无进展）。
+
+细节与演进见 `docs/DESIGN.md`（v1 定稿）与各 SPEC（telemetry/CLI/环境自举，在仓库根或工作区）。
+
+## 相关文档
+
+- `docs/DESIGN.md` — 设计文档 v1（记录契约 / 六步循环 / 任务隔离 / 写入权限）
+- 工作区 SPEC：`TELEMETRY_SPEC.md`（遥测数据源）、`CLI_SPEC.md`（查看层命令）、`IMPROVE_SPEC.md`（环境自举）
+- `phonefarm schema` — log.jsonl 的完整字段契约（代码内生成，永远最新）
