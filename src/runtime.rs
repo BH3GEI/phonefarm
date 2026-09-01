@@ -430,11 +430,17 @@ fn capture(phone: &Device, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap
     // 文字备胎: UI树为空(游戏/自绘界面/dump失败)→ 用本机Vision识别截图文字补清单,
     // 框换回设备像素空间,点名吸附/页面身份证/熟路小地图全部照常工作
     let mut ocr = false;
-    if els.is_empty() {
+    let force_ocr = perceive_ocr();
+    if want_ocr(force_ocr, els.is_empty()) {
         let o = ocr_els(&img, w, h, realw, realh);
         if !o.is_empty() {
-            println!("      🔤 UI树为空,OCR文字备胎({}条)", o.len());
+            if force_ocr && !els.is_empty() {
+                println!("      🔤 感知模式=ocr: 截图文字清单覆盖原生UI树({}条)", o.len());
+            } else {
+                println!("      🔤 UI树为空,OCR文字备胎({}条)", o.len());
+            }
             els = o;
+            full = vec![];
             ocr = true;
         }
     }
@@ -448,6 +454,16 @@ fn capture(phone: &Device, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap
             >= realw as i64 * realh as i64 / 2);
     Some(Cap { seq, els, full, folded, img, img_rel, xml_rel, w, h, thumb, noise,
                pkg: fg, activity, ime, els_pkg, suspect, ocr, webview })
+}
+
+/// #20 感知源选择(纯函数供单测): 强制OCR(自绘/兼容层surface,原生UI树不可信) 或 UI树为空 → 用截图文字清单。
+pub fn want_ocr(force_ocr: bool, els_empty: bool) -> bool { force_ocr || els_empty }
+
+/// 感知模式是否强制OCR: 读 PF_PERCEIVE=ocr(由 run --perceive ocr 设置),OnceLock 一次定。
+fn perceive_ocr() -> bool {
+    use std::sync::OnceLock;
+    static M: OnceLock<bool> = OnceLock::new();
+    *M.get_or_init(|| std::env::var("PF_PERCEIVE").map(|v| v.eq_ignore_ascii_case("ocr")).unwrap_or(false))
 }
 
 /// OCR文字备胎: UI树为空时调本机Vision(ocr二进制,由ocr.swift编译)识别截图文字。
@@ -2380,6 +2396,13 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ocr_gating_20() {
+        assert!(super::want_ocr(false, true));
+        assert!(super::want_ocr(true, false));
+        assert!(super::want_ocr(true, true));
+        assert!(!super::want_ocr(false, false));
+    }
     use super::*;
 
     fn cfg() -> Config {

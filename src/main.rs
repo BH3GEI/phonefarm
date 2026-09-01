@@ -101,7 +101,7 @@ impl Config {
 }
 
 const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
-跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--app P] [--assert \"词1,词2\"] \"<目标>\"
+跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--app P] [--assert \"词1,词2\"] [--perceive ocr] \"<目标>\"
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
 设备:  devices | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
@@ -241,6 +241,7 @@ fn main() {
                     "--detach" => detach = true,
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--app" => app = it.next().cloned(),
+                    "--perceive" => { if let Some(v) = it.next() { if v.eq_ignore_ascii_case("ocr") { std::env::set_var("PF_PERCEIVE", "ocr"); } } }
                     "--assert" => {
                         // 验收词(可逗号分隔多个,英文/中文逗号都认): 契约式到达断言
                         if let Some(v) = it.next() {
@@ -254,7 +255,7 @@ fn main() {
                 }
             }
             if goal.is_empty() || task.is_empty() {
-                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] [--assert \"词1,词2\"] \"<目标>\"");
+                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] [--assert \"词1,词2\"] [--perceive ocr] \"<目标>\"");
                 std::process::exit(2);
             }
             let cfg_text = match std::fs::read_to_string("phonefarm.toml") {
@@ -313,6 +314,7 @@ fn main() {
                     "--rounds" => rounds = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--app" => app = it.next().cloned(),
+                    "--perceive" => { if let Some(v) = it.next() { if v.eq_ignore_ascii_case("ocr") { std::env::set_var("PF_PERCEIVE", "ocr"); } } }
                     "--assert" => {
                         if let Some(v) = it.next() {
                             for w in v.split(|c| c == ',' || c == '、') {
