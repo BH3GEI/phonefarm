@@ -567,7 +567,7 @@ fn class_short(c: &str) -> &str {
 }
 
 /// 本帧画面入记录流(seq 去重)。主循环顶部、goto跳段、终局三处共用同一节奏。
-/// els 保持旧形态(build_tree.py 契约);nodes 为全量属性层(仅记账,暂无运行时消费方);
+/// els 保持旧形态(tree::rebuild 的账本契约,原 build_tree.py);nodes 为全量属性层(仅记账,暂无运行时消费方);
 /// activity/ime_shown/xml 一并入账。
 fn log_screen(log: &mut Log, cap: &Cap, n: u32, realw: i32, realh: i32, logged_seq: &mut u32) {
     if cap.seq == *logged_seq { return; }
@@ -1375,7 +1375,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     // 全局经验: 跨任务共享(tasks/_global/),"游戏里用home逃生"这类学费只交一次
     let global_dir = format!("{}/tasks/_global", cfg.data_dir.trim_end_matches('/'));
     let glessons = load_lessons(&format!("{global_dir}/lessons.jsonl"));
-    // 交互网(build_tree.py 离线产出,局末自动重算): 页面身份证+熟路。没有也能跑,只是没有goto
+    // 交互网(tree::rebuild 局末自动重算的离线产物): 页面身份证+熟路。没有也能跑,只是没有goto
     let tree = Tree::load(&format!("{task_dir}/tree.json"));
     if tree.is_some() { println!("(载入交互网: {}页/{}边)", tree.as_ref().unwrap().pages.len(), tree.as_ref().unwrap().edges.len()); }
     // OCR文字备胎自举(Improve Spec): 限时编译+临时文件原子mv(多进程编译不互踩);
@@ -2304,18 +2304,17 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         }
     }
 
-    // ── 局末: 交互网重算(build_tree.py 汇总全部runs含本局,<1s;下一局开场即用上新路) ──
-    if std::path::Path::new("build_tree.py").exists()
-        && fs::metadata(format!("{task_dir}/runs")).is_ok()
-    {
-        if let Ok(o) = std::process::Command::new("python3")
-            .arg("build_tree.py")
-            .arg(&task_dir)
-            .output()
-        {
-            if o.status.success() {
+    // ── 局末: 交互网重算(Rust 原生 rebuild,TREE_RUST_SPEC 收编;汇总全部 runs 含本局,
+    //    下一局开场即用上新路;失败不 panic,记账+提示后局照常收尾) ──
+    if fs::metadata(format!("{task_dir}/runs")).is_ok() {
+        match crate::tree::rebuild(&task_dir) {
+            Ok(_) => {
                 log.put(json!({"r":"hook","kind":"tree","rebuilt":true}));
                 println!("      🧭 交互网已重算 → {task_dir}/tree.json");
+            }
+            Err(e) => {
+                log.put(json!({"r":"hook","kind":"tree","rebuilt":false,"err":e}));
+                println!("      ⚠ 交互网重算失败(不影响本局收账): {e}");
             }
         }
     }

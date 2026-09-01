@@ -163,7 +163,7 @@ impl Args {
         for v in &self.vals {
             if skip { skip = false; continue; }
             if let Some(s) = v.strip_prefix("--") {
-                skip = !matches!(s, "json" | "raw" | "hooks" | "events" | "crashes" | "anr" | "trace" | "markdown" | "yes");
+                skip = !matches!(s, "json" | "raw" | "hooks" | "events" | "crashes" | "anr" | "trace" | "markdown" | "yes" | "rebuild");
                 continue;
             }
             return Some(v.clone());
@@ -387,6 +387,18 @@ fn cmd_schema(a: &Args) -> Result<(), String> {
 
 fn cmd_tree(a: &Args) -> Result<(), String> {
     let task = task_or_latest(a)?;
+    if a.flag("--rebuild") {
+        // 手动重建(TREE_RUST_SPEC 任务3): 纯离线,复用局末同一 rebuild(),不烧 token
+        let dir = data_root().join(&task);
+        let text = crate::tree::rebuild(dir.to_str().unwrap_or("."))?;
+        let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        println!("已重建 {}/tree.json: {} 步材料 → {} 页 {} 边 (熟路 {} 条, 无家可归画面 {} 张)",
+            dir.display(), v["steps_total"],
+            v["pages"].as_array().map(|x| x.len()).unwrap_or(0),
+            v["edges"].as_array().map(|x| x.len()).unwrap_or(0),
+            v["edges"].as_array().map(|x| x.iter().filter(|e| e["ripe"] == true).count()).unwrap_or(0),
+            v["orphan_screens"]);
+    }
     let p = data_root().join(&task).join("tree.json");
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&p)
         .map_err(|_| format!("任务 {task} 没有 tree.json(还没跑出交互网)"))?)

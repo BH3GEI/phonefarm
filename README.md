@@ -70,7 +70,6 @@ src/                   Rust 内核源码（包含运行时、模型调度、设�
 phonefarm.toml         主配置文件：包含判定阈值、决策提示词模板、模型 Provider 轮询及降级链
 docs/DESIGN.md         设计文档 v1（规定了系统的记录契约、六步执行主循环、任务数据隔离设计）
 round.sh               单轮调度外壳脚本（保留以向下兼容，生产环境建议使用 benchmark 命令）
-build_tree.py          离线交互网构建器：汇总 runs/*/log.jsonl 导出共享 tree.json（待收编 Rust 原生）
 ocr.swift / ocr        OCR 辅助识别组件（基于 macOS Vision 库，首跑自动编译）
 tasks/<任务名>/        数据隔离目录：包含本地经验库 lessons.jsonl、状态转移图 tree.json、对局汇总 campaign.tsv
                     runs/<局ID>/ （本局的 log.jsonl、ctx.log 详情、步骤截图及 XML UI 树，媒体与树文件不入 git）
