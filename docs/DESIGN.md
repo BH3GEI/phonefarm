@@ -1,7 +1,7 @@
 # phonefarm 设计文档 v1
 
 > **定稿**: 2026-08-27 · v0.2 时代的架构定稿 · 由 phonefarm-设计文档-v1.html 转 Markdown 归档
-> **现状**: 项目已演进到 v0.6+（无损落盘/折叠/探针、hdc 适配、telemetry、CLI）。本文件是**架构真理**（记录契约/六步循环/任务隔离/写入权限）
+> **现状**: 项目已演进到 v0.6+（无损落盘/折叠/探针、hdc 适配、telemetry、CLI）。本文件是**核心架构规范与契约**（记录契约/六步循环/任务隔离/写入权限）
 > **演进指针**: 实现现状见 README.md；新能力规格见各 SPEC（telemetry/CLI/环境自举）；log.jsonl 的完整字段见 phonefarm schema 命令
 
 ---
@@ -26,7 +26,7 @@
 <数据根目录>/           位置由 phonefarm.toml 的 data_dir 指定
 ├─ phonefarm            二进制
 ├─ phonefarm.toml       配置+阈值+提示词+时间点表+服务列表; 人编辑, 程序只读
-└─ tasks/<任务名>/      ★ 程序唯一可写区域
+└─ tasks/<任务名>/      程序唯一可写区域
    ├─ lessons.jsonl     经验记录, 每行一条 lesson; 复盘产出, 程序原子写回
    ├─ params.toml       感知自愈参数; 键与取值白名单限定
    └─ runs/<时间戳>/
