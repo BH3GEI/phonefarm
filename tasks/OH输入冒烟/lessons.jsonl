@@ -1,0 +1,8 @@
+{"v":1}
+{"born":1,"id":1,"lose":1,"r":"lesson","t":"launch(com.ohos.note)失败时diff为none且无效,不要连续重复launch;应回到桌面用swipe左右滑动查找备忘录图标,点击图标进入。本局swipe找到备忘录并tap成功进入,此路有效。","win":1}
+{"born":3,"id":2,"lose":2,"r":"lesson","t":"每次操作后检查界面diff,若连续2-3次无任何变化应立即换其他方式,避免原地重试耗尽步数。本局仍对同一点(612,520)连点3次被rejected,需严格做到rejected/none后立刻换目标。","win":0}
+{"born":2,"id":3,"lose":1,"r":"lesson","t":"备忘录中 tap 点在空白背景处会被rejected(清单附近会列出真实元素)。输入框以清单中的 resource:/ 坐标为准,但本局 tap resource:/ 也被rejected,说明该法不可靠;更稳妥路径是直接 tap 清单中笔","win":0}
+{"born":2,"id":4,"lose":1,"r":"lesson","t":"未聚焦输入框时type为none无效;必须先tap输入框获得焦点(见diff出现变化)再type,输入后diff确认文字出现才算完成。本局tap(498,490)聚焦后type(pfok123)即成功出现+pfok123,验证此法有效。","win":1}
+{"born":3,"id":5,"lose":0,"r":"lesson","t":"误开样式面板时,同一点(787,731)连点2次触发ban,附近30px内的tap也会被拒;应立即用back关闭面板(diff显示-[样式]),回到正文页再重新定位输入框。","win":0}
+{"born":2,"id":6,"lose":1,"r":"lesson","t":"tap元素必须使用screen清单中该元素标出的精确坐标;本局对输入框用清单精确坐标(498,490)一次tap即聚焦成功,证明精确坐标法可靠。","win":1}
+{"born":4,"id":7,"lose":0,"r":"lesson","t":"备忘录修改标题流程:tap标题后弹出含'修改标题'输入框的面板;tap该输入框聚焦后type新标题,再tap面板中的'保存'按钮即生效(diff出现+新标题文字)。","win":0}
