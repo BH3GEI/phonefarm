@@ -293,6 +293,41 @@ fn els_sig_of(cap: &Cap) -> Vec<String> {
     v
 }
 
+/// OCR 备胎编译(限时90s,临时产物原子 mv 替换——多进程同时编译不互踩)。
+/// compiler 可注入(单测用不存在的编译器验降级不 panic)。
+fn compile_ocr(compiler: &str) -> bool {
+    let tmp_bin = format!("ocr.build.{}", std::process::id());
+    let Ok(mut child) = std::process::Command::new(compiler)
+        .args(["-O", "ocr.swift", "-o", &tmp_bin])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .spawn() else { return false };
+    let t0 = std::time::Instant::now();
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.success(),
+            Ok(None) => {
+                if t0.elapsed().as_secs() > 90 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(_) => break false,
+        }
+    };
+    let built = ok && std::path::Path::new(&tmp_bin).is_file();
+    if built {
+        if fs::rename(&tmp_bin, "ocr").is_err() {
+            let _ = fs::remove_file(&tmp_bin);
+            return false;
+        }
+        return true;
+    }
+    let _ = fs::remove_file(&tmp_bin);
+    false
+}
+
 /// 后台包是否可安全掐死(force-stop): 目标应用、系统/谷歌/OH系统家族包、桌面一律不碰
 fn pkg_killable(pkg: &str, target: Option<&str>) -> bool {
     !pkg.is_empty()
@@ -1329,10 +1364,19 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     // 交互网(build_tree.py 离线产出,局末自动重算): 页面身份证+熟路。没有也能跑,只是没有goto
     let tree = Tree::load(&format!("{task_dir}/tree.json"));
     if tree.is_some() { println!("(载入交互网: {}页/{}边)", tree.as_ref().unwrap().pages.len(), tree.as_ref().unwrap().edges.len()); }
-    // OCR文字备胎自举: 没编译过就现场编一次(几秒;失败不碍事,该通道自动关闭)
-    if !std::path::Path::new("ocr").exists() && std::path::Path::new("ocr.swift").exists() {
-        println!("(编译OCR文字备胎 ocr.swift…)");
-        let _ = std::process::Command::new("swiftc").args(["-O", "ocr.swift", "-o", "ocr"]).output();
+    // OCR文字备胎自举(Improve Spec): 限时编译+临时文件原子mv(多进程编译不互踩);
+    // 失败/无swiftc → 明确降级警告,该通道自动关闭照常跑
+    if !std::path::Path::new("ocr").exists() {
+        if std::path::Path::new("ocr.swift").exists() {
+            println!("(编译OCR文字备胎 ocr.swift…)");
+            if compile_ocr("swiftc") {
+                println!("(OCR备胎就绪)");
+            } else {
+                println!("⚠ OCR备胎编译失败或无swiftc,文字备胎通道自动关闭(UI树为空时只剩截图),照常跑");
+            }
+        } else {
+            println!("⚠ OCR备胎不可用: 缺 ocr.swift,该通道自动关闭");
+        }
     }
     let ep_no = fs::read_dir(format!("{task_dir}/runs")).map(|d| d.count()).unwrap_or(1) as i64;
 
@@ -2311,6 +2355,22 @@ mod tests {
 
     fn cfg() -> Config {
         toml::from_str(&std::fs::read_to_string("../phonefarm.toml").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn ocr_compile_degrades_without_compiler() {
+        // 编译器不存在 → false 不 panic(spec: mock swiftc 缺失路径);临时产物不残留
+        assert!(!compile_ocr("swiftc-definitely-not-exist-xyz"));
+        assert!(!std::path::Path::new(&format!("ocr.build.{}", std::process::id())).exists());
+    }
+
+    #[test]
+    fn secrets_parse_never_executes() {
+        // 只认 export KEY="v" / KEY=v;注释/命令行/带展开符的值一律忽略,不执行
+        let t = "# 注释\nexport GLM_KEY=\"abc.123\"\nEMPERO_KEY=free\nrm -rf /tmp/x\nexport EVIL=\"$(whoami)\"\nBAD KEY=1\n";
+        let kv = crate::parse_secrets(t);
+        assert_eq!(kv, vec![("GLM_KEY".into(), "abc.123".into()), ("EMPERO_KEY".into(), "free".into())],
+            "命令行与含$()的值都被拒收");
     }
 
     #[test]

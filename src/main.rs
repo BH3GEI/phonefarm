@@ -107,14 +107,79 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)";
 
+/// secrets.env 解析(Improve Spec): 只认 `export KEY="v"` / `KEY=v` 形态的行,
+/// 等价 source 语义但绝不执行任何命令。纯函数供单测。
+fn parse_secrets(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') { continue; }
+        let l = l.strip_prefix("export ").unwrap_or(l).trim();
+        let Some((k, v)) = l.split_once('=') else { continue };
+        let k = k.trim();
+        if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') { continue; }
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        if v.contains('$') || v.contains('`') { continue; } // 不做任何展开/执行
+        out.push((k.to_string(), v.to_string()));
+    }
+    out
+}
+
+/// key 自举: provider 链的 key_env 有缺 → 自动读 ./secrets.env(仅本地);仍全缺 → 警告+格式说明+退出。
+/// 用户已 export 的值最高,不覆盖。部分缺失只提示不拦(存活 provider 可接力)。
+fn ensure_keys(cfg: &Config) {
+    let mut envs: Vec<&str> = Vec::new();
+    for p in &cfg.providers {
+        if !envs.contains(&p.key_env.as_str()) { envs.push(p.key_env.as_str()); }
+    }
+    let missing = |es: &[&str]| -> Vec<String> {
+        es.iter().filter(|e| std::env::var(e).map(|v| v.trim().is_empty()).unwrap_or(true))
+            .map(|e| e.to_string()).collect()
+    };
+    let mut miss = missing(&envs);
+    if !miss.is_empty() {
+        if let Ok(text) = std::fs::read_to_string("secrets.env") {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(m) = std::fs::metadata("secrets.env") {
+                    if m.permissions().mode() & 0o037 != 0 {
+                        println!("(提示: secrets.env 权限过宽,建议 chmod 600 secrets.env)");
+                    }
+                }
+            }
+            for (k, v) in parse_secrets(&text) {
+                if miss.contains(&k) {
+                    std::env::set_var(&k, &v);
+                    println!("(secrets: 从 ./secrets.env 读到 {k})");
+                }
+            }
+            miss = missing(&envs);
+        }
+    }
+    if miss.len() == envs.len() {
+        eprintln!("⚠ 未配置模型 key(缺: {})。", miss.join(", "));
+        eprintln!("请在仓库根创建 secrets.env(格式见 secrets.env.example):");
+        eprintln!("    export GLM_KEY=\"你的智谱key(Coding套餐)\"");
+        eprintln!("或先 export {}=... 再重跑。", miss.first().map(String::as_str).unwrap_or("GLM_KEY"));
+        std::process::exit(2);
+    } else if !miss.is_empty() {
+        println!("(提示: {} 未配置,对应 provider 将失效,链上其余接力)", miss.join(", "));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("devices") => {
             // 两族并列,各自 best-effort(某族工具不在 PATH 就跳过):
             // hdc 目标直接以 "hdc:<key>" 形态给出,拷进 --serial 即用
-            if let Ok(out) = std::process::Command::new("adb").arg("devices").output() {
-                print!("{}", String::from_utf8_lossy(&out.stdout));
+            if let Some(adb) = device::locate_adb() {
+                if let Ok(out) = std::process::Command::new(&adb).arg("devices").output() {
+                    print!("{}", String::from_utf8_lossy(&out.stdout));
+                }
+            } else {
+                eprintln!("(未找到 adb,仅列 hdc;ADB_BIN=/path/to/adb 可指定)");
             }
             if let Ok(out) = std::process::Command::new("hdc").args(["list", "targets"]).output() {
                 for l in String::from_utf8_lossy(&out.stdout).lines() {
@@ -169,6 +234,7 @@ fn main() {
                 eprintln!("phonefarm.toml 缺 [prompts].step");
                 std::process::exit(2);
             }
+            ensure_keys(&cfg);
             let res = runtime::episode(&cfg, &task, &goal, serial, endless, budget, app, asserts);
             println!("summary: run={} stop={} steps={} calls={} tokens={} wall={:.1}s achieved={}",
                 res.run_id, res.stop, res.steps, res.calls, res.tokens,
@@ -221,6 +287,7 @@ fn main() {
                 eprintln!("phonefarm.toml 缺 [prompts].step");
                 std::process::exit(2);
             }
+            ensure_keys(&cfg);
             let task_root = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
             let _ = std::fs::create_dir_all(&task_root);
             let tsv = format!("{task_root}/campaign.tsv");

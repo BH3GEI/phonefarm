@@ -117,18 +117,61 @@ fn sips_wh(path: &str) -> Option<(i32, i32)> {
     Some((w, h))
 }
 
+/// adb 搜索顺序(Improve Spec 环境自举): 纯函数供单测。
+/// ADB_BIN 显式指定最高;仓库自带 platform-tools/ 次之(自己目录自己部署,clone 即跑,
+/// 规格细化③的"优先"胜过枚举序);再 PATH;最后常见 SDK 安装点。"PATH" 是哨兵项。
+pub fn adb_search_order(adb_bin: Option<&str>, home: Option<&str>) -> Vec<String> {
+    let mut v = Vec::new();
+    if let Some(b) = adb_bin {
+        if !b.trim().is_empty() { v.push(b.to_string()); }
+    }
+    v.push("platform-tools/adb".into());
+    v.push("PATH".into());
+    if let Some(h) = home {
+        v.push(format!("{h}/Library/Android/sdk/platform-tools/adb"));
+        v.push(format!("{h}/Library/Application Support/CindyGlobal/android-platform-tools/darwin-arm64/platform-tools/adb"));
+    }
+    v.push("/opt/homebrew/share/android-commandlinetools/platform-tools/adb".into());
+    v
+}
+
+/// adb 定位: 一次定位进程级缓存。找不到返回 None——调用方给可操作警告,不 panic。
+pub fn locate_adb() -> Option<String> {
+    static ADB: OnceLock<Option<String>> = OnceLock::new();
+    ADB.get_or_init(|| {
+        let bin = std::env::var("ADB_BIN").ok();
+        let home = std::env::var("HOME").ok();
+        for c in adb_search_order(bin.as_deref(), home.as_deref()) {
+            if c == "PATH" {
+                let ok = Command::new("adb").arg("--version")
+                    .stdout(Stdio::null()).stderr(Stdio::null())
+                    .status().map(|st| st.success()).unwrap_or(false);
+                if ok { return Some("adb".into()); }
+            } else if std::path::Path::new(&c).is_file() {
+                return Some(c);
+            }
+        }
+        None
+    }).clone()
+}
+
 pub struct Adb {
+    bin: String, // 定位到的 adb 路径(构造时解析,见 locate_adb)
     serial: Option<String>,
     tmp: String,
 }
 
 impl Adb {
     pub fn new(serial: Option<String>, tmp: String) -> Self {
-        Adb { serial, tmp }
+        let Some(bin) = locate_adb() else {
+            eprintln!("⚠ 未找到 adb: 请安装 Android platform-tools(或把 platform-tools/ 整个目录放进仓库根),或用 ADB_BIN=/path/to/adb 指定后重跑。");
+            std::process::exit(2);
+        };
+        Adb { bin, serial, tmp }
     }
 
     fn run(&self, args: &[&str]) -> Vec<u8> {
-        let mut cmd = Command::new("adb");
+        let mut cmd = Command::new(&self.bin);
         if let Some(s) = &self.serial {
             cmd.arg("-s").arg(s);
         }
@@ -139,7 +182,7 @@ impl Adb {
     fn run_timeout(&self, args: &[&str], ms: u64) -> Vec<u8> {
         let outfile = format!("{}/_cmd.out", self.tmp);
         let Ok(f) = std::fs::File::create(&outfile) else { return vec![] };
-        let mut cmd = Command::new("adb");
+        let mut cmd = Command::new(&self.bin);
         if let Some(s) = &self.serial {
             cmd.arg("-s").arg(s);
         }
@@ -1319,6 +1362,20 @@ mod tests {
         assert_eq!(st.pkg, "com.ss.android.article.news");
         assert_eq!(st.activity, "com.ss.android.article.news.activity.MainActivity");
         assert_eq!(st.ime, Some(true));
+    }
+
+    #[test]
+    fn adb_search_order_spec() {
+        // ADB_BIN 最高;仓库自带 platform-tools 胜过 PATH 与系统安装点;PATH 哨兵在系统目录前
+        let v = adb_search_order(Some("/x/adb"), Some("/Users/u"));
+        assert_eq!(v[0], "/x/adb");
+        assert_eq!(v[1], "platform-tools/adb");
+        assert_eq!(v[2], "PATH");
+        assert!(v[3].starts_with("/Users/u/Library/Android"));
+        assert!(v.last().unwrap().contains("homebrew"));
+        let v2 = adb_search_order(None, None);
+        assert_eq!(v2[0], "platform-tools/adb", "无显式指定时仓库自带最先");
+        assert!(adb_search_order(Some("  "), None)[0] == "platform-tools/adb", "空白 ADB_BIN 忽略");
     }
 
     #[test]

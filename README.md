@@ -38,14 +38,16 @@ summarize_run.py      从 log.jsonl 抽取单局汇总
 build_tree.py         离线交互网构建器:汇总全部 runs 的 log.jsonl → tree.json(局末也会自动跑)
 ocr.swift             OCR文字备胎(macOS Vision):UI树为空时识别截图文字坐标,swiftc 编译出 ./ocr
 tasks/<任务>/          各靶子的经验库 lessons.jsonl、交互网 tree.json、评测账 campaign.tsv、逐局 runs/(log.jsonl+ctx.log 入库,截图不入库)
-phonefarm-设计文档-v1.html
+docs/DESIGN.md           设计文档v1(Markdown归档; HTML原档保留在仓库根)
 ```
 
 ## 跑起来
 
-1. `cp secrets.env.example secrets.env`,填入智谱 key(Coding 套餐)
+1. `cp secrets.env.example secrets.env`,填入智谱 key(Coding 套餐)——不填也能启动,程序会
+   自动读 ./secrets.env 补进环境;仍缺 key 时打印格式说明后退出,不会裸 401
 2. `cd src && cargo build --release`,把产物 `phonefarm` 放到仓库根目录
-   (推荐) `swiftc -O ocr.swift -o ocr` — OCR文字备胎;不编也能跑,该功能自动关闭,程序也会尝试自举编译
+   - adb 自动定位: ADB_BIN 显式指定 > 仓库根自带 platform-tools/ 目录(clone 即跑) > PATH > 常见 SDK 安装点;都找不到给可操作提示
+   - OCR 文字备胎首跑自动编译(有 swiftc 即可,限时+原子替换);编不出该通道自动关闭照常跑
 3. 启动 Android 模拟器(AVD 名 `agentphone`),装好目标 App
 4. 单轮:`./round.sh 1`(旧脚本,仍可用);或直接:
    `./phonefarm run --task "今日头条遍历" --endless --budget-calls 90 --app com.ss.android.article.news "<目标文本>"`
