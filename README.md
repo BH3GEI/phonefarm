@@ -62,6 +62,25 @@ phonefarm-设计文档-v1.html
    (急速息屏+锁屏会把整局毒成"树=锁屏层/aa=背后app"的假分歧;跑长局前
    `power-shell timeout -o 1800000` 或起个 wakeup pinger,冒烟设备已留 30 分钟息屏设定)
 
+## CLI(查看层: 万事万物一条命令可取)
+
+数据全在盘上,CLI 只是发现路径;查看命令只读盘、不烧 token、不改状态。全部支持 `--json`。
+
+```
+phonefarm last                     最近一局结论(入口)     phonefarm tasks    全部任务统计
+phonefarm runs [--task T]          某任务全部局           phonefarm tree     交互网(页/边/熟路)
+phonefarm show <局ID> [--step N]   局概要/单步钻取        phonefarm lessons  经验库(win/lose)
+phonefarm show <局ID> --raw/--hooks/--events/--crashes/--anr/--trace        phonefarm campaign 评测账
+phonefarm cat <路径> [--grep/--head/--tail]  万能文件打印(.gz解压/.jsonl美化/.jpg报尺寸)
+phonefarm stats <局ID>             局内统计+遥测汇总(帧率/CPU/步耗时分位/内存曲线/事件数)
+phonefarm schema [--type r类型]    log.jsonl 记录契约      phonefarm config [--key k] 生效配置
+phonefarm probe --serial S "只读命令"   设备直连调试;exec 同形但高危,必须 --yes
+```
+
+局ID 前缀即可(多命中报候选);`--task` 缺省=最近有局的任务。零背景钻取链:
+`phonefarm last` → `show <局ID> --step 5` → `cat tasks/<T>/runs/<局>/step5.xml.gz`。
+遥测(r=telemetry)与事件(r=app_event)同账,`show --step` 看单步性能,`stats` 看整局分布。
+
 ## 战绩(2026-08-29)
 
 今日头条全功能遍历,10 轮端到端连跑:**5 轮"完成+复核"双过,最后三轮连续通过**;共 442 步、311 次模型调用、76 分钟;全程暴露并修复 6 个真实缺陷(便签当动作、复盘丢经验、模型图像通道劣化、内容审核拒图、back+done 连发、限流误判)。明细见 `tasks/今日头条遍历/campaign10.tsv` 与各局 `log.jsonl`。

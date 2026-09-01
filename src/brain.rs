@@ -1,10 +1,10 @@
 //! 唯一模型调用函数。多 provider 按序 failover;HTTP 走 curl 子进程(绕 WAF 指纹问题)。
 //! 本层只做 消息→原文回复;JSON 解析由调用方按记录契约执行。
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::time::Instant;
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct ProviderCfg {
     pub name: String,
     pub url: String,

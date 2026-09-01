@@ -4,16 +4,17 @@
 //! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod brain;
+mod cli;
 mod device;
 mod fold;
 mod runtime;
 mod telemetry;
 mod tree;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct HookCfg {
     pub on: String,
     #[serde(default)]
@@ -27,7 +28,7 @@ pub struct HookCfg {
     pub output: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "d_data_dir")]
     pub data_dir: String,
@@ -97,6 +98,14 @@ impl Config {
             .and_then(|n| self.prompts.get(n).map(|s| s.as_str()))
     }
 }
+
+const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
+跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--app P] [--assert \"词1,词2\"] \"<目标>\"
+评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
+设备:  devices | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
+查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
+       cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
+       schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -271,8 +280,17 @@ fn main() {
             let last_ok = rows.last().and_then(|r| r["achieved"].as_bool()).unwrap_or(false);
             std::process::exit(if last_ok { 0 } else { 1 });
         }
-        _ => {
-            eprintln!("phonefarm v0.2 — 记录契约 v1 运行时\n  phonefarm run --task <任务名> [--assert \"词1,词2\"] \"<目标>\"\n  phonefarm benchmark --task <任务名> [--rounds N] [--app <包名>] [--assert \"词1,词2\"] [--json] \"<目标>\"\n  phonefarm devices");
+        Some(other) => {
+            // CLI 查看层(CLI Spec v1.0): 只读盘,不烧 token
+            if let Some(code) = cli::dispatch(other, &args[1..]) {
+                std::process::exit(code);
+            }
+            eprintln!("未知子命令 '{other}'");
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+        None => {
+            eprintln!("{USAGE}");
             std::process::exit(2);
         }
     }

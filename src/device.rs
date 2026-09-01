@@ -428,6 +428,11 @@ impl Adb {
     pub fn telemetry(&self, heavy: bool, pkg: &str) -> crate::telemetry::Telemetry {
         crate::telemetry::from_android(&self.telemetry_collect(heavy), pkg)
     }
+
+    /// 任意设备 shell 命令(CLI probe/exec 用),限时,原样返回输出
+    pub fn shell(&self, cmd: &str, ms: u64) -> String {
+        String::from_utf8_lossy(&self.run_timeout(&["shell", cmd], ms)).to_string()
+    }
 }
 
 /// OpenHarmony 后端: hdc 封装,方法面与 Adb 逐位同构,由 Device 统一分发。
@@ -765,6 +770,11 @@ impl Hdc {
     pub fn telemetry(&self, heavy: bool, _pkg: &str) -> crate::telemetry::Telemetry {
         crate::telemetry::from_oh(&self.telemetry_collect(heavy))
     }
+
+    /// 任意设备 shell 命令(CLI probe/exec 用)。整句一个参数交远端解释。
+    pub fn shell(&self, cmd: &str, ms: u64) -> String {
+        String::from_utf8_lossy(&self.run_timeout(&["shell", cmd], ms, "cli")).to_string()
+    }
 }
 
 /// 设备后端统一分发。调用方一律持 Device,方法面与 Adb 逐位同构;选择按 serial 前缀:
@@ -848,6 +858,9 @@ impl Device {
     }
     pub fn telemetry(&self, heavy: bool, pkg: &str) -> crate::telemetry::Telemetry {
         match self { Device::Adb(d) => d.telemetry(heavy, pkg), Device::Hdc(d) => d.telemetry(heavy, pkg) }
+    }
+    pub fn shell(&self, cmd: &str, ms: u64) -> String {
+        match self { Device::Adb(d) => d.shell(cmd, ms), Device::Hdc(d) => d.shell(cmd, ms) }
     }
 }
 
