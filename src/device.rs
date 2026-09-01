@@ -749,13 +749,15 @@ impl Hdc {
     }
 
     /// 遥测采集: 每脚本一趟 shell;heavy 时两趟。限时失败返已得部分(解析容忍)。
+    /// 重量级放宽到 20s: hidumper 服务冷启动首跑实测会超 10s(热跑 4.6s),heavy 每
+    /// telemetry_interval 步才付一次,上限不进常规步。
     pub fn telemetry_collect(&self, heavy: bool) -> String {
         let mut out = String::from_utf8_lossy(
             &self.run_timeout(&["shell", "sh", "/data/local/tmp/pf_t1.sh"], 10000, "tele")).to_string();
         if heavy {
             out.push('\n');
             out.push_str(&String::from_utf8_lossy(
-                &self.run_timeout(&["shell", "sh", "/data/local/tmp/pf_t2.sh"], 10000, "tele")));
+                &self.run_timeout(&["shell", "sh", "/data/local/tmp/pf_t2.sh"], 20000, "tele")));
         }
         out
     }
