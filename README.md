@@ -4,11 +4,13 @@ Agent 自动化移动端并行、测试、采集工具：由 Rust 内核驱动�
 
 程序架构采用“执行回路与决策机制分离”的设计：模型提供屏幕元素识别及下一步动作规划，其余的状态采集、合法性校验、安全拦截、复盘更新和系统性能监控全部由 Rust 宿主进程控制。
 
-> **🤖🤖🤖 For AI Agents (recommended)**: This project ships with an agent manual at `skills/phonefarm/SKILL.md`. Copy the prompt below to your agent (Claude Code / Codex / Cindy / octos etc.) to start using the project immediately:
+> **🤖🤖🤖 给 AI Agent 用（推荐姿势）**：本项目自带 agent 说明书 `skills/phonefarm/SKILL.md`。复制下面这段发给你的 Agent（Claude Code / Codex / Cindy / octos 等），立即开始使用该项目：
 >
 > ```
 > Read https://raw.githubusercontent.com/BH3GEI/phonefarm/main/skills/phonefarm/SKILL.md and strictly follow its rules. Then drive the phonefarm tool accordingly. Run `phonefarm last` first to verify the environment, then report the current device status to me.
 > ```
+>
+> 注：`skills/` 目录下的说明书为全英文（非常抱歉🙏），以便各家 Agent 直接阅读理解。
 
 ## 核心功能
 
