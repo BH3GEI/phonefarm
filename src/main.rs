@@ -7,6 +7,7 @@ mod brain;
 mod device;
 mod fold;
 mod runtime;
+mod telemetry;
 mod tree;
 
 use serde::Deserialize;
@@ -58,6 +59,12 @@ pub struct Config {
     /// #21 done预检: 首次done不定局,注入事实给模型一次终态自查(默认开;false=旧行为)
     #[serde(default = "d_done_reflect")]
     pub done_reflect: bool,
+    /// 遥测(Telemetry Spec v1.0): 每步只读采集性能账进 log.jsonl,不进模型上下文(默认开)
+    #[serde(default = "d_telemetry")]
+    pub telemetry: bool,
+    /// 重量级遥测明细的采集间隔(步);高频字段每步采
+    #[serde(default = "d_tele_interval")]
+    pub telemetry_interval: u32,
     #[serde(default)]
     pub prompts: HashMap<String, String>,
     #[serde(default, rename = "hook")]
@@ -77,6 +84,8 @@ fn d_lesson_max() -> usize { 20 }
 fn d_window() -> usize { 5 }
 fn d_plan_max() -> usize { 4 }
 fn d_done_reflect() -> bool { true }
+fn d_telemetry() -> bool { true }
+fn d_tele_interval() -> u32 { 5 }
 
 impl Config {
     pub fn hook_for(&self, on: &str) -> Option<&HookCfg> {
@@ -239,7 +248,7 @@ fn main() {
                     phone.home();
                     std::thread::sleep(std::time::Duration::from_secs(3));
                     if let Some((_, comp)) = apps.iter().find(|(p, _)| p == pkg) {
-                        phone.launch(pkg, comp);
+                        let _ = phone.launch(pkg, comp); // 冷启动毫秒由 run 内的遥测层消费,benchmark 不重复记
                     }
                     std::thread::sleep(std::time::Duration::from_secs(6));
                 }

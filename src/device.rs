@@ -386,14 +386,47 @@ impl Adb {
             self.run_timeout(&["shell", "am", "force-stop", pkg], 6000);
         }
     }
-    /// 直接启动应用: 有组件走 am start,否则 monkey 兜底
-    pub fn launch(&self, pkg: &str, comp: &str) {
+    /// 直接启动应用: 有组件走 am start -W(阻塞至可见,顺手产出冷启动 WaitTime——遥测层
+    /// 唯一"写"动作即启动本身,计时是白拿的),否则 monkey 兜底。返回冷启动毫秒(采不到None)。
+    pub fn launch(&self, pkg: &str, comp: &str) -> Option<i64> {
         if !comp.is_empty() {
-            self.run_timeout(&["shell", "am", "start", "-n", comp], 8000);
+            let out = self.run_timeout(&["shell", "am", "start", "-W", "-n", comp], 8000);
+            return crate::telemetry::parse_coldstart_a(&String::from_utf8_lossy(&out)).0;
         } else if !pkg.is_empty() {
             self.run_timeout(&["shell", "monkey", "-p", pkg,
                                "-c", "android.intent.category.LAUNCHER", "1"], 8000);
         }
+        None
+    }
+
+    /// 遥测开局(Telemetry Spec): root 探测一次 + 采集脚本上载(整批命令一趟 shell 跑完)。
+    /// 返回是否 root(root 层字段的开关,非 root 自动跳过)。
+    pub fn telemetry_setup(&self, pkg: &str) -> bool {
+        let root = String::from_utf8_lossy(&self.run_timeout(&["shell", "id"], 4000)).contains("uid=0");
+        let l1 = format!("{}/_pf_t1.sh", self.tmp);
+        let l2 = format!("{}/_pf_t2.sh", self.tmp);
+        if std::fs::write(&l1, tele_script_a(pkg, root, false)).is_ok() {
+            self.run_timeout(&["push", &l1, "/data/local/tmp/pf_t1.sh"], 6000);
+        }
+        if std::fs::write(&l2, tele_script_a(pkg, root, true)).is_ok() {
+            self.run_timeout(&["push", &l2, "/data/local/tmp/pf_t2.sh"], 6000);
+        }
+        root
+    }
+
+    /// 遥测采集: 高频脚本每步,heavy=true 时重量级脚本并跑(仍是一趟 shell 往返)。
+    /// 限时,失败返空文本(解析层对空输入产出全 None——采不到留空,不装)。
+    pub fn telemetry_collect(&self, heavy: bool) -> String {
+        let cmd = if heavy {
+            "sh /data/local/tmp/pf_t1.sh 2>/dev/null; sh /data/local/tmp/pf_t2.sh 2>/dev/null"
+        } else {
+            "sh /data/local/tmp/pf_t1.sh 2>/dev/null"
+        };
+        String::from_utf8_lossy(&self.run_timeout(&["shell", cmd], 10000)).to_string()
+    }
+
+    pub fn telemetry(&self, heavy: bool, pkg: &str) -> crate::telemetry::Telemetry {
+        crate::telemetry::from_android(&self.telemetry_collect(heavy), pkg)
     }
 }
 
@@ -681,17 +714,54 @@ impl Hdc {
     }
 
     /// 启动: ability 必须是 bm dump -n 的 mainAbility 全名(实测坑)。comp 有值直接用;
-    /// 空则现场解析——Android 侧"query-activities 解析组件"的对称物。解析不到就不动(OH 无 monkey)
-    pub fn launch(&self, pkg: &str, comp: &str) {
-        if pkg.is_empty() { return; }
+    /// 空则现场解析——Android 侧"query-activities 解析组件"的对称物。解析不到就不动(OH 无 monkey)。
+    /// 冷启动耗时: OH 无 am start -W 等价物(首帧要另采),如实返 None。
+    pub fn launch(&self, pkg: &str, comp: &str) -> Option<i64> {
+        if pkg.is_empty() { return None; }
         let ability = if comp.is_empty() { self.main_ability_of(pkg) } else { comp.to_string() };
-        if ability.is_empty() { return; }
+        if ability.is_empty() { return None; }
         self.run_timeout(&["shell", "aa", "start", "-b", pkg, "-a", &ability], 8000, "start");
+        None
     }
 
     fn main_ability_of(&self, bundle: &str) -> String {
         let out = self.run_timeout(&["shell", "bm", "dump", "-n", bundle], 6000, "bm");
         parse_main_ability(&String::from_utf8_lossy(&out))
+    }
+
+    /// 送文件上设备(file send 是 hdc 顶层命令)
+    fn send(&self, local: &str, remote: &str) {
+        self.run_timeout(&["file", "send", local, remote], 6000, "send");
+    }
+
+    /// 遥测开局: 脚本上载。hdc shell 本身即 root(真机 id 实测 uid=0),恒 true;
+    /// 脚本文件承载整批命令——绕开 hdc 参数按空白切分的通道限制(inputText 实测教训)。
+    pub fn telemetry_setup(&self, pkg: &str) -> bool {
+        let l1 = format!("{}/_pf_t1.sh", self.tmp);
+        let l2 = format!("{}/_pf_t2.sh", self.tmp);
+        if std::fs::write(&l1, tele_script_oh(pkg, false)).is_ok() {
+            self.send(&l1, "/data/local/tmp/pf_t1.sh");
+        }
+        if std::fs::write(&l2, tele_script_oh(pkg, true)).is_ok() {
+            self.send(&l2, "/data/local/tmp/pf_t2.sh");
+        }
+        true
+    }
+
+    /// 遥测采集: 每脚本一趟 shell;heavy 时两趟。限时失败返已得部分(解析容忍)。
+    pub fn telemetry_collect(&self, heavy: bool) -> String {
+        let mut out = String::from_utf8_lossy(
+            &self.run_timeout(&["shell", "sh", "/data/local/tmp/pf_t1.sh"], 10000, "tele")).to_string();
+        if heavy {
+            out.push('\n');
+            out.push_str(&String::from_utf8_lossy(
+                &self.run_timeout(&["shell", "sh", "/data/local/tmp/pf_t2.sh"], 10000, "tele")));
+        }
+        out
+    }
+
+    pub fn telemetry(&self, heavy: bool, _pkg: &str) -> crate::telemetry::Telemetry {
+        crate::telemetry::from_oh(&self.telemetry_collect(heavy))
     }
 }
 
@@ -767,9 +837,107 @@ impl Device {
     pub fn force_stop(&self, pkg: &str) {
         match self { Device::Adb(d) => d.force_stop(pkg), Device::Hdc(d) => d.force_stop(pkg) }
     }
-    pub fn launch(&self, pkg: &str, comp: &str) {
+    /// 返回冷启动毫秒(Android am start -W 的 WaitTime;OH/monkey 路线采不到为 None)
+    pub fn launch(&self, pkg: &str, comp: &str) -> Option<i64> {
         match self { Device::Adb(d) => d.launch(pkg, comp), Device::Hdc(d) => d.launch(pkg, comp) }
     }
+    pub fn telemetry_setup(&self, pkg: &str) -> bool {
+        match self { Device::Adb(d) => d.telemetry_setup(pkg), Device::Hdc(d) => d.telemetry_setup(pkg) }
+    }
+    pub fn telemetry(&self, heavy: bool, pkg: &str) -> crate::telemetry::Telemetry {
+        match self { Device::Adb(d) => d.telemetry(heavy, pkg), Device::Hdc(d) => d.telemetry(heavy, pkg) }
+    }
+}
+
+/// Android 遥测脚本(设备端 sh 一趟跑完全部数据源,段间哨兵行分隔)。
+/// pkg/root 开局烤进脚本;pid 每次现场解析(pidof)。非 root 段自动缺席——采不到留空。
+fn tele_script_a(pkg: &str, root: bool, heavy: bool) -> String {
+    let mut s = format!(
+        "PKG={pkg}\nROOT={}\nset -- $(pidof $PKG 2>/dev/null); PID=$1\n", if root { 1 } else { 0 });
+    if !heavy {
+        s.push_str(r#"echo "-----PF:pid-----"; echo $PID
+echo "-----PF:meminfo-----"; head -48 /proc/meminfo 2>/dev/null
+echo "-----PF:psi-----"; cat /proc/pressure/cpu /proc/pressure/memory 2>/dev/null
+echo "-----PF:cpuinfo-----"; dumpsys cpuinfo 2>/dev/null | grep -E "^Load:|TOTAL:|$PKG"
+echo "-----PF:battery-----"; dumpsys battery 2>/dev/null
+echo "-----PF:cpufreq-----"; cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>/dev/null
+echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do cat $z/type $z/temp 2>/dev/null; done
+echo "-----PF:gfxinfo-----"; if [ -n "$PID" ]; then dumpsys gfxinfo $PKG 2>/dev/null | grep -E "Total frames rendered|Janky frames|th percentile|Number Missed Vsync"; fi
+echo "-----PF:topact-----"; dumpsys activity activities 2>/dev/null | grep -m1 topResumedActivity
+echo "-----PF:status-----"; if [ -n "$PID" ]; then grep -E "^(VmRSS|VmHWM|Threads):" /proc/$PID/status 2>/dev/null; fi
+echo "-----PF:nettcp-----"; cat /proc/net/tcp 2>/dev/null | wc -l; cat /proc/net/tcp6 2>/dev/null | wc -l
+echo "-----PF:crashcnt-----"; dumpsys dropbox 2>/dev/null | grep -ci crash
+echo "-----PF:anrcnt-----"; dumpsys dropbox 2>/dev/null | grep -ci anr
+if [ "$ROOT" = "1" ] && [ -n "$PID" ]; then
+echo "-----PF:io-----"; cat /proc/$PID/io 2>/dev/null
+echo "-----PF:fd-----"; ls /proc/$PID/fd 2>/dev/null | wc -l; ls -l /proc/$PID/fd 2>/dev/null | grep -c socket
+fi
+"#);
+    } else {
+        s.push_str(r#"echo "-----PF:meminfo_app-----"; if [ -n "$PID" ]; then dumpsys meminfo $PKG 2>/dev/null | head -45; fi
+echo "-----PF:vsync-----"; dumpsys SurfaceFlinger 2>/dev/null | grep -m2 -E "VSYNC period|refresh-rate"
+echo "-----PF:layers-----"; dumpsys SurfaceFlinger --list 2>/dev/null | wc -l
+echo "-----PF:wifi-----"; dumpsys wifi 2>/dev/null | grep -m4 -E "mWifiInfo|SSID"
+echo "-----PF:diskstats-----"; dumpsys diskstats 2>/dev/null | head -8
+echo "-----PF:df-----"; df -k /data 2>/dev/null | tail -1
+echo "-----PF:sensors-----"; dumpsys sensorservice 2>/dev/null | grep -m6 -E "active-count|Active sensors|connections"
+echo "-----PF:location-----"; dumpsys location 2>/dev/null | head -6
+echo "-----PF:gpu-----"; dumpsys gpu 2>/dev/null | head -6
+echo "-----PF:batterystats-----"; dumpsys batterystats $PKG 2>/dev/null | head -20
+if [ -n "$PID" ]; then
+U=$(grep -m1 "^Uid:" /proc/$PID/status 2>/dev/null | cut -f2)
+echo "-----PF:netsum-----"; dumpsys netstats detail 2>/dev/null | awk -v u="uid=$U" '$0~u{f=1} f&&match($0,/rb=[0-9]+/){rb+=substr($0,RSTART+3,RLENGTH-3)} f&&match($0,/tb=[0-9]+/){tb+=substr($0,RSTART+3,RLENGTH-3)} END{print "rx:" rb " tx:" tb}'
+fi
+if [ "$ROOT" = "1" ] && [ -n "$PID" ]; then
+echo "-----PF:smaps-----"; head -25 /proc/$PID/smaps_rollup 2>/dev/null
+echo "-----PF:procnet-----"; head -6 /proc/$PID/net/dev 2>/dev/null
+echo "-----PF:cgroup-----"; head -4 /proc/$PID/cgroup 2>/dev/null; cat /proc/$PID/schedstat 2>/dev/null
+echo "-----PF:dmesg-----"; dmesg 2>/dev/null | tail -8
+echo "-----PF:tombstones-----"; ls /data/tombstones 2>/dev/null | wc -l
+fi
+"#);
+    }
+    s
+}
+
+/// OpenHarmony 遥测脚本(shell 即 root,root 层恒采;hidumper 子命令均为真机实测形态)。
+/// OH 设备无 awk(实测教训)——聚合一律用 smaps_rollup/hidumper 自带汇总,不依赖文本工具。
+fn tele_script_oh(pkg: &str, heavy: bool) -> String {
+    let mut s = format!("PKG={pkg}\nset -- $(pidof $PKG 2>/dev/null); PID=$1\n");
+    if !heavy {
+        s.push_str(r#"echo "-----PF:pid-----"; echo $PID
+echo "-----PF:meminfo-----"; head -48 /proc/meminfo 2>/dev/null
+echo "-----PF:psi-----"; cat /proc/pressure/cpu /proc/pressure/memory 2>/dev/null
+echo "-----PF:cpuusage-----"; hidumper --cpuusage 2>/dev/null | head -10
+echo "-----PF:battery-----"; hidumper -s BatteryService -a -i 2>/dev/null | head -30
+echo "-----PF:cpufreq-----"; hidumper --cpufreq 2>/dev/null | head -60
+echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do cat $z/type $z/temp 2>/dev/null; done
+echo "-----PF:fpscount-----"; hidumper -s RenderService -a fpsCount 2>/dev/null | head -12
+echo "-----PF:status-----"; if [ -n "$PID" ]; then grep -E "^(VmRSS|VmHWM|Threads):" /proc/$PID/status 2>/dev/null; fi
+echo "-----PF:nettcp-----"; cat /proc/net/tcp 2>/dev/null | wc -l; cat /proc/net/tcp6 2>/dev/null | wc -l
+echo "-----PF:faultcnt-----"; hidumper -e --list 2>/dev/null | head -10
+if [ -n "$PID" ]; then
+echo "-----PF:io-----"; cat /proc/$PID/io 2>/dev/null
+echo "-----PF:fd-----"; ls /proc/$PID/fd 2>/dev/null | wc -l; ls -l /proc/$PID/fd 2>/dev/null | grep -c socket
+fi
+"#);
+    } else {
+        s.push_str(r#"echo "-----PF:mem_app-----"; if [ -n "$PID" ]; then hidumper --mem $PID 2>/dev/null | head -40; fi
+echo "-----PF:gles-----"; hidumper -s RenderService -a gles 2>/dev/null | head -12
+echo "-----PF:surface-----"; hidumper -s RenderService -a surface 2>/dev/null | grep -m20 "surface \["
+echo "-----PF:storage-----"; hidumper --storage 2>/dev/null | head -15
+echo "-----PF:df-----"; df -k /data 2>/dev/null | tail -1
+echo "-----PF:net-----"; hidumper --net 2>/dev/null | head -8
+echo "-----PF:ipc-----"; hidumper --ipc -a --stat 2>/dev/null | head -40
+if [ -n "$PID" ]; then
+echo "-----PF:smaps-----"; head -25 /proc/$PID/smaps_rollup 2>/dev/null
+echo "-----PF:procnet-----"; head -6 /proc/$PID/net/dev 2>/dev/null
+echo "-----PF:cgroup-----"; head -4 /proc/$PID/cgroup 2>/dev/null; cat /proc/$PID/schedstat 2>/dev/null
+fi
+echo "-----PF:dmesg-----"; dmesg 2>/dev/null | tail -8
+"#);
+    }
+    s
 }
 
 fn parse_bounds(b: &str) -> Option<[i32; 4]> {

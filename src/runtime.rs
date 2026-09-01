@@ -1128,7 +1128,7 @@ fn exec(phone: &Device, a: &ActN, cap: &Cap, realw: i32, realh: i32, apps: &[(St
             let pkg = a.text.as_deref().unwrap_or("");
             let comp = apps.iter().find(|(p, _)| p == pkg)
                 .map(|(_, c)| c.as_str()).unwrap_or("");
-            phone.launch(pkg, comp);
+            let _ = phone.launch(pkg, comp); // 局中启动的冷启动毫秒不单独记账(orient 才是规范冷启动)
         }
         "type" => phone.type_text(a.text.as_deref().unwrap_or("")),
         "wait" => std::thread::sleep(std::time::Duration::from_millis(2500)),
@@ -1362,6 +1362,18 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let apps = phone.launchable_apps();
     let apps_line = apps.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(",");
 
+    // ── 遥测(Telemetry Spec v1.0): 开局 root 探测+采集脚本上载;只读、限时、纯账本 ──
+    let tele_on = cfg.telemetry;
+    let tele_pkg = app.clone().unwrap_or_default();
+    let tele_root = if tele_on { phone.telemetry_setup(&tele_pkg) } else { false };
+    let mut tele_seq: u32 = u32::MAX; // 已采过的帧号(探针/驳回轮复用同帧,不重复采)
+    let mut tele_cnt: u32 = 0;
+    let mut tele_prev_frames: Option<(i64, std::time::Instant)> = None; // fps 差值基准
+    let mut tele_prev_ev: (Option<i32>, Option<i32>, Option<i32>, Option<i32>) = (None, None, None, None); // crash/anr/fd/net_conn
+    let mut tele_last_t = std::time::Instant::now();
+    let mut tele_cold: Option<i64> = None; // 开局归位的冷启动毫秒,并入下一条遥测记录
+    let mut last_api_ms: i64 = 0;
+
     // ── 开局归位(确定性,零模型调用): 声明了目标应用且前台不符 → 掐掉可杀的前台,回桌面 ──
     if let Some(target) = &app {
         let fg = phone.foreground_pkg();
@@ -1374,7 +1386,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             std::thread::sleep(std::time::Duration::from_millis(900));
             // 冷启动目标应用(整合round.sh轮间清理语义: 统一从主Activity起)
             if let Some((_, comp)) = apps.iter().find(|(p, _)| p == target) {
-                phone.launch(target, comp);
+                tele_cold = phone.launch(target, comp);
                 std::thread::sleep(std::time::Duration::from_millis(900));
             }
             log.put(json!({"r":"hook","kind":"orient","from":fg,"target":target,"act":act}));
@@ -1447,6 +1459,64 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
         // ① 本轮画面记录(采集在上一动作末尾或开局完成)
         log_screen(&mut log, &cap, n, realw, realh, &mut logged_seq);
+        // ── 遥测: 每个新帧采一次(帧号判重),r=telemetry 入账;差值事件出 r=app_event。
+        // 不进模型上下文;失败/超时产出全 None 的紧凑空记录,不 panic 不拖循环。 ──
+        if tele_on && cap.seq != tele_seq {
+            tele_seq = cap.seq;
+            let heavy = tele_cnt % cfg.telemetry_interval.max(1) == 0;
+            tele_cnt += 1;
+            let mut t = phone.telemetry(heavy, &tele_pkg);
+            let now = std::time::Instant::now();
+            t.step_ms = Some(now.duration_since(tele_last_t).as_millis() as i64);
+            tele_last_t = now;
+            t.api_ms = (last_api_ms > 0).then_some(last_api_ms);
+            t.shot_bytes = fs::metadata(&cap.img).ok().map(|m| m.len() as i64);
+            t.ui_nodes = Some(cap.full.len() as i32);
+            t.ocr = Some(cap.ocr); // OCR 触发即 UI 树失效时刻的自动标注
+            if t.root.is_none() { t.root = Some(tele_root); }
+            if let Some(ms) = tele_cold.take() { t.cold_start_ms = Some(ms); }
+            if let Some(ft) = t.frames_total {
+                if let Some((pf, pt)) = tele_prev_frames {
+                    let dt = now.duration_since(pt).as_secs_f32();
+                    if dt > 0.5 && ft >= pf {
+                        t.fps = Some(((ft - pf) as f32 / dt * 10.0).round() / 10.0);
+                    }
+                }
+                tele_prev_frames = Some((ft, now));
+            }
+            let (pc, pa, pfd, pconn) = tele_prev_ev;
+            if let (Some(p), Some(c)) = (pc, t.crash_count) {
+                if c > p {
+                    log.put(json!({"r":"app_event","kind":"crash","n":n,"from":p,"to":c,"pkg":tele_pkg}));
+                    println!("      💥 遥测事件: 崩溃计数 {p}→{c}");
+                }
+            }
+            if let (Some(p), Some(c)) = (pa, t.anr_count) {
+                if c > p {
+                    log.put(json!({"r":"app_event","kind":"anr","n":n,"from":p,"to":c,"pkg":tele_pkg}));
+                    println!("      💥 遥测事件: ANR计数 {p}→{c}");
+                }
+            }
+            if let (Some(p), Some(c)) = (pfd, t.fd_count) {
+                if c >= p + 50 {
+                    log.put(json!({"r":"app_event","kind":"fd_growth","n":n,"from":p,"to":c,"pkg":tele_pkg}));
+                    println!("      💥 遥测事件: fd {p}→{c}(疑似泄漏)");
+                }
+            }
+            if let (Some(p), Some(c)) = (pconn, t.net_conn) {
+                if (c - p).abs() >= 10 {
+                    log.put(json!({"r":"app_event","kind":"net_conn","n":n,"from":p,"to":c}));
+                }
+            }
+            tele_prev_ev = (t.crash_count.or(pc), t.anr_count.or(pa), t.fd_count.or(pfd), t.net_conn.or(pconn));
+            if let Ok(v) = serde_json::to_value(&t) {
+                let mut rec = json!({"r":"telemetry","n":n,"seq":cap.seq,"heavy":heavy});
+                if let (Some(o), Some(vo)) = (rec.as_object_mut(), v.as_object()) {
+                    for (k, val) in vo { o.insert(k.clone(), val.clone()); }
+                }
+                log.put(rec);
+            }
+        }
         // 沙盘: 到访页登记(每轮顶部必经,覆盖goto跳段/驳回重采/盲移等一切路径)
         if let Some(t) = tree.as_ref() {
             if let Some(p) = t.page_of(&cap.els) { visited.insert(p.id); }
@@ -1562,6 +1632,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     queue = acts.into();
                     plan_by = by;
                     plan_ms = Some(ms);
+                    last_api_ms = ms as i64;
                     pending_note = note_new;
                     alert.clear(); // 警报已送达本次决策,清掉避免重复轰炸
                     probe_ans.clear(); // 探针应答同为一次性投递
