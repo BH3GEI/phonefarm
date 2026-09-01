@@ -47,7 +47,9 @@ phonefarm show <局ID> --step 5       # 精确查看第 5 步：包含该步截�
 phonefarm show <局ID> --raw          # 查看模型的原始回复包内容
 phonefarm show <局ID> --hooks        # 打印各步骤对应的内核拦截或规则判定记录
 phonefarm show <局ID> --events       # 输出运行期间的异常事件流（崩溃、ANR、FD增长）
-phonefarm show <局ID> --crashes      # 过滤深度调试所需的应用 Crash 日志现场
+phonefarm show <局ID> --crashes      # 输出应用崩溃日志现场
+phonefarm show <局ID> --anr           # 输出 ANR 现场记录
+phonefarm show <局ID> --trace         # 输出调试跟踪信息
 phonefarm cat <文件路径>             # 万能文件查看器：支持 gzip 自动解压、JSONL 格式化、图片属性读取
 phonefarm stats <局ID>               # 统计该局运行指标：提供 FPS/CPU/内存/温度的分位数及分布曲线
 phonefarm schema                     # 打印 log.jsonl 所有合法记录的字段模型定义（代码内生成，永远最新）
@@ -67,13 +69,13 @@ round.sh               单轮调度外壳脚本（保留以向下兼容，生产
 build_tree.py          离线交互网构建器：汇总 runs/*/log.jsonl 导出共享 tree.json
 summarize_run.py       旧版数据提取脚本（已被 CLI stats 与 last 命令取代）
 ocr.swift / ocr        OCR 辅助识别组件（基于 macOS Vision 库，首跑自动编译）
-tasks/<任务名>/        ★ 数据隔离目录：包含 local 经验库 lessons.jsonl、本地交互树 tree.json、对局 campaign.tsv
+tasks/<任务名>/        数据隔离目录：包含本地经验库 lessons.jsonl、状态转移图 tree.json、对局汇总 campaign.tsv
                     runs/<局ID>/ （本局的 log.jsonl、ctx.log 详情、步骤截图及 XML UI 树，媒体与树文件不入 git）
 ```
 
 ## 核心执行回路
 
-单步运行遵循以下六个周期（六拍）：
+单步运行遵循以下六个周期：
 1. **状态采集**：并行截取当前屏幕并提取 UI 布局树。
 2. **上下文组装**：结合任务目标、Lessons 经验、近期历史路径及当前屏幕状态，拼接至提示词上下文。
 3. **模型决策**：单次模型调用支持最多 4 组动作规划，非首次动作无需额外模型调用，降低延迟。
@@ -87,4 +89,4 @@ tasks/<任务名>/        ★ 数据隔离目录：包含 local 经验库 lesson
 
 - `docs/DESIGN.md` — 设计文档 v1（核心契约 / 状态机循环 / 数据隔离 / 写入规范）
 - 工作区 SPEC：`TELEMETRY_SPEC.md`（遥测指标详情）、`CLI_SPEC.md`（命令行交互规范）、`IMPROVE_SPEC.md`（自举部署流程）
-- `phonefarm schema` — 字段模型模型手册
+- `phonefarm schema` — log.jsonl 全部合法记录的字段模型手册
