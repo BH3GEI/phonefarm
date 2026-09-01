@@ -2286,6 +2286,10 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         log.put(json!({"r":"hook","kind":"ctx_stat","bytes":ctx_bytes,"calls":ctx_calls,
                        "avg":ctx_bytes / ctx_calls as u64}));
     }
+    // 收官记录: 局级结论落盘(此前只在 stdout,CLI 的 last/runs 需要盘上权威源)
+    log.put(json!({"r":"end","stop":stop_reason.unwrap_or("done"),"achieved":achieved,
+                   "steps":n,"exec_steps":exec_steps,"calls":brain.calls,"tokens":brain.tokens,
+                   "wall_ms":t0.elapsed().as_millis() as u64,"done_claim":done_claim}));
     println!("{}", "=".repeat(56));
     println!("局{ep_no}结束 | 步数{n} 执行{exec_steps} 空击{null_steps} 动态屏{dyn_steps} ban{ban_count} | 调用{}次 tokens{} ctx均{}B | done={done_claim} achieved={achieved}",
         brain.calls, brain.tokens, if ctx_calls > 0 { ctx_bytes / ctx_calls as u64 } else { 0 });
