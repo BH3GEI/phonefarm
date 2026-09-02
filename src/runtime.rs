@@ -1342,10 +1342,10 @@ pub enum Verdict {
 impl Verdict {
     /// 从 aw-verdict.json 文本解析判分。
     /// 契约: {"success": 0|1, "task": "...", ...}
-    /// 只读 success 字段(支持 0/1、bool、浮点阈值);解析失败按"无判分"处理,不得 panic。
+    /// 兼容读取 success 或 is_successful 字段(支持 0/1、bool、浮点阈值);解析失败按"无判分"处理,不得 panic。
     pub fn from_json_str(s: &str) -> Option<Self> {
         let v: Value = serde_json::from_str(s).ok()?;
-        let success = v.get("success")?;
+        let success = v.get("success").or_else(|| v.get("is_successful"))?;
         if let Some(b) = success.as_bool() {
             return Some(if b { Verdict::Pass } else { Verdict::Fail });
         }
@@ -2837,6 +2837,8 @@ mod tests {
         assert_eq!(Verdict::from_json_str(r#"{"success": false}"#), Some(Verdict::Fail));
         assert_eq!(Verdict::from_json_str(r#"{"success": 1.0}"#), Some(Verdict::Pass));
         assert_eq!(Verdict::from_json_str(r#"{"success": 0.0}"#), Some(Verdict::Fail));
+        assert_eq!(Verdict::from_json_str(r#"{"is_successful": 1.0, "task": "test"}"#), Some(Verdict::Pass));
+        assert_eq!(Verdict::from_json_str(r#"{"is_successful": 0.0, "task": "test"}"#), Some(Verdict::Fail));
 
         // 损坏或缺失 success 字段: 一律返 None,不 panic
         assert_eq!(Verdict::from_json_str(r#"{"task": "no_success"}"#), None);

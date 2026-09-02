@@ -171,17 +171,15 @@ output = "stream"
 # ══════════════════════════════════════════════════════════════
 
 [[providers]]
-name = "glm-53-flash"
-url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
-model = "glm-5.3-flash"
-key_env = "GLM_KEY"
+name = "kimi-k27"
+url = "https://api.kimi.com/coding/v1/chat/completions"
+model = "kimi-k2.7-code"
+key_env = "KIMI_KEY"
 direct = true
 vision = true
-timeout_s = 45
-thinking_disable = true
+timeout_s = 60
 coord_norm = 1000
 
-# 图像后备: 4.6v——flash 图像通道恢复后已回链头;若 flash 再发 http 000,把本条提到最前
 [[providers]]
 name = "glm-vision"
 url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
@@ -194,24 +192,6 @@ thinking_disable = true
 coord_norm = 1000
 
 [[providers]]
-name = "empero"
-url = "https://free.empero.org/v1/chat/completions"
-model = "Qwen/Qwen3.8-Flash-Next-FP8"
-key_env = "EMPERO_KEY"
-vision = true
-timeout_s = 45
-coord_norm = 1000
-extra = { chat_template_kwargs = { enable_thinking = false } }
-
-[[providers]]
-name = "cloudflare"
-url = ""   # 要启用请填入含账户ID的完整URL;留空时前两次调用失败后被熔断跳过
-model = "@cf/qwen/qwen3.8-27b"
-key_env = "CF_TOKEN"
-vision = true
-timeout_s = 60
-
-[[providers]]
 name = "glm-53-flash"
 url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
 model = "glm-5.3-flash"
@@ -223,11 +203,21 @@ thinking_disable = true
 coord_norm = 1000
 
 [[providers]]
-name = "glm-text"
+name = "glm-47-text"
 url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
-model = "glm-5.3"
+model = "glm-4.7"
 key_env = "GLM_KEY"
 direct = true
 vision = false
-timeout_s = 25
+timeout_s = 35
 thinking_disable = true
+
+[[providers]]
+name = "empero"
+url = "https://free.empero.org/v1/chat/completions"
+model = "Qwen/Qwen3.8-Flash-Next-FP8"
+key_env = "EMPERO_KEY"
+vision = true
+timeout_s = 45
+coord_norm = 1000
+extra = { chat_template_kwargs = { enable_thinking = false } }
