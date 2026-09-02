@@ -133,6 +133,10 @@ The full CLI surface is in `references/cli.md`.
   three deterministic gates → execution → acceptance diff. See
   `references/architecture.md`.
 - All inspection commands are offline local parsing and consume no API quota.
+- MCP hosts (e.g. octos): `phonefarm serve [--root <dir>]` exposes the same
+  CLI surface as newline-delimited JSON-RPC tools (`phonefarm_*`). run and
+  benchmark are always detached; `cat` is jailed to the tasks root; raw-shell
+  probe/exec are not exposed. Spec: `docs/SPEC_MCP_SERVE.md`.
 
 ## Detailed references
 

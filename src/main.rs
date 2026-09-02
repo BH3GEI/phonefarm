@@ -9,6 +9,7 @@ mod parallel;
 mod device;
 mod fold;
 mod runtime;
+mod serve;
 mod telemetry;
 mod tree;
 
@@ -108,7 +109,8 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 后台:  run/benchmark 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
-       schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)";
+       schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
+服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)";
 
 /// secrets.env 解析(Improve Spec): 只认 `export KEY="v"` / `KEY=v` 形态的行,
 /// 等价 source 语义但绝不执行任何命令。纯函数供单测。
@@ -200,6 +202,10 @@ fn spawn_detached(console: &str, envs: &[(&str, &str)]) -> std::io::Result<u32> 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
+        Some("serve") => {
+            // MCP stdio 工具服务(SPEC_MCP_SERVE): octos 等客户端的外部工具契约
+            std::process::exit(serve::run_serve(&args[1..]));
+        }
         Some("parallel") => {
             // 多设备并行(PARALLEL_SPEC): 自进程 fan-out,行级设备前缀,任一失败整体非0
             std::process::exit(parallel::run_parallel(&args[1..]));

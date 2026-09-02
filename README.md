@@ -95,8 +95,32 @@ tasks/<任务名>/        数据隔离目录：包含本地经验库 lessons.jso
 
 架构细节与演进规划请参考 `docs/DESIGN.md`（v1 架构定稿）与各功能规格 SPEC。
 
+## MCP 工具服务（`phonefarm serve`）
+
+`phonefarm serve [--root <目录>]` 把整套 CLI 能力以 **MCP stdio 服务**（换行分隔 JSON-RPC 2.0）暴露给 octos 等外部 Agent 宿主：15 个 `phonefarm_*` 工具（devices/tasks/runs/last/status/show/stats/lessons/tree/campaign/schema/config/cat/run/benchmark），全部经既有 CLI 契约自调用，零新依赖。设计要点见 `docs/SPEC_MCP_SERVE.md`：
+
+- **run/benchmark 强制 `--detach`**：立即回报局 ID，进度用 `phonefarm_status` / `phonefarm_show` 轮询（适配客户端 60s 工具超时）。
+- **cat 路径监狱**：只允许读 tasks 数据根之下的文件，逃逸一律拒绝。
+- **不暴露 probe/exec/parallel**：设备写操作的唯一入口是受三道拦截保护的六步循环，裸 shell 不进 MCP 面。
+- 密钥不依赖环境继承：detached 子进程仍走 `./secrets.env` 自举（`--root` 先把工作目录钉在仓库根）。
+
+octos 侧挂载（`config.json` 或 profile 的 `[[mcp_servers]]`）：
+
+```jsonc
+{
+  "mcp_servers": [
+    {
+      "command": "/path/to/phonefarm",
+      "args": ["serve", "--root", "/path/to/phonefarm-repo"],
+      "concurrency_class": "exclusive"  // 设备是独占资源，串行化本服务的全部工具调用
+    }
+  ]
+}
+```
+
 ## 相关文档
 
 - `docs/DESIGN.md` — 设计文档 v1（核心契约 / 状态机循环 / 数据隔离 / 写入规范）
+- `docs/SPEC_MCP_SERVE.md` — MCP stdio 工具服务规格（工具面 / 协议子集 / 安全护栏 / octos 接法）
 - 工作区 SPEC：`TELEMETRY_SPEC.md`（遥测指标详情）、`CLI_SPEC.md`（命令行交互规范）、`IMPROVE_SPEC.md`（自举部署流程）
 - `phonefarm schema` — log.jsonl 全部合法记录的字段模型手册
