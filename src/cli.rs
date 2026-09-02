@@ -34,7 +34,7 @@ const SCHEMA_MD: &str = r#"# log.jsonl 记录契约 (schema)
 
 /// 仓库根的 tasks 目录(尊重 phonefarm.toml 的 data_dir,读不到用当前目录)。
 /// PF_TASKS_ROOT 环境变量可整体覆盖(单测注入用,避免 chdir 的进程级竞态)。
-fn data_root() -> PathBuf {
+pub(crate) fn data_root() -> PathBuf {
     if let Ok(o) = std::env::var("PF_TASKS_ROOT") {
         return PathBuf::from(o);
     }

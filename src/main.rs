@@ -9,6 +9,7 @@ mod parallel;
 mod device;
 mod fold;
 mod runtime;
+mod serve;
 mod telemetry;
 mod tree;
 
@@ -108,7 +109,8 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 后台:  run/benchmark 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
-       schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)";
+       schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
+服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)";
 
 /// secrets.env 解析(Improve Spec): 只认 `export KEY="v"` / `KEY=v` 形态的行,
 /// 等价 source 语义但绝不执行任何命令。纯函数供单测。
@@ -200,6 +202,10 @@ fn spawn_detached(console: &str, envs: &[(&str, &str)]) -> std::io::Result<u32> 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
+        Some("serve") => {
+            // MCP stdio 工具服务(SPEC_MCP_SERVE): octos 等客户端的外部工具契约
+            std::process::exit(serve::run_serve(&args[1..]));
+        }
         Some("parallel") => {
             // 多设备并行(PARALLEL_SPEC): 自进程 fan-out,行级设备前缀,任一失败整体非0
             std::process::exit(parallel::run_parallel(&args[1..]));
@@ -232,6 +238,7 @@ fn main() {
             let mut app: Option<String> = None;
             let mut asserts: Vec<String> = Vec::new();
             let mut detach = false;
+            let mut freeze_on_done = false;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -239,6 +246,7 @@ fn main() {
                     "--task" => task = it.next().cloned().unwrap_or_default(),
                     "--endless" => endless = true,
                     "--detach" => detach = true,
+                    "--freeze-on-done" => freeze_on_done = true,
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--app" => app = it.next().cloned(),
                     "--perceive" => { if let Some(v) = it.next() { if v.eq_ignore_ascii_case("ocr") { std::env::set_var("PF_PERCEIVE", "ocr"); } } }
@@ -288,7 +296,7 @@ fn main() {
                 }
             }
             ensure_keys(&cfg);
-            let res = runtime::episode(&cfg, &task, &goal, serial, None, endless, budget, app, asserts);
+            let res = runtime::episode(&cfg, &task, &goal, serial, None, endless, budget, app, asserts, freeze_on_done);
             println!("summary: run={} stop={} steps={} calls={} tokens={} wall={:.1}s achieved={}",
                 res.run_id, res.stop, res.steps, res.calls, res.tokens,
                 res.wall_ms as f64 / 1000.0, res.achieved);
@@ -401,7 +409,7 @@ fn main() {
                     std::thread::sleep(std::time::Duration::from_secs(6));
                 }
                 let t0 = std::time::Instant::now();
-                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), cold_ms, true, budget, app.clone(), asserts.clone());
+                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), cold_ms, true, budget, app.clone(), asserts.clone(), false);
                 let wall = t0.elapsed().as_secs();
                 append(&format!(
                     "{r}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{wall}",
