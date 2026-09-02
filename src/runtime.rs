@@ -803,7 +803,7 @@ fn probe_answer(a: &ActN, cap: &Cap, runs: &[PageRun], clip: Option<String>, rea
 
 /// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 里程碑+当前页act/diff + ban + note + 小地图 + 前台应用 + 屏幕
 /// 静态段(goal/经验/apps)在前,动态段在后,保住能保的提示词缓存前缀。
-fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str, budget_line: &str,
+fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], last_verdict_line: &str, apps_line: &str, budget_line: &str,
               map_line: &str, assert_line: &str, alert: &str, probe_line: &str, runs: &[PageRun], bans: &[Ban],
               note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
     let mut s = format!("goal: {goal}\n");
@@ -816,6 +816,10 @@ fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], apps_line: &str
     // 探针应答: 一次性注入(仅本轮可见),要留存的事实模型自己写note
     if !probe_line.is_empty() {
         s.push_str(&format!("probe应答(你上一步的探针查询,仅本轮可见):\n{probe_line}\n"));
+    }
+    // 上轮官方判分(SCORE_FEEDBACK_SPEC v1): 外部考场真实验收结论,优先级高于自评
+    if !last_verdict_line.is_empty() {
+        s.push_str(&format!("{last_verdict_line}\n"));
     }
     for l in glessons {
         s.push_str(&format!("lesson(通用): {}\n", l["t"].as_str().unwrap_or("")));
@@ -1328,6 +1332,82 @@ fn load_lessons(path: &str) -> Vec<Value> {
         .collect()
 }
 
+/// 官方判分信号(SCORE_FEEDBACK_SPEC v1): 接回外部考场 ground truth,打破"自信的错"死循环
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Pass,
+    Fail,
+}
+
+impl Verdict {
+    /// 从 aw-verdict.json 文本解析判分。
+    /// 契约: {"success": 0|1, "task": "...", ...}
+    /// 只读 success 字段(支持 0/1、bool、浮点阈值);解析失败按"无判分"处理,不得 panic。
+    pub fn from_json_str(s: &str) -> Option<Self> {
+        let v: Value = serde_json::from_str(s).ok()?;
+        let success = v.get("success")?;
+        if let Some(b) = success.as_bool() {
+            return Some(if b { Verdict::Pass } else { Verdict::Fail });
+        }
+        if let Some(i) = success.as_i64() {
+            return Some(if i > 0 { Verdict::Pass } else { Verdict::Fail });
+        }
+        if let Some(f) = success.as_f64() {
+            return Some(if f > 0.5 { Verdict::Pass } else { Verdict::Fail });
+        }
+        None
+    }
+
+    /// 决策提示词注入文本
+    pub fn prompt_line(&self) -> &'static str {
+        match self {
+            Verdict::Pass => "上轮官方判分: pass（外部考场对终态的程序化判定，优先级高于一切自评）",
+            Verdict::Fail => "上轮官方判分: fail（外部考场对终态的程序化判定，优先级高于一切自评）",
+        }
+    }
+}
+
+/// 扫描 tasks/<任务>/runs/ 下最近一个含 aw-verdict.json 的局。
+/// 有且解析有效则返回 Some(Verdict); 缺失/损坏则返回 None(零扰动不报错)。
+pub fn scan_last_verdict(runs_dir: &std::path::Path, current_run_id: Option<&str>) -> Option<Verdict> {
+    let entries = fs::read_dir(runs_dir).ok()?;
+    let mut runs: Vec<(Option<std::time::SystemTime>, String)> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            if name.starts_with('.') {
+                return None;
+            }
+            if let Some(cur) = current_run_id {
+                if name == cur {
+                    return None;
+                }
+            }
+            let mtime = e.metadata().and_then(|m| m.modified()).ok();
+            Some((mtime, name))
+        })
+        .collect();
+
+    // 时间升序排列,末尾为最新局(倒序扫描由新到旧)
+    runs.sort_by(|a, b| {
+        match (a.0, b.0) {
+            (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
+            _ => a.1.cmp(&b.1),
+        }
+    });
+
+    for (_, run_name) in runs.into_iter().rev() {
+        let verdict_file = runs_dir.join(&run_name).join("aw-verdict.json");
+        if verdict_file.is_file() {
+            let content = fs::read_to_string(&verdict_file).ok()?;
+            return Verdict::from_json_str(&content);
+        }
+    }
+
+    None
+}
+
 #[derive(serde::Deserialize, Default)]
 struct ParamsFile {
     settle_ms: Option<u64>,
@@ -1357,6 +1437,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         eprintln!("✗ 建不了运行目录 {run_dir}");
         return fail("mkdir_fail", String::new());
     }
+    // 官方判分(SCORE_FEEDBACK_SPEC v1): 扫描上一局外部考场判分信号,下局注入打破"自信的错"
+    let last_verdict = scan_last_verdict(&std::path::Path::new(&task_dir).join("runs"), Some(&run_id));
+    let last_verdict_line = last_verdict.as_ref().map(|v| v.prompt_line()).unwrap_or("");
     // tmp 按 PID+局序号隔离(多进程并行、同进程多局中间文件 _raw/_cmd.out 都不互踩)
     let tmp = std::env::temp_dir().join(format!("phonefarm-{}-{seq}", std::process::id()));
     let tmp = tmp.to_string_lossy().to_string();
@@ -1371,6 +1454,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64).unwrap_or(0)}));
     log.put(json!({"r": "goal", "t": goal}));
+    if let Some(v) = &last_verdict {
+        log.put(json!({"r": "last_verdict", "verdict": match v { Verdict::Pass => "pass", Verdict::Fail => "fail" }}));
+    }
 
     // 模型视角存档: 本局所用的完整提示词与规则 + 每次决策看到的全部材料,精准落 run_dir/ctx.log
     // (此前写tmp、局末即删,无法复盘"模型当时到底看到了什么")
@@ -1517,7 +1603,13 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         return fail("capture_fail", run_id.clone());
     };
     stream.push(format!("goal: {goal}"));
+    if !last_verdict_line.is_empty() {
+        stream.push(last_verdict_line.to_string());
+    }
     println!("任务[{task}] 局{ep_no} | {goal}");
+    if let Some(v) = &last_verdict {
+        println!("      ⚖ 上轮官方判分: {}", match v { Verdict::Pass => "pass", Verdict::Fail => "fail" });
+    }
     println!("屏{realw}x{realh} 图{}x{} | 通道{channel} 等安静上限{settle_ms}ms 计划上限{} | 经验{}条+通用{}条 | 应用{}个",
         cap.w, cap.h, cfg.plan_max, lessons.len(), glessons.len(), apps.len());
     println!("{}", "=".repeat(56));
@@ -1694,7 +1786,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             } else {
                 format!("进度: 第{n}/{}步", cfg.max_steps)
             };
-            let user = render_ctx(goal, &glessons, &lessons, &apps_line, &budget_line, &map_line, &assert_line, &alert, &probe_ans, &runs, &bans, &note, &cap, realw, realh);
+            let user = render_ctx(goal, &glessons, &lessons, last_verdict_line, &apps_line, &budget_line, &map_line, &assert_line, &alert, &probe_ans, &runs, &bans, &note, &cap, realw, realh);
             ctx_bytes += user.len() as u64;
             ctx_calls += 1;
             // 模型视角存档: 这次决策发给模型的完整上下文(含警报/沙盘/清单/便签)
@@ -2735,5 +2827,71 @@ mod tests {
         assert_eq!(assert_hits(&c, &ws), vec!["广告设置".to_string()], "全量层无截断盲区");
         c.full.clear();
         assert!(assert_hits(&c, &ws).is_empty(), "无全量层(OCR帧)退回文字清单,如实测不到就不注入");
+    }
+
+    #[test]
+    fn verdict_parse_and_prompt_line() {
+        assert_eq!(Verdict::from_json_str(r#"{"success": 1, "task": "test"}"#), Some(Verdict::Pass));
+        assert_eq!(Verdict::from_json_str(r#"{"success": 0, "task": "test"}"#), Some(Verdict::Fail));
+        assert_eq!(Verdict::from_json_str(r#"{"success": true}"#), Some(Verdict::Pass));
+        assert_eq!(Verdict::from_json_str(r#"{"success": false}"#), Some(Verdict::Fail));
+        assert_eq!(Verdict::from_json_str(r#"{"success": 1.0}"#), Some(Verdict::Pass));
+        assert_eq!(Verdict::from_json_str(r#"{"success": 0.0}"#), Some(Verdict::Fail));
+
+        // 损坏或缺失 success 字段: 一律返 None,不 panic
+        assert_eq!(Verdict::from_json_str(r#"{"task": "no_success"}"#), None);
+        assert_eq!(Verdict::from_json_str(r#"{"success": "invalid_string"}"#), None);
+        assert_eq!(Verdict::from_json_str(r#"{"success": null}"#), None);
+        assert_eq!(Verdict::from_json_str(r#"{corrupted json"#), None);
+        assert_eq!(Verdict::from_json_str(""), None);
+
+        // 提示词注入文本严格符合 SCORE_FEEDBACK_SPEC
+        assert_eq!(Verdict::Pass.prompt_line(), "上轮官方判分: pass（外部考场对终态的程序化判定，优先级高于一切自评）");
+        assert_eq!(Verdict::Fail.prompt_line(), "上轮官方判分: fail（外部考场对终态的程序化判定，优先级高于一切自评）");
+    }
+
+    #[test]
+    fn verdict_scan_and_injection_tri_state() {
+        // SCORE_FEEDBACK_SPEC 验收标准 1: verdict 存在/缺失/损坏三种情况下注入行为正确
+        let dir = std::env::temp_dir().join(format!("pf_verdict_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let runs_dir = dir.join("runs");
+
+        let c = cap();
+
+        // 1. 缺失情况 (runs 目录不存在 或 没有任何 verdict 文件)
+        assert_eq!(scan_last_verdict(&runs_dir, None), None, "runs目录不存在时安全返回 None");
+        std::fs::create_dir_all(runs_dir.join("20260901-010000")).unwrap();
+        assert_eq!(scan_last_verdict(&runs_dir, None), None, "无 verdict 文件时返回 None");
+        let ctx_missing = render_ctx("test goal", &[], &[], "", "app", "budget", "map", "", "", "", &[], &[], "note", &c, 1080, 2340);
+        assert!(!ctx_missing.contains("上轮官方判分"), "缺失时不注入任何判分行");
+
+        // 2. 损坏情况 (文件存在但为破损 json / 缺少 success 字段)
+        std::fs::write(runs_dir.join("20260901-010000/aw-verdict.json"), r#"{"broken": json"#).unwrap();
+        assert_eq!(scan_last_verdict(&runs_dir, None), None, "verdict 损坏时不报错且返回 None");
+        let ctx_corrupted = render_ctx("test goal", &[], &[], "", "app", "budget", "map", "", "", "", &[], &[], "note", &c, 1080, 2340);
+        assert!(!ctx_corrupted.contains("上轮官方判分"), "损坏时不注入任何判分行");
+
+        // 3. 存在情况 (上一局 fail)
+        std::fs::write(runs_dir.join("20260901-010000/aw-verdict.json"), r#"{"success": 0, "task": "AudioRecorder"}"#).unwrap();
+        let v_fail = scan_last_verdict(&runs_dir, None);
+        assert_eq!(v_fail, Some(Verdict::Fail), "上一局判分 fail 正确解析");
+        let ctx_fail = render_ctx("test goal", &[], &[], v_fail.unwrap().prompt_line(), "app", "budget", "map", "", "", "", &[], &[], "note", &c, 1080, 2340);
+        assert!(ctx_fail.contains("上轮官方判分: fail（外部考场对终态的程序化判定，优先级高于一切自评）"), "正确注入 fail 判分行");
+
+        // 4. 存在情况 (新局 pass 覆盖旧局 fail)
+        std::fs::create_dir_all(runs_dir.join("20260902-020000")).unwrap();
+        std::fs::write(runs_dir.join("20260902-020000/aw-verdict.json"), r#"{"success": 1, "task": "AudioRecorder"}"#).unwrap();
+        let v_pass = scan_last_verdict(&runs_dir, None);
+        assert_eq!(v_pass, Some(Verdict::Pass), "多局时取最近一局 pass");
+        let ctx_pass = render_ctx("test goal", &[], &[], v_pass.unwrap().prompt_line(), "app", "budget", "map", "", "", "", &[], &[], "note", &c, 1080, 2340);
+        assert!(ctx_pass.contains("上轮官方判分: pass（外部考场对终态的程序化判定，优先级高于一切自评）"), "正确注入 pass 判分行");
+
+        // 5. 当前局隔离 (current_run_id 排除)
+        let v_isolated = scan_last_verdict(&runs_dir, Some("20260902-020000"));
+        assert_eq!(v_isolated, Some(Verdict::Fail), "当前运行局被安全排除,回溯到上一局");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

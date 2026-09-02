@@ -1329,7 +1329,7 @@ mod tests {
     #[test]
     fn oh_layout_parses_isomorphic_to_android() {
         // hdc dumpLayout(真机OpenHarmony) 与 parse_dump 同构: 下游零改动的地基
-        let (els, full, pkg) = parse_layout_json(OH_HOME);
+        let (els, full, _pkg) = parse_layout_json(OH_HOME);
         assert!(!full.is_empty() && !els.is_empty(), "真机dump应解出节点");
         // 文字节点提取: 桌面图标名进 els
         for name in ["设置", "图库", "电话", "信息", "相机"] {
