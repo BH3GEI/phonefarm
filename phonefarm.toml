@@ -69,8 +69,8 @@ step = """
 3. act 格式: {"r":"act","a":"<动作>","x":..,"y":..,"x2":..,"y2":..,"text":"..","what":".."}
    动作取值: tap | swipe | scroll_up | scroll_down | type | clear | back | home | launch | goto | wait | done
              | inspect | find | get_state | history(只读探针)
-   tap 需要 x,y,建议附 what=按钮文字(screen清单里的): 程序吸附到该元素准确中心,
-   what不在清单会被驳回并附附近候选;不发what时,落点在某元素框内也会自动吸附中心;
+   tap 需要 x,y,建议附 what=按钮文字(screen清单里的): 程序吸附到该元素准确中心;
+   what不在清单时程序改按你的坐标直点(落点在某元素框内则吸附其中心)——所以坐标必须认真给;
    纯图标按钮(无文字,如×/齿轮/返回箭头)用 what:"icon:<描述>"(如icon:close):
    程序不吸附,按你的视觉坐标直点,坐标合法性/空白/前科检查照常;
    swipe 需要 x,y,x2,y2(起点到终点,距离要足够大);type 需要 text;

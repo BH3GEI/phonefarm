@@ -553,6 +553,29 @@ fn find_el(cap: &Cap, w: &str, hx: i64, hy: i64, realw: i32, realh: i32)
         .map(|(t, b)| (t.trim().to_string(), b_img_space(*b, cap, realw, realh)))
 }
 
+/// 剥掉模型照抄的候选显示格式 "文字(x,y)" 的坐标后缀 → "文字";不是该格式返回 None。
+/// (x,y)须为两个可带负号的纯整数才认,防止把正文里真实括号内容误剥。
+fn strip_norm_suffix(w: &str) -> Option<&str> {
+    let w = w.trim();
+    if !w.ends_with(')') {
+        return None;
+    }
+    let i = w.rfind('(')?;
+    let inner = w[i + 1..w.len() - 1].trim();
+    let (a, b) = inner.split_once(',')?;
+    let ok = |s: &str| {
+        let t = s.trim();
+        let d = t.strip_prefix('-').unwrap_or(t);
+        !d.is_empty() && d.chars().all(|c| c.is_ascii_digit())
+    };
+    if ok(a) && ok(b) {
+        let name = w[..i].trim();
+        if name.is_empty() { None } else { Some(name) }
+    } else {
+        None
+    }
+}
+
 /// (x,y)@0~999 落在哪个文字元素框内 → 该框(图片px);取最小框(最内层元素)。
 /// 只认文字锚点(与旧els语义一致): 无字容器不参与,防止空白落点被吸去容器中心。
 fn box_at(cap: &Cap, x: i64, y: i64, realw: i32, realh: i32) -> Option<[i32; 4]> {
@@ -1064,17 +1087,24 @@ fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32, String
                 // 纯图标按钮(×/齿轮/返回箭头等无文字控件): 清单和OCR都没有它的文字,
                 // 跳过吸附按模型视觉坐标直点;坐标合法性/前科/连点/空白死角检查照常
             } else if let Some(w) = a.what.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
-                match find_el(cap, w, x, y, realw, realh) {
+                // 点名两级兜底(候选列表展示为"文字(x,y)",模型照抄整行当what时精确匹配必失败;
+                // 且坐标本身仍是有效信息,不该因点名失配整发作废):
+                // ① 剥掉尾部"(x,y)"显示后缀重匹配;② 仍不中则丢弃what退化为纯坐标路径(框内吸附/裸点),
+                //    前科/连点/空白检查照常——连点签名随what丢弃改为坐标桶,换名重发绕不过连点拦截
+                let hit = find_el(cap, w, x, y, realw, realh).or_else(|| {
+                    strip_norm_suffix(w).and_then(|s| find_el(cap, s, x, y, realw, realh))
+                });
+                match hit {
                     Some((_, bi)) => {
                         xi = (bi[0] + bi[2]) / 2;
                         yi = (bi[1] + bi[3]) / 2;
                     }
                     None => {
-                        return Some(format!(
-                            "点名'{}'不在screen清单;附近元素: {}",
-                            tcut(w, 12),
-                            nearby_els(cap, x, y, realw, realh)
-                        ));
+                        a.what = None;
+                        if let Some(bi) = box_at(cap, x, y, realw, realh) {
+                            xi = (bi[0] + bi[2]) / 2;
+                            yi = (bi[1] + bi[3]) / 2;
+                        }
                     }
                 }
             } else if let Some(bi) = box_at(cap, x, y, realw, realh) {
@@ -2568,14 +2598,17 @@ mod tests {
     }
 
     #[test]
-    fn text_what_off_list_rejected() {
-        // 有文字点名但清单为空 → 驳回(与icon分流相反的方向)
+    fn text_what_off_list_falls_back_to_coordinates() {
+        // 契约变更: 文字点名不在清单不再整发驳回——坐标是模型认真给的视觉证据,
+        // 退化为纯坐标路径(裸点/框内吸附),what丢弃后连点签名也退化为坐标桶
         let mut a = ActN {
             a: "tap".into(), x: Some(500), y: Some(500),
             what: Some("设置".into()), ..Default::default()
         };
         let r = gate(&mut a, &cap(), &[], &VecDeque::new(), &cfg(), "/tmp/pf-test", &[], 1080, 2340);
-        assert!(r.is_some(), "文字点名不在清单应驳回");
+        assert!(r.is_none(), "点名失配应退化为坐标路径执行: {r:?}");
+        assert_eq!(a.what, None, "what应丢弃");
+        assert_eq!((a.x, a.y), (Some(336), Some(728)), "裸点按原坐标换算");
     }
 
     #[test]
@@ -2721,6 +2754,55 @@ mod tests {
         let hit = find_el(&c, "广告设置入口", 500, 500, 1080, 2340);
         assert!(hit.is_some(), "40字截断之外的文字应可点名吸附");
         assert_eq!(hit.unwrap().0, long.trim());
+    }
+
+    #[test]
+    fn strip_norm_suffix_parses_display_candidate_format() {
+        // 候选列表展示为"文字(x,y)",模型照抄整行当what → 应剥出文字部分再匹配
+        assert_eq!(strip_norm_suffix("Recording:(497,908)"), Some("Recording:"));
+        assert_eq!(strip_norm_suffix("0 Mb, M4a,(498,812)"), Some("0 Mb, M4a,"));
+        assert_eq!(strip_norm_suffix("设置(-5,20)"), Some("设置"));
+        // 括号内容不是坐标/无名纯坐标/普通文字 → 不剥
+        assert_eq!(strip_norm_suffix("设置(高级)"), None);
+        assert_eq!(strip_norm_suffix("(497,908)"), None);
+        assert_eq!(strip_norm_suffix("Recording:"), None);
+    }
+
+    #[test]
+    fn tap_display_format_what_strips_suffix_and_snaps() {
+        // 清单元素"Recording:",模型抄了候选展示格式"Recording:(497,908)"当what:
+        // 剥后缀应命中吸附,不再整发驳回(录音题8局全灭的根因回归)
+        let mut c = cap();
+        let mut n = fnode("Recording:");
+        n.b = [460, 2050, 620, 2200]; // 真机坐标,归一化后含(500,908)
+        c.full = vec![n];
+        let mut a = ActN { a: "tap".into(), x: Some(500), y: Some(908),
+                           what: Some("Recording:(497,908)".into()), ..Default::default() };
+        let r = gate(&mut a, &c, &[], &VecDeque::new(), &cfg(), "/tmp/pf-test", &[], 1080, 2340);
+        assert!(r.is_none(), "剥后缀应命中不驳回: {r:?}");
+        assert_eq!((a.x, a.y), (Some(335), Some(1321)), "应吸附到元素中心(图片px)");
+    }
+
+    #[test]
+    fn tap_unknown_what_degrades_to_coordinate_path() {
+        // what彻底不匹配 → 退化为纯坐标路径: 框内吸附中心;框外裸点执行。
+        // 坐标是模型认真给的视觉证据,不因点名失配整发作废
+        let mut c = cap();
+        let mut n = fnode("时间显示");
+        n.b = [260, 1000, 420, 1100]; // 归一化框[239,426,388,469]
+        c.full = vec![n];
+        let mut a = ActN { a: "tap".into(), x: Some(300), y: Some(440),
+                           what: Some("record button".into()), ..Default::default() };
+        let r = gate(&mut a, &c, &[], &VecDeque::new(), &cfg(), "/tmp/pf-test", &[], 1080, 2340);
+        assert!(r.is_none(), "框内应吸附执行: {r:?}");
+        assert_eq!((a.x, a.y), (Some(211), Some(653)), "框内吸附到中心");
+        assert_eq!(a.what, None, "what应被丢弃,连点签名退化为坐标桶");
+        // 框外裸点: 不因点名驳回,按原坐标走(空白/前科检查照常)
+        let mut b = ActN { a: "tap".into(), x: Some(500), y: Some(710),
+                           what: Some("record button".into()), ..Default::default() };
+        let r2 = gate(&mut b, &c, &[], &VecDeque::new(), &cfg(), "/tmp/pf-test", &[], 1080, 2340);
+        assert!(r2.is_none(), "框外裸点应执行: {r2:?}");
+        assert_eq!((b.x, b.y), (Some(336), Some(1034)), "裸点按原坐标换算");
     }
 
     #[test]
