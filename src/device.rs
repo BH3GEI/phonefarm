@@ -3,7 +3,7 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -159,6 +159,7 @@ pub struct Adb {
     bin: String, // 定位到的 adb 路径(构造时解析,见 locate_adb)
     serial: Option<String>,
     tmp: String,
+    frozen: AtomicBool, // --freeze-on-done: 置位后不再发"写"动作,只放行观测
 }
 
 impl Adb {
@@ -167,8 +168,13 @@ impl Adb {
             eprintln!("⚠ 未找到 adb: 请安装 Android platform-tools(或把 platform-tools/ 整个目录放进仓库根),或用 ADB_BIN=/path/to/adb 指定后重跑。");
             std::process::exit(2);
         };
-        Adb { bin, serial, tmp }
+        Adb { bin, serial, tmp, frozen: AtomicBool::new(false) }
     }
+
+    /// --freeze-on-done: 置位后本后端不再对设备发"写"动作(手势/键/force-stop/launch),
+    /// 只放行观测(截屏/dumpsys/遥测采集)。done 定局后置位,保住终局画面给 harness 判分。
+    pub fn set_frozen(&self) { self.frozen.store(true, Ordering::Relaxed); }
+    fn frozen(&self) -> bool { self.frozen.load(Ordering::Relaxed) }
 
     fn run(&self, args: &[&str]) -> Vec<u8> {
         let mut cmd = Command::new(&self.bin);
@@ -207,6 +213,7 @@ impl Adb {
     }
 
     fn input(&self, args: &[&str]) {
+        if self.frozen() { return; }
         let mut v = vec!["shell", "input"];
         v.extend_from_slice(args);
         self.run(&v);
@@ -425,6 +432,7 @@ impl Adb {
     }
     /// 掐死后台应用(假树/无障碍事件风暴的源头)。目标应用与系统包不碰——调用方过 pkg_killable 把关
     pub fn force_stop(&self, pkg: &str) {
+        if self.frozen() { return; }
         if !pkg.is_empty() {
             self.run_timeout(&["shell", "am", "force-stop", pkg], 6000);
         }
@@ -432,6 +440,7 @@ impl Adb {
     /// 直接启动应用: 有组件走 am start -W(阻塞至可见,顺手产出冷启动 WaitTime——遥测层
     /// 唯一"写"动作即启动本身,计时是白拿的),否则 monkey 兜底。返回冷启动毫秒(采不到None)。
     pub fn launch(&self, pkg: &str, comp: &str) -> Option<i64> {
+        if self.frozen() { return None; }
         if !comp.is_empty() {
             let out = self.run_timeout(&["shell", "am", "start", "-W", "-n", comp], 8000);
             return crate::telemetry::parse_coldstart_a(&String::from_utf8_lossy(&out)).0;
@@ -506,14 +515,19 @@ pub struct Hdc {
     /// Android 的假树病根(陈旧dump文件)在 OH 不存在(每次 rm 后现 dump),树≠前台的
     /// 对质在 OH 因此自然失效,这是设计而非疏漏。
     fg_cache: std::sync::Mutex<Option<String>>,
+    frozen: AtomicBool, // --freeze-on-done(与 Adb 对称)
 }
 
 impl Hdc {
     pub fn new(key: Option<String>, tmp: String) -> Self {
         Hdc { key, tmp, size_cache: OnceLock::new(),
               last_tap: (AtomicI32::new(-1), AtomicI32::new(-1)),
-              fg_cache: std::sync::Mutex::new(None) }
+              fg_cache: std::sync::Mutex::new(None),
+              frozen: AtomicBool::new(false) }
     }
+
+    pub fn set_frozen(&self) { self.frozen.store(true, Ordering::Relaxed); }
+    fn frozen(&self) -> bool { self.frozen.load(Ordering::Relaxed) }
 
     fn base(&self) -> Command {
         let mut cmd = Command::new("hdc");
@@ -553,6 +567,7 @@ impl Hdc {
     }
 
     fn ui_input(&self, args: &[&str]) {
+        if self.frozen() { return; }
         let mut v = vec!["shell", "uitest", "uiInput"];
         v.extend_from_slice(args);
         self.run_timeout(&v, 8000, "input");
@@ -754,6 +769,7 @@ impl Hdc {
     /// 强停(软点②): aa force-stop 在 OH 3.2 实测报错,标准命令先试、pidof+kill 兜底
     /// (成功则 pidof 落空,兜底自然无操作)。系统 bundle 不碰的关卡在调用方 pkg_killable。
     pub fn force_stop(&self, pkg: &str) {
+        if self.frozen() { return; }
         if pkg.is_empty() { return; }
         self.run_timeout(&["shell", "aa", "force-stop", pkg], 6000, "stop");
         // 整句交远端 shell 解释($() 在设备侧展开)
@@ -765,6 +781,7 @@ impl Hdc {
     /// 空则现场解析——Android 侧"query-activities 解析组件"的对称物。解析不到就不动(OH 无 monkey)。
     /// 冷启动耗时: OH 无 am start -W 等价物(首帧要另采),如实返 None。
     pub fn launch(&self, pkg: &str, comp: &str) -> Option<i64> {
+        if self.frozen() { return None; }
         if pkg.is_empty() { return None; }
         let ability = if comp.is_empty() { self.main_ability_of(pkg) } else { comp.to_string() };
         if ability.is_empty() { return None; }
@@ -837,6 +854,10 @@ impl Device {
             }
             other => Device::Adb(Adb::new(other, tmp)),
         }
+    }
+    /// --freeze-on-done 置位:分发到具体后端。done 定局后调用。
+    pub fn set_frozen(&self) {
+        match self { Device::Adb(d) => d.set_frozen(), Device::Hdc(d) => d.set_frozen() }
     }
     pub fn health_check(&self, ms: u64) -> bool {
         match self { Device::Adb(d) => d.health_check(ms), Device::Hdc(d) => d.health_check(ms) }
@@ -1427,5 +1448,43 @@ mod tests {
         let st2 = parse_sys_state(s2);
         assert_eq!(st2.pkg, "", "StatusBar 不是包名,拒收");
         assert_eq!(st2.ime, Some(false));
+    }
+
+    // --freeze-on-done 行为单测: 冻结后语义动作(手势/键/force-stop/launch)一律不得下发
+    // 任何设备命令(不 spawn 外部进程),只放行观测。对应 AW_RIG_SPEC §1 验收"done 后无 act"。
+    #[test]
+    fn frozen_blocks_device_writes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pf_freeze_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("touched");
+        let fake = dir.join("fakeadb.sh");
+        // 假 adb: 无论收到什么参数都 touch 标记文件——被调用即留痕
+        std::fs::write(&fake, format!("#!/bin/sh\ntouch \"{}\"\n", marker.display())).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let d = Adb {
+            bin: fake.to_string_lossy().into_owned(),
+            serial: None,
+            tmp: dir.to_string_lossy().into_owned(),
+            frozen: AtomicBool::new(false),
+        };
+        assert!(!d.frozen(), "新建默认不冻结");
+        d.set_frozen();
+        assert!(d.frozen(), "set_frozen 后冻结");
+
+        // 冻结后所有语义写动作都不得 spawn(marker 永不出现)
+        d.tap(1, 2);
+        d.swipe(0, 0, 1, 1);
+        d.scroll_down();
+        d.type_text("x");
+        d.back();
+        d.home();
+        d.force_stop("com.example");
+        assert_eq!(d.launch("com.example", "com.example/.Main"), None, "冻结后 launch 直接 None");
+        assert!(!marker.exists(), "冻结后任何语义动作都不应下发设备命令");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

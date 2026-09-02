@@ -232,6 +232,7 @@ fn main() {
             let mut app: Option<String> = None;
             let mut asserts: Vec<String> = Vec::new();
             let mut detach = false;
+            let mut freeze_on_done = false;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -239,6 +240,7 @@ fn main() {
                     "--task" => task = it.next().cloned().unwrap_or_default(),
                     "--endless" => endless = true,
                     "--detach" => detach = true,
+                    "--freeze-on-done" => freeze_on_done = true,
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--app" => app = it.next().cloned(),
                     "--assert" => {
@@ -254,7 +256,7 @@ fn main() {
                 }
             }
             if goal.is_empty() || task.is_empty() {
-                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] [--assert \"词1,词2\"] \"<目标>\"");
+                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] [--assert \"词1,词2\"] [--freeze-on-done] \"<目标>\"");
                 std::process::exit(2);
             }
             let cfg_text = match std::fs::read_to_string("phonefarm.toml") {
@@ -287,7 +289,7 @@ fn main() {
                 }
             }
             ensure_keys(&cfg);
-            let res = runtime::episode(&cfg, &task, &goal, serial, None, endless, budget, app, asserts);
+            let res = runtime::episode(&cfg, &task, &goal, serial, None, endless, budget, app, asserts, freeze_on_done);
             println!("summary: run={} stop={} steps={} calls={} tokens={} wall={:.1}s achieved={}",
                 res.run_id, res.stop, res.steps, res.calls, res.tokens,
                 res.wall_ms as f64 / 1000.0, res.achieved);
@@ -399,7 +401,7 @@ fn main() {
                     std::thread::sleep(std::time::Duration::from_secs(6));
                 }
                 let t0 = std::time::Instant::now();
-                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), cold_ms, true, budget, app.clone(), asserts.clone());
+                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), cold_ms, true, budget, app.clone(), asserts.clone(), false);
                 let wall = t0.elapsed().as_secs();
                 append(&format!(
                     "{r}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{wall}",

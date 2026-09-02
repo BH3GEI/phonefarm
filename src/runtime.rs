@@ -1337,7 +1337,8 @@ struct ParamsFile {
 
 pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                ext_cold_ms: Option<i64>,
-               endless: bool, budget: u32, app: Option<String>, asserts: Vec<String>) -> EpisodeResult {
+               endless: bool, budget: u32, app: Option<String>, asserts: Vec<String>,
+               freeze_on_done: bool) -> EpisodeResult {
     let t0 = std::time::Instant::now();
     let fail = |stop: &str, run_id: String| EpisodeResult {
         achieved: false, run_id, stop: stop.into(), steps: 0, calls: 0, tokens: 0,
@@ -1953,6 +1954,13 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 log.put(json!({"r":"note","t":t}));
             }
             done_claim = true;
+            // --freeze-on-done: 定局后不再对设备发写动作(收尾/复核/遥测均不得扰动前台),
+            // 终局画面保持至进程退出,给 harness 判分留证(秒表/短信这类"验分看前台"的题)。
+            if freeze_on_done {
+                phone.set_frozen();
+                log.put(json!({"r":"hook","kind":"freeze_on_done","n":n}));
+                println!("      ❄ freeze-on-done: 定局,冻结设备写动作(终局画面保持至退出)");
+            }
             break;
         }
 
