@@ -1038,7 +1038,7 @@ fn plan_call(brain: &mut Brain, cfg: &Config, user: &str, img: &str, log: &mut L
 /// 未点名但落点在某元素框内 → 也吸附中心(修手偏,零成本)。清单不可信(假树)时不吸附。
 fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32, String)>, cfg: &Config, tmp: &str,
         apps: &[(String, String)], realw: i32, realh: i32) -> Option<String> {
-    let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "back", "home", "launch", "goto", "wait", "done",
+    let known = ["tap", "swipe", "scroll_up", "scroll_down", "type", "clear", "back", "home", "launch", "goto", "wait", "done",
                  "inspect", "find", "get_state", "history"];
     if !known.contains(&a.a.as_str()) {
         return Some(format!("未知动作:{}", tcut(&a.a, 12)));
@@ -1203,6 +1203,7 @@ fn exec(phone: &Device, a: &ActN, cap: &Cap, realw: i32, realh: i32, apps: &[(St
             let _ = phone.launch(pkg, comp); // 局中启动的冷启动毫秒不单独记账(orient 才是规范冷启动)
         }
         "type" => phone.type_text(a.text.as_deref().unwrap_or("")),
+        "clear" => phone.clear_field(),
         "wait" => std::thread::sleep(std::time::Duration::from_millis(2500)),
         _ => {}
     }

@@ -423,6 +423,15 @@ impl Adb {
     pub fn type_text(&self, text: &str) {
         self.input(&["text", &text.replace(' ', "%s")]);
     }
+    /// 清空当前焦点输入框: 光标移到末尾(KEYCODE_MOVE_END)后连发 DEL(KEYCODE_DEL)。
+    /// input text 是纯追加——预填默认文本的输入框(如保存框预填名)不先清空就物理上改不掉,
+    /// 给模型一个通用的"先聚焦→clear→type"原语,而非让它对着追加语义空转
+    pub fn clear_field(&self) {
+        self.run_timeout(
+            &["shell", "input keyevent 123; for i in $(seq 64); do input keyevent 67; done"],
+            10000,
+        );
+    }
     pub fn back(&self) {
         self.input(&["keyevent", "4"]);
     }
@@ -759,6 +768,15 @@ impl Hdc {
         }
     }
 
+    /// 清空当前焦点输入框(OH 后端 best-effort): KEYCODE_MOVE_END 2087 归位后连发 KEYCODE_DEL 2055。
+    /// OH keycode 表与 ADB 不同且未见官方清单,此二值未在真机核验——AW 考场走 Adb 后端,此实现仅保 API 对称
+    pub fn clear_field(&self) {
+        self.ui_input(&["keyEvent", "2087"]);
+        for _ in 0..64 {
+            self.ui_input(&["keyEvent", "2055"]);
+        }
+    }
+
     pub fn back(&self) {
         self.ui_input(&["keyEvent", "Back"]);
     }
@@ -903,6 +921,9 @@ impl Device {
     }
     pub fn type_text(&self, text: &str) {
         match self { Device::Adb(d) => d.type_text(text), Device::Hdc(d) => d.type_text(text) }
+    }
+    pub fn clear_field(&self) {
+        match self { Device::Adb(d) => d.clear_field(), Device::Hdc(d) => d.clear_field() }
     }
     pub fn back(&self) {
         match self { Device::Adb(d) => d.back(), Device::Hdc(d) => d.back() }
