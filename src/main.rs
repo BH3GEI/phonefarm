@@ -8,7 +8,10 @@ mod cli;
 mod parallel;
 mod device;
 mod fold;
+mod gamepad;
+mod quest;
 mod runtime;
+mod script;
 mod serve;
 mod telemetry;
 mod tree;
@@ -105,8 +108,10 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--app P] [--assert \"词1,词2\"] [--perceive ocr] \"<目标>\"
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
+脚本:  script [--task T] [--serial S] [--app P] [--repeat N] [--settle-ms M] [--no-screen] [--detach] <脚本文件或局ID>
+任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神剧情跳过与任务跑图Agent)
 设备:  devices | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
-后台:  run/benchmark 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
+后台:  run/benchmark/script 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
@@ -426,6 +431,113 @@ fn main() {
             }
             let last_ok = rows.last().and_then(|r| r["achieved"].as_bool()).unwrap_or(false);
             std::process::exit(if last_ok { 0 } else { 1 });
+        }
+        Some("script") => {
+            // 脚本与回放模式 (Script & Replay Mode): 确定性执行离线脚本或历史对局轨迹，跳过模型决策，零Token消耗
+            let mut serial: Option<String> = None;
+            let mut script_source = String::new();
+            let mut task: Option<String> = None;
+            let mut app: Option<String> = None;
+            let mut repeat: u32 = 1;
+            let mut settle_ms: u64 = 500;
+            let mut tele_interval: u32 = 1;
+            let mut no_screen = false;
+            let mut detach = false;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--serial" => serial = it.next().cloned(),
+                    "--task" => task = it.next().cloned(),
+                    "--app" => app = it.next().cloned(),
+                    "--repeat" => repeat = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+                    "--settle-ms" => settle_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(500),
+                    "--tele-interval" => tele_interval = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+                    "--no-screen" => no_screen = true,
+                    "--detach" => detach = true,
+                    _ => script_source = a.clone(),
+                }
+            }
+            if script_source.is_empty() {
+                eprintln!("用法: phonefarm script [--task <任务名>] [--serial <设备>] [--app <包名>] [--repeat N] [--settle-ms M] [--tele-interval K] [--no-screen] [--detach] <脚本文件或局ID>");
+                std::process::exit(2);
+            }
+            let cfg_data_dir = match std::fs::read_to_string("phonefarm.toml") {
+                Ok(s) => toml::from_str::<Config>(&s).map(|c| c.data_dir).unwrap_or_else(|_| ".".into()),
+                Err(_) => ".".into(),
+            };
+            let task_name = task.unwrap_or_else(|| {
+                std::path::Path::new(&script_source)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("script")
+                    .to_string()
+            });
+            if detach {
+                let id = runtime::alloc_run_id();
+                let run_dir = format!("{}/tasks/{}/runs/{}", cfg_data_dir.trim_end_matches('/'), task_name, id);
+                if std::fs::create_dir_all(&run_dir).is_err() {
+                    eprintln!("✗ 建不了运行目录 {run_dir}");
+                    std::process::exit(2);
+                }
+                let console = format!("{run_dir}/console.log");
+                match spawn_detached(&console, &[("PF_RUN_ID", &id)]) {
+                    Ok(pid) => {
+                        println!("已后台起跑 script: run={id}\n目录: {run_dir}\n控制台: {console}\npid: {pid}\n取结果: phonefarm status {id} | show {id} | stats {id}");
+                        std::process::exit(0);
+                    }
+                    Err(e) => { eprintln!("detach 失败: {e}"); std::process::exit(2); }
+                }
+            }
+            let run_cfg = script::ScriptRunConfig {
+                task: task_name,
+                script_source,
+                serial,
+                app,
+                repeat,
+                settle_ms,
+                tele_interval,
+                no_screen,
+                data_dir: cfg_data_dir,
+            };
+            match script::execute_script(&run_cfg) {
+                Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("脚本执行失败: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("quest") => {
+            // 原神自主跑图与剧情过关 Agent (Genshin Quest & Dialogue Agent)
+            let mut serial: Option<String> = None;
+            let mut mode = "auto".to_string();
+            let mut max_sec: u64 = 1800;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--serial" => serial = it.next().cloned(),
+                    "--mode" => mode = it.next().cloned().unwrap_or_else(|| "auto".into()),
+                    "--max-seconds" | "--sec" => max_sec = it.next().and_then(|v| v.parse().ok()).unwrap_or(1800),
+                    _ => {}
+                }
+            }
+            let tmp = std::env::temp_dir().join(format!("phonefarm-quest-{}", std::process::id())).to_string_lossy().to_string();
+            let _ = std::fs::create_dir_all(&tmp);
+            let phone = device::Device::new(serial.clone(), tmp);
+            let cfg = quest::QuestConfig {
+                mode,
+                serial,
+                max_seconds: max_sec,
+                auto_choice: true,
+            };
+            let mut agent = quest::GenshinQuestAgent::new(&phone, cfg);
+            match agent.run_loop() {
+                Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Quest Agent 执行失败: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
         Some(other) => {
             // CLI 查看层(CLI Spec v1.0): 只读盘,不烧 token

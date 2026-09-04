@@ -175,6 +175,23 @@ fn tools_list() -> Vec<Value> {
                        "budget_calls": n("per-round model-call budget, default 40"),
                        "assert": s("comma-separated acceptance words")}),
                 &["task", "goal"])),
+        tool("phonefarm_script",
+            "Deterministic script/macro execution or historical run replay without LLM tokens. \
+             Collects full 68-metric telemetry (FPS, CPU, PSS, Battery, Temp). Runs detached.",
+            obj(json!({"task": s("task name for storing data"),
+                       "script": s("path to script file (.json/.jsonl/.toml) or past run ID to replay"),
+                       "serial": s("device: adb serial or hdc:<key>"),
+                       "app": s("target app package for telemetry"),
+                       "repeat": n("repeat count (default 1)"),
+                       "settle_ms": n("settle delay in ms after actions (default 500)"),
+                       "no_screen": json!({"type": "boolean", "description": "skip screenshot capture for speed"})}),
+                &["task", "script"])),
+        tool("phonefarm_quest",
+            "Autonomous Genshin Impact story and quest agent (dialogue fast-forward, interact, navigation).",
+            obj(json!({"mode": s("operation mode: 'auto' | 'dialogue' | 'interact' | 'navigate' (default 'auto')"),
+                       "sec": n("maximum runtime in seconds (default 1800)"),
+                       "serial": s("device: adb serial or hdc:<key>")}),
+                &[])),
     ]
 }
 
@@ -200,6 +217,10 @@ fn call_tool(id: Value, req: &Value) -> String {
 
 fn arg_str<'a>(args: &'a Value, k: &str) -> Option<&'a str> {
     args.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+}
+
+fn arg_bool(args: &Value, k: &str) -> Option<bool> {
+    args.get(k).and_then(|v| v.as_bool())
 }
 
 fn arg_u64(args: &Value, k: &str) -> Option<u64> {
@@ -318,6 +339,27 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             push_opt(&mut v, "--assert", arg_str(args, "assert"));
             v.push("--detach".into());
             v.push(goal.to_string());
+        }
+        "phonefarm_script" => {
+            let task = arg_str(args, "task").ok_or("缺参数 task")?;
+            let script = arg_str(args, "script").ok_or("缺参数 script")?;
+            v.push("script".into());
+            v.push("--task".into()); v.push(task.to_string());
+            push_opt(&mut v, "--serial", arg_str(args, "serial"));
+            push_opt(&mut v, "--app", arg_str(args, "app"));
+            push_opt(&mut v, "--repeat", arg_u64(args, "repeat").map(|n| n.to_string()).as_deref());
+            push_opt(&mut v, "--settle-ms", arg_u64(args, "settle_ms").map(|n| n.to_string()).as_deref());
+            if arg_bool(args, "no_screen").unwrap_or(false) {
+                v.push("--no-screen".into());
+            }
+            v.push("--detach".into());
+            v.push(script.to_string());
+        }
+        "phonefarm_quest" => {
+            v.push("quest".into());
+            push_opt(&mut v, "--mode", arg_str(args, "mode"));
+            push_opt(&mut v, "--sec", arg_u64(args, "sec").map(|n| n.to_string()).as_deref());
+            push_opt(&mut v, "--serial", arg_str(args, "serial"));
         }
         other => return Err(format!("未知工具 '{other}'(tools/list 看全量; probe/exec/parallel 不在 MCP 面内)")),
     }
@@ -465,7 +507,7 @@ mod tests {
         let line = json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}).to_string();
         let resp: Value = serde_json::from_str(&handle_line(&line).unwrap()).unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 15, "工具面数量变了要有意为之");
+        assert_eq!(tools.len(), 17, "工具面数量变了要有意为之");
         for t in tools {
             assert!(t["name"].as_str().unwrap().starts_with("phonefarm_"));
             assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
@@ -490,6 +532,16 @@ mod tests {
         // 缺必填
         assert!(build_argv("phonefarm_run", &json!({"goal":"G"})).is_err());
         assert!(build_argv("phonefarm_benchmark", &json!({"task":"T"})).is_err());
+    }
+
+    #[test]
+    fn build_argv_script_forces_detach() {
+        let a = build_argv("phonefarm_script", &json!({"task":"T","script":"test.json"})).unwrap();
+        assert!(a.contains(&"--detach".to_string()), "script 必须强制 detach");
+        assert_eq!(a.last().unwrap(), "test.json", "script 路径是位置参数收尾");
+        // 缺必填
+        assert!(build_argv("phonefarm_script", &json!({"task":"T"})).is_err());
+        assert!(build_argv("phonefarm_script", &json!({"script":"s.json"})).is_err());
     }
 
     #[test]

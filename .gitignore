@@ -11,5 +11,7 @@ tasks/**/*.jpg
 tasks/**/*.png
 tasks/**/*.xml
 tasks/**/*.xml.gz
+tasks/genshin_*
+tasks/phonefarm_smoke
 
 .DS_Store

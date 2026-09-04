@@ -92,6 +92,10 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd ..
 # The same task name on multiple devices is refused (lessons/tree state would
 # collide) — use distinct task names.
 
+# Deterministic script execution or historical run replay (zero model tokens, full telemetry)
+./phonefarm script --task game-bench --app com.pkg --repeat 10 script.json
+./phonefarm script --task replay <run-id>
+
 # Inspecting results (read-only, offline, zero model tokens)
 ./phonefarm last                                  # latest session verdict
 ./phonefarm show <run-id> --step N                # drill into one step

@@ -166,6 +166,8 @@ pub struct Adb {
     serial: Option<String>,
     tmp: String,
     frozen: AtomicBool, // --freeze-on-done: 置位后不再发"写"动作,只放行观测
+    gamepad: std::sync::Mutex<Option<crate::gamepad::Gamepad>>,
+    is_root: AtomicBool, // 标记设备是否具备 root 特权 (su -c 或 direct uid=0)
 }
 
 impl Adb {
@@ -174,7 +176,14 @@ impl Adb {
             eprintln!("⚠ 未找到 adb: 请安装 Android platform-tools(或把 platform-tools/ 整个目录放进仓库根),或用 ADB_BIN=/path/to/adb 指定后重跑。");
             std::process::exit(2);
         };
-        Adb { bin, serial, tmp, frozen: AtomicBool::new(false) }
+        Adb {
+            bin,
+            serial,
+            tmp,
+            frozen: AtomicBool::new(false),
+            gamepad: std::sync::Mutex::new(None),
+            is_root: AtomicBool::new(false),
+        }
     }
 
     /// --freeze-on-done: 置位后本后端不再对设备发"写"动作(手势/键/force-stop/launch),
@@ -374,6 +383,15 @@ impl Adb {
         resample_and_save_jpeg(&dynamic, 672, 85, out_jpg)
     }
 
+    /// 获取原始截屏解码图像 (用于本地轻量视觉感知与状态分类)
+    pub fn screen_image(&self) -> Option<image::DynamicImage> {
+        let png = self.run(&["exec-out", "screencap", "-p"]);
+        if png.len() < 1000 {
+            return None;
+        }
+        image::load_from_memory(&png).ok()
+    }
+
     /// 快照小图: 截屏压成64px灰度,用于等画面安静/量背景动静(不入档)
     pub fn quick_thumb(&self, _tag: &str) -> Option<Vec<u8>> {
         let png = self.run(&["exec-out", "screencap", "-p"]);
@@ -452,7 +470,10 @@ impl Adb {
     /// 遥测开局(Telemetry Spec): root 探测一次 + 采集脚本上载(整批命令一趟 shell 跑完)。
     /// 返回是否 root(root 层字段的开关,非 root 自动跳过)。
     pub fn telemetry_setup(&self, pkg: &str) -> bool {
-        let root = String::from_utf8_lossy(&self.run_timeout(&["shell", "id"], 4000)).contains("uid=0");
+        let is_root_direct = String::from_utf8_lossy(&self.run_timeout(&["shell", "id"], 4000)).contains("uid=0");
+        let is_root_su = !is_root_direct && String::from_utf8_lossy(&self.run_timeout(&["shell", "su", "-c", "id"], 4000)).contains("uid=0");
+        let root = is_root_direct || is_root_su;
+        self.is_root.store(root, Ordering::Relaxed);
         let l1 = format!("{}/_pf_t1.sh", self.tmp);
         let l2 = format!("{}/_pf_t2.sh", self.tmp);
         if std::fs::write(&l1, tele_script_a(pkg, root, false)).is_ok() {
@@ -467,12 +488,18 @@ impl Adb {
     /// 遥测采集: 高频脚本每步,heavy=true 时重量级脚本并跑(仍是一趟 shell 往返)。
     /// 限时,失败返空文本(解析层对空输入产出全 None——采不到留空,不装)。
     pub fn telemetry_collect(&self, heavy: bool) -> String {
+        let root = self.is_root.load(Ordering::Relaxed);
         let cmd = if heavy {
             "sh /data/local/tmp/pf_t1.sh 2>/dev/null; sh /data/local/tmp/pf_t2.sh 2>/dev/null"
         } else {
             "sh /data/local/tmp/pf_t1.sh 2>/dev/null"
         };
-        String::from_utf8_lossy(&self.run_timeout(&["shell", cmd], 10000)).to_string()
+        let out = if root {
+            self.run_timeout(&["shell", "su", "-c", cmd], 10000)
+        } else {
+            self.run_timeout(&["shell", cmd], 10000)
+        };
+        String::from_utf8_lossy(&out).to_string()
     }
 
     pub fn telemetry(&self, heavy: bool, pkg: &str) -> crate::telemetry::Telemetry {
@@ -482,6 +509,110 @@ impl Adb {
     /// 任意设备 shell 命令(CLI probe/exec 用),限时,原样返回输出
     pub fn shell(&self, cmd: &str, ms: u64) -> String {
         String::from_utf8_lossy(&self.run_timeout(&["shell", cmd], ms)).to_string()
+    }
+
+    /// 获取或懒加载虚拟手柄控制器会话
+    fn get_gamepad(&self) -> Result<std::sync::MutexGuard<'_, Option<crate::gamepad::Gamepad>>, String> {
+        let mut guard = self.gamepad.lock().map_err(|e| format!("手柄锁争用失败: {e}"))?;
+        if guard.is_none() {
+            let gp = crate::gamepad::Gamepad::new(&self.bin, self.serial.as_deref())?;
+            *guard = Some(gp);
+        }
+        Ok(guard)
+    }
+
+    pub fn gamepad_press(&self, btn: &str, duration_ms: u64) -> Result<(), String> {
+        if self.frozen() { return Ok(()); }
+        let mut guard = self.get_gamepad()?;
+        if let Some(gp) = guard.as_mut() {
+            gp.press(btn, duration_ms)
+        } else {
+            Err("虚拟手柄未就绪".into())
+        }
+    }
+
+    pub fn gamepad_down(&self, btn: &str) -> Result<(), String> {
+        if self.frozen() { return Ok(()); }
+        let mut guard = self.get_gamepad()?;
+        if let Some(gp) = guard.as_mut() {
+            gp.button_down(btn)
+        } else {
+            Err("虚拟手柄未就绪".into())
+        }
+    }
+
+    pub fn gamepad_up(&self, btn: &str) -> Result<(), String> {
+        if self.frozen() { return Ok(()); }
+        let mut guard = self.get_gamepad()?;
+        if let Some(gp) = guard.as_mut() {
+            gp.button_up(btn)
+        } else {
+            Err("虚拟手柄未就绪".into())
+        }
+    }
+
+    pub fn gamepad_stick(&self, stick: &str, x: f32, y: f32, duration_ms: u64) -> Result<(), String> {
+        if self.frozen() { return Ok(()); }
+        let mut guard = self.get_gamepad()?;
+        if let Some(gp) = guard.as_mut() {
+            gp.set_stick(stick, x, y)?;
+            if duration_ms > 0 {
+                sleep(Duration::from_millis(duration_ms));
+                gp.set_stick(stick, 0.0, 0.0)?;
+            }
+            Ok(())
+        } else {
+            Err("虚拟手柄未就绪".into())
+        }
+    }
+
+    pub fn gamepad_trigger(&self, trigger: &str, val: f32, duration_ms: u64) -> Result<(), String> {
+        if self.frozen() { return Ok(()); }
+        let mut guard = self.get_gamepad()?;
+        if let Some(gp) = guard.as_mut() {
+            gp.set_trigger(trigger, val)?;
+            if duration_ms > 0 {
+                sleep(Duration::from_millis(duration_ms));
+                gp.set_trigger(trigger, 0.0)?;
+            }
+            Ok(())
+        } else {
+            Err("虚拟手柄未就绪".into())
+        }
+    }
+
+    pub fn gamepad_dpad(&self, dir: &str, duration_ms: u64) -> Result<(), String> {
+        if self.frozen() { return Ok(()); }
+        let mut guard = self.get_gamepad()?;
+        if let Some(gp) = guard.as_mut() {
+            gp.set_dpad(dir)?;
+            if duration_ms > 0 {
+                sleep(Duration::from_millis(duration_ms));
+                gp.set_dpad("center")?;
+            }
+            Ok(())
+        } else {
+            Err("虚拟手柄未就绪".into())
+        }
+    }
+
+    pub fn gamepad_reset(&self) -> Result<(), String> {
+        let mut guard = self.get_gamepad()?;
+        if let Some(gp) = guard.as_mut() {
+            gp.reset()
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn gamepad_wander(&self, duration_ms: u64) -> Result<(), String> {
+        if self.frozen() { return Ok(()); }
+        let mut guard = self.get_gamepad()?;
+        if let Some(gp) = guard.as_mut() {
+            gp.wander(duration_ms)
+        } else {
+            Err("虚拟手柄未就绪".into())
+        }
     }
 }
 
@@ -883,6 +1014,9 @@ impl Device {
     pub fn screen(&self, out_jpg: &str) -> Option<(i32, i32)> {
         match self { Device::Adb(d) => d.screen(out_jpg), Device::Hdc(d) => d.screen(out_jpg) }
     }
+    pub fn screen_image(&self) -> Option<image::DynamicImage> {
+        match self { Device::Adb(d) => d.screen_image(), Device::Hdc(_) => None }
+    }
     pub fn quick_thumb(&self, tag: &str) -> Option<Vec<u8>> {
         match self { Device::Adb(d) => d.quick_thumb(tag), Device::Hdc(d) => d.quick_thumb(tag) }
     }
@@ -928,6 +1062,54 @@ impl Device {
     }
     pub fn shell(&self, cmd: &str, ms: u64) -> String {
         match self { Device::Adb(d) => d.shell(cmd, ms), Device::Hdc(d) => d.shell(cmd, ms) }
+    }
+    pub fn gamepad_press(&self, btn: &str, duration_ms: u64) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.gamepad_press(btn, duration_ms),
+            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
+        }
+    }
+    pub fn gamepad_down(&self, btn: &str) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.gamepad_down(btn),
+            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
+        }
+    }
+    pub fn gamepad_up(&self, btn: &str) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.gamepad_up(btn),
+            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
+        }
+    }
+    pub fn gamepad_stick(&self, stick: &str, x: f32, y: f32, duration_ms: u64) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.gamepad_stick(stick, x, y, duration_ms),
+            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
+        }
+    }
+    pub fn gamepad_trigger(&self, trigger: &str, val: f32, duration_ms: u64) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.gamepad_trigger(trigger, val, duration_ms),
+            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
+        }
+    }
+    pub fn gamepad_dpad(&self, dir: &str, duration_ms: u64) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.gamepad_dpad(dir, duration_ms),
+            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
+        }
+    }
+    pub fn gamepad_reset(&self) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.gamepad_reset(),
+            Device::Hdc(_) => Ok(()),
+        }
+    }
+    pub fn gamepad_wander(&self, duration_ms: u64) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.gamepad_wander(duration_ms),
+            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
+        }
     }
 }
 
@@ -1472,6 +1654,8 @@ mod tests {
             serial: None,
             tmp: dir.to_string_lossy().into_owned(),
             frozen: AtomicBool::new(false),
+            gamepad: std::sync::Mutex::new(None),
+            is_root: AtomicBool::new(false),
         };
         assert!(!d.frozen(), "新建默认不冻结");
         d.set_frozen();
