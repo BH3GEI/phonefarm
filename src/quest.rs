@@ -96,8 +96,8 @@ impl<'a> GenshinQuestAgent<'a> {
         println!("[生命周期] 检查设备状态与屏幕唤醒...");
         let pwr = self.device.shell("dumpsys power | grep mWakefulness", 3000);
         if !pwr.contains("Awake") {
-            println!("[生命周期] 设备处于休眠/息屏状态，正在自主唤醒并解锁屏幕...");
-            self.device.shell("input keyevent 26 && sleep 0.5 && input swipe 608 2000 608 500", 5000);
+            println!("[生命周期] 设备处于休眠/息屏状态，正在自主唤醒并解锁屏幕 (KEYCODE_WAKEUP 224)...");
+            self.device.shell("input keyevent 224 && sleep 0.5 && input swipe 608 2000 608 500", 5000);
             sleep(Duration::from_millis(1000));
         }
 
@@ -430,16 +430,14 @@ impl<'a> GenshinQuestAgent<'a> {
             }
             GenshinState::LoadingOrCutscene => {
                 self.consecutive_loading_ticks += 1;
-                println!("  [场景转场] 画面暗转或加载中 (连续第 {} 帧) -> 等待场景就绪", self.consecutive_loading_ticks);
-                if self.consecutive_loading_ticks >= 4 {
-                    let pwr = self.device.shell("dumpsys power | grep mWakefulness", 2000);
-                    if !pwr.contains("Awake") {
-                        println!("  [状态防锁] 检测到屏幕因系统策略进入休眠，立即重新激活屏幕...");
-                        self.device.shell("svc power stayon true && input keyevent 26 && sleep 0.3 && input swipe 608 2000 608 500", 3000);
-                    } else {
-                        // 亮屏但卡暗屏，注入 A 键确认以防卡确认弹窗
-                        let _ = self.device.gamepad_press("a", 100);
-                    }
+                println!("  [场景转场] 画面暗转或过场加载中 (连续第 {} 帧) -> 等待并推进对白", self.consecutive_loading_ticks);
+                // 偶尔注入按键 A 快速跳过转场字幕与对话卡片
+                let _ = self.device.gamepad_press("a", 120);
+
+                // 若连续黑屏超过 10 帧 (超 10 秒)，发送幂等唤醒键 (KEYCODE_WAKEUP 224) 确保屏幕被点亮，绝不触发翻转熄屏
+                if self.consecutive_loading_ticks >= 10 && self.consecutive_loading_ticks % 5 == 0 {
+                    println!("  [转场保活] 发送幂等点亮信号 (KEYCODE_WAKEUP 224)...");
+                    self.device.shell("input keyevent 224", 2000);
                 }
                 sleep(Duration::from_millis(1000));
             }
@@ -461,11 +459,8 @@ impl<'a> GenshinQuestAgent<'a> {
         self.device.shell("am force-stop com.miHoYo.Yuanshen", 5000);
         sleep(Duration::from_millis(800));
 
-        let pwr = self.device.shell("dumpsys power | grep mWakefulness", 3000);
-        if pwr.contains("Awake") {
-            println!("[生命周期] 设备当前处于亮屏状态，自动执行熄屏锁屏...");
-            self.device.shell("input keyevent 26", 3000);
-        }
+        println!("[生命周期] 执行幂等锁屏休眠 (KEYCODE_SLEEP 223)...");
+        self.device.shell("input keyevent 223", 3000);
     }
 
     /// 只读性能遥测采集 (内存与温度)
