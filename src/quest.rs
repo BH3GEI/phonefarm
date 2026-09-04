@@ -71,6 +71,7 @@ pub struct GenshinQuestAgent<'a> {
     cfg: QuestConfig,
     last_climb: Option<Instant>,
     consecutive_dialogue_ticks: u32,
+    consecutive_loading_ticks: u32,
     last_action_time: Instant,
 }
 
@@ -82,12 +83,16 @@ impl<'a> GenshinQuestAgent<'a> {
             cfg,
             last_climb: None,
             consecutive_dialogue_ticks: 0,
+            consecutive_loading_ticks: 0,
             last_action_time: Instant::now(),
         }
     }
 
     /// 1. 会话预检与环境拉起：唤醒屏幕、解锁并启动游戏直到加载进入大世界
     pub fn ensure_game_ready(&mut self) -> Result<(), String> {
+        println!("[生命周期] 保持会话常亮策略 (svc power stayon true)...");
+        self.device.shell("svc power stayon true", 3000);
+
         println!("[生命周期] 检查设备状态与屏幕唤醒...");
         let pwr = self.device.shell("dumpsys power | grep mWakefulness", 3000);
         if !pwr.contains("Awake") {
@@ -350,29 +355,34 @@ impl<'a> GenshinQuestAgent<'a> {
         let (state, marker_x) = self.detect_state(&img);
         match state {
             GenshinState::TitleScreen => {
+                self.consecutive_loading_ticks = 0;
                 println!("  [进门引导] 处于登录标题画面 -> 注入按键 A 穿过大门进入游戏");
                 self.device.gamepad_press("a", 150)?;
                 sleep(Duration::from_millis(800));
             }
             GenshinState::DialogueText => {
+                self.consecutive_loading_ticks = 0;
                 self.consecutive_dialogue_ticks += 1;
                 println!("  [剧情模式] 正在播放对话字幕 (连续第 {} 帧) -> 注入按键 A 快速推进", self.consecutive_dialogue_ticks);
                 self.device.gamepad_press("a", 120)?;
                 sleep(Duration::from_millis(250));
             }
             GenshinState::DialogueChoice => {
+                self.consecutive_loading_ticks = 0;
                 self.consecutive_dialogue_ticks += 1;
                 println!("  [剧情模式] 检测到对话分支选项 -> 注入按键 A 确认选中分支");
                 self.device.gamepad_press("a", 150)?;
                 sleep(Duration::from_millis(400));
             }
             GenshinState::InteractionPrompt => {
+                self.consecutive_loading_ticks = 0;
                 self.consecutive_dialogue_ticks = 0;
                 println!("  [交互模式] 检测到 NPC / 机关可交互提示 -> 注入按键 X 触发对话/调查");
                 self.device.gamepad_press("x", 150)?;
                 sleep(Duration::from_millis(600));
             }
             GenshinState::Climbing => {
+                self.consecutive_loading_ticks = 0;
                 println!("  [状态保护] 角色正处于攀爬消耗体力中 -> 下发按键 B 脱离爬墙");
                 let now = Instant::now();
                 if let Some(prev) = self.last_climb {
@@ -388,20 +398,27 @@ impl<'a> GenshinQuestAgent<'a> {
                 sleep(Duration::from_millis(400));
             }
             GenshinState::OpenWorldExplore => {
+                self.consecutive_loading_ticks = 0;
                 self.consecutive_dialogue_ticks = 0;
                 self.last_climb = None;
 
                 if let Some(mx) = marker_x {
-                    // 视野中检测到任务指引标
-                    if mx < 0.44 {
-                        println!("  [跑图导航] 任务目标偏左 ({:.1}%) -> 右摇杆向左微调视角", mx * 100.0);
-                        self.device.gamepad_stick("right", -0.65, 0.0, 250)?;
+                    // 视野中检测到任务指引标，根据偏移量分级调节右摇杆视角
+                    if mx < 0.35 {
+                        println!("  [跑图导航] 任务目标大幅偏左 ({:.1}%) -> 大幅左偏视角", mx * 100.0);
+                        self.device.gamepad_stick("right", -0.85, 0.0, 350)?;
+                    } else if mx < 0.44 {
+                        println!("  [跑图导航] 任务目标轻微偏左 ({:.1}%) -> 轻微左偏视角", mx * 100.0);
+                        self.device.gamepad_stick("right", -0.50, 0.0, 200)?;
+                    } else if mx > 0.65 {
+                        println!("  [跑图导航] 任务目标大幅偏右 ({:.1}%) -> 大幅右偏视角", mx * 100.0);
+                        self.device.gamepad_stick("right", 0.85, 0.0, 350)?;
                     } else if mx > 0.56 {
-                        println!("  [跑图导航] 任务目标偏右 ({:.1}%) -> 右摇杆向右微调视角", mx * 100.0);
-                        self.device.gamepad_stick("right", 0.65, 0.0, 250)?;
+                        println!("  [跑图导航] 任务目标轻微偏右 ({:.1}%) -> 轻微右偏视角", mx * 100.0);
+                        self.device.gamepad_stick("right", 0.50, 0.0, 200)?;
                     } else {
-                        println!("  [跑图导航] 目标正居中 ({:.1}%) -> 向前奔跑推进 (LS + B)", mx * 100.0);
-                        self.device.gamepad_stick("left", 0.0, -1.0, 1500)?;
+                        println!("  [跑图导航] 目标正居中 ({:.1}%) -> 全速向前奔跑推进 (LS + B)", mx * 100.0);
+                        self.device.gamepad_stick("left", 0.0, -1.0, 1600)?;
                         self.device.gamepad_press("b", 120)?;
                     }
                 } else {
@@ -412,7 +429,18 @@ impl<'a> GenshinQuestAgent<'a> {
                 }
             }
             GenshinState::LoadingOrCutscene => {
-                println!("  [场景转场] 画面暗转或加载中 -> 等待场景就绪");
+                self.consecutive_loading_ticks += 1;
+                println!("  [场景转场] 画面暗转或加载中 (连续第 {} 帧) -> 等待场景就绪", self.consecutive_loading_ticks);
+                if self.consecutive_loading_ticks >= 4 {
+                    let pwr = self.device.shell("dumpsys power | grep mWakefulness", 2000);
+                    if !pwr.contains("Awake") {
+                        println!("  [状态防锁] 检测到屏幕因系统策略进入休眠，立即重新激活屏幕...");
+                        self.device.shell("svc power stayon true && input keyevent 26 && sleep 0.3 && input swipe 608 2000 608 500", 3000);
+                    } else {
+                        // 亮屏但卡暗屏，注入 A 键确认以防卡确认弹窗
+                        let _ = self.device.gamepad_press("a", 100);
+                    }
+                }
                 sleep(Duration::from_millis(1000));
             }
         }
@@ -425,6 +453,9 @@ impl<'a> GenshinQuestAgent<'a> {
     pub fn shutdown_and_lock(&mut self) {
         println!("[生命周期] 正在复位手柄并释放输入通道...");
         let _ = self.device.gamepad_reset();
+
+        println!("[生命周期] 恢复系统正常休眠策略 (svc power stayon false)...");
+        self.device.shell("svc power stayon false", 3000);
 
         println!("[生命周期] 强制退出原神进程 (杜绝游戏息屏挂机与后台消耗)...");
         self.device.shell("am force-stop com.miHoYo.Yuanshen", 5000);
