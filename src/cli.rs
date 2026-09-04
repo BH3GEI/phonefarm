@@ -140,11 +140,20 @@ fn status_of(recs: &[Value], pid_alive: impl Fn(i64) -> bool) -> (&'static str, 
     ("finished", None)
 }
 
-/// pid 活性(ps -p,macOS/Linux 通用,无依赖)
+/// pid 活性(macOS/Linux 用 ps -p, Windows 用 tasklist)
 fn pid_alive_ps(pid: i64) -> bool {
-    std::process::Command::new("ps").args(["-p", &pid.to_string()])
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-        .status().map(|s| s.success()).unwrap_or(false)
+    #[cfg(unix)]
+    {
+        std::process::Command::new("ps").args(["-p", &pid.to_string()])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .status().map(|s| s.success()).unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd").args(["/C", &format!("tasklist /FI \"PID eq {pid}\" | findstr {pid}")])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .status().map(|s| s.success()).unwrap_or(false)
+    }
 }
 
 fn cmd_status(a: &Args) -> Result<(), String> {
@@ -395,14 +404,18 @@ fn cmd_cat(a: &Args) -> Result<(), String> {
     let raw_mode = a.flag("--raw");
     // 智能识别: gz 解压;jsonl 逐行美化;json 缩进;图片报尺寸;其余原样
     let text = if name.ends_with(".gz") {
-        let out = std::process::Command::new("gzip").args(["-dc", &p]).output()
-            .map_err(|e| format!("gzip 解压失败: {e}"))?;
-        String::from_utf8_lossy(&out.stdout).to_string()
+        let f = std::fs::File::open(&path).map_err(|e| format!("读取失败: {e}"))?;
+        let mut gz = flate2::read::GzDecoder::new(f);
+        let mut s = String::new();
+        use std::io::Read;
+        gz.read_to_string(&mut s).map_err(|e| format!("gzip 解压失败: {e}"))?;
+        s
     } else if name.ends_with(".jpg") || name.ends_with(".jpeg") || name.ends_with(".png") {
-        let out = std::process::Command::new("sips")
-            .args(["-g", "pixelWidth", "-g", "pixelHeight", &p]).output()
-            .map_err(|e| format!("sips: {e}"))?;
-        println!("{}", String::from_utf8_lossy(&out.stdout).trim());
+        if let Ok((w, h)) = image::image_dimensions(&path) {
+            println!("pixelWidth: {w}\npixelHeight: {h}");
+        } else {
+            println!("无法读取图片尺寸");
+        }
         println!("路径: {}", path.display());
         return Ok(());
     } else {

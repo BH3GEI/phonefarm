@@ -149,9 +149,7 @@ fn num(v: &Value) -> Option<i64> {
 }
 
 fn now_tag() -> String {
-    let out = std::process::Command::new("date").arg("+%Y%m%d-%H%M%S").output();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "run".into())
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
 /// 局序号(进程内自增): run_id 与 tmp 目录的防撞组件(PARALLEL_SPEC 任务1/2)。
@@ -417,14 +415,21 @@ fn capture(phone: &Device, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap
     // gzip 压缩(shell自带,零依赖);压不动就留明文。与截图同为不进 git 的本地重资产。
     let mut xml_rel = String::new();
     if !xml.is_empty() {
-        // 扩展名按内容认: Adb 吐 XML,Hdc 吐 JSON——地面真值名实相符,账本字段名(xml)不动
         let ext = if xml.trim_start().starts_with('{') { "json" } else { "xml" };
         let xp = format!("{run_dir}/step{seq}.{ext}");
         if fs::write(&xp, &xml).is_ok() {
             xml_rel = format!("step{seq}.{ext}");
-            let gz = std::process::Command::new("gzip").args(["-f", &xp]).output()
-                .map(|o| o.status.success()).unwrap_or(false);
-            if gz && fs::metadata(format!("{xp}.gz")).is_ok() { xml_rel.push_str(".gz"); }
+            let gz_path = format!("{xp}.gz");
+            let gz_ok = (|| -> std::io::Result<()> {
+                let f = fs::File::create(&gz_path)?;
+                let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+                use std::io::Write;
+                enc.write_all(xml.as_bytes())?;
+                enc.finish()?;
+                let _ = fs::remove_file(&xp);
+                Ok(())
+            })().is_ok();
+            if gz_ok && fs::metadata(&gz_path).is_ok() { xml_rel.push_str(".gz"); }
         }
     }
     // 文字备胎: UI树为空(游戏/自绘界面/dump失败)→ 用本机Vision识别截图文字补清单,

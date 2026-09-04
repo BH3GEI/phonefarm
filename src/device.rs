@@ -37,27 +37,14 @@ pub struct SysState {
     pub ime: Option<bool>,
 }
 
-/// 解析 BMP 为灰度像素(sips 输出的 24/32bpp)
-fn bmp_gray(path: &str) -> Option<Vec<u8>> {
-    let d = std::fs::read(path).ok()?;
-    if d.len() < 54 || &d[0..2] != b"BM" { return None; }
-    let off = u32::from_le_bytes([d[10], d[11], d[12], d[13]]) as usize;
-    let w = i32::from_le_bytes([d[18], d[19], d[20], d[21]]) as usize;
-    let h = i32::from_le_bytes([d[22], d[23], d[24], d[25]]).unsigned_abs() as usize;
-    let bpp = u16::from_le_bytes([d[28], d[29]]) as usize;
-    if bpp != 24 && bpp != 32 { return None; }
-    let bytes = bpp / 8;
-    let row = (w * bytes + 3) / 4 * 4;
-    let mut g = Vec::with_capacity(w * h);
-    for r in 0..h {
-        for c in 0..w {
-            let i = off + r * row + c * bytes;
-            if i + 2 < d.len() {
-                g.push(((d[i] as u32 + d[i + 1] as u32 + d[i + 2] as u32) / 3) as u8);
-            }
-        }
+/// 将 DynamicImage 转为灰度像素(平均灰度 (R+G+B)/3)
+fn image_to_gray(img: &image::DynamicImage) -> Vec<u8> {
+    let rgb = img.to_rgb8();
+    let mut g = Vec::with_capacity((rgb.width() * rgb.height()) as usize);
+    for p in rgb.pixels() {
+        g.push(((p[0] as u32 + p[1] as u32 + p[2] as u32) / 3) as u8);
     }
-    Some(g)
+    g
 }
 
 /// 众数灰度(按16分桶) = 背景色估计
@@ -72,31 +59,39 @@ pub fn mode_gray(px: &[u8]) -> u8 {
 /// 落点内容检查: tap点周围48x48的灰度 (标准差, 均值)
 /// 48 而非 32: 白底列表应用里点稍偏于文字时,较大窗口仍能采到文字像素而放行,
 /// 只有真正落在大片空白 void 上才被判空白。
-pub fn patch_stats(img: &str, x: i32, y: i32, tmp: &str) -> Option<(f32, f32)> {
-    let px = (x - 24).max(0);
-    let py = (y - 24).max(0);
-    let out = format!("{tmp}/_patch.bmp");
-    Command::new("sips")
-        .args(["--cropOffset", &py.to_string(), &px.to_string(), "-c", "48", "48",
-               "-s", "format", "bmp", img, "--out", &out])
-        .stdout(Stdio::null()).stderr(Stdio::null())
-        .status().ok()?;
-    let g = bmp_gray(&out)?;
-    if g.is_empty() { return None; }
-    let n = g.len() as f32;
-    let mean = g.iter().map(|&v| v as f32).sum::<f32>() / n;
-    let var = g.iter().map(|&v| { let d = v as f32 - mean; d * d }).sum::<f32>() / n;
+pub fn patch_stats(img: &str, x: i32, y: i32, _tmp: &str) -> Option<(f32, f32)> {
+    let dynamic = image::open(img).ok()?;
+    let rgb = dynamic.to_rgb8();
+    let (width, height) = (rgb.width() as i32, rgb.height() as i32);
+    let px = (x - 24).clamp(0, (width - 1).max(0));
+    let py = (y - 24).clamp(0, (height - 1).max(0));
+    let pw = 48.min(width - px);
+    let ph = 48.min(height - py);
+    if pw <= 0 || ph <= 0 { return None; }
+
+    let mut sum = 0.0f32;
+    let mut count = 0usize;
+    let mut pixels = Vec::with_capacity((pw * ph) as usize);
+    for r in py..(py + ph) {
+        for c in px..(px + pw) {
+            let p = rgb.get_pixel(c as u32, r as u32);
+            let val = ((p[0] as u32 + p[1] as u32 + p[2] as u32) / 3) as f32;
+            sum += val;
+            pixels.push(val);
+            count += 1;
+        }
+    }
+    if count == 0 { return None; }
+    let mean = sum / count as f32;
+    let var = pixels.iter().map(|&v| { let d = v - mean; d * d }).sum::<f32>() / count as f32;
     Some((var.sqrt(), mean))
 }
 
-/// 画面变化检测用 64px 缩略灰度图
-pub fn thumb_gray(img: &str, tmp: &str, tag: &str) -> Option<Vec<u8>> {
-    let out = format!("{tmp}/_thumb{tag}.bmp");
-    Command::new("sips")
-        .args(["-Z", "64", "-s", "format", "bmp", img, "--out", &out])
-        .stdout(Stdio::null()).stderr(Stdio::null())
-        .status().ok()?;
-    bmp_gray(&out)
+/// 画面变化检测用 64px 缩略灰度图 (保持纵横比, 宽高中最大为 64px)
+pub fn thumb_gray(img: &str, _tmp: &str, _tag: &str) -> Option<Vec<u8>> {
+    let dynamic = image::open(img).ok()?;
+    let thumb = dynamic.thumbnail(64, 64);
+    Some(image_to_gray(&thumb))
 }
 
 /// 两帧缩略图差异像素占比(%)。状态栏时钟等微小变化在阈值内。
@@ -106,15 +101,22 @@ pub fn frames_diff_pct(a: &[u8], b: &[u8]) -> f32 {
     diff as f32 / a.len() as f32 * 100.0
 }
 
-/// sips 读图片像素尺寸(host 侧,与设备后端无关)。
-fn sips_wh(path: &str) -> Option<(i32, i32)> {
-    let out = Command::new("sips")
-        .args(["-g", "pixelWidth", "-g", "pixelHeight", path])
-        .output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).to_string();
-    let w = s.split("pixelWidth:").nth(1)?.split_whitespace().next()?.parse().ok()?;
-    let h = s.split("pixelHeight:").nth(1)?.split_whitespace().next()?.parse().ok()?;
-    Some((w, h))
+/// 读图片像素尺寸(纯 Rust 解析,与宿主系统工具无关)。
+pub fn image_wh(path: &str) -> Option<(i32, i32)> {
+    image::image_dimensions(path).ok().map(|(w, h)| (w as i32, h as i32))
+}
+
+/// 重采样宽度并编码写出指定质量的 JPEG (纯 Rust,无需外部 sips/ffmpeg)
+pub fn resample_and_save_jpeg(img: &image::DynamicImage, target_width: u32, quality: u8, out_jpg: &str) -> Option<(i32, i32)> {
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 { return None; }
+    let target_height = ((h as u64 * target_width as u64 + w as u64 / 2) / w as u64).max(1) as u32;
+    let resized = img.resize_exact(target_width, target_height, image::imageops::FilterType::Triangle);
+    let file = std::fs::File::create(out_jpg).ok()?;
+    let mut writer = std::io::BufWriter::new(file);
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, quality);
+    encoder.encode_image(&resized).ok()?;
+    Some((target_width as i32, target_height as i32))
 }
 
 /// adb 搜索顺序(Improve Spec 环境自举): 纯函数供单测。
@@ -126,10 +128,14 @@ pub fn adb_search_order(adb_bin: Option<&str>, home: Option<&str>) -> Vec<String
         if !b.trim().is_empty() { v.push(b.to_string()); }
     }
     v.push("platform-tools/adb".into());
+    #[cfg(windows)]
+    v.push("platform-tools/adb.exe".into());
     v.push("PATH".into());
     if let Some(h) = home {
         v.push(format!("{h}/Library/Android/sdk/platform-tools/adb"));
         v.push(format!("{h}/Library/Application Support/CindyGlobal/android-platform-tools/darwin-arm64/platform-tools/adb"));
+        v.push(format!("{h}/Android/Sdk/platform-tools/adb"));
+        v.push(format!("{h}/Android/sdk/platform-tools/adb"));
     }
     v.push("/opt/homebrew/share/android-commandlinetools/platform-tools/adb".into());
     v
@@ -360,40 +366,23 @@ impl Adb {
 
     /// 截屏并压成 672 宽 jpg 写到 out_jpg; 返回 (宽, 高)
     pub fn screen(&self, out_jpg: &str) -> Option<(i32, i32)> {
-        let raw = format!("{}/_raw.png", self.tmp);
         let png = self.run(&["exec-out", "screencap", "-p"]);
         if png.len() < 1000 {
             return None;
         }
-        std::fs::write(&raw, &png).ok()?;
-        Command::new("sips")
-            .args(["--resampleWidth", "672", "-s", "format", "jpeg",
-                   "-s", "formatOptions", "85", &raw, "--out", out_jpg])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().ok()?;
-        let out = Command::new("sips")
-            .args(["-g", "pixelWidth", "-g", "pixelHeight", out_jpg])
-            .output().ok()?;
-        let s = String::from_utf8_lossy(&out.stdout).to_string();
-        let w = s.split("pixelWidth:").nth(1)?.split_whitespace().next()?.parse().ok()?;
-        let h = s.split("pixelHeight:").nth(1)?.split_whitespace().next()?.parse().ok()?;
-        Some((w, h))
+        let dynamic = image::load_from_memory(&png).ok()?;
+        resample_and_save_jpeg(&dynamic, 672, 85, out_jpg)
     }
 
     /// 快照小图: 截屏压成64px灰度,用于等画面安静/量背景动静(不入档)
-    pub fn quick_thumb(&self, tag: &str) -> Option<Vec<u8>> {
+    pub fn quick_thumb(&self, _tag: &str) -> Option<Vec<u8>> {
         let png = self.run(&["exec-out", "screencap", "-p"]);
         if png.len() < 1000 {
             return None;
         }
-        let raw = format!("{}/_qt{tag}.png", self.tmp);
-        std::fs::write(&raw, &png).ok()?;
-        let out = format!("{}/_qt{tag}.bmp", self.tmp);
-        Command::new("sips")
-            .args(["-Z", "64", "-s", "format", "bmp", &raw, "--out", &out])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().ok()?;
-        bmp_gray(&out)
+        let dynamic = image::load_from_memory(&png).ok()?;
+        let thumb = dynamic.thumbnail(64, 64);
+        Some(image_to_gray(&thumb))
     }
 
     /// 物理屏幕尺寸
@@ -686,12 +675,8 @@ impl Hdc {
     pub fn screen(&self, out_jpg: &str) -> Option<(i32, i32)> {
         let raw = format!("{}/_raw.jpeg", self.tmp);
         if !self.shot(&raw, "shot") { return None; }
-        Command::new("sips")
-            .args(["--resampleWidth", "672", "-s", "format", "jpeg",
-                   "-s", "formatOptions", "85", &raw, "--out", out_jpg])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().ok()?;
-        sips_wh(out_jpg)
+        let dynamic = image::open(&raw).ok()?;
+        resample_and_save_jpeg(&dynamic, 672, 85, out_jpg)
     }
 
     /// 快照小图: 64px 灰度(等画面安静用)。比 adb 版多付一趟 file recv,settle 循环
@@ -699,12 +684,9 @@ impl Hdc {
     pub fn quick_thumb(&self, tag: &str) -> Option<Vec<u8>> {
         let raw = format!("{}/_qt{tag}.jpeg", self.tmp);
         if !self.shot(&raw, "thumb") { return None; }
-        let out = format!("{}/_qt{tag}.bmp", self.tmp);
-        Command::new("sips")
-            .args(["-Z", "64", "-s", "format", "bmp", &raw, "--out", &out])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().ok()?;
-        bmp_gray(&out)
+        let dynamic = image::open(&raw).ok()?;
+        let thumb = dynamic.thumbnail(64, 64);
+        Some(image_to_gray(&thumb))
     }
 
     /// 物理屏幕尺寸: OH 无 wm size,从整幅截屏实测并缓存;取不到用 720x1280 兜底(OH 设备常见档)
@@ -712,7 +694,7 @@ impl Hdc {
         *self.size_cache.get_or_init(|| {
             let raw = format!("{}/_size.jpeg", self.tmp);
             if self.shot(&raw, "size") {
-                if let Some(wh) = sips_wh(&raw) { return wh; }
+                if let Some(wh) = image_wh(&raw) { return wh; }
             }
             (720, 1280)
         })
@@ -1507,5 +1489,50 @@ mod tests {
         assert!(!marker.exists(), "冻结后任何语义动作都不应下发设备命令");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pure_rust_image_resample_and_wh() {
+        let dir = std::env::temp_dir().join(format!("pf_img_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out_jpg = dir.join("test_out.jpg");
+        let out_jpg_str = out_jpg.to_string_lossy().to_string();
+
+        // 构造 100x200 的纯色图像
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(100, 200, image::Rgb([120, 120, 120])));
+        let res = resample_and_save_jpeg(&img, 672, 85, &out_jpg_str);
+        assert!(res.is_some(), "保存并重采样应成功");
+        let (w, h) = res.unwrap();
+        assert_eq!(w, 672);
+        assert_eq!(h, 1344);
+
+        // 用 image_wh 读出刚才写入的图片尺寸
+        let wh = image_wh(&out_jpg_str);
+        assert_eq!(wh, Some((672, 1344)));
+
+        // 验证 patch_stats 能正常计算局部均值与方差 (纯色图方差接近 0, 均值接近 120)
+        let stats = patch_stats(&out_jpg_str, 50, 50, dir.to_str().unwrap());
+        assert!(stats.is_some());
+        let (sd, mean) = stats.unwrap();
+        assert!(sd < 2.0, "纯色图像标准差极低: {sd}");
+        assert!((mean - 120.0).abs() < 5.0, "均值应接近 120: {mean}");
+
+        // 验证 thumb_gray 能提取 64px 约束缩略图
+        let thumb = thumb_gray(&out_jpg_str, dir.to_str().unwrap(), "test");
+        assert!(thumb.is_some());
+        let t = thumb.unwrap();
+        // 672x1344 缩放后高为 64, 宽约为 32, 像素数约为 2048
+        assert!(!t.is_empty());
+        assert_eq!(frames_diff_pct(&t, &t), 0.0, "同一帧缩略图差异率为 0");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adb_search_order_includes_linux_sdk() {
+        let v = adb_search_order(None, Some("/home/user"));
+        assert!(v.iter().any(|p| p == "/home/user/Android/Sdk/platform-tools/adb"),
+            "应包含 Linux/WSL 标准 Android Sdk 路径");
     }
 }
