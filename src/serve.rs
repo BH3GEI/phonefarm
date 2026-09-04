@@ -186,6 +186,12 @@ fn tools_list() -> Vec<Value> {
                        "settle_ms": n("settle delay in ms after actions (default 500)"),
                        "no_screen": json!({"type": "boolean", "description": "skip screenshot capture for speed"})}),
                 &["task", "script"])),
+        tool("phonefarm_quest",
+            "Autonomous Genshin Impact story and quest agent (dialogue fast-forward, interact, navigation).",
+            obj(json!({"mode": s("operation mode: 'auto' | 'dialogue' | 'interact' | 'navigate' (default 'auto')"),
+                       "sec": n("maximum runtime in seconds (default 1800)"),
+                       "serial": s("device: adb serial or hdc:<key>")}),
+                &[])),
     ]
 }
 
@@ -349,6 +355,12 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             v.push("--detach".into());
             v.push(script.to_string());
         }
+        "phonefarm_quest" => {
+            v.push("quest".into());
+            push_opt(&mut v, "--mode", arg_str(args, "mode"));
+            push_opt(&mut v, "--sec", arg_u64(args, "sec").map(|n| n.to_string()).as_deref());
+            push_opt(&mut v, "--serial", arg_str(args, "serial"));
+        }
         other => return Err(format!("未知工具 '{other}'(tools/list 看全量; probe/exec/parallel 不在 MCP 面内)")),
     }
     Ok(v)
@@ -495,7 +507,7 @@ mod tests {
         let line = json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}).to_string();
         let resp: Value = serde_json::from_str(&handle_line(&line).unwrap()).unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16, "工具面数量变了要有意为之");
+        assert_eq!(tools.len(), 17, "工具面数量变了要有意为之");
         for t in tools {
             assert!(t["name"].as_str().unwrap().starts_with("phonefarm_"));
             assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));

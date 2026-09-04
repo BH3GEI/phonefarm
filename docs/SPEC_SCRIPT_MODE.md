@@ -79,6 +79,14 @@ phonefarm script [--task <任务名>] [--serial <设备>] [--app <包名>] [--re
 | `stop` / `force_stop`| `pkg` | `phone.force_stop(pkg)` |
 | `shell` / `exec` | `cmd` | `phone.shell(cmd, 15000)` |
 | `loop` / `repeat` | `count`, `steps` | 展开循环执行子动作序列 |
+| `gamepad_press` / `pad_press` | `button` (或 `btn`), `duration_ms` (默认 120ms) | 原生 HID 注入虚拟 Xbox 手柄按键 (A/B/X/Y/LB/RB/LT/RT/START/SELECT) 并自动释放 |
+| `gamepad_down` / `pad_down` | `button` (或 `btn`) | 保持手柄按键处于持续按压状态 |
+| `gamepad_up` / `pad_up` | `button` (或 `btn`) | 释放手柄按键 |
+| `gamepad_stick` / `pad_stick` | `stick` ("left"/"right"), `val_x` (-1.0~1.0), `val_y` (-1.0~1.0), `duration_ms` | 360 度连续摇杆物理量推杆 (人物走位 / 3D 自由视角无顿挫转动) |
+| `gamepad_trigger` / `pad_trigger` | `trigger` ("lt"/"rt"), `val_x` (0.0~1.0 深度), `duration_ms` | 线性扳机模拟 |
+| `gamepad_dpad` / `pad_dpad` | `dpad` ("up"/"down"/"left"/"right"/"center") | 十字方向键 |
+| `gamepad_reset` / `pad_reset` | (无参) | 复位手柄所有摇杆与按键至中立位置 |
+| `gamepad_wander` / `pad_wander` | `duration_ms` (或 `sec` / `s`) | 原神/3D游戏防烧屏与巡航原语：平滑走位 + 3D视角旋转 + 间歇跳跃与冲刺 |
 
 ### 3.3 历史对局原样回放 (`.jsonl` 或对局 ID)
 系统自动解析任何历史 `log.jsonl`，抽取全部 `r="act"` 记录按原坐标与顺序重放：

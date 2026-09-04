@@ -48,6 +48,32 @@ pub struct ScriptStep {
     #[serde(default, alias = "command")]
     pub cmd: Option<String>,
 
+    /// 虚拟手柄按键 (gamepad_press / gamepad_down / gamepad_up)
+    #[serde(default, alias = "btn", alias = "key")]
+    pub button: Option<String>,
+
+    /// 虚拟手柄摇杆与轴向 ("left" / "right")
+    #[serde(default, alias = "axis")]
+    pub stick: Option<String>,
+
+    /// 持续按压时间 (毫秒)
+    #[serde(default, alias = "hold_ms", alias = "duration")]
+    pub duration_ms: Option<u64>,
+
+    /// 浮点摇杆/扳机量 (-1.0 ~ 1.0 或 0.0 ~ 1.0)
+    #[serde(default, alias = "fx")]
+    pub val_x: Option<f32>,
+    #[serde(default, alias = "fy")]
+    pub val_y: Option<f32>,
+
+    /// 十字方向键 (up, down, left, right, center)
+    #[serde(default)]
+    pub dpad: Option<String>,
+
+    /// 扳机名称 ("lt" / "rt")
+    #[serde(default)]
+    pub trigger: Option<String>,
+
     /// 循环与嵌套动作 (loop / repeat)
     #[serde(default, alias = "repeat")]
     pub count: Option<u32>,
@@ -333,6 +359,11 @@ pub fn execute_script(cfg: &ScriptRunConfig) -> Result<ScriptResult, String> {
             if let Some(x2) = step.to_x { act_val["x2"] = json!(x2); }
             if let Some(y2) = step.to_y { act_val["y2"] = json!(y2); }
             if let Some(t) = &step.text { act_val["text"] = json!(t); }
+            if let Some(b) = &step.button { act_val["button"] = json!(b); }
+            if let Some(s) = &step.stick { act_val["stick"] = json!(s); }
+            if let Some(d) = step.duration_ms { act_val["duration_ms"] = json!(d); }
+            if let Some(fx) = step.val_x { act_val["val_x"] = json!(fx); }
+            if let Some(fy) = step.val_y { act_val["val_y"] = json!(fy); }
             writeln!(log, "{act_val}").map_err(|e| e.to_string())?;
 
             // 3. 执行动作
@@ -410,6 +441,84 @@ pub fn execute_script(cfg: &ScriptRunConfig) -> Result<ScriptResult, String> {
                         if !out.trim().is_empty() {
                             print!(" => {}", crate::runtime::tcut(out.trim(), 40));
                         }
+                    }
+                }
+                "gamepad_press" | "gamepad_button" | "pad_press" | "pad_btn" | "pad_button" => {
+                    let btn = step.button.as_deref()
+                        .or(step.text.as_deref())
+                        .unwrap_or("a");
+                    let dur = step.duration_ms.or(step.ms).unwrap_or(120);
+                    print!(" 按手柄键 {btn} (持续 {dur}ms)");
+                    if let Err(e) = phone.gamepad_press(btn, dur) {
+                        eprintln!(" [手柄操作失败: {e}]");
+                    }
+                }
+                "gamepad_down" | "pad_down" => {
+                    let btn = step.button.as_deref()
+                        .or(step.text.as_deref())
+                        .unwrap_or("a");
+                    print!(" 按下手柄键 {btn}");
+                    if let Err(e) = phone.gamepad_down(btn) {
+                        eprintln!(" [手柄操作失败: {e}]");
+                    }
+                }
+                "gamepad_up" | "pad_up" => {
+                    let btn = step.button.as_deref()
+                        .or(step.text.as_deref())
+                        .unwrap_or("a");
+                    print!(" 松开手柄键 {btn}");
+                    if let Err(e) = phone.gamepad_up(btn) {
+                        eprintln!(" [手柄操作失败: {e}]");
+                    }
+                }
+                "gamepad_stick" | "pad_stick" => {
+                    let stick = step.stick.as_deref().unwrap_or("left");
+                    let x = step.val_x
+                        .or_else(|| step.x.map(|v| (v as f32) / 1000.0))
+                        .unwrap_or(0.0);
+                    let y = step.val_y
+                        .or_else(|| step.y.map(|v| (v as f32) / 1000.0))
+                        .unwrap_or(0.0);
+                    let dur = step.duration_ms.or(step.ms).unwrap_or(0);
+                    print!(" 推动手柄{stick}摇杆 ({x:.2}, {y:.2}) 保持 {dur}ms");
+                    if let Err(e) = phone.gamepad_stick(stick, x, y, dur) {
+                        eprintln!(" [手柄操作失败: {e}]");
+                    }
+                }
+                "gamepad_trigger" | "pad_trigger" => {
+                    let trig = step.trigger.as_deref()
+                        .or(step.button.as_deref())
+                        .unwrap_or("rt");
+                    let val = step.val_x.unwrap_or(1.0);
+                    let dur = step.duration_ms.or(step.ms).unwrap_or(100);
+                    print!(" 压下手柄扳机 {trig} 深度 {val:.2} (持续 {dur}ms)");
+                    if let Err(e) = phone.gamepad_trigger(trig, val, dur) {
+                        eprintln!(" [手柄操作失败: {e}]");
+                    }
+                }
+                "gamepad_dpad" | "pad_dpad" => {
+                    let dir = step.dpad.as_deref()
+                        .or(step.button.as_deref())
+                        .or(step.text.as_deref())
+                        .unwrap_or("center");
+                    let dur = step.duration_ms.or(step.ms).unwrap_or(120);
+                    print!(" 手柄十字键 {dir} (持续 {dur}ms)");
+                    if let Err(e) = phone.gamepad_dpad(dir, dur) {
+                        eprintln!(" [手柄操作失败: {e}]");
+                    }
+                }
+                "gamepad_reset" | "pad_reset" => {
+                    print!(" 复位手柄状态");
+                    let _ = phone.gamepad_reset();
+                }
+                "gamepad_wander" | "pad_wander" => {
+                    let dur = step.duration_ms
+                        .or(step.ms)
+                        .or_else(|| step.sec.map(|s| (s * 1000.0) as u64))
+                        .unwrap_or(3000);
+                    print!(" 手柄巡航走位与视角旋转 (持续 {}ms)", dur);
+                    if let Err(e) = phone.gamepad_wander(dur) {
+                        eprintln!(" [手柄漫步失败: {e}]");
                     }
                 }
                 other => {

@@ -8,6 +8,8 @@ mod cli;
 mod parallel;
 mod device;
 mod fold;
+mod gamepad;
+mod quest;
 mod runtime;
 mod script;
 mod serve;
@@ -107,6 +109,7 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
 脚本:  script [--task T] [--serial S] [--app P] [--repeat N] [--settle-ms M] [--no-screen] [--detach] <脚本文件或局ID>
+任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神剧情跳过与任务跑图Agent)
 设备:  devices | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
 后台:  run/benchmark/script 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
@@ -500,6 +503,38 @@ fn main() {
                 Ok(_) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("脚本执行失败: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("quest") => {
+            // 原神自主跑图与剧情过关 Agent (Genshin Quest & Dialogue Agent)
+            let mut serial: Option<String> = None;
+            let mut mode = "auto".to_string();
+            let mut max_sec: u64 = 1800;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--serial" => serial = it.next().cloned(),
+                    "--mode" => mode = it.next().cloned().unwrap_or_else(|| "auto".into()),
+                    "--max-seconds" | "--sec" => max_sec = it.next().and_then(|v| v.parse().ok()).unwrap_or(1800),
+                    _ => {}
+                }
+            }
+            let tmp = std::env::temp_dir().join(format!("phonefarm-quest-{}", std::process::id())).to_string_lossy().to_string();
+            let _ = std::fs::create_dir_all(&tmp);
+            let phone = device::Device::new(serial.clone(), tmp);
+            let cfg = quest::QuestConfig {
+                mode,
+                serial,
+                max_seconds: max_sec,
+                auto_choice: true,
+            };
+            let mut agent = quest::GenshinQuestAgent::new(&phone, cfg);
+            match agent.run_loop() {
+                Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Quest Agent 执行失败: {e}");
                     std::process::exit(1);
                 }
             }
