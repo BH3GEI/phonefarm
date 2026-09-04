@@ -451,6 +451,7 @@ impl<'a> GenshinQuestAgent<'a> {
     pub fn shutdown_and_lock(&mut self) {
         println!("[生命周期] 正在复位手柄并释放输入通道...");
         let _ = self.device.gamepad_reset();
+        let _ = self.device.gamepad_close();
 
         println!("[生命周期] 恢复系统正常休眠策略 (svc power stayon false)...");
         self.device.shell("svc power stayon false", 3000);
