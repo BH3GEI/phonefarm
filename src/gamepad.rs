@@ -88,28 +88,30 @@ pub struct Gamepad {
 }
 
 impl Gamepad {
-    /// 连接手机端常驻虚拟手柄服务（若未启动则自动唤起守护进程）
+    /// 在 PC 端通过 ADB 标准输入通道拉起与管理虚拟手柄会话
+    /// 全生命周期完全受控于宿主机，手机端不落盘任何脚本或守护服务
     pub fn new(adb_bin: &str, serial: Option<&str>) -> Result<Self, String> {
-        // 检查并确保手机端驻留手柄守护进程正在运行
-        let mut ensure_cmd = Command::new(adb_bin);
-        if let Some(s) = serial {
-            ensure_cmd.arg("-s").arg(s);
-        }
-        ensure_cmd.args(["shell", "su -c 'ps -ef | grep -v grep | grep -q com.android.commands.hid.Hid || sh /data/local/tmp/gamepad_daemon.sh'"]);
-        let _ = ensure_cmd.status();
-
-        // 通过 su 连接至手机端常驻 FIFO 写入管道
         let mut cmd = Command::new(adb_bin);
         if let Some(s) = serial {
             cmd.arg("-s").arg(s);
         }
-        cmd.args(["shell", "su -c 'cat > /data/local/tmp/gamepad.fifo'"]);
+        cmd.args(["shell", "hid", "-"]);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
 
-        let mut child = cmd.spawn().map_err(|e| format!("连接手机端手柄管道失败: {e}"))?;
-        let stdin = child.stdin.take().ok_or("无法获取手柄管道的标准输入")?;
+        let mut child = cmd.spawn().map_err(|e| format!("启动 ADB hid 注入管道失败: {e}"))?;
+        let mut stdin = child.stdin.take().ok_or("无法获取手柄管道的标准输入")?;
+
+        // 注册标准 Xbox Wireless Controller HID 描述符 (通过标准输入下发，纯内存通信)
+        const REG_JSON: &str = r#"{"id":1,"command":"register","name":"Xbox Wireless Controller","vid":1118,"pid":765,"bus":"bluetooth","source":"KEYBOARD | GAMEPAD | JOYSTICK","descriptor":[5,1,9,5,161,1,133,1,9,1,161,0,9,48,9,49,21,0,39,255,255,0,0,149,2,117,16,129,2,192,9,1,161,0,9,50,9,53,21,0,39,255,255,0,0,149,2,117,16,129,2,192,5,2,9,197,21,0,38,255,3,149,1,117,10,129,2,21,0,37,0,117,6,149,1,129,3,5,2,9,196,21,0,38,255,3,149,1,117,10,129,2,21,0,37,0,117,6,149,1,129,3,5,1,9,57,21,1,37,8,53,0,70,59,1,102,20,0,117,4,149,1,129,66,117,4,149,1,21,0,37,0,53,0,69,0,101,0,129,3,5,9,25,1,41,15,21,0,37,1,117,1,149,15,129,2,21,0,37,0,117,1,149,1,129,3,5,12,10,36,2,21,0,37,1,149,1,117,1,129,2,21,0,37,0,117,7,149,1,129,3,192,5,15,9,33,133,3,161,2,9,151,21,0,37,1,117,4,149,1,145,2,21,0,37,0,117,4,149,1,145,3,9,112,21,0,37,100,117,8,149,4,145,2,9,80,102,1,16,85,14,21,0,38,255,0,117,8,149,1,145,2,9,167,21,0,38,255,0,117,8,149,1,145,2,101,0,85,0,9,124,21,0,38,255,0,117,8,149,1,145,2,192,5,6,9,32,133,4,21,0,38,255,0,117,8,149,1,129,2,192]}"#;
+
+        stdin.write_all(REG_JSON.as_bytes()).map_err(|e| format!("注册虚拟手柄失败: {e}"))?;
+        stdin.write_all(b"\n").map_err(|e| format!("写入换行失败: {e}"))?;
+        stdin.flush().map_err(|e| format!("刷新注册报文失败: {e}"))?;
+
+        // 等待内核完成设备注册并接入输入子系统
+        sleep(Duration::from_millis(150));
 
         let mut gp = Self {
             child,

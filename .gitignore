@@ -13,5 +13,6 @@ tasks/**/*.xml
 tasks/**/*.xml.gz
 tasks/genshin_*
 tasks/phonefarm_smoke
+tasks/test_*
 
 .DS_Store
