@@ -512,12 +512,14 @@ fn main() {
             let mut serial: Option<String> = None;
             let mut mode = "auto".to_string();
             let mut max_sec: u64 = 1800;
+            let mut auto_shutdown = true;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--serial" => serial = it.next().cloned(),
                     "--mode" => mode = it.next().cloned().unwrap_or_else(|| "auto".into()),
                     "--max-seconds" | "--sec" => max_sec = it.next().and_then(|v| v.parse().ok()).unwrap_or(1800),
+                    "--no-shutdown" | "--no-lock" => auto_shutdown = false,
                     _ => {}
                 }
             }
@@ -529,6 +531,7 @@ fn main() {
                 serial,
                 max_seconds: max_sec,
                 auto_choice: true,
+                auto_shutdown,
             };
             let mut agent = quest::GenshinQuestAgent::new(&phone, cfg);
             match agent.run_loop() {
