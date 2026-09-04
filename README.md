@@ -45,6 +45,11 @@ cd src && cargo build --release && cp target/release/phonefarm ..
 # 6. 多设备并行（每设备独立一局，stdout 逐行带 [设备] 前缀，任一失败整体退出码非 0）
 ./phonefarm parallel --job "任务A|目标A|emulator-5554|com.pkg" --job "任务B|目标B|hdc:<key>" --budget-calls 60
 # 同一任务名派给多台设备会被拒绝（经验库 lessons/tree 会互踩）——用不同任务名分开，合并语义留后续
+
+# 7. 运行离线确定性脚本或回放历史对局（零 Token 消耗，保留全套遥测）
+./phonefarm script --task 游戏压测 --app com.tencent.tmgp.projectc --repeat 10 examples/sample_game_benchmark.json
+# 直接回放某次历史运行的动作流：
+./phonefarm script --task 轨迹重放 20260831-213215
 ```
 
 ## 数据查询与 CLI 交互
@@ -97,9 +102,9 @@ tasks/<任务名>/        数据隔离目录：包含本地经验库 lessons.jso
 
 ## MCP 工具服务（`phonefarm serve`）
 
-`phonefarm serve [--root <目录>]` 把整套 CLI 能力以 **MCP stdio 服务**（换行分隔 JSON-RPC 2.0）暴露给 octos 等外部 Agent 宿主：15 个 `phonefarm_*` 工具（devices/tasks/runs/last/status/show/stats/lessons/tree/campaign/schema/config/cat/run/benchmark），全部经既有 CLI 契约自调用，零新依赖。设计要点见 `docs/SPEC_MCP_SERVE.md`：
+`phonefarm serve [--root <目录>]` 把整套 CLI 能力以 **MCP stdio 服务**（换行分隔 JSON-RPC 2.0）暴露给 octos 等外部 Agent 宿主：16 个 `phonefarm_*` 工具（devices/tasks/runs/last/status/show/stats/lessons/tree/campaign/schema/config/cat/run/benchmark/script），全部经既有 CLI 契约自调用，零新依赖。设计要点见 `docs/SPEC_MCP_SERVE.md`：
 
-- **run/benchmark 强制 `--detach`**：立即回报局 ID，进度用 `phonefarm_status` / `phonefarm_show` 轮询（适配客户端 60s 工具超时）。
+- **run/benchmark/script 强制 `--detach`**：立即回报局 ID，进度用 `phonefarm_status` / `phonefarm_show` 轮询（适配客户端 60s 工具超时）。
 - **cat 路径监狱**：只允许读 tasks 数据根之下的文件，逃逸一律拒绝。
 - **不暴露 probe/exec/parallel**：设备写操作的唯一入口是受三道拦截保护的六步循环，裸 shell 不进 MCP 面。
 - 密钥不依赖环境继承：detached 子进程仍走 `./secrets.env` 自举（`--root` 先把工作目录钉在仓库根）。
@@ -122,5 +127,6 @@ octos 侧挂载（`config.json` 或 profile 的 `[[mcp_servers]]`）：
 
 - `docs/DESIGN.md` — 设计文档 v1（核心契约 / 状态机循环 / 数据隔离 / 写入规范）
 - `docs/SPEC_MCP_SERVE.md` — MCP stdio 工具服务规格（工具面 / 协议子集 / 安全护栏 / octos 接法）
+- `docs/SPEC_SCRIPT_MODE.md` — 确定性脚本与历史轨迹回放规格（纯离线 / 零 Token / 全遥测 / 重放契约）
 - 工作区 SPEC：`TELEMETRY_SPEC.md`（遥测指标详情）、`CLI_SPEC.md`（命令行交互规范）、`IMPROVE_SPEC.md`（自举部署流程）
 - `phonefarm schema` — log.jsonl 全部合法记录的字段模型手册
