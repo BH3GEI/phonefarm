@@ -437,6 +437,15 @@ impl<'a> GenshinQuestAgent<'a> {
         }
     }
 
+    /// 只读性能遥测采集 (内存与温度)
+    pub fn sample_telemetry(&self) -> (u64, f32) {
+        let mem_str = self.device.shell("dumpsys meminfo com.miHoYo.Yuanshen | grep -E 'TOTAL PSS:|TOTAL:'", 2000);
+        let pss_kb = mem_str.split_whitespace().nth(2).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let bat_str = self.device.shell("dumpsys battery | grep temperature", 2000);
+        let temp_c = bat_str.split_whitespace().nth(1).and_then(|v| v.parse::<f32>().ok()).map(|t| t / 10.0).unwrap_or(0.0);
+        (pss_kb / 1024, temp_c)
+    }
+
     /// 5. 持续运行主循环：全流程编排执行
     pub fn run_loop(&mut self) -> Result<(), String> {
         println!("════ 启动原神剧情过关与跑图 Agent (Genshin Quest Agent) ════");
@@ -453,15 +462,41 @@ impl<'a> GenshinQuestAgent<'a> {
             return Err(e);
         }
 
+        // 创建任务日志目录 (符合 phonefarm 账本规范)
+        let now_str = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+        let task_dir = format!("tasks/genshin_quest_{now_str}");
+        let _ = std::fs::create_dir_all(&task_dir);
+        let telem_file = format!("{task_dir}/telemetry.jsonl");
+
         // 阶段二：自主循环决策推进
         let start = Instant::now();
         let mut step_count = 0;
+        let mut last_telemetry_time = Instant::now();
+
         while start.elapsed().as_secs() < self.cfg.max_seconds {
             step_count += 1;
             print!("[步数 #{:03}]", step_count);
             if let Err(e) = self.step() {
                 eprintln!("  [警告: 单步执行异常: {e}]");
                 sleep(Duration::from_millis(500));
+            }
+
+            // 每 30 秒执行一次轻量只读遥测采样并写入账本
+            if last_telemetry_time.elapsed().as_secs() >= 30 {
+                last_telemetry_time = Instant::now();
+                let (pss_mb, temp_c) = self.sample_telemetry();
+                println!("  [实时遥测] 耗时: {:.0}s | 内存: {} MB | 电池温度: {:.1}C", start.elapsed().as_secs_f32(), pss_mb, temp_c);
+                let row = serde_json::json!({
+                    "ts_ms": chrono::Utc::now().timestamp_millis(),
+                    "elapsed_s": start.elapsed().as_secs(),
+                    "step": step_count,
+                    "pss_mb": pss_mb,
+                    "temp_c": temp_c,
+                });
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&telem_file) {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{}", row);
+                }
             }
         }
 
