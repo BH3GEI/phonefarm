@@ -605,6 +605,12 @@ impl Adb {
         }
     }
 
+    pub fn gamepad_close(&self) -> Result<(), String> {
+        let mut guard = self.gamepad.lock().map_err(|e| format!("手柄锁争用失败: {e}"))?;
+        *guard = None;
+        Ok(())
+    }
+
     pub fn gamepad_wander(&self, duration_ms: u64) -> Result<(), String> {
         if self.frozen() { return Ok(()); }
         let mut guard = self.get_gamepad()?;
@@ -1102,6 +1108,12 @@ impl Device {
     pub fn gamepad_reset(&self) -> Result<(), String> {
         match self {
             Device::Adb(d) => d.gamepad_reset(),
+            Device::Hdc(_) => Ok(()),
+        }
+    }
+    pub fn gamepad_close(&self) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.gamepad_close(),
             Device::Hdc(_) => Ok(()),
         }
     }
