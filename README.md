@@ -27,8 +27,10 @@ Agent 自动化移动端并行、测试、采集工具：由 Rust 内核驱动�
 cp secrets.env.example secrets.env   # 填入 GLM_KEY(智谱 Coding 套餐)
 # 密钥不填亦能启动：程序会自动读取 ./secrets.env 补全环境；检测到必选密钥缺失时给出配置说明并安全退出
 
-# 2. 编译构建
-cd src && cargo build --release && cp target/release/phonefarm ..
+# 2. 编译构建（Apple Silicon 必须重新签名，见下方说明）
+cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && codesign --force --sign - ./phonefarm
+# 为何要 codesign：release profile 的 strip = true 会在链接后剥离符号，使 Rust 附加的 ad-hoc 代码签名失效。
+# 失效的二进制在 macOS 上不报错，而是静默卡死在 _dyld_start（进程存活、CPU 为零、无任何输出），极易被误判为死循环或设备失联。
 # adb 自动定位：按 ADB_BIN > 仓库根目录 platform-tools/ > PATH 路径 > 常见系统 SDK 目录顺序检索
 # OCR 备用文字识别首跑时自动编译（需系统装有 swiftc）；编译失败该辅助通道自动关闭，不影响主回路运行
 
@@ -79,7 +81,9 @@ phonefarm probe --serial S "只读命令"  # 建立与目标设备的只读直�
 ## 目录结构说明
 
 ```
-src/                   Rust 内核源码（包含运行时、模型调度、设备抽象、CLI、遥测等模块）
+src/                   Rust 内核源码（运行时、模型调度、设备抽象、CLI、遥测等）
+src/universal/         通用核心：统一动作协议、三大算子（弹窗/对白/寻路）、优先级引擎、插件契约
+src/plugins/           场景插件层：一切专用场景（某款游戏、某个 App 的特定流程）都落在这里
 phonefarm.toml         主配置文件：包含判定阈值、决策提示词模板、模型 Provider 轮询及降级链
 docs/DESIGN.md         设计文档 v1（规定了系统的记录契约、六步执行主循环、任务数据隔离设计）
 round.sh               单轮调度外壳脚本（保留以向下兼容，生产环境建议使用 benchmark 命令）
@@ -87,6 +91,36 @@ ocr.swift / ocr        OCR 辅助识别组件（基于 macOS Vision 库，首跑
 tasks/<任务名>/        数据隔离目录：包含本地经验库 lessons.jsonl、状态转移图 tree.json、对局汇总 campaign.tsv
                     runs/<局ID>/ （本局的 log.jsonl、ctx.log 详情、步骤截图及 XML UI 树，媒体与树文件不入 git）
 ```
+
+## 架构分层：通用核心 + 场景插件
+
+phonefarm 的定位是**通用**的移动端 UI 与游戏自动化基础设施，任何 App、任何游戏都能操作。
+为了不让单一应用的特殊需求侵蚀通用性，代码严格分为两层：
+
+- **核心层**（`src/universal/`、`src/runtime.rs`、`src/device.rs`）只做通用能力：统一感知、
+  统一动作协议、通用三大算子（弹窗确认 / 对白跳过 / 导航寻路）、优先级调度。
+  核心代码**不含任何具体应用的包名、界面文案或流程假设**。
+- **插件层**（`src/plugins/`）承载全部专用场景，通过 `universal::ScenarioPlugin` 契约接入。
+
+单帧决策的优先级阶梯：
+
+| 档位 | 归属 | 说明 |
+| :--- | :--- | :--- |
+| 1 | 插件 `intercept` | 场景特有语义，抢在通用规则之前 |
+| 2 | 通用弹窗算子 | 公告、权限、评分等阻断性弹窗 |
+| 3 | 通用对白算子 | 字幕、分支卡片、CG 转场 |
+| 4 | 通用寻路算子 | 循迹转向、列表滚动、脱困 |
+| 5 | 插件 `decide` | 场景兜底策略，命中即省一次模型调用 |
+| 6 | 视觉大模型 | 前五档都不接管时才调用 |
+
+前五档均为本地规则，零 Token。新增一个专用场景**只需在 `src/plugins/` 下加模块并在
+`register_builtin` 登记，核心代码一行不改**；卸下全部插件后核心仍能独立工作。
+
+```bash
+./phonefarm plugins        # 列出已登记的场景插件
+```
+
+若某需求迫使你修改核心去迁就单一应用，那是设计错了，应当改为插件。
 
 ## 核心执行回路
 
@@ -125,6 +159,7 @@ octos 侧挂载（`config.json` 或 profile 的 `[[mcp_servers]]`）：
 
 ## 相关文档
 
+- `docs/GOLDEN_RULES.md` — 研发与操作金科玉律（架构铁律 / 生命周期 / 模型选型纪律 / 工程规范）
 - `docs/DESIGN.md` — 设计文档 v1（核心契约 / 状态机循环 / 数据隔离 / 写入规范）
 - `docs/SPEC_MCP_SERVE.md` — MCP stdio 工具服务规格（工具面 / 协议子集 / 安全护栏 / octos 接法）
 - `docs/SPEC_SCRIPT_MODE.md` — 确定性脚本与历史轨迹回放规格（纯离线 / 零 Token / 全遥测 / 重放契约）
