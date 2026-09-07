@@ -15,6 +15,7 @@ mod script;
 mod serve;
 mod telemetry;
 mod tree;
+pub mod universal;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

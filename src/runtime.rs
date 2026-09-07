@@ -1567,7 +1567,12 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
     let phone = Device::new(serial, tmp.clone());
     let mut brain = Brain::new(cfg.providers.clone(), tmp.clone());
+    let mut universal_engine = crate::universal::UniversalEngine::new(false);
     let (realw, realh) = phone.size();
+
+    // 保证运行期间屏幕处于唤醒与常亮状态 (幂等唤醒，避免进入 Dozing)
+    phone.shell("svc power stayon true", 3000);
+    phone.shell("input keyevent 224", 3000);
 
     // ── 安装清单(局内静态,注入上下文供 launch 选择) ──
     let apps = phone.launchable_apps();
@@ -1845,48 +1850,92 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             let _ = fs::OpenOptions::new().create(true).append(true)
                 .open(&ctx_path)
                 .map(|mut f| writeln!(f, "\n══ 步#{n} 决策上下文 ══\n{user}\n"));
-            match plan_call(&mut brain, cfg, &user, &cap.img, &mut log, n) {
-                Ok((acts, note_new, by, ms)) => {
-                    if acts.len() > 1 { println!("      📋 {}给出{}步计划", by, acts.len()); }
-                    queue = acts.into();
-                    plan_by = by;
-                    plan_ms = Some(ms);
-                    last_api_ms = ms as i64;
-                    pending_note = note_new;
-                    alert.clear(); // 警报已送达本次决策,清掉避免重复轰炸
-                    probe_ans.clear(); // 探针应答同为一次性投递
+            // 优先由通用状态机规则拦截 (弹窗 / 对白跳过)，0 Token 极速推进
+            let u_decision = universal_engine.evaluate(&cap.els, None, realw.max(1) as u32, realh.max(1) as u32);
+            let handled_by_engine = match u_decision {
+                crate::universal::EngineDecision::HandledByPopup { action } => {
+                    let act = match action {
+                        crate::universal::UniversalAction::Tap { x, y, label } => {
+                            let nx = (x as i64 * NORM / realw.max(1) as i64).clamp(0, NORM);
+                            let ny = (y as i64 * NORM / realh.max(1) as i64).clamp(0, NORM);
+                            ActN { a: "tap".into(), x: Some(nx), y: Some(ny), what: label, ..Default::default() }
+                        }
+                        crate::universal::UniversalAction::Keycode { code: 4, .. } => {
+                            ActN { a: "back".into(), ..Default::default() }
+                        }
+                        _ => ActN { a: "wait".into(), ..Default::default() },
+                    };
+                    println!("      [UniversalEngine] 规则接管: 弹窗拦截 -> 执行 {}", act.a);
+                    queue = vec![act].into();
+                    plan_by = "universal-popup".into();
+                    plan_ms = Some(0);
+                    true
                 }
-                Err(e) if e == "内容过滤" && escapes_left > 0 => {
-                    // 画面被安全审核拒绝(确定性): 不等模型,盲滑一步离开,重新采集再决策
-                    escapes_left -= 1;
-                    println!("      🚧 画面被内容过滤拒绝,盲移离开(余{escapes_left}次)");
-                    let esc = ActN { a: "scroll_down".into(), ..Default::default() };
-                    exec(&phone, &esc, &cap, realw, realh, &apps);
-                    if osc_note(&mut act_sigs, act_sig(&esc), &mut osc_fire_at) {
-                        alert = OSCILL_WARN.to_string();
-                        log.put(json!({"r":"hook","kind":"oscill","at":"escape"}));
-                        println!("      ⚠ 打摆检测命中,警报已注入");
-                    }
-                    log_act(&mut log, n, &esc, "(盲移)", None);
-                    let d = "escape(内容过滤)".to_string();
-                    log.put(json!({"r":"diff","n":n,"d":d}));
-                    println!("[{n}] ·盲移 | scroll_down → {d}");
-                    run_push(&mut runs, format!("act#{n} scroll_down(盲移)"), d.clone());
-                    diffs_all.push(d.clone());
-                    stream.push(format!("act#{n} scroll_down → escape(内容过滤)"));
-                    stall += 1;
-                    if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
-                    capseq += 1;
-                    match capture_or_revive(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref(), &mut revived) {
-                        Some(c) => cap = c,
-                        None => { stop_reason = Some("capture_fail"); break; }
-                    }
-                    continue;
+                crate::universal::EngineDecision::HandledByDialogue { action } => {
+                    let act = match action {
+                        crate::universal::UniversalAction::Tap { x, y, label } => {
+                            let nx = (x as i64 * NORM / realw.max(1) as i64).clamp(0, NORM);
+                            let ny = (y as i64 * NORM / realh.max(1) as i64).clamp(0, NORM);
+                            ActN { a: "tap".into(), x: Some(nx), y: Some(ny), what: label, ..Default::default() }
+                        }
+                        crate::universal::UniversalAction::NormalizedTap { nx, ny, .. } => {
+                            ActN { a: "tap".into(), x: Some(nx as i64), y: Some(ny as i64), what: None, ..Default::default() }
+                        }
+                        _ => ActN { a: "wait".into(), ..Default::default() },
+                    };
+                    println!("      [UniversalEngine] 规则接管: 剧情对白快进 -> 执行 {}", act.a);
+                    queue = vec![act].into();
+                    plan_by = "universal-dialogue".into();
+                    plan_ms = Some(0);
+                    true
                 }
-                Err(e) => {
-                    println!("✗ 大脑失联: {e}");
-                    stop_reason = Some("model_fail");
-                    break;
+                _ => false,
+            };
+
+            if !handled_by_engine {
+                match plan_call(&mut brain, cfg, &user, &cap.img, &mut log, n) {
+                    Ok((acts, note_new, by, ms)) => {
+                        if acts.len() > 1 { println!("      📋 {}给出{}步计划", by, acts.len()); }
+                        queue = acts.into();
+                        plan_by = by;
+                        plan_ms = Some(ms);
+                        last_api_ms = ms as i64;
+                        pending_note = note_new;
+                        alert.clear(); // 警报已送达本次决策,清掉避免重复轰炸
+                        probe_ans.clear(); // 探针应答同为一次性投递
+                    }
+                    Err(e) if e == "内容过滤" && escapes_left > 0 => {
+                        // 画面被安全审核拒绝(确定性): 不等模型,盲滑一步离开,重新采集再决策
+                        escapes_left -= 1;
+                        println!("      🚧 画面被内容过滤拒绝,盲移离开(余{escapes_left}次)");
+                        let esc = ActN { a: "scroll_down".into(), ..Default::default() };
+                        exec(&phone, &esc, &cap, realw, realh, &apps);
+                        if osc_note(&mut act_sigs, act_sig(&esc), &mut osc_fire_at) {
+                            alert = OSCILL_WARN.to_string();
+                            log.put(json!({"r":"hook","kind":"oscill","at":"escape"}));
+                            println!("      ⚠ 打摆检测命中,警报已注入");
+                        }
+                        log_act(&mut log, n, &esc, "(盲移)", None);
+                        let d = "escape(内容过滤)".to_string();
+                        log.put(json!({"r":"diff","n":n,"d":d}));
+                        println!("[{n}] ·盲移 | scroll_down → {d}");
+                        run_push(&mut runs, format!("act#{n} scroll_down(盲移)"), d.clone());
+                        diffs_all.push(d.clone());
+                        stream.push(format!("act#{n} scroll_down → escape(内容过滤)"));
+                        stall += 1;
+                        if stall >= cfg.stall_limit { stop_reason = Some("watchdog"); break; }
+                        capseq += 1;
+                        match capture_or_revive(&phone, &run_dir, capseq, cfg, &tmp, settle_ms, realw, realh, app.as_deref(), &mut revived) {
+                            Some(c) => cap = c,
+                            None => { stop_reason = Some("capture_fail"); break; }
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        println!("✗ 大脑失联: {e}");
+                        stop_reason = Some("model_fail");
+                        break;
+                    }
                 }
             }
         }
