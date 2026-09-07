@@ -1,2 +1,3 @@
 {"v":1}
 {"from":"OH输入冒烟","r":"lesson","scope":"global","t":"对同一坐标连续重复tap约3次会被系统rejected;一旦收到rejected必须换目标或用back/scroll离开当前界面,不要原点重试。"}
+{"from":"calculator_e2e","r":"lesson","scope":"global","t":"弹窗×按钮若反复tap被ban,先back退出当前页/桌面再launch目标应用重进,不要在同一坐标原点重试。"}
