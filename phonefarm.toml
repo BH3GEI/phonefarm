@@ -173,7 +173,22 @@ output = "stream"
 
 # ══════════════════════════════════════════════════════════════
 # 模型服务(当前二进制即读此表)
-# 按序排布: 默认优先走零成本通道,失败后按序 failover 降级
+#
+# 排序原则 = 单位任务的真实代价, 不是标价, 也不是端点探活延迟。
+# 必须用"真实截图 + 真实提示词"的同口径实测排序: /v1/models 探活快, 不代表
+# 带图推理快(硅基流动探活 0.24s, 实际带图 36s)。
+#
+# 2026-09-07 本机同口径实测(60KB 截图 + 单轮视觉问答, 各 3 次):
+#   glm-5.3-flash              2.9-4.5s   3/3   计划质量差: 8 步任务的分批顺序会错乱
+#   openrouter minimax-m3:free 8.3-28s    2/3   计划质量好: 能正确拆成 [1,2,8,+][2,5,6,=]
+#   siliconflow Qwen3-VL-8B    36-37s     2/3   偏慢, 仅作后备
+#
+# 故以"计划正确"为首要指标: minimax 打头(唯一跑通过整局的模型), glm-flash 紧随
+# 作为快速兜底(它出错但不卡住, 由 runtime 的驳回与复核机制纠偏)。
+#
+# 注意: PaddleOCR-VL 一类纯 OCR 模型不能进本表。它只提取文字、产不出 act 记录,
+# 排在链上会每步白费一次调用("回复不含act记录,换下一家")。OCR 走 --perceive ocr
+# 感知通道, 不是决策通道。
 # ══════════════════════════════════════════════════════════════
 
 [[providers]]
@@ -187,24 +202,25 @@ timeout_s = 45
 coord_norm = 1000
 
 [[providers]]
+name = "glm-53-flash"
+url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+model = "glm-5.3-flash"
+key_env = "GLM_KEY"
+direct = true
+vision = true
+timeout_s = 30
+thinking_disable = true
+coord_norm = 1000
+
+[[providers]]
 name = "openrouter-free"
 url = "https://openrouter.ai/api/v1/chat/completions"
 model = "openrouter/free"
 key_env = "OPENROUTER_KEY"
 direct = true
 vision = true
-timeout_s = 45
+timeout_s = 30
 coord_norm = 1000
-
-# [[providers]]
-# name = "siliconflow-ocr"
-# url = "https://api.siliconflow.cn/v1/chat/completions"
-# model = "PaddlePaddle/PaddleOCR-VL-1.5"
-# key_env = "SILICONFLOW_KEY"
-# direct = true
-# vision = true
-# timeout_s = 45
-# coord_norm = 1000
 
 [[providers]]
 name = "siliconflow-qwen3-vl"
@@ -214,17 +230,6 @@ key_env = "SILICONFLOW_KEY"
 direct = true
 vision = true
 timeout_s = 45
-coord_norm = 1000
-
-[[providers]]
-name = "glm-53-flash"
-url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
-model = "glm-5.3-flash"
-key_env = "GLM_KEY"
-direct = true
-vision = true
-timeout_s = 45
-thinking_disable = true
 coord_norm = 1000
 
 [[providers]]

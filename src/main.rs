@@ -1,5 +1,5 @@
 //! phonefarm v0.2 — 记录契约 v1 运行时
-//! 用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] "<目标>"
+//! 用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--max-steps N] [--app <包名>] "<目标>"
 //!       phonefarm devices
 //! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
@@ -106,7 +106,7 @@ impl Config {
 }
 
 const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
-跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--app P] [--assert \"词1,词2\"] [--perceive ocr] \"<目标>\"
+跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--max-steps N] [--app P] [--assert \"词1,词2\"] [--perceive ocr] \"<目标>\"
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
 脚本:  script [--task T] [--serial S] [--app P] [--repeat N] [--settle-ms M] [--no-screen] [--detach] <脚本文件或局ID>
@@ -250,6 +250,9 @@ fn main() {
             let mut task = String::new();
             let mut endless = false;
             let mut budget: u32 = 40;
+            // 步数上限的按局覆盖: 需要多步确定性输入的任务(如逐位敲键盘)
+            // 步数下限远高于常规导航类任务, 不该被全局默认值一刀切。
+            let mut max_steps_override: Option<u32> = None;
             let mut app: Option<String> = None;
             let mut asserts: Vec<String> = Vec::new();
             let mut detach = false;
@@ -263,6 +266,7 @@ fn main() {
                     "--detach" => detach = true,
                     "--freeze-on-done" => freeze_on_done = true,
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
+                    "--max-steps" => max_steps_override = it.next().and_then(|v| v.parse().ok()),
                     "--app" => app = it.next().cloned(),
                     "--perceive" => { if let Some(v) = it.next() { if v.eq_ignore_ascii_case("ocr") { std::env::set_var("PF_PERCEIVE", "ocr"); } } }
                     "--assert" => {
@@ -278,17 +282,24 @@ fn main() {
                 }
             }
             if goal.is_empty() || task.is_empty() {
-                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--app <包名>] [--assert \"词1,词2\"] [--freeze-on-done] [--perceive ocr] \"<目标>\"");
+                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--max-steps N] [--app <包名>] [--assert \"词1,词2\"] [--freeze-on-done] [--perceive ocr] \"<目标>\"");
                 std::process::exit(2);
             }
             let cfg_text = match std::fs::read_to_string("phonefarm.toml") {
                 Ok(s) => s,
                 Err(e) => { eprintln!("读不到 phonefarm.toml: {e}"); std::process::exit(2); }
             };
-            let cfg: Config = match toml::from_str(&cfg_text) {
+            let mut cfg: Config = match toml::from_str(&cfg_text) {
                 Ok(c) => c,
                 Err(e) => { eprintln!("phonefarm.toml 解析失败: {e}"); std::process::exit(2); }
             };
+            if let Some(ms) = max_steps_override {
+                if ms == 0 {
+                    eprintln!("--max-steps 需为正整数");
+                    std::process::exit(2);
+                }
+                cfg.max_steps = ms;
+            }
             if !cfg.prompts.contains_key("step") {
                 eprintln!("phonefarm.toml 缺 [prompts].step");
                 std::process::exit(2);

@@ -2,27 +2,45 @@
   "edges": [
     {
       "fail": 0,
+      "from": 2,
+      "label": "点[接受]",
+      "n": 5,
+      "pure": 1.0,
+      "ripe": true,
+      "to": 0
+    },
+    {
+      "fail": 0,
       "from": 0,
       "label": "点[+]",
-      "n": 1,
+      "n": 9,
       "pure": 1.0,
-      "ripe": false,
+      "ripe": true,
       "to": 0
     },
     {
       "fail": 0,
       "from": 0,
       "label": "点[1]",
-      "n": 1,
+      "n": 8,
       "pure": 1.0,
-      "ripe": false,
+      "ripe": true,
       "to": 0
     },
     {
       "fail": 0,
       "from": 0,
       "label": "点[2]",
-      "n": 2,
+      "n": 11,
+      "pure": 1.0,
+      "ripe": true,
+      "to": 0
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "点[3]",
+      "n": 1,
       "pure": 1.0,
       "ripe": false,
       "to": 0
@@ -31,7 +49,7 @@
       "fail": 0,
       "from": 0,
       "label": "点[5]",
-      "n": 1,
+      "n": 2,
       "pure": 1.0,
       "ripe": false,
       "to": 0
@@ -40,15 +58,33 @@
       "fail": 0,
       "from": 0,
       "label": "点[6]",
-      "n": 1,
+      "n": 6,
       "pure": 1.0,
-      "ripe": false,
+      "ripe": true,
       "to": 0
     },
     {
       "fail": 0,
       "from": 0,
       "label": "点[8]",
+      "n": 7,
+      "pure": 1.0,
+      "ripe": true,
+      "to": 0
+    },
+    {
+      "fail": 2,
+      "from": 0,
+      "label": "点[AC]",
+      "n": 4,
+      "pure": 1.0,
+      "ripe": true,
+      "to": 0
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "点图标[退格删除键]",
       "n": 1,
       "pure": 1.0,
       "ripe": false,
@@ -67,14 +103,23 @@
       "fail": 0,
       "from": 1,
       "label": "launch",
-      "n": 3,
-      "pure": 1.0,
-      "ripe": true,
-      "to": 0
+      "n": 7,
+      "pure": 0.57,
+      "ripe": false,
+      "to": 2
     }
   ],
-  "orphan_screens": 2,
+  "orphan_screens": 0,
   "pages": [
+    {
+      "core": [
+        "拒绝",
+        "接受"
+      ],
+      "id": 2,
+      "name": "拒绝/接受",
+      "visits": 6
+    },
     {
       "core": [
         "%",
@@ -102,7 +147,7 @@
       ],
       "id": 0,
       "name": "%/+/-/.",
-      "visits": 27
+      "visits": 79
     },
     {
       "core": [
@@ -140,10 +185,10 @@
       ],
       "id": 1,
       "name": "AI翻译/Magisk/主屏幕/卡包",
-      "visits": 6
+      "visits": 10
     }
   ],
-  "steps_total": 35,
+  "steps_total": 95,
   "task": "./tasks/calculator_e2e",
   "v": 1
 }

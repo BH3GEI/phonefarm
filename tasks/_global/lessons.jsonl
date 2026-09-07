@@ -1,3 +1,5 @@
 {"v":1}
 {"from":"OH输入冒烟","r":"lesson","scope":"global","t":"对同一坐标连续重复tap约3次会被系统rejected;一旦收到rejected必须换目标或用back/scroll离开当前界面,不要原点重试。"}
 {"from":"calculator_e2e","r":"lesson","scope":"global","t":"弹窗×按钮若反复tap被ban,先back退出当前页/桌面再launch目标应用重进,不要在同一坐标原点重试。"}
+{"from":"calculator_e2e","r":"lesson","scope":"global","t":"输入数字时,若屏幕显示内容与预期不符,立即停止输入并检查屏幕显示的数字是否正确,不要继续按后续数字键;本局屏幕显示1+26而非1+28,但未检查就继续按8,导致计算错误"}
+{"from":"calculator_e2e","r":"lesson","scope":"global","t":"同一坐标连点≥2次且无任何屏幕变化时,视为无效控件或坐标,立即换坐标或停止操作,不要继续原点重试"}
