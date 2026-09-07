@@ -173,27 +173,47 @@ output = "stream"
 
 # ══════════════════════════════════════════════════════════════
 # 模型服务(当前二进制即读此表)
+# 按序排布: 默认优先走零成本通道,失败后按序 failover 降级
 # ══════════════════════════════════════════════════════════════
 
 [[providers]]
-name = "kimi-k27"
-url = "https://api.kimi.com/coding/v1/chat/completions"
-model = "kimi-k2.7-code"
-key_env = "KIMI_KEY"
-direct = true
-vision = true
-timeout_s = 60
-coord_norm = 1000
-
-[[providers]]
-name = "glm-vision"
-url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
-model = "glm-4.6v"
-key_env = "GLM_KEY"
+name = "openrouter-minimax"
+url = "https://openrouter.ai/api/v1/chat/completions"
+model = "minimax/minimax-m3:free"
+key_env = "OPENROUTER_KEY"
 direct = true
 vision = true
 timeout_s = 45
-thinking_disable = true
+coord_norm = 1000
+
+[[providers]]
+name = "openrouter-free"
+url = "https://openrouter.ai/api/v1/chat/completions"
+model = "openrouter/free"
+key_env = "OPENROUTER_KEY"
+direct = true
+vision = true
+timeout_s = 45
+coord_norm = 1000
+
+# [[providers]]
+# name = "siliconflow-ocr"
+# url = "https://api.siliconflow.cn/v1/chat/completions"
+# model = "PaddlePaddle/PaddleOCR-VL-1.5"
+# key_env = "SILICONFLOW_KEY"
+# direct = true
+# vision = true
+# timeout_s = 45
+# coord_norm = 1000
+
+[[providers]]
+name = "siliconflow-qwen3-vl"
+url = "https://api.siliconflow.cn/v1/chat/completions"
+model = "Qwen/Qwen3-VL-8B-Instruct"
+key_env = "SILICONFLOW_KEY"
+direct = true
+vision = true
+timeout_s = 45
 coord_norm = 1000
 
 [[providers]]
@@ -208,6 +228,27 @@ thinking_disable = true
 coord_norm = 1000
 
 [[providers]]
+name = "glm-vision"
+url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+model = "glm-4.6v"
+key_env = "GLM_KEY"
+direct = true
+vision = true
+timeout_s = 45
+thinking_disable = true
+coord_norm = 1000
+
+[[providers]]
+name = "kimi-k27"
+url = "https://api.kimi.com/coding/v1/chat/completions"
+model = "kimi-k2.7-code"
+key_env = "KIMI_KEY"
+direct = true
+vision = true
+timeout_s = 60
+coord_norm = 1000
+
+[[providers]]
 name = "glm-47-text"
 url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
 model = "glm-4.7"
@@ -217,12 +258,3 @@ vision = false
 timeout_s = 35
 thinking_disable = true
 
-[[providers]]
-name = "empero"
-url = "https://free.empero.org/v1/chat/completions"
-model = "Qwen/Qwen3.8-Flash-Next-FP8"
-key_env = "EMPERO_KEY"
-vision = true
-timeout_s = 45
-coord_norm = 1000
-extra = { chat_template_kwargs = { enable_thinking = false } }

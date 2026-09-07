@@ -119,6 +119,7 @@ impl Brain {
                     Ok(k) if !k.is_empty() => k,
                     _ => continue,
                 };
+                println!("      (请求决策: {})", p.name);
                 let mut b = base.clone();
                 b["model"] = serde_json::json!(p.model);
                 if p.thinking_disable {
@@ -187,8 +188,11 @@ impl Brain {
         if resp["error"]["code"].as_str() == Some("1301") || resp.to_string().contains("contentFilter") {
             return Err("内容过滤1301:输入被安全审核拒绝".into());
         }
-        let content = resp["choices"][0]["message"]["content"]
+        let msg = &resp["choices"][0]["message"];
+        let content = msg["content"]
             .as_str()
+            .or_else(|| msg["reasoning_content"].as_str())
+            .or_else(|| msg["reasoning"].as_str())
             .ok_or_else(|| format!("无content: {}", clip(&resp.to_string(), 150)))?;
         if content.trim().is_empty() {
             return Err("空content".into());
@@ -197,3 +201,69 @@ impl Brain {
         Ok((content.to_string(), tok))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_openrouter_minimax_call() {
+        if std::env::var("OPENROUTER_KEY").unwrap_or_default().is_empty() {
+            return;
+        }
+        let cfg = ProviderCfg {
+            name: "openrouter-minimax".into(),
+            url: "https://openrouter.ai/api/v1/chat/completions".into(),
+            model: "minimax/minimax-m3:free".into(),
+            key_env: "OPENROUTER_KEY".into(),
+            vision: true,
+            timeout_s: Some(30),
+            thinking_disable: false,
+            coord_norm: Some(1000),
+            extra: None,
+            direct: true,
+        };
+        let mut brain = Brain::new(vec![cfg], "/tmp".into());
+        let img_path = "/tmp/test_screen.jpg";
+        if !std::path::Path::new(img_path).exists() {
+            let png_bytes: [u8; 67] = [
+                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+                0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+                0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+            ];
+            std::fs::write(img_path, png_bytes).unwrap();
+        }
+        let res = brain.call("You are a helpful assistant.", "Describe this image in 5 words.", &[img_path], 30, 0);
+        assert!(res.is_ok(), "Call failed: {:?}", res.err());
+        let out = res.unwrap();
+        println!("Brain call output: {}, by: {}", out.text, out.by);
+    }
+
+    #[test]
+    fn test_siliconflow_call() {
+        if std::env::var("SILICONFLOW_KEY").unwrap_or_default().is_empty() {
+            return;
+        }
+        let cfg = ProviderCfg {
+            name: "siliconflow-qwen3-vl".into(),
+            url: "https://api.siliconflow.cn/v1/chat/completions".into(),
+            model: "Qwen/Qwen3-VL-8B-Instruct".into(),
+            key_env: "SILICONFLOW_KEY".into(),
+            vision: true,
+            timeout_s: Some(30),
+            thinking_disable: false,
+            coord_norm: Some(1000),
+            extra: None,
+            direct: true,
+        };
+        let mut brain = Brain::new(vec![cfg], "/tmp".into());
+        let img_path = "/tmp/test_screen.jpg";
+        let res = brain.call("You are a helpful assistant.", "Describe this image in 5 words.", &[img_path], 30, 0);
+        assert!(res.is_ok(), "Call failed: {:?}", res.err());
+        let out = res.unwrap();
+        println!("Siliconflow output: {}, by: {}", out.text, out.by);
+    }
+}
+
