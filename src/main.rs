@@ -9,7 +9,7 @@ mod parallel;
 mod device;
 mod fold;
 mod gamepad;
-mod quest;
+mod plugins;
 mod runtime;
 mod script;
 mod serve;
@@ -110,7 +110,8 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
 脚本:  script [--task T] [--serial S] [--app P] [--repeat N] [--settle-ms M] [--no-screen] [--detach] <脚本文件或局ID>
-任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神剧情跳过与任务跑图Agent)
+插件:  plugins                                   (列出已登记的专用场景插件)
+任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神场景插件的独立长跑Agent)
 设备:  devices | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
 后台:  run/benchmark/script 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
@@ -215,6 +216,14 @@ fn main() {
         Some("parallel") => {
             // 多设备并行(PARALLEL_SPEC): 自进程 fan-out,行级设备前缀,任一失败整体非0
             std::process::exit(parallel::run_parallel(&args[1..]));
+        }
+        Some("plugins") => {
+            // 专用场景插件清单。核心不认识具体应用,这里列的全部来自 plugins 层登记。
+            let names = plugins::builtin_names();
+            println!("已登记场景插件 {} 个:", names.len());
+            for n in names {
+                println!("  {n}");
+            }
         }
         Some("devices") => {
             // 两族并列,各自 best-effort(某族工具不在 PATH 就跳过):
@@ -527,14 +536,14 @@ fn main() {
             let tmp = std::env::temp_dir().join(format!("phonefarm-quest-{}", std::process::id())).to_string_lossy().to_string();
             let _ = std::fs::create_dir_all(&tmp);
             let phone = device::Device::new(serial.clone(), tmp);
-            let cfg = quest::QuestConfig {
+            let cfg = plugins::genshin::QuestConfig {
                 mode,
                 serial,
                 max_seconds: max_sec,
                 auto_choice: true,
                 auto_shutdown,
             };
-            let mut agent = quest::GenshinQuestAgent::new(&phone, cfg);
+            let mut agent = plugins::genshin::GenshinQuestAgent::new(&phone, cfg);
             match agent.run_loop() {
                 Ok(_) => std::process::exit(0),
                 Err(e) => {

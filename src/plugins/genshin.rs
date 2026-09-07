@@ -1,4 +1,8 @@
-//! 原神剧情推进与任务跑图自主 Agent (Genshin Autonomous Story & Quest Agent)
+//! 原神场景插件 (Genshin Scenario Plugin)
+//!
+//! 本模块属于专用场景层, 是 `universal::ScenarioPlugin` 的一个实现。
+//! 核心引擎不认识原神: 包名、界面特征与操作序列等一切专用知识都只在本插件内生效,
+//! 卸下本插件后核心行为不受任何影响。
 //!
 //! 核心设计理念：
 //! 1. 代码是给人看的，只是机器恰好可以运行 (高可读性、模块化状态机与完备注释)。
@@ -17,6 +21,10 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use image::{DynamicImage, GenericImageView};
 use crate::device::Device;
+use crate::universal::{FrameContext, InputMode, ScenarioPlugin, UniversalAction};
+
+/// 本插件负责的应用包名。核心引擎不持有、也不得引用此常量。
+pub const PACKAGE: &str = "com.miHoYo.Yuanshen";
 
 /// 原神游戏画面状态分类
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,9 +111,9 @@ impl<'a> GenshinQuestAgent<'a> {
 
         // 检查原神进程是否在前台运行
         let window_info = self.device.shell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'", 3000);
-        if !window_info.contains("com.miHoYo.Yuanshen") {
+        if !window_info.contains(PACKAGE) {
             println!("[生命周期] 原神未在前台运行，正在执行冷启动...");
-            self.device.shell("monkey -p com.miHoYo.Yuanshen -c android.intent.category.LAUNCHER 1", 5000);
+            self.device.shell(&format!("monkey -p {PACKAGE} -c android.intent.category.LAUNCHER 1"), 5000);
             self.wait_until_in_world()?;
         } else {
             println!("[生命周期] 原神已在前台运行，检查当前画面状态...");
@@ -162,6 +170,21 @@ impl<'a> GenshinQuestAgent<'a> {
 
     /// 2. 视觉状态感知：从截屏图像中抽取 UI 特征并分类当前游戏所处状态
     pub fn detect_state(&self, img: &DynamicImage) -> (GenshinState, Option<f32>) {
+        classify_state(img)
+    }
+}
+
+/// 纯感知函数: 仅凭一帧画面判定原神所处状态, 不依赖设备与可变状态,
+/// 因而可同时服务于独立 Agent 循环与 `ScenarioPlugin` 的单帧决策。
+pub fn classify_state(img: &DynamicImage) -> (GenshinState, Option<f32>) {
+    GenshinPerception::classify(img)
+}
+
+/// 感知实现体 (无状态)
+struct GenshinPerception;
+
+impl GenshinPerception {
+    fn classify(img: &DynamicImage) -> (GenshinState, Option<f32>) {
         let (w, h) = img.dimensions();
         if w < 100 || h < 100 {
             return (GenshinState::OpenWorldExplore, None);
@@ -185,8 +208,8 @@ impl<'a> GenshinQuestAgent<'a> {
         // 检查标题界面特征：中央门扉光效与天空岛背景
         // 标题界面通常上部明亮天蓝/白云，中下部有"点击进入游戏"
         // 并且此时绝对没有小地图 (左上角) 和技能栏 (右下角)
-        let top_left_minimap = self.check_minimap_active(img, w, h);
-        let combat_ui_active = self.check_combat_ui_active(img, w, h);
+        let top_left_minimap = Self::check_minimap_active(img, w, h);
+        let combat_ui_active = Self::check_combat_ui_active(img, w, h);
 
         if !top_left_minimap && !combat_ui_active {
             // 左上角没有小地图且右下角没有技能栏，判断是否在标题界面
@@ -303,7 +326,7 @@ impl<'a> GenshinQuestAgent<'a> {
     }
 
     /// 检测右下角战斗技能栏是否处于激活状态
-    fn check_combat_ui_active(&self, img: &DynamicImage, w: u32, h: u32) -> bool {
+    fn check_combat_ui_active(img: &DynamicImage, w: u32, h: u32) -> bool {
         let mut combat_white = 0;
         let mut combat_total = 0;
         let x_start = (w as f32 * 0.82) as u32;
@@ -324,7 +347,7 @@ impl<'a> GenshinQuestAgent<'a> {
     }
 
     /// 检测左上角小地图区域是否处于激活状态
-    fn check_minimap_active(&self, img: &DynamicImage, w: u32, h: u32) -> bool {
+    fn check_minimap_active(img: &DynamicImage, w: u32, h: u32) -> bool {
         let mut border_pixels = 0;
         let mut total = 0;
         let x_start = (w as f32 * 0.03) as u32;
@@ -345,6 +368,9 @@ impl<'a> GenshinQuestAgent<'a> {
         ratio > 0.02
     }
 
+}
+
+impl<'a> GenshinQuestAgent<'a> {
     /// 3. 单步决策与手柄动作执行
     pub fn step(&mut self) -> Result<(), String> {
         let Some(img) = self.device.screen_image() else {
@@ -457,7 +483,7 @@ impl<'a> GenshinQuestAgent<'a> {
         self.device.shell("svc power stayon false", 3000);
 
         println!("[生命周期] 强制退出原神进程 (杜绝游戏息屏挂机与后台消耗)...");
-        self.device.shell("am force-stop com.miHoYo.Yuanshen", 5000);
+        self.device.shell(&format!("am force-stop {PACKAGE}"), 5000);
         sleep(Duration::from_millis(800));
 
         println!("[生命周期] 执行幂等锁屏休眠 (KEYCODE_SLEEP 223)...");
@@ -466,7 +492,7 @@ impl<'a> GenshinQuestAgent<'a> {
 
     /// 只读性能遥测采集 (内存与温度)
     pub fn sample_telemetry(&self) -> (u64, f32) {
-        let mem_str = self.device.shell("dumpsys meminfo com.miHoYo.Yuanshen | grep -E 'TOTAL PSS:|TOTAL:'", 2000);
+        let mem_str = self.device.shell(&format!("dumpsys meminfo {PACKAGE} | grep -E 'TOTAL PSS:|TOTAL:'"), 2000);
         let pss_kb = mem_str.split_whitespace().nth(2).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
         let bat_str = self.device.shell("dumpsys battery | grep temperature", 2000);
         let temp_c = bat_str.split_whitespace().nth(1).and_then(|v| v.parse::<f32>().ok()).map(|t| t / 10.0).unwrap_or(0.0);
@@ -536,5 +562,107 @@ impl<'a> GenshinQuestAgent<'a> {
         }
 
         Ok(())
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// ScenarioPlugin 实现: 让原神以插件身份接入通用引擎的优先级阶梯
+// ══════════════════════════════════════════════════════════════
+
+/// 插件名 (进日志与遥测归因)
+pub const NAME: &str = "genshin";
+
+/// 原神场景插件
+///
+/// 与 `GenshinQuestAgent` 的分工:
+/// - `GenshinQuestAgent` 是独立长跑 Agent, 自持循环与生命周期, 供 `phonefarm quest` 使用;
+/// - `GenshinPlugin` 是单帧决策体, 挂进通用引擎, 供 `phonefarm run` 在遇到原神画面时复用同一套感知。
+///
+/// 两者共享纯感知函数 `classify_state`, 不重复实现界面判定。
+pub struct GenshinPlugin {
+    /// 连续判定为剧情态的帧数 (用于节流日志与后续策略扩展)
+    consecutive_dialogue_ticks: u32,
+}
+
+impl GenshinPlugin {
+    pub fn new() -> Self {
+        Self { consecutive_dialogue_ticks: 0 }
+    }
+}
+
+impl Default for GenshinPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScenarioPlugin for GenshinPlugin {
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn matches(&self, package: &str) -> bool {
+        package == PACKAGE
+    }
+
+    /// 原神是纯自绘 3D 画面, 触屏在手柄接入后会被游戏屏蔽, 故走手柄链路。
+    fn input_mode(&self) -> InputMode {
+        InputMode::GamepadOnly
+    }
+
+    /// 剧情态与标题门在通用算子之前处理: 这两类画面的 UI 树为空,
+    /// 通用弹窗/对白算子无从判定, 必须由本插件的像素感知接管。
+    fn intercept(&mut self, ctx: &FrameContext) -> Option<UniversalAction> {
+        let img = ctx.img?;
+        let (state, _marker_x) = classify_state(img);
+        match state {
+            GenshinState::TitleScreen => {
+                self.consecutive_dialogue_ticks = 0;
+                Some(UniversalAction::GamepadButton { button: "a".into(), hold_ms: 150 })
+            }
+            GenshinState::DialogueText | GenshinState::DialogueChoice => {
+                self.consecutive_dialogue_ticks += 1;
+                Some(UniversalAction::GamepadButton { button: "a".into(), hold_ms: 120 })
+            }
+            GenshinState::InteractionPrompt => {
+                self.consecutive_dialogue_ticks = 0;
+                Some(UniversalAction::GamepadButton { button: "x".into(), hold_ms: 120 })
+            }
+            GenshinState::LoadingOrCutscene => {
+                self.consecutive_dialogue_ticks = 0;
+                Some(UniversalAction::Wait { ms: 800 })
+            }
+            // 大世界探索与攀爬交由通用导航算子与上层决策处理
+            GenshinState::OpenWorldExplore | GenshinState::Climbing => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+
+    #[test]
+    fn test_plugin_only_claims_its_own_package() {
+        let p = GenshinPlugin::new();
+        assert!(p.matches(PACKAGE));
+        assert!(!p.matches("com.android.calculator2"));
+        assert!(!p.matches(""));
+    }
+
+    #[test]
+    fn test_plugin_uses_gamepad_input_mode() {
+        assert_eq!(GenshinPlugin::new().input_mode(), InputMode::GamepadOnly);
+    }
+
+    #[test]
+    fn test_plugin_yields_without_image() {
+        // 无截图时插件不得臆断画面状态, 必须放行
+        let mut p = GenshinPlugin::new();
+        let ctx = FrameContext {
+            package: PACKAGE, activity: "", elements: &[], img: None,
+            screen_w: 1216, screen_h: 2688, step: 1, last_rejected: false,
+        };
+        assert_eq!(p.intercept(&ctx), None);
     }
 }

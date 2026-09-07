@@ -353,7 +353,7 @@ mod tests {
         let mut engine = UniversalEngine::new(false);
         let nodes = vec![Node { t: "商品详情".into(), b: [100, 200, 400, 300] }];
         let ctx = FrameContext {
-            package: "com.miHoYo.Yuanshen", activity: "", elements: &nodes, img: None,
+            package: "com.example.some.specific.app", activity: "", elements: &nodes, img: None,
             screen_w: 1080, screen_h: 2400, step: 1, last_rejected: false,
         };
         // 核心不认识任何具体包名, 一律放行给上层

@@ -1568,6 +1568,8 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let phone = Device::new(serial, tmp.clone());
     let mut brain = Brain::new(cfg.providers.clone(), tmp.clone());
     let mut universal_engine = crate::universal::UniversalEngine::new(false);
+    // 专用场景一律插件化: 核心只调用登记入口, 不认识任何具体应用
+    crate::plugins::register_builtin(&mut universal_engine);
     let (realw, realh) = phone.size();
 
     // 保证运行期间屏幕处于唤醒与常亮状态 (幂等唤醒，避免进入 Dozing)
@@ -1850,8 +1852,21 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             let _ = fs::OpenOptions::new().create(true).append(true)
                 .open(&ctx_path)
                 .map(|mut f| writeln!(f, "\n══ 步#{n} 决策上下文 ══\n{user}\n"));
-            // 优先由通用状态机规则拦截 (弹窗 / 对白跳过)，0 Token 极速推进
-            let u_decision = universal_engine.evaluate(&cap.els, None, realw.max(1) as u32, realh.max(1) as u32);
+            // 优先由通用状态机规则与场景插件拦截，0 Token 极速推进
+            if let Some(active) = universal_engine.activate_plugin_for(&cap.pkg) {
+                println!("      [UniversalEngine] 场景插件已激活: {active} (前台 {})", cap.pkg);
+            }
+            let u_ctx = crate::universal::FrameContext {
+                package: &cap.pkg,
+                activity: &cap.activity,
+                elements: &cap.els,
+                img: None,
+                screen_w: realw.max(1) as u32,
+                screen_h: realh.max(1) as u32,
+                step: n,
+                last_rejected: reject_streak > 0,
+            };
+            let u_decision = universal_engine.evaluate_frame(&u_ctx);
             let handled_by_engine = match u_decision {
                 crate::universal::EngineDecision::HandledByPopup { action } => {
                     let act = match action {
@@ -1886,6 +1901,24 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     println!("      [UniversalEngine] 规则接管: 剧情对白快进 -> 执行 {}", act.a);
                     queue = vec![act].into();
                     plan_by = "universal-dialogue".into();
+                    plan_ms = Some(0);
+                    true
+                }
+                crate::universal::EngineDecision::HandledByPlugin { plugin, action } => {
+                    let act = match action {
+                        crate::universal::UniversalAction::Tap { x, y, label } => {
+                            let nx = (x as i64 * NORM / realw.max(1) as i64).clamp(0, NORM);
+                            let ny = (y as i64 * NORM / realh.max(1) as i64).clamp(0, NORM);
+                            ActN { a: "tap".into(), x: Some(nx), y: Some(ny), what: label, ..Default::default() }
+                        }
+                        crate::universal::UniversalAction::Keycode { code: 4, .. } => {
+                            ActN { a: "back".into(), ..Default::default() }
+                        }
+                        _ => ActN { a: "wait".into(), ..Default::default() },
+                    };
+                    println!("      [UniversalEngine] 场景插件 '{plugin}' 接管 -> 执行 {}", act.a);
+                    queue = vec![act].into();
+                    plan_by = format!("plugin-{plugin}");
                     plan_ms = Some(0);
                     true
                 }

@@ -1,6 +1,79 @@
 {
-  "edges": [],
-  "orphan_screens": 4,
+  "edges": [
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "点[+]",
+      "n": 1,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 0
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "点[1]",
+      "n": 1,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 0
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "点[2]",
+      "n": 2,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 0
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "点[5]",
+      "n": 1,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 0
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "点[6]",
+      "n": 1,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 0
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "点[8]",
+      "n": 1,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 0
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "返回",
+      "n": 3,
+      "pure": 1.0,
+      "ripe": true,
+      "to": 1
+    },
+    {
+      "fail": 0,
+      "from": 1,
+      "label": "launch",
+      "n": 3,
+      "pure": 1.0,
+      "ripe": true,
+      "to": 0
+    }
+  ],
+  "orphan_screens": 2,
   "pages": [
     {
       "core": [
@@ -29,10 +102,48 @@
       ],
       "id": 0,
       "name": "%/+/-/.",
-      "visits": 11
+      "visits": 27
+    },
+    {
+      "core": [
+        "AI翻译",
+        "Magisk",
+        "主屏幕",
+        "信息",
+        "卡包",
+        "原神",
+        "哔哩哔哩",
+        "国际流量",
+        "备份助手",
+        "天气",
+        "实用工具",
+        "应用中心",
+        "应用建议",
+        "录音机",
+        "指南针",
+        "掌心管家",
+        "文件管理",
+        "智能遥控",
+        "未成年人模式",
+        "浏览器",
+        "用户帮助",
+        "电话",
+        "相机",
+        "红魔商城",
+        "红魔社区",
+        "联系人",
+        "计算器",
+        "记事本",
+        "超能壁纸",
+        "高德地图",
+        "魔姬助手"
+      ],
+      "id": 1,
+      "name": "AI翻译/Magisk/主屏幕/卡包",
+      "visits": 6
     }
   ],
-  "steps_total": 15,
+  "steps_total": 35,
   "task": "./tasks/calculator_e2e",
   "v": 1
 }

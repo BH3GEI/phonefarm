@@ -15,7 +15,7 @@ use crate::device::Device;
 pub enum InputMode {
     /// 纯触控模式 (适用于常规移动 App、纯触屏自绘手游)
     TouchOnly,
-    /// 虚拟手柄模式 (适用于支持 Xbox/HID 手柄的主流游戏，如原神、崩铁等)
+    /// 虚拟手柄模式 (适用于声明支持 Xbox/HID 标准手柄的游戏)
     GamepadOnly,
     /// 混合模式 (优先手柄，界面点击回退至触控)
     Hybrid,
