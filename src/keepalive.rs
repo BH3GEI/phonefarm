@@ -8,11 +8,21 @@
 //!     先前写入——所以 HDC 顺序必须是 wakeup → 上滑解锁 → 等 2s → override 落在最后。
 //!   - OH override 不跨重启/锁屏恢复存活, 每轮巡检必须重放。
 use serde_json::{json, Value};
+use std::io::Write;
 use std::process::Command;
 use std::time::Duration;
 
 const TIMEOUT_NEVER: &str = "2147483647"; // int32 上限; 两族都没有真正的"永不"值
 const TIMEOUT_NEVER_MS: i64 = 2147483647;
+
+/// 输出到 stdout; 消费方提前关管(`| head -1`、宿主终止读取)时安静退出,
+/// 不让 println! 炸 "failed printing to stdout" 的 panic 栈(E2E T6 实测)
+fn emit(text: &str) {
+    let mut out = std::io::stdout().lock();
+    if out.write_all(text.as_bytes()).is_err() || out.flush().is_err() {
+        std::process::exit(0);
+    }
+}
 
 // ══════════════ 参数解析 ══════════════
 
@@ -203,6 +213,14 @@ fn patrol_hdc(r: &mut Report, phone: &crate::device::Device, write: bool) {
             None => r.notes.push("分辨率解析失败,未上滑(不影响后续 override)".into()),
         }
         phone.shell(&format!("power-shell timeout -o {TIMEOUT_NEVER}"), 5000);
+        // 竞态关闭: KeyGuard 的恢复写实测可落在解锁后 3~4s(晚于上面的 override),
+        // 把它冲回基准值。等足窗口回读, 被冲就再压一次——override 必须落在
+        // KeyGuard 最后一次写之后才稳(E2E 日志实证: 解锁:43 → 恢复写:47)
+        std::thread::sleep(Duration::from_secs(2));
+        let pm = phone.shell("hidumper -s PowerManagerService -a -a", 10000);
+        if parse_override_timeout(&pm) != Some(TIMEOUT_NEVER_MS) {
+            phone.shell(&format!("power-shell timeout -o {TIMEOUT_NEVER}"), 5000);
+        }
     }
     let scr = phone.shell("hidumper -s RenderService -a screen", 8000);
     r.screen_on = parse_hdc_power_on(&scr);
@@ -237,16 +255,18 @@ fn once(ka: &KaArgs) -> i32 {
     }
     let all_ok = reports.iter().all(|r| r.ok());
     if ka.json {
-        println!("{}", json!({"ok": all_ok, "readonly": ka.status,
-            "devices": reports.iter().map(|r| r.to_json()).collect::<Vec<_>>()}));
+        emit(&format!("{}\n", json!({"ok": all_ok, "readonly": ka.status,
+            "devices": reports.iter().map(|r| r.to_json()).collect::<Vec<_>>()})));
     } else {
         let yn = |b: Option<bool>| match b { Some(true) => "是", Some(false) => "否", None => "?" };
+        let mut out = String::new();
         for r in &reports {
-            println!("{} {:<26} 在线={} 亮屏={} 不息屏={}{}",
+            out.push_str(&format!("{} {:<26} 在线={} 亮屏={} 不息屏={}{}\n",
                 if r.ok() { "✓" } else { "✗" }, r.serial,
                 if r.online { "是" } else { "否" }, yn(r.screen_on), yn(r.policy_ok),
-                if r.notes.is_empty() { String::new() } else { format!("  ({})", r.notes.join("; ")) });
+                if r.notes.is_empty() { String::new() } else { format!("  ({})", r.notes.join("; ")) }));
         }
+        emit(&out);
     }
     if all_ok { 0 } else { 1 }
 }
@@ -260,7 +280,7 @@ pub fn run_keepalive(args: &[String]) -> i32 {
         let mut cycle = 0u64;
         loop {
             cycle += 1;
-            println!("── keepalive 第{cycle}轮 (每{interval}s, Ctrl+C 退出) ──");
+            emit(&format!("── keepalive 第{cycle}轮 (每{interval}s, Ctrl+C 退出) ──\n"));
             let _ = once(&ka); // 单轮失败不退出: 守护的职责是继续盯着
             std::thread::sleep(Duration::from_secs(interval));
         }

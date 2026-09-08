@@ -58,6 +58,7 @@ phonefarm keepalive [--serial S] [--status] [--watch [间隔秒]] [--json]
 | 3 | 解锁 | `uitest uiInput swipe <W/2> <H*0.92> <W/2> <H*0.30>`(底部中点上滑,比例坐标,不写死分辨率) |
 | 4 | 等待 | 2s(KeyGuard 的恢复写发生在解锁后数秒内,实测 3~4s) |
 | 5 | 不息屏 | `power-shell timeout -o 2147483647`(int32 上限;重启/锁屏恢复后失效,故每轮必重放) |
+| 6 | 竞态关闭 | 再等 2s 回读 OverrideTimeout,被 KeyGuard 恢复写(实测可落在解锁后 3~4s)冲掉就再压一次——override 必须落在 KeyGuard 最后一次写之后才稳 |
 
 校验: RenderService `powerStatus=POWER_STATUS_ON` 且
 PowerManagerService `OverrideTimeout=2147483647ms`。
