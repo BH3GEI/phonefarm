@@ -42,6 +42,11 @@ cd src && cargo build --release && cp target/release/phonefarm ..
 ./phonefarm devices                        # 列出当前连接的 adb 与 hdc 设备
 ./phonefarm run --serial hdc:<serial_id> --task OH设置冒烟 --budget-calls 30 "<目标>"
 
+# 5.1 设备保活巡检（农场级：唤醒+解锁+不息屏，adb/hdc 两族并列，规格见 docs/SPEC_KEEPALIVE.md）
+./phonefarm keepalive                      # 对全部在线设备巡检一轮
+./phonefarm keepalive --status             # 只读报告：连接/亮屏/不息屏是否生效
+./phonefarm keepalive --watch              # 常驻守护（默认 300s 一轮，新上线设备自动纳入）
+
 # 6. 多设备并行（每设备独立一局，stdout 逐行带 [设备] 前缀，任一失败整体退出码非 0）
 ./phonefarm parallel --job "任务A|目标A|emulator-5554|com.pkg" --job "任务B|目标B|hdc:<key>" --budget-calls 60
 # 同一任务名派给多台设备会被拒绝（经验库 lessons/tree 会互踩）——用不同任务名分开，合并语义留后续
