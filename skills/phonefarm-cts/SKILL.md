@@ -102,6 +102,21 @@ platform's backgrounding and poll the out dir:
   `recovery == "VERIFIED"`)
 - JUnit XML files import directly into CI test reporting
 
+## Reconciliation entries (never silently absent)
+
+Cases must never vanish without a record. The harness synthesizes:
+
+- In-flight case at watchdog kill → `TIMEOUT`; at process crash / broken pipe →
+  `ENV_BLOCKED` with the real `Class#method` (profile reconciliation matches it).
+- `numtests` shortfall on whole-module runs → one `NOT_RUN` entry
+  `(runner)#unaccounted_cases_xN`.
+- Runner-level errors (package not installed, bad component), even when the
+  device drops the `Error=` line — `ENV_BLOCKED` entry `(runner)#runner_error`
+  with the raw message. Zero-case silence is never a pass.
+- `--resume`: done modules are skipped **and their previous report is carried
+  forward** into the new summary (evidence is preserved, totals stay honest);
+  failed modules rerun automatically.
+
 ## Claim discipline (matches CTS_FAST_TESTING.md §4)
 
 - Runner errors, missing cases, zero-case runs, and skips must NOT be

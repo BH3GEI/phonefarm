@@ -34,6 +34,17 @@ A2OH 侧没有 cts-tradefed 基础设施(无 adb/fastboot、无完整 system ser
 
 跳过、零用例、运行器错误**不得计为 PASS**。recovery 为 `PENDING` 的批次不得宣称完成。
 
+### 收尾对账(无论一轮以何种方式结束,用例不得凭空消失)
+
+- **在飞用例**: 已开始但从未收官者——看门狗强杀记 `TIMEOUT`;进程崩溃/管道早断记
+  `ENV_BLOCKED`(带真实 Class#method,profile 可按名对账)。
+- **numtests 缺额**(仅整模块轮次): runner 宣称数 > 实际产出数,缺额补记一条
+  `NOT_RUN`(`(runner)#unaccounted_cases_xN`)。切片轮次由 profile 按名对账,不重复记。
+- **runner 级错误**(`STATUS Error=…` 或 stderr `INSTRUMENTATION_FAILED`,如包未安装):
+  零产出时补记 `ENV_BLOCKED`(`(runner)#runner_error`,附原始报错),不得静默零用例。
+- **--resume 续跑**: done 模块跳过且**沿用上一份 summary 的历史报告**计入总账
+  (不会把已跑证据抹成全零);failed 模块自动重跑。
+
 ## 组件
 
 ### instrument 原语(script 动作 & 内部 API)
