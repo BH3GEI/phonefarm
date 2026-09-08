@@ -5,6 +5,7 @@
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod brain;
 mod cli;
+mod keepalive;
 mod parallel;
 mod device;
 mod fold;
@@ -110,7 +111,7 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
 脚本:  script [--task T] [--serial S] [--app P] [--repeat N] [--settle-ms M] [--no-screen] [--detach] <脚本文件或局ID>
 任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神剧情跳过与任务跑图Agent)
-设备:  devices | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
+设备:  devices | keepalive [--status|--watch [秒]] [--serial S] [--json] | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
 后台:  run/benchmark/script 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
@@ -506,6 +507,10 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        Some("keepalive") => {
+            // 农场级设备保活巡检(SPEC_KEEPALIVE): 唤醒+解锁+不息屏, adb/hdc 两族并列
+            std::process::exit(keepalive::run_keepalive(&args[1..]));
         }
         Some("quest") => {
             // 原神自主跑图与剧情过关 Agent (Genshin Quest & Dialogue Agent)
