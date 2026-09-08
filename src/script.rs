@@ -83,6 +83,22 @@ pub struct ScriptStep {
     /// 是否强制采集重量级遥测明细
     #[serde(default)]
     pub heavy: Option<bool>,
+
+    /// instrumentation runner (instrument 动作, CTS Harness)
+    #[serde(default)]
+    pub runner: Option<String>,
+
+    /// Class 或 Class#method 切片 (instrument 动作;缺省=整个 runner)
+    #[serde(default, alias = "method", alias = "test", alias = "case")]
+    pub class_or_method: Option<String>,
+
+    /// 透传 -e key=value 运行器参数 (instrument 动作)
+    #[serde(default)]
+    pub env_args: Option<Vec<String>>,
+
+    /// 静默超时(毫秒): instrument 管道长时间无输出判定锁死;缺省 90s
+    #[serde(default, alias = "idle_ms", alias = "idle_timeout_ms")]
+    pub idle_ms: Option<u64>,
 }
 
 /// 脚本执行配置
@@ -519,6 +535,65 @@ pub fn execute_script(cfg: &ScriptRunConfig) -> Result<ScriptResult, String> {
                     print!(" 手柄巡航走位与视角旋转 (持续 {}ms)", dur);
                     if let Err(e) = phone.gamepad_wander(dur) {
                         eprintln!(" [手柄漫步失败: {e}]");
+                    }
+                }
+                "instrument" | "am_instrument" => {
+                    // CTS Harness 原语: 流式执行 am instrument,双重看门狗,逐用例实时出结果。
+                    // 结果以 hook 记录入账(kind=instrument),show --hooks 可回溯。
+                    match (&step.pkg, &step.runner) {
+                        (Some(pkg), Some(runner)) => {
+                            let env_args: Vec<(String, String)> = step.env_args.clone()
+                                .unwrap_or_default().into_iter()
+                                .filter_map(|kv| kv.split_once('=')
+                                    .map(|(k, v)| (k.to_string(), v.to_string())))
+                                .collect();
+                            let spec = crate::cts::InstrumentSpec {
+                                package: pkg.clone(),
+                                runner: runner.clone(),
+                                class_or_method: step.class_or_method.clone(),
+                                timeout_ms: step.ms.unwrap_or(600_000),
+                                idle_timeout_ms: step.idle_ms.unwrap_or(90_000),
+                                env_args,
+                            };
+                            print!(" instrument {}", spec.package);
+                            if let Some(cm) = &spec.class_or_method {
+                                print!(" -e class {cm}");
+                            }
+                            println!();
+                            let run_dir_c = run_dir.clone();
+                            let mut sink = move |line: &str| {
+                                let p = run_dir_c.join("instrument_stdout.log");
+                                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
+                                    let _ = writeln!(f, "{line}");
+                                }
+                            };
+                            let run = crate::cts::run_instrument(&phone, &spec, &mut sink);
+                            let (mut np, mut nf, mut ne, mut nt, mut nnr) = (0, 0, 0, 0, 0);
+                            for c in &run.cases {
+                                match c.verdict {
+                                    crate::cts::CaseVerdict::PASS => np += 1,
+                                    crate::cts::CaseVerdict::ASSERTION_FAIL => nf += 1,
+                                    crate::cts::CaseVerdict::ENV_BLOCKED => ne += 1,
+                                    crate::cts::CaseVerdict::TIMEOUT => nt += 1,
+                                    crate::cts::CaseVerdict::NOT_RUN => nnr += 1,
+                                }
+                            }
+                            let _ = writeln!(log, "{}", json!({
+                                "r": "hook", "kind": "instrument", "n": step_n,
+                                "package": spec.package, "runner": spec.runner,
+                                "class_or_method": spec.class_or_method,
+                                "run_verdict": run.verdict.as_str(),
+                                "PASS": np, "ASSERTION_FAIL": nf, "ENV_BLOCKED": ne,
+                                "TIMEOUT": nt, "NOT_RUN": nnr,
+                                "process_crashed": run.process_crashed,
+                                "wall_ms": run.wall_ms,
+                            }));
+                            print!(" => {} 用例 PASS{} FAIL{} ENV{} TMO{} NR{}",
+                                run.cases.len(), np, nf, ne, nt, nnr);
+                        }
+                        _ => {
+                            eprintln!("警告: instrument 动作需要 pkg 与 runner 字段 (步 {step_n})");
+                        }
                     }
                 }
                 other => {

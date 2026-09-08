@@ -511,6 +511,24 @@ impl Adb {
         String::from_utf8_lossy(&self.run_timeout(&["shell", cmd], ms)).to_string()
     }
 
+    /// 流式 shell(CTS Harness 用): 拉起长生命周期管道,stdout/stderr 双 pipe 归调用方逐行消费。
+    /// 纯新增通道——既有 run/run_timeout 路径一字不动;看门狗与清理都在调用方(cts.rs)外层。
+    pub fn stream_shell(&self, cmd: &str) -> std::io::Result<std::process::Child> {
+        let mut c = Command::new(&self.bin);
+        if let Some(s) = &self.serial {
+            c.arg("-s").arg(s);
+        }
+        c.arg("shell").arg(cmd)
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+    }
+
+    /// 送文件上设备(CTS 差量部署用);返回设备侧是否出现非空文件
+    pub fn push_file(&self, local: &str, remote: &str) -> bool {
+        self.run_timeout(&["push", local, remote], 120_000);
+        let out = self.run_timeout(&["shell", "stat", "-c", "%s", remote], 5000);
+        String::from_utf8_lossy(&out).trim().parse::<u64>().unwrap_or(0) > 0
+    }
+
     /// 获取或懒加载虚拟手柄控制器会话
     fn get_gamepad(&self) -> Result<std::sync::MutexGuard<'_, Option<crate::gamepad::Gamepad>>, String> {
         let mut guard = self.gamepad.lock().map_err(|e| format!("手柄锁争用失败: {e}"))?;
@@ -972,6 +990,20 @@ impl Hdc {
     pub fn shell(&self, cmd: &str, ms: u64) -> String {
         String::from_utf8_lossy(&self.run_timeout(&["shell", cmd], ms, "cli")).to_string()
     }
+
+    /// 流式 shell(CTS Harness 用): 与 Adb::stream_shell 同契约,hdc 长管道逐行出。
+    pub fn stream_shell(&self, cmd: &str) -> std::io::Result<std::process::Child> {
+        self.base()
+            .arg("shell").arg(cmd)
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+    }
+
+    /// 送文件上设备(CTS 差量部署用): file send 是 hdc 顶层命令
+    pub fn push_file(&self, local: &str, remote: &str) -> bool {
+        self.run_timeout(&["file", "send", local, remote], 120_000, "push");
+        let out = self.run_timeout(&["shell", "stat", "-c", "%s", remote], 5000, "push");
+        String::from_utf8_lossy(&out).trim().parse::<u64>().unwrap_or(0) > 0
+    }
 }
 
 /// 设备后端统一分发。调用方一律持 Device,方法面与 Adb 逐位同构;选择按 serial 前缀:
@@ -1068,6 +1100,18 @@ impl Device {
     }
     pub fn shell(&self, cmd: &str, ms: u64) -> String {
         match self { Device::Adb(d) => d.shell(cmd, ms), Device::Hdc(d) => d.shell(cmd, ms) }
+    }
+    /// 流式 shell(CTS Harness): 长生命周期管道,逐行消费由调用方负责
+    pub fn stream_shell(&self, cmd: &str) -> std::io::Result<std::process::Child> {
+        match self { Device::Adb(d) => d.stream_shell(cmd), Device::Hdc(d) => d.stream_shell(cmd) }
+    }
+    /// 送文件上设备(CTS 差量部署)
+    pub fn push_file(&self, local: &str, remote: &str) -> bool {
+        match self { Device::Adb(d) => d.push_file(local, remote), Device::Hdc(d) => d.push_file(local, remote) }
+    }
+    /// 后端名(CTS 日志通道选择: hdc→hilog, adb→logcat)
+    pub fn backend_name(&self) -> &'static str {
+        match self { Device::Adb(_) => "adb", Device::Hdc(_) => "hdc" }
     }
     pub fn gamepad_press(&self, btn: &str, duration_ms: u64) -> Result<(), String> {
         match self {
@@ -1649,6 +1693,8 @@ mod tests {
 
     // --freeze-on-done 行为单测: 冻结后语义动作(手势/键/force-stop/launch)一律不得下发
     // 任何设备命令(不 spawn 外部进程),只放行观测。对应 AW_RIG_SPEC §1 验收"done 后无 act"。
+    // 仅 unix: 假 adb 靠 sh 脚本 + 文件权限,Windows 无此机制(cfg 修复 Windows cargo test 编译)
+    #[cfg(unix)]
     #[test]
     fn frozen_blocks_device_writes() {
         use std::os::unix::fs::PermissionsExt;

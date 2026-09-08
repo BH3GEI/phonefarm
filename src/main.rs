@@ -5,6 +5,7 @@
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod brain;
 mod cli;
+mod cts;
 mod keepalive;
 mod parallel;
 mod device;
@@ -110,6 +111,9 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
 脚本:  script [--task T] [--serial S] [--app P] [--repeat N] [--settle-ms M] [--no-screen] [--detach] <脚本文件或局ID>
+CTS:   test-batch (--profile P.json | --module pkg/runner | --dir APK目录) [--environment E.json] [--serial S]
+       [--include 正则] [--exclude 正则] [--resume] [--retry N] [--timeout-ms N] [--idle-timeout-ms N]
+       [--heal-script 路径] [--install-cmd '模板{apk}'] [--out 目录]   (A2OH CTS 批量挂机执行器)
 任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神剧情跳过与任务跑图Agent)
 设备:  devices | keepalive [--status|--watch [秒]] [--serial S] [--json] | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
 后台:  run/benchmark/script 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
@@ -511,6 +515,55 @@ fn main() {
         Some("keepalive") => {
             // 农场级设备保活巡检(SPEC_KEEPALIVE): 唤醒+解锁+不息屏, adb/hdc 两族并列
             std::process::exit(keepalive::run_keepalive(&args[1..]));
+        }
+        Some("test-batch") => {
+            // CTS 批量挂机执行器 (CTS Harness Spec): A2OH 桥接环境的 instrument 调度,
+            // 双重看门狗 + 掉线自愈 + Crash Bundle + JUnit/summary 报告。纯增量子命令。
+            let mut cfg = cts::BatchCfg {
+                serial: None,
+                apk_dir: None,
+                modules: Vec::new(),
+                profile: None,
+                environment: None,
+                include: None,
+                exclude: None,
+                resume: false,
+                retry: 0,
+                timeout_ms: 600_000,
+                idle_timeout_ms: 90_000,
+                heal_script: None,
+                install_cmd: None,
+                out_dir: None,
+            };
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--serial" => cfg.serial = it.next().cloned(),
+                    "--dir" => cfg.apk_dir = it.next().cloned(),
+                    "--module" => {
+                        if let Some(m) = it.next() { cfg.modules.push(m.clone()); }
+                    }
+                    "--profile" => cfg.profile = it.next().cloned(),
+                    "--environment" | "--env" => cfg.environment = it.next().cloned(),
+                    "--include" => cfg.include = it.next().cloned(),
+                    "--exclude" => cfg.exclude = it.next().cloned(),
+                    "--resume" => cfg.resume = true,
+                    "--retry" => cfg.retry = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    "--timeout-ms" => cfg.timeout_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(600_000),
+                    "--idle-timeout-ms" => cfg.idle_timeout_ms = it.next().and_then(|v| v.parse().ok()).unwrap_or(90_000),
+                    "--heal-script" => cfg.heal_script = it.next().cloned(),
+                    "--install-cmd" => cfg.install_cmd = it.next().cloned(),
+                    "--out" => cfg.out_dir = it.next().cloned(),
+                    _ => {}
+                }
+            }
+            match cts::run_batch(&cfg) {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("test-batch 失败: {e}");
+                    std::process::exit(2);
+                }
+            }
         }
         Some("quest") => {
             // 原神自主跑图与剧情过关 Agent (Genshin Quest & Dialogue Agent)
