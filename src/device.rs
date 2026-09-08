@@ -1632,8 +1632,13 @@ mod tests {
         let v = adb_search_order(Some("/x/adb"), Some("/Users/u"));
         assert_eq!(v[0], "/x/adb");
         assert_eq!(v[1], "platform-tools/adb");
-        assert_eq!(v[2], "PATH");
-        assert!(v[3].starts_with("/Users/u/Library/Android"));
+        // Windows 经 cfg 多注入 platform-tools/adb.exe,PATH 哨兵绝对下标随之漂移——按相对序断言
+        let pos_path = v.iter().position(|x| x == "PATH").expect("PATH 哨兵必在");
+        assert!(
+            v[1..pos_path].iter().all(|x| x.starts_with("platform-tools/")),
+            "PATH 哨兵前只允许仓库自带 platform-tools 项"
+        );
+        assert!(v[pos_path + 1].starts_with("/Users/u/Library/Android"));
         assert!(v.last().unwrap().contains("homebrew"));
         let v2 = adb_search_order(None, None);
         assert_eq!(v2[0], "platform-tools/adb", "无显式指定时仓库自带最先");
