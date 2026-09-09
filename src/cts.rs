@@ -158,6 +158,10 @@ pub struct InstrumentParser {
     /// 整轮尾部原文(OK (N tests) / FAILURES!!! 等),供报告引用
     tail: Vec<String>,
     crashed: bool,
+    /// runner 宣称的用例总数(numtests 字段,整轮对账用;未播报则为 None)
+    numtests: Option<u32>,
+    /// runner 级错误(INSTRUMENTATION_STATUS: Error=...,组件缺失/参数非法等)
+    runner_error: Option<String>,
 }
 
 impl Default for InstrumentParser {
@@ -177,6 +181,8 @@ impl InstrumentParser {
             cur_start: None,
             tail: Vec::new(),
             crashed: false,
+            numtests: None,
+            runner_error: None,
         }
     }
 
@@ -189,6 +195,11 @@ impl InstrumentParser {
         if l.contains("Process crashed") || l.contains("shortMsg=Process crashed") {
             self.crashed = true;
         }
+        // runner 级失败兜底: 设备侧 stdout 可能因进程死亡竞态丢 Error= 行(实测偶发),
+        // stderr 的 INSTRUMENTATION_FAILED 字样是最后的线索;Error= 字段到达时会覆盖它
+        if l.contains("INSTRUMENTATION_FAILED") && self.runner_error.is_none() {
+            self.runner_error = Some(l.trim().to_string());
+        }
 
         if let Some(rest) = l.strip_prefix("INSTRUMENTATION_STATUS: ") {
             self.cont_key = None;
@@ -197,6 +208,12 @@ impl InstrumentParser {
                 let v = v.to_string();
                 if k == "stream" || k == "stack" {
                     self.cont_key = Some(k.clone());
+                }
+                if k == "numtests" {
+                    self.numtests = v.trim().parse().ok();
+                }
+                if k == "Error" {
+                    self.runner_error = Some(v.clone());
                 }
                 self.fields.insert(k, v);
             }
@@ -300,6 +317,16 @@ impl InstrumentParser {
     /// 进程崩溃标记(桥接层 Native Crash 经由 runner 文本露出)
     pub fn saw_process_crash(&self) -> bool {
         self.crashed
+    }
+
+    /// runner 宣称的用例总数(未播报为 None)
+    pub fn numtests(&self) -> Option<u32> {
+        self.numtests
+    }
+
+    /// runner 级错误(STATUS Error= 字段,如 instrumentation 未安装/组件不存在)
+    pub fn runner_error(&self) -> Option<&str> {
+        self.runner_error.as_deref()
     }
 }
 
@@ -474,29 +501,14 @@ pub fn run_instrument(
 
     let wall_ms = t0.elapsed().as_millis() as u64;
     let crashed = parser.saw_process_crash();
-
-    // 看门狗触发的轮次: 已开始但未收官的用例如实记 TIMEOUT/NOT_RUN
-    if verdict != RunVerdict::Completed {
-        // 本轮所有已产出的用例保留;若有"已开始未结束"的用例,补一条 TIMEOUT
-        let finished_started = cases
-            .iter()
-            .any(|c| c.class_name == parser.cur_class && c.method == parser.cur_method);
-        if !parser.cur_class.is_empty() && !finished_started {
-            cases.push(CaseResult {
-                class_name: parser.cur_class.clone(),
-                method: parser.cur_method.clone(),
-                verdict: CaseVerdict::TIMEOUT,
-                stack: String::new(),
-                stream: format!(
-                    "watchdog {} after {:.1}s",
-                    verdict.as_str(),
-                    wall_ms as f64 / 1000.0
-                ),
-                raw_lines: parser.cur_lines.clone(),
-                duration_ms: wall_ms,
-            });
-        }
-    }
+    reconcile_cases(
+        &mut cases,
+        &parser,
+        &verdict,
+        crashed,
+        spec.class_or_method.is_none(),
+        wall_ms,
+    );
 
     InstrumentRun {
         cases,
@@ -504,6 +516,89 @@ pub fn run_instrument(
         stdout_lines,
         process_crashed: crashed,
         wall_ms,
+    }
+}
+
+/// 收尾对账(纯函数供单测): 无论一轮以何种方式结束,绝不让用例凭空消失。
+/// ① 已开始但从未收官的在飞用例: 看门狗强杀→TIMEOUT;进程崩溃/管道早断→ENV_BLOCKED
+///    (同事契约: 桥崩溃属环境阻塞,且绝不允许"开始后消失"被误记或漏记)。
+/// ② numtests 整轮对账(仅整模块轮次): runner 宣称数 > 实际产出数,缺额记一条
+///    NOT_RUN(未产出不算 PASS)。切片轮次由 profile 按名对账,不在此重复记。
+/// ③ runner 级错误(STATUS Error=...)且零产出: 记 ENV_BLOCKED(未安装/组件不存在
+///    等运行器错误不得静默为零用例)。
+fn reconcile_cases(
+    cases: &mut Vec<CaseResult>,
+    parser: &InstrumentParser,
+    verdict: &RunVerdict,
+    crashed: bool,
+    whole_module: bool,
+    wall_ms: u64,
+) {
+    let finished_started = cases
+        .iter()
+        .any(|c| c.class_name == parser.cur_class && c.method == parser.cur_method);
+    if !parser.cur_class.is_empty() && !finished_started {
+        let (v, stream) = if *verdict != RunVerdict::Completed {
+            (
+                CaseVerdict::TIMEOUT,
+                format!(
+                    "watchdog {} after {:.1}s",
+                    verdict.as_str(),
+                    wall_ms as f64 / 1000.0
+                ),
+            )
+        } else {
+            (
+                CaseVerdict::ENV_BLOCKED,
+                if crashed {
+                    "process crashed: runner 收官时该用例未产出结果".to_string()
+                } else {
+                    "runner 管道中断: 已开始用例未产出结果".to_string()
+                },
+            )
+        };
+        cases.push(CaseResult {
+            class_name: parser.cur_class.clone(),
+            method: parser.cur_method.clone(),
+            verdict: v,
+            stack: String::new(),
+            stream,
+            raw_lines: parser.cur_lines.clone(),
+            duration_ms: wall_ms,
+        });
+    }
+    // ③ runner 级错误(STATUS Error=...,如 instrumentation 未安装/组件不存在):
+    //    零产出时如实补记 ENV_BLOCKED,绝不允许"0 用例"静默溜过
+    if cases.is_empty() {
+        if let Some(err) = parser.runner_error() {
+            cases.push(CaseResult {
+                class_name: "(runner)".into(),
+                method: "runner_error".into(),
+                verdict: CaseVerdict::ENV_BLOCKED,
+                stack: String::new(),
+                stream: format!("runner 报错: {err}"),
+                raw_lines: parser.cur_lines.clone(),
+                duration_ms: wall_ms,
+            });
+        }
+    }
+    if whole_module {
+        if let Some(n) = parser.numtests() {
+            let (declared, accounted) = (n as usize, cases.len());
+            if declared > accounted {
+                cases.push(CaseResult {
+                    class_name: "(runner)".into(),
+                    method: format!("unaccounted_cases_x{}", declared - accounted),
+                    verdict: CaseVerdict::NOT_RUN,
+                    stack: String::new(),
+                    stream: format!(
+                        "runner 宣称 {declared} 用例,仅产出 {accounted};缺额未运行(崩溃/看门狗提前终结)"
+                    ),
+                    raw_lines: vec![],
+                    duration_ms: 0,
+                });
+            }
+        }
     }
 }
 
@@ -861,6 +956,15 @@ pub fn summary_json(batch_id: &str, serial: &str, modules: &[ModuleReport], wall
         "recovery": if all_verified { "VERIFIED" } else { "PENDING" },
         "module_reports": modules,
     })
+}
+
+/// 从历史 summary 中取出某模块的报告(纯函数供单测): 续跑跳过时沿用证据
+fn carried_report(prev: &Value, module: &str) -> Option<ModuleReport> {
+    prev["module_reports"]
+        .as_array()?
+        .iter()
+        .find(|r| r["module"].as_str() == Some(module))
+        .and_then(|r| serde_json::from_value::<ModuleReport>(r.clone()).ok())
 }
 
 /// 批次是否"干净收官"(纯函数供单测): 恢复全 VERIFIED 且无失败/阻塞/超时
@@ -1368,10 +1472,30 @@ pub fn run_batch(cfg: &BatchCfg) -> Result<i32, String> {
     );
 
     let mut reports: Vec<ModuleReport> = Vec::new();
+    // 续跑跳过 ≠ 抹掉证据: 先读上一份 summary,跳过的模块沿用其历史报告计入总账
+    let prev_summary: Option<Value> = if cfg.resume {
+        fs::read_to_string(out_dir.join("summary.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        None
+    };
     for plan in &plans {
         let mname = plan.name();
         if cfg.resume && state.modules.get(&mname).map(|s| s.as_str()) == Some("done") {
-            println!("── {mname}: 已完成,跳过");
+            match prev_summary
+                .as_ref()
+                .and_then(|s| carried_report(s, &mname))
+            {
+                Some(r) => {
+                    println!(
+                        "── {mname}: 已完成,跳过(沿用历史报告 {} 用例)",
+                        r.cases.len()
+                    );
+                    reports.push(r);
+                }
+                None => println!("── {mname}: 已完成,跳过(无历史报告可沿用)"),
+            }
             continue;
         }
         println!("── 模块 {mname} (切片 {} 条) ──", plan.methods.len());
@@ -1957,5 +2081,156 @@ INSTRUMENTATION_CODE: -1
         assert_eq!(loaded.modules.get("a/b").map(String::as_str), Some("done"));
         assert_eq!(sanitize_case_id("com.x.C#m()"), "com.x.C_m__");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 喂一段 runner 输出,返回 (parser, 已收官用例)
+    fn feed(script: &str) -> (InstrumentParser, Vec<CaseResult>) {
+        let mut p = InstrumentParser::new();
+        let mut cases = Vec::new();
+        for l in script.lines() {
+            for ev in p.feed_line(l) {
+                if let ParseEvent::CaseFinished(c) = ev {
+                    cases.push(c);
+                }
+            }
+        }
+        (p, cases)
+    }
+
+    #[test]
+    fn reconcile_crash_midcase_env_blocked_and_unaccounted() {
+        // 桥崩溃现场: case1 PASS 后 case2 开始,随即 Process crashed,管道正常收官
+        let (p, mut cases) = feed(
+            "INSTRUMENTATION_STATUS: numtests=3\n\
+             INSTRUMENTATION_STATUS: class=a.C\nINSTRUMENTATION_STATUS: test=m1\n\
+             INSTRUMENTATION_STATUS_CODE: 1\n\
+             INSTRUMENTATION_STATUS: class=a.C\nINSTRUMENTATION_STATUS: test=m1\n\
+             INSTRUMENTATION_STATUS_CODE: 0\n\
+             INSTRUMENTATION_STATUS: class=a.C\nINSTRUMENTATION_STATUS: test=m2\n\
+             INSTRUMENTATION_STATUS_CODE: 1\n\
+             INSTRUMENTATION_RESULT: shortMsg=Process crashed.\n\
+             INSTRUMENTATION_CODE: 0",
+        );
+        assert_eq!(cases.len(), 1, "崩溃前只有 case1 收官");
+        reconcile_cases(&mut cases, &p, &RunVerdict::Completed, true, true, 500);
+        assert_eq!(cases.len(), 3, "在飞用例补记 + numtests 缺额补记");
+        assert_eq!(cases[1].verdict, CaseVerdict::ENV_BLOCKED);
+        assert_eq!(
+            cases[1].id(),
+            "a.C#m2",
+            "在飞用例必须带真实 Class#method 以便 profile 对账"
+        );
+        assert_eq!(cases[2].verdict, CaseVerdict::NOT_RUN);
+        assert_eq!(cases[2].method, "unaccounted_cases_x1");
+    }
+
+    #[test]
+    fn reconcile_watchdog_timeout_and_unaccounted() {
+        // 看门狗强杀: 在飞用例→TIMEOUT,numtests 缺额→NOT_RUN
+        let (p, mut cases) = feed(
+            "INSTRUMENTATION_STATUS: numtests=5\n\
+             INSTRUMENTATION_STATUS: class=a.H\nINSTRUMENTATION_STATUS: test=hang\n\
+             INSTRUMENTATION_STATUS_CODE: 1",
+        );
+        reconcile_cases(&mut cases, &p, &RunVerdict::IdleTimeout, false, true, 9000);
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0].verdict, CaseVerdict::TIMEOUT);
+        assert_eq!(cases[0].id(), "a.H#hang");
+        assert_eq!(cases[1].verdict, CaseVerdict::NOT_RUN);
+        assert_eq!(cases[1].method, "unaccounted_cases_x4");
+    }
+
+    #[test]
+    fn reconcile_clean_run_adds_nothing() {
+        // 干净整轮: 宣称=产出,对账零添加(回归守卫: 不得误伤正常轮次)
+        let (p, mut cases) = feed(
+            "INSTRUMENTATION_STATUS: numtests=1\n\
+             INSTRUMENTATION_STATUS: class=a.C\nINSTRUMENTATION_STATUS: test=m1\n\
+             INSTRUMENTATION_STATUS_CODE: 1\n\
+             INSTRUMENTATION_STATUS: class=a.C\nINSTRUMENTATION_STATUS: test=m1\n\
+             INSTRUMENTATION_STATUS_CODE: 0\n\
+             INSTRUMENTATION_CODE: -1",
+        );
+        reconcile_cases(&mut cases, &p, &RunVerdict::Completed, false, true, 100);
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].verdict, CaseVerdict::PASS);
+    }
+
+    #[test]
+    fn reconcile_runner_error_env_blocked() {
+        // runner 级错误(包未安装): 零产出必须补记 ENV_BLOCKED,不得静默零用例
+        let (p, mut cases) = feed(
+            "onError: commandError=true message=INSTRUMENTATION_FAILED: a.b/c.D\n\
+             INSTRUMENTATION_STATUS: Error=Unable to find instrumentation info for: ComponentInfo{a.b/c.D}\n\
+             INSTRUMENTATION_STATUS: id=ActivityManagerService\n\
+             INSTRUMENTATION_STATUS_CODE: -1",
+        );
+        assert!(cases.is_empty());
+        reconcile_cases(&mut cases, &p, &RunVerdict::Completed, false, true, 200);
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].verdict, CaseVerdict::ENV_BLOCKED);
+        assert_eq!(cases[0].method, "runner_error");
+        assert!(cases[0].stream.contains("Unable to find instrumentation"));
+    }
+
+    #[test]
+    fn reconcile_runner_error_fallback_from_stderr_text() {
+        // 设备偶发只露出 stderr 的 INSTRUMENTATION_FAILED(stdout Error= 行丢失),
+        // 兜底检出同样必须记 ENV_BLOCKED
+        let (p, mut cases) = feed(
+            "onError: commandError=true message=INSTRUMENTATION_FAILED: a.b/c.D\n\
+             android.util.AndroidException: INSTRUMENTATION_FAILED: a.b/c.D",
+        );
+        reconcile_cases(&mut cases, &p, &RunVerdict::Completed, false, true, 100);
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].verdict, CaseVerdict::ENV_BLOCKED);
+        assert!(cases[0].stream.contains("INSTRUMENTATION_FAILED"));
+    }
+
+    #[test]
+    fn carried_report_from_prev_summary() {
+        // 续跑沿用: 历史 summary 中存在的模块可取回报告,不存在则为 None
+        let m = ModuleReport {
+            module: "a/b".into(),
+            package: "a".into(),
+            runner: "b".into(),
+            run_verdict: "Completed".into(),
+            cases: vec![CaseResult {
+                class_name: "C".into(),
+                method: "m".into(),
+                verdict: CaseVerdict::PASS,
+                stack: String::new(),
+                stream: String::new(),
+                raw_lines: vec![],
+                duration_ms: 1,
+            }],
+            wall_ms: 5,
+            retries_used: 0,
+            recovery: "VERIFIED".into(),
+            crash_bundles: vec![],
+        };
+        let s = summary_json("b1", "ser", std::slice::from_ref(&m), 5);
+        let got = carried_report(&s, "a/b").expect("应取回历史报告");
+        assert_eq!(got.cases.len(), 1);
+        assert_eq!(got.cases[0].verdict, CaseVerdict::PASS);
+        assert!(carried_report(&s, "x/y").is_none());
+        assert!(carried_report(&json!({}), "a/b").is_none());
+    }
+
+    #[test]
+    fn reconcile_slice_mode_skips_numtests_synthesis() {
+        // 切片轮次(profile): 在飞崩溃记 ENV_BLOCKED,但不做 numtests 缺额合成
+        // (缺额由 profile 按名对账补 NOT_RUN,避免双重记账)
+        let (p, mut cases) = feed(
+            "INSTRUMENTATION_STATUS: numtests=3\n\
+             INSTRUMENTATION_STATUS: class=a.C\nINSTRUMENTATION_STATUS: test=m1\n\
+             INSTRUMENTATION_STATUS_CODE: 1\n\
+             INSTRUMENTATION_RESULT: shortMsg=Process crashed.\n\
+             INSTRUMENTATION_CODE: 0",
+        );
+        reconcile_cases(&mut cases, &p, &RunVerdict::Completed, true, false, 300);
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].verdict, CaseVerdict::ENV_BLOCKED);
+        assert_eq!(cases[0].id(), "a.C#m1");
     }
 }
