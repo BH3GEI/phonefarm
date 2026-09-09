@@ -138,10 +138,64 @@ summary{metric, rounds_total, rounds_interfered, window, latency_ms, min_ms, max
 
 Gen 0 = 上述 ESPCN 两变体 (`gen0-espcn-ps` / `gen0-espcn-bc`): params 1706 / 1211, FLOPs 1.74 G。
 
-## 4. `phonefarm capture` (Gate 2, 待定稿)
+## 4. `phonefarm capture` 与数据集 A (Gate 2)
 
-原神无 UI 自动巡航截图: 复用 `src/plugins/genshin.rs` 的巡航能力作为独立 CLI 子命令输出原始帧, 不改插件决策;
-对齐切块、Bicubic PSNR (> 28 dB) 与相位相关平移校验在 sr_loop 离线脚本完成, 丢弃率 > 5% 熔断。本节在 Gate 1 通过后补全。
+```
+phonefarm capture --serial <设备> [--out <目录>] [--frames 200] [--max-steps N] [--settle-ms 800] [--mode auto] [--no-shutdown] [--json]
+```
+
+- 复用 `plugins/genshin.rs` 的公开生命周期与单步 (`ensure_game_ready` / `step` / `shutdown_and_lock`), **不改插件决策**;
+  两步之间用 `adb exec-out screencap -p` 抓原始 PNG, 不重编码。登录/穿门/掉线重连不是本命令的职责: 人先进到大世界即可。
+- 只保留同时满足三条的帧: 横屏; `classify_state == OpenWorldExplore`; `hud_present` 小地图与技能栏都在场 (第二道证据)。
+  其余按状态计数跳过; 同一非探索态连续 6 步不变发一次 BACK (弹窗通用关闭键), 有界计数。
+- 冻结去重: 64x36 灰度缩略图与上一保留帧平均绝对差 < 1.0 视为画面冻结, 跳过。
+- `manifest.jsonl` 每行: i / file / ts_ms / step / state / w / h / bytes / sha256 / segment (每 10 张保留帧一段) / diff_prev;
+  结束写 `capture.json`。退出码 0 = 收满 `--frames`; 1 = `--max-steps` 用尽; 2 = 用法/设备错。
+- 缺省写 `tasks/sr_capture_<stamp>/` (DESIGN 写入权限); `--out` 显式指定则写该目录。
+
+### 4.1 离线对齐切块 (sr_loop/dataset.py) → 数据集 A
+
+| # | 步骤 | 判定 |
+|---|---|---|
+| 1 | 取横屏探索态帧 | manifest state=explore 且 w>h |
+| 2 | HR = 全帧 (对齐到 2*scale); LR = PIL 抗混叠 bicubic 下采样 ×1/2 | 像素中心约定与上采样一致 |
+| 3 | 相位相关平移校验: bicubic 上采样回 HR 尺寸, 与 HR 在中央区 (0.20,0.15)-(0.80,0.80) 做相位相关, 峰值三点抛物线亚像素 | \|dx\|,\|dy\| <= 0.25 px 否则整帧丢弃 (半像素错位是 SR 数据集的经典暗坑) |
+| 4 | 全帧铺 256x256 块, 与任一 HUD 排除区相交的块不要 | 排除区 (相对坐标, 2026-09-09 NX809J 实测帧标定): 顶栏 (0,0,1,0.13); 左上小地图+任务 (0,0,0.17,0.40); 右侧队伍 (0.80,0.13,1,0.50); 右下技能 (0.60,0.58,1,1); 左下摇杆/聊天 (0,0.62,0.25,1); 底部血条 (0.35,0.85,0.65,1); 底栏 (0,0.93,1,1) — "无 UI" 由构造保证 |
+| 5 | 逐块 Bicubic 重建 PSNR | PSNR(bicubic_up(LR块), HR块) > 28 dB 才保留 |
+| 6 | 熔断 | (PSNR 丢弃块 + 对齐丢弃帧的块) / 可用块 > 5% → 不产出数据集, 退出码 3 |
+| 7 | 固定路线划分 | manifest 的 segment: segment % 5 == 4 → val, 其余 train; 同段帧不跨集 |
+| 8 | 落盘 | `{train,val}_{lr,hr}.npy` (uint8), `split.json` (帧清单/块坐标/阈值/指纹), `baseline.json` (val 块 Bicubic PSNR 均值 = **锁定的基线**), `dataset_report.json` |
+
+PSNR 定义 (全环统一): RGB 三通道联合 MSE, 像素域 [0,255] (或 [0,1] 等价), 逐块计算后取均值。
+
+### 4.2 画质短训 (sr_loop/train.py)
+
+固定种子 (`tf.keras.utils.set_random_seed`) + 固定步数 + L1 损失 + Adam 余弦退火 (lr 2e-3 → 5%), batch 8 个 128→256 块,
+增广只做与种子绑定的翻转。评估 = val 全部块的 PSNR 均值; `delta_db` = PSNR − 锁定基线。训练图用动态空间尺寸的同构模型
+(`genome_to_model(g, input_hw=None)`), 权重与导出图逐位同形。所有代际使用同一组 (steps, batch, lr, seed, 数据集指纹)。
+
+### 4.3 Gate 2 验收 (sr_loop/gate2.py)
+
+数据集构建未熔断 → `baseline.json` 锁定 → Gen 0 两变体各短训一次 → 最佳 `delta_db >= 0.5` 才 GATE2_PASS; 证据 `runs/gate2/report.json`。
+
+## 5. 单代闭环与多代推进 (Gate 3 / Gate 4)
+
+### 5.1 一代的状态机 (sr_loop/evolve.py)
+
+| 阶段 | 输入 | 输出 / 门禁 |
+|---|---|---|
+| 变异 | 父代 = 当前 Pareto 前沿 (可行且已短训); 上一代全部候选及结局 | `sr_loop/mutate_llm.py` 向 LLM 要 `--children` 个基因组; 提示词只含语法/预算/真机反馈, **不含任何论文或网络名**; id 由程序分配; 解析失败/重复/非法逐个剔除; 不足用随机变异补齐并标注 `source=random` |
+| 秒筛 | 每个子代 | `sr_loop/screen.py`: BUDGET_FAIL / INVALID / EXPORT_FAIL 不上机; 真机 FALLBACK / SLOW / UNSTABLE(重测一次) / FEASIBLE |
+| 短训 | 仅 FEASIBLE | 与 Gate 2 同参数; 得 psnr_val / delta_db |
+| 归档 | 全部子代 | `archive.json` (指纹去重, 原子写), `gen_N.json` (子代/前沿/LLM 统计/序列项); 已存在的代直接跳过 (可续跑) |
+
+Pareto 前沿: 两目标 (延迟最小, PSNR 最大), 只在 FEASIBLE 且已短训的个体上计算。任何单个候选的异常记为 status=ERROR, 不中断整代;
+LLM 全链失败整代仍靠随机变异推进 — 闭环零人工介入的底线。
+
+### 5.2 Gate 4: 20 代与 Spearman
+
+`series` 每代记录: `best_psnr_so_far` (可行域内历史最高 PSNR) 与 `gen_best_psnr` (本代最高)。`sr_loop/analyze.py` 对代序号与两条序列分别做
+Spearman 秩相关 (scipy), 输出 rho / p-value / 增益 dB; 结论 "显著正向演进" 当且仅当累计序列 rho > 0 且 p < 0.05。
 
 ## 5. 测试契约
 
