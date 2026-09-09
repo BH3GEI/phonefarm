@@ -23,7 +23,7 @@
 | 门 | 进入条件 | 退出判据 (程序断言) |
 |---|---|---|
 | Gate 0 物理标尺 | 设备在线 + root | `bench` 对 Gen 0 两个变体: `full_gpu=true`, 3 轮 `dispersion_pct<=5`, 两次独立冷机调用的 median 相差 <= 5% |
-| Gate 1 零样本秒筛 | Gate 0 通过 | 任意合法基因组 → `genome_to_model` → TFLite → `bench --json` 得到 `feasible` 布尔; 预算校验 params<=50000, FLOPs<=2G 由 `sr_loop.genome.budget` 程序判定 |
+| Gate 1 零样本秒筛 | Gate 0 通过 | 任意合法基因组 → `genome_to_model` → TFLite → `bench --json` 得到 `feasible` 布尔; 预算校验 params<=50000, FLOPs<=2G 由 `sr_loop.genome.budget` 程序判定; 回退模型在首轮即被否决 (`sr_loop.screen` 状态机: BUDGET_FAIL / INVALID / EXPORT_FAIL / FALLBACK / UNSTABLE / SLOW / FEASIBLE) |
 | Gate 2 数据与基线 | Gate 1 通过 | 数据集 A 含 `split.json`; Bicubic PSNR 锁定; 丢弃率 <= 5% (超过熔断); Gen 0 短训后 PSNR - Bicubic >= 0.5 dB |
 | Gate 3 单代闭环 | Gate 2 通过 | 变异 → 秒筛 → 短训 → Pareto → `gen_N.json` 全程无人工介入、无异常阻断 |
 | Gate 4 20 代演进 | Gate 3 通过 | 20 代可行域内最高 PSNR 序列的 Spearman rho 与 p-value 报告落盘 |
@@ -79,8 +79,13 @@ kgsl 的 `force_clk_on / force_bus_on / force_rail_on / force_no_nap` 在此内�
 
 ### 2.3 判定
 
-- `full_gpu`: 日志 `Replacing N out of N node(s) ... yielding 1 partitions` 且算子档案无任何非 `Delegate/` 行, 且无 `ERROR:` 行。
-  GPU delegate 申请失败 (`Failed to apply GPU delegate`) → 无覆盖行 → `FAIL_FALLBACK`。
+- `full_gpu`: 日志 `Replacing N out of N node(s) ... yielding 1 partitions`, 算子档案无任何非 `Delegate/` 行, 后端为 OpenCL
+  (`Initialized OpenCL-based API`), 且无 `ERROR:` 行。命令行强制 `--gpu_backend=cl`: 不这样做时 OpenCL 不认的算子会让 delegate
+  静默退到 OpenGL 后端 (无 per-op profiler, 也不是被校准的路径; 2026-09-09 `floor_mod` 实测); 强制后表现为
+  `TfLiteGpuDelegate Init: No selector for floor_mod` → delegate 申请失败 → benchmark 中止。
+- 只要日志里出现过 `Created TensorFlow Lite delegate for GPU` 而整图没落在 OpenCL 上 (覆盖不满 / 多分区 / CPU 行 / 后端非 CL /
+  申请失败 / benchmark 中止), 一律 `FAIL_FALLBACK` (退出码 1), `summary.fallback_reason` 给出 CPU 算子名、覆盖率、后端与错误行,
+  作为上层变异器的反馈。`ERROR` 只留给与模型 GPU 兼容性无关的失败 (模型加载不了、设备无心跳、无输出)。
 - `dispersion_pct` = (Max − Min) / Median × 100, 样本是判定窗口内各轮 `gpu_kernel_us` (或 `invoke_avg_us`); 上限 5。
   窗口 = 最近 `--runs` 轮连续 clean 且离散度达标的那一段 (`summary.window` 给出 1 起的 [起, 止]); 没有窗口即 `FAIL_UNSTABLE`,
   报告里仍如实给出最后 N 轮的统计与每轮 `clean` / `cv_pct`。
@@ -98,9 +103,9 @@ delegate{replaced,total,partitions}, backend, ops[{type,avg_ms,pct,name,gpu}],
 rounds[{round, clean, cv_pct, gpu_kernel_us, invoke_avg_us, invoke{count,first,min,max,avg,std,median,p5,p95}, profile_total{...},
         init_us, first_us, warmup_avg_us, delegate, backend, full_gpu, ops[], error,
         thermal{start_zone,start_c,waited_s,end_zone,end_c},
-        lock{applied,verified,gpu_verified,bus_verified,restored,cpu[],bus[],gpu_thermal_level,gpu_throttled},
+        delegate_attempted, fallback_reason, lock{applied,verified,gpu_verified,bus_verified,restored,cpu[],bus[],gpu_thermal_level,gpu_throttled},
         gpuclk_hz{mode,min,max}, cpu_khz[{mode,min,max}], bus_khz[{name,mode,min,max}], wall_ms, log}],
-summary{metric, rounds_total, rounds_interfered, window, latency_ms, min_ms, max_ms, dispersion_pct, dispersion_limit_pct, dispersion_ok,
+summary{metric, rounds_total, rounds_interfered, window, latency_ms, min_ms, max_ms, dispersion_pct, dispersion_limit_pct, dispersion_ok, fallback_reason,
         limit_ms, within_limit, full_gpu, gpu_lock_verified, feasible, errors[]}, wall_s
 ```
 

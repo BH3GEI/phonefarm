@@ -207,6 +207,8 @@ pub struct RoundStats {
     pub delegate: Option<Delegate>,
     pub backend: Option<String>,
     pub error: Option<String>,
+    /// 日志里出现过 GPU delegate 创建: 之后的任何失败都归因于模型与 OpenCL 路径不兼容 (回退否决), 而非环境错误
+    pub delegate_attempted: bool,
 }
 
 impl RoundStats {
@@ -217,11 +219,32 @@ impl RoundStats {
         }
         self.profile_total.as_ref().map(|d| d.avg)
     }
-    /// 全图落在 GPU: 委托覆盖 N/N 且单分区, 且算子档案里没有任何 CPU 节点
+    /// 全图落在 GPU (OpenCL): 委托覆盖 N/N 且单分区, 算子档案里没有任何 CPU 节点, 后端是 OpenCL, 无 ERROR 行。
+    /// OpenCL 不支持的算子会让 delegate 退到 OpenGL 后端 (无 per-op profiler, 且不是标尺校准的路径),
+    /// 所以命令行强制 --gpu_backend=cl, 这时不支持的算子表现为 delegate 申请失败 + CPU 行, 直接一票否决。
     pub fn full_gpu(&self) -> bool {
         let cov = matches!(self.delegate, Some(d) if d.total > 0 && d.replaced == d.total && d.partitions == 1);
         let no_cpu_op = !self.ops.iter().any(|o| !o.on_gpu);
-        cov && no_cpu_op && self.error.is_none()
+        cov && no_cpu_op && self.error.is_none() && self.backend.as_deref() == Some("opencl")
+    }
+    /// 回退原因 (给上层变异器的反馈): CPU 算子清单 / 后端 / delegate 错误
+    pub fn fallback_reason(&self) -> Option<String> {
+        if self.full_gpu() { return None; }
+        let mut parts = Vec::new();
+        let cpu_ops: Vec<&str> = self.ops.iter().filter(|o| !o.on_gpu).map(|o| o.node_type.as_str()).collect();
+        if !cpu_ops.is_empty() { parts.push(format!("cpu_ops={}", cpu_ops.join(","))); }
+        match self.delegate {
+            Some(d) if d.replaced < d.total || d.partitions != 1 => parts.push(format!("coverage={}/{} partitions={}", d.replaced, d.total, d.partitions)),
+            None => parts.push("delegate_not_applied".into()),
+            _ => {}
+        }
+        match self.backend.as_deref() {
+            Some("opencl") => {}
+            Some(b) => parts.push(format!("backend={b}")),
+            None => parts.push("backend=none".into()),
+        }
+        if let Some(e) = &self.error { parts.push(e.clone()); }
+        Some(parts.join("; "))
     }
 }
 
@@ -257,6 +280,8 @@ pub fn parse_round_log(text: &str) -> RoundStats {
                     _ => cand,
                 });
             }
+        } else if t.contains("Created TensorFlow Lite delegate for GPU") {
+            r.delegate_attempted = true;
         } else if t.contains("Initialized OpenCL-based API") {
             r.backend = Some("opencl".into());
         } else if t.contains("Initialized OpenGL-based API") {
@@ -621,7 +646,7 @@ fn run_round(phone: &crate::device::Device, a: &BenchArgs, remote_model: &str, s
     }
     let cmd = format!(
         "cd {REMOTE_DIR} && ./benchmark_model --graph={remote_model} --use_gpu=true --gpu_precision_loss_allowed={} \
---num_threads={} --warmup_runs={} --warmup_min_secs=0 --num_runs={} --min_secs=0 --enable_op_profiling=true \
+--gpu_backend=cl --num_threads={} --warmup_runs={} --warmup_min_secs=0 --num_runs={} --min_secs=0 --enable_op_profiling=true \
 --max_profiling_buffer_entries=4096 2>&1",
         a.fp16, a.threads, a.warmup, a.num_runs, );
     let log = phone.shell(&cmd, 180_000);
@@ -796,6 +821,8 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
             "delegate": st.delegate.map(|d| json!({"replaced": d.replaced, "total": d.total, "partitions": d.partitions})),
             "backend": st.backend,
             "full_gpu": st.full_gpu(),
+            "delegate_attempted": st.delegate_attempted,
+            "fallback_reason": st.fallback_reason(),
             "ops": st.ops.iter().map(|o| json!({"type": o.node_type, "avg_ms": o.avg_ms, "pct": o.pct, "name": o.name, "gpu": o.on_gpu})).collect::<Vec<_>>(),
             "error": st.error,
             "thermal": {"start_zone": zone, "start_c": c, "waited_s": waited, "end_zone": zone_end, "end_c": c_end},
@@ -852,8 +879,13 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     let within = have_all && median_us / 1000.0 <= a.limit_ms;
     let gpu_lock_ok = target.map(|_| rounds[ws..we].iter().all(|r| r["lock"]["verified"].as_bool() == Some(true)));
     let interfered = clean_flags.iter().filter(|c| !**c).count();
-    let verdict = if !errors.is_empty() || (rounds.is_empty()) { "ERROR" }
+    let ran = rounds.iter().all(|r| r["invoke_avg_us"].as_f64().is_some());
+    let attempted = rounds.iter().all(|r| r["delegate_attempted"].as_bool() == Some(true));
+    let fallback_reason: Option<String> = rounds.iter().find_map(|r| r["fallback_reason"].as_str().map(String::from));
+    // 回退否决优先于 ERROR: delegate 已创建但整图没落在 OpenCL 上 (含申请失败、benchmark 中止) 都是模型的问题, 不是环境的
+    let verdict = if rounds.is_empty() || !attempted { "ERROR" }
         else if !full_gpu { "FAIL_FALLBACK" }
+        else if !ran { "ERROR" }
         else if !dispersion_ok { "FAIL_UNSTABLE" }
         else if !within { "FAIL_LATENCY" }
         else { "PASS" };
@@ -897,6 +929,7 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
             "limit_ms": a.limit_ms,
             "within_limit": within,
             "full_gpu": full_gpu,
+            "fallback_reason": fallback_reason,
             "gpu_lock_verified": gpu_lock_ok,
             "feasible": full_gpu && within,
             "errors": errors,
@@ -928,9 +961,12 @@ fn render_text(r: &Value) -> String {
     if let Some(dl) = r["delegate"].as_object() {
         s.push_str(&format!("GPU 覆盖: {}/{} 节点, {} 分区, {} -> {}\n", dl["replaced"], dl["total"], dl["partitions"],
             r["backend"].as_str().unwrap_or("?"),
-            if r["summary"]["full_gpu"].as_bool() == Some(true) { "100% GPU" } else { "存在 CPU 回退" }));
+            if r["summary"]["full_gpu"].as_bool() == Some(true) { "100% GPU (OpenCL)" } else { "回退, 一票否决" }));
     } else {
         s.push_str("GPU 覆盖: 未见委托日志 (delegate 未生效, 整图 CPU)\n");
+    }
+    if let Some(why) = r["summary"]["fallback_reason"].as_str() {
+        s.push_str(&format!("回退原因: {why}\n"));
     }
     s.push_str("轮  GPU核时延us  cv%   invoke avg/median/p95 us    init ms  gpuclk MHz  DDR/LLCC MHz  温度C(等冷s)\n");
     for rd in r["rounds"].as_array().cloned().unwrap_or_default() {
@@ -1031,10 +1067,22 @@ INFO: Operator-wise Profiling Info for Regular Benchmark Runs:\n\
         assert!(r.ops.iter().any(|o| !o.on_gpu));
         let failed = "INFO: Created TensorFlow Lite delegate for GPU.\nERROR: Failed to apply GPU delegate.\nINFO: Inference timings in us: Init: 1, First inference: 2, Warmup (avg): 3, Inference (avg): 4\n";
         let r = parse_round_log(failed);
-        assert!(r.delegate.is_none());
+        assert!(r.delegate_attempted && r.delegate.is_none());
         assert!(!r.full_gpu());
         assert_eq!(r.error.as_deref(), Some("ERROR: Failed to apply GPU delegate."));
         assert_eq!(r.invoke_avg_us, Some(4.0));
+        assert!(r.fallback_reason().unwrap().contains("delegate_not_applied"));
+        // OpenCL 不认的算子: 覆盖 4/4 却退到 OpenGL 后端 (2026-09-09 floor_mod 实测), 同样否决且原因带算子名
+        let gl = "VERBOSE: Replacing 4 out of 4 node(s) with delegate (TfLiteGpuDelegateV2) node, yielding 1 partitions for subgraph 0.\n\
+ERROR: No selector for floor_mod\nERROR: Falling back to OpenGL\nINFO: Initialized OpenGL-based API.\n\
+INFO: Inference timings in us: Init: 188735, First inference: 26307, Warmup (avg): 7857.5, Inference (avg): 6928.99\n";
+        let r = parse_round_log(gl);
+        assert!(!r.delegate_attempted, "该片段没有创建行");
+        assert_eq!(r.backend.as_deref(), Some("opengl"));
+        assert!(!r.full_gpu());
+        let why = r.fallback_reason().unwrap();
+        assert!(why.contains("backend=opengl") && why.contains("floor_mod"), "{why}");
+        assert_eq!(parse_round_log(LOG).fallback_reason(), None);
     }
 
     #[test]
