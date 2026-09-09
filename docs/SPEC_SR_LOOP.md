@@ -1,7 +1,8 @@
 # SPEC: SR_LOOP — 端侧超分网络自主进化环 (v1.1 落地契约)
 
 > 状态: 实施中 · 2026-09-09 起 · **Gate 0/1/2 已通过** (2026-09-09; 证据 sr_loop/runs/gate0/report.json, runs/gate1/, runs/gate2/report.json:
-> 数据集 A 150 帧 1440/360 块, 丢弃率 0%, Bicubic 基线 37.286 dB, Gen 0 ps +1.376 dB / bc +1.537 dB), Gate 3~4 进行中
+> 数据集 A 150 帧 1440/360 块, 丢弃率 0%, Bicubic 基线 37.286 dB, Gen 0 ps +1.376 dB / bc +1.537 dB),
+> **Gate 3 已通过** (gen_1.json: LLM 变异 6/6 真机可行, 零错误, 最佳 +2.21 dB), Gate 4 (20 代) 运行中
 > 目标: 依托红魔 NX809J (SM8850 / Adreno 840, Magisk root) 与 phonefarm, 构建
 > "候选生成 → 零样本真机秒筛 → 画质短训 → Pareto 归档 → 反馈迭代" 的全自主闭环,
 > 验证结构变异能否在物理硬件约束下推动超分模型正向演进。
