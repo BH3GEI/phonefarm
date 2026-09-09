@@ -1,6 +1,6 @@
 # SPEC: SR_LOOP — 端侧超分网络自主进化环 (v1.1 落地契约)
 
-> 状态: 实施中 · 2026-09-09 起 · Gate 0 定稿, Gate 1~4 逐门补记
+> 状态: 实施中 · 2026-09-09 起 · **Gate 0 已通过** (2026-09-09, 证据 sr_loop/runs/gate0/report.json), Gate 1~4 逐门补记
 > 目标: 依托红魔 NX809J (SM8850 / Adreno 840, Magisk root) 与 phonefarm, 构建
 > "候选生成 → 零样本真机秒筛 → 画质短训 → Pareto 归档 → 反馈迭代" 的全自主闭环,
 > 验证结构变异能否在物理硬件约束下推动超分模型正向演进。
@@ -143,3 +143,6 @@ Gen 0 = 上述 ESPCN 两变体 (`gen0-espcn-ps` / `gen0-espcn-bc`): params 1706 
 - `src/bench.rs` 全部解析器为纯函数并单测: 覆盖行 / 计时行 / 算子档案 (只取 Regular 段 Run Order) / 快照往返 /
   热区筛选 / 离散度 / 采样器众数 / 参数形态。`cd src && cargo test` 100% 通过。
 - 真机验收 (Gate 0): 见 §1 表; 证据是两份 `bench --json` 输出, 归档在 sr_loop 仓库 `runs/gate0/`。
+  2026-09-09 结果 (`python -m sr_loop.gate0`, GATE0_PASS): gen0-espcn-ps 两次冷机 1.099 / 1.088 ms (轮内离散 1.36% / 0.37%,
+  复测差 1.01%); gen0-espcn-bc 1.682 / 1.674 ms (1.07% / 0.78%, 复测差 0.48%); 四次调用全部 4/4 节点 OpenCL 单分区,
+  gpuclk / DDR / LLCC 采样众数均等于锁定值, 每轮锁态回读恢复。
