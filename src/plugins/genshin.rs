@@ -180,8 +180,14 @@ pub fn classify_state(img: &DynamicImage) -> (GenshinState, Option<f32>) {
     GenshinPerception::classify(img)
 }
 
+/// 大世界 HUD 是否在场 (小地图, 技能栏): capture 等只读消费者用它做"确实在大世界"的第二道证据
+pub fn hud_present(img: &DynamicImage) -> (bool, bool) {
+    let (w, h) = img.dimensions();
+    (GenshinPerception::check_minimap_active(img, w, h), GenshinPerception::check_combat_ui_active(img, w, h))
+}
+
 /// 感知实现体 (无状态)
-struct GenshinPerception;
+pub(crate) struct GenshinPerception;
 
 impl GenshinPerception {
     fn classify(img: &DynamicImage) -> (GenshinState, Option<f32>) {
@@ -203,6 +209,13 @@ impl GenshinPerception {
         let avg_luma = sample_sum / sample_count.max(1);
         if avg_luma < 12 {
             return (GenshinState::LoadingOrCutscene, None);
+        }
+
+        // 标题页硬签名 (2026-09-09 修正): 深色夜景版标题门 (avg_luma 不到 80) 靠亮度判不出来, 而右缘白色图标列
+        // 会落进技能栏采样窗、蓝色天空又命中任务指引色, 整帧被误判成"大世界+目标偏右"。
+        // 右缘五个圆形白图标 (设置/修复/扫码/公告/退出) 位置固定且大世界里不存在, 命中即标题页。
+        if Self::check_title_icon_column(img, w, h) && !Self::check_minimap_active(img, w, h) {
+            return (GenshinState::TitleScreen, None);
         }
 
         // 检查标题界面特征：中央门扉光效与天空岛背景
@@ -325,8 +338,35 @@ impl GenshinPerception {
         (GenshinState::OpenWorldExplore, marker_x)
     }
 
+    /// 标题页右缘白色圆形图标列: 5 个图标中心 x=91%, y=47%/57%/68%/79%/89%, 各取 3.4%x6% 的窗, 白覆盖 > 25% 记命中,
+    /// 至少 4 个命中才算 (大世界右缘的队伍头像是彩色圆, 且位置不同)
+    pub(crate) fn check_title_icon_column(img: &DynamicImage, w: u32, h: u32) -> bool {
+        let mut hits = 0;
+        for yc in [0.469f32, 0.572, 0.679, 0.786, 0.888] {
+            let x_start = (w as f32 * 0.894) as u32;
+            let x_end = (w as f32 * 0.928) as u32;
+            let y_start = (h as f32 * (yc - 0.03)) as u32;
+            let y_end = (h as f32 * (yc + 0.03)) as u32;
+            let mut white = 0;
+            let mut total = 0;
+            for x in (x_start..x_end.min(w)).step_by(3) {
+                for y in (y_start..y_end.min(h)).step_by(3) {
+                    let p = img.get_pixel(x, y);
+                    total += 1;
+                    if p[0] > 200 && p[1] > 200 && p[2] > 200 {
+                        white += 1;
+                    }
+                }
+            }
+            if total > 0 && white as f32 / total as f32 > 0.25 {
+                hits += 1;
+            }
+        }
+        hits >= 4
+    }
+
     /// 检测右下角战斗技能栏是否处于激活状态
-    fn check_combat_ui_active(img: &DynamicImage, w: u32, h: u32) -> bool {
+    pub(crate) fn check_combat_ui_active(img: &DynamicImage, w: u32, h: u32) -> bool {
         let mut combat_white = 0;
         let mut combat_total = 0;
         let x_start = (w as f32 * 0.82) as u32;
@@ -347,7 +387,7 @@ impl GenshinPerception {
     }
 
     /// 检测左上角小地图区域是否处于激活状态
-    fn check_minimap_active(img: &DynamicImage, w: u32, h: u32) -> bool {
+    pub(crate) fn check_minimap_active(img: &DynamicImage, w: u32, h: u32) -> bool {
         let mut border_pixels = 0;
         let mut total = 0;
         let x_start = (w as f32 * 0.03) as u32;

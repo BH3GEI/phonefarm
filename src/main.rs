@@ -5,6 +5,7 @@
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod bench;
 mod brain;
+mod capture;
 mod cli;
 mod cts;
 mod keepalive;
@@ -121,6 +122,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --dir APK目录) [--
 设备:  devices | keepalive [--status|--watch [秒]] [--serial S] [--json] | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
        (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
+采集:  capture --serial <S> [--out 目录] [--frames 200] [--max-steps N] [--settle-ms 800] [--mode auto] [--no-shutdown] [--json]
+       (原神无 UI 自动巡航原始帧采集: 只留大世界探索态帧 + manifest 路线分段, SPEC_SR_LOOP Gate 2)
 后台:  run/benchmark/script 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
@@ -543,6 +546,10 @@ fn main() {
         Some("bench") => {
             // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
             std::process::exit(bench::run_bench(&args[1..]));
+        }
+        Some("capture") => {
+            // 原神无 UI 自动巡航截图(SPEC_SR_LOOP Gate 2): 复用 genshin 插件生命周期与单步, 只抓原始帧, 纯增量子命令
+            std::process::exit(capture::run_capture(&args[1..]));
         }
         Some("test-batch") => {
             // CTS 批量挂机执行器 (CTS Harness Spec): A2OH 桥接环境的 instrument 调度,
