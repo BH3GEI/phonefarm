@@ -28,6 +28,7 @@ cd src && cargo build --release && cp target/release/phonefarm ..
 ./phonefarm cat <文件路径>                         # 压缩文件、JSONL 美化及图片万能查看器
 ./phonefarm schema                                # 输出运行日志 log.jsonl 的完备模型 schema
 ./phonefarm probe --serial S "只读命令"             # 目标设备只读调试通道
+./phonefarm bench --serial S --model m.tflite --json # 端侧模型真机延迟标尺(锁频+等冷+GPU Delegate, 需 root; docs/SPEC_SR_LOOP.md)
 ```
 
 ## 安全边界与执行规范

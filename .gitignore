@@ -16,3 +16,6 @@ tasks/phonefarm_smoke
 tasks/test_*
 
 .DS_Store
+
+# TFLite benchmark_model 真机二进制 (tools/tflite/fetch.sh 拉取)
+tools/tflite/android_aarch64_benchmark_model*

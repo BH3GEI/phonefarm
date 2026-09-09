@@ -3,6 +3,7 @@
 //!       phonefarm devices
 //! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
+mod bench;
 mod brain;
 mod cli;
 mod cts;
@@ -118,6 +119,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --dir APK目录) [--
        [--heal-script 路径] [--install-cmd '模板{apk}'] [--out 目录]   (A2OH CTS 批量挂机执行器)
 任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神场景插件的独立长跑Agent)
 设备:  devices | keepalive [--status|--watch [秒]] [--serial S] [--json] | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
+标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
+       (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
 后台:  run/benchmark/script 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
@@ -536,6 +539,10 @@ fn main() {
         Some("keepalive") => {
             // 农场级设备保活巡检(SPEC_KEEPALIVE): 唤醒+解锁+不息屏, adb/hdc 两族并列
             std::process::exit(keepalive::run_keepalive(&args[1..]));
+        }
+        Some("bench") => {
+            // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
+            std::process::exit(bench::run_bench(&args[1..]));
         }
         Some("test-batch") => {
             // CTS 批量挂机执行器 (CTS Harness Spec): A2OH 桥接环境的 instrument 调度,

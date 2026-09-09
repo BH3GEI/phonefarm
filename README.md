@@ -53,6 +53,13 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ./phonefarm parallel --job "任务A|目标A|emulator-5554|com.pkg" --job "任务B|目标B|hdc:<key>" --budget-calls 60
 # 同一任务名派给多台设备会被拒绝（经验库 lessons/tree 会互踩）——用不同任务名分开，合并语义留后续
 
+# 6.1 端侧模型物理延迟标尺（SR_LOOP Gate 0，规格见 docs/SPEC_SR_LOOP.md；需 root）
+./tools/tflite/fetch.sh                    # 首次: 拉取官方 nightly 的 benchmark_model (Android arm64, 内置 GPU Delegate)
+./phonefarm bench --serial <ID> --model model.tflite --runs 3 --json
+# 每轮: 未锁频等冷(<40C) -> CPU performance + kgsl 档位锁频 -> benchmark_model GPU Delegate -> 立刻解锁
+# 判定: 全图 GPU(无 CPU 回退)、3 轮离散度 <= 5%、GPU 内核时延 median <= 4.0ms;退出码 0/1/2 = PASS/FAIL/ERROR
+./phonefarm bench --serial <ID> --unlock   # 异常退出遗留锁频态的回滚
+
 # 7. 运行离线确定性脚本或回放历史对局（零 Token 消耗，保留全套遥测）
 ./phonefarm script --task 游戏压测 --app com.tencent.tmgp.projectc --repeat 10 examples/sample_game_benchmark.json
 # 直接回放某次历史运行的动作流：
