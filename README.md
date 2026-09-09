@@ -14,7 +14,7 @@ Agent 自动化移动端并行、测试、采集工具：由 Rust 内核驱动�
 
 ## 核心功能
 
-- **应用自动化遍历**：支持无登录态自动探索。基于预置规则拦截系统/应用弹窗，按底部标签页及核心菜单路径深度遍历，输出页面覆盖清单。
+- **应用自动化遍历**：基于预置规则拦截系统/应用弹窗，按底部标签页及核心菜单路径深度遍历，输出页面覆盖清单。
 - **经验库累积与状态共享**：每轮任务结束自动提炼动作异常或跳转失败场景，追加写入本地 `lessons.jsonl` 经验库；多次运行共享设备状态转移图 `tree.json`。
 - **状态持久化与下钻分析**：步骤级截图、原始 UI 树（XML格式）、模型原始 JSON 回包及系统规则判定结果完整落盘，可通过 `phonefarm show` 进行单步状态回溯与调试。
 - **多维度性能采集（Telemetry）**：每步执行期间采集 68 项高低频设备指标（含 FPS、Janky 占比、各 CPU 核心频率、内存 Pss 详情、SoC 及电池温度、FD/Socket 占用等），支持通过 `phonefarm stats` 输出局级运行指标汇总。
@@ -43,6 +43,11 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 # 5. 运行 OpenHarmony 真机任务
 ./phonefarm devices                        # 列出当前连接的 adb 与 hdc 设备
 ./phonefarm run --serial hdc:<serial_id> --task OH设置冒烟 --budget-calls 30 "<目标>"
+
+# 5.1 设备保活巡检（农场级：唤醒+解锁+不息屏，adb/hdc 两族并列，规格见 docs/SPEC_KEEPALIVE.md）
+./phonefarm keepalive                      # 对全部在线设备巡检一轮
+./phonefarm keepalive --status             # 只读报告：连接/亮屏/不息屏是否生效
+./phonefarm keepalive --watch              # 常驻守护（默认 300s 一轮，新上线设备自动纳入）
 
 # 6. 多设备并行（每设备独立一局，stdout 逐行带 [设备] 前缀，任一失败整体退出码非 0）
 ./phonefarm parallel --job "任务A|目标A|emulator-5554|com.pkg" --job "任务B|目标B|hdc:<key>" --budget-calls 60

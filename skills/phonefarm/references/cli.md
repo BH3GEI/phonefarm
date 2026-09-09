@@ -41,6 +41,19 @@ phonefarm probe --serial S "read-only cmd"  # read-only direct device channel
 phonefarm exec --serial S "cmd" --yes       # arbitrary device command (dangerous)
 ```
 
+## Device keep-alive
+
+```bash
+phonefarm keepalive [--serial S] [--json]   # one-shot patrol: wake + unlock + never-sleep for all devices
+phonefarm keepalive --status                # read-only report: online / screen-on / policy-effective
+phonefarm keepalive --watch [sec]           # resident watchdog (default 300s, re-enumerates each cycle)
+```
+
+Idempotent and token-free. HDC patrol order is contractual (unlock swipe
+BEFORE the screen-off override — the OH lockscreen stomps the override
+otherwise); see `docs/SPEC_KEEPALIVE.md`. Not exposed over MCP (device
+write op, same boundary as probe/exec).
+
 ## Drill-down path
 
 `phonefarm last` → `show <run-id> --step N` → `cat .../stepN.xml.gz`

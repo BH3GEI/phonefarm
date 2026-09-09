@@ -73,6 +73,13 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd ..
   (via ssh) — sync the repo there and rebuild before running.
 - Switch targets with `--serial`, e.g. `--serial emulator-5554` or
   `--serial hdc:<connect key>`.
+- Farm-level keep-alive (`docs/SPEC_KEEPALIVE.md`): `phonefarm keepalive`
+  wakes + unlocks every connected device and enforces the never-sleep
+  policy (idempotent, re-runnable); `--status` is the read-only report,
+  `--watch [sec]` (default 300s) is the resident watchdog that
+  re-enumerates devices every cycle. Session-level lifecycle in
+  `quest.rs` is separate (it relocks on exit to save battery) — do not
+  run both against the same device at the same time.
 
 ## Essential commands
 

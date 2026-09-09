@@ -11,6 +11,8 @@ quick-xml = "0.36"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 flate2 = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+regex = "1"
+sha2 = "0.10"
 
 [profile.release]
 strip = true
