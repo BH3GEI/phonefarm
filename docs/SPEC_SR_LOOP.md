@@ -132,11 +132,14 @@ summary{metric, rounds_total, rounds_interfered, window, latency_ms, min_ms, max
 - `op` ∈ conv | dwsep (depthwise k + pointwise 1x1) | res (conv-act-conv + 残差, 要求 c == 输入通道);
   `k` ∈ 1/3/5/7; `c` ∈ 1..64; `act` ∈ relu/relu6/tanh/linear; 1..16 层。
 - `upsample`: `pixelshuffle` = conv k3 → 3·r² 通道 → depth_to_space(r); `bilinear_conv` = resize_bilinear(×r) → conv k3 → 3。
+- `skip` (v1 追加, 缺省 none): `bilinear` = 输出加上双线性放大的输入 (全局残差, TFLite 为 RESIZE_BILINEAR + ADD, GPU 支持)。
+  2026-09-09 实测定论: 无跳连的 Gen 0 短训 2000 步 val PSNR 34.7 dB, 比 Bicubic 基线 (38.7 dB) 低 4 dB, 步数全耗在学直流与上采样;
+  加跳连后 500 步即 39.4 dB, 2000 步 40.5 dB (+1.8 dB)。Gen 0 两变体均带 skip=bilinear; 变异器可自由切换该字段。
 - `budget()` 解析式计 params 与 FLOPs (= 2×MACs, 在 `input` 分辨率上); 超限直接不上真机。
 - `genome_to_model` 确定性: 每层派生独立种子, 同一基因组两次生成权重逐位相同。
 - 指纹 = 去掉 `id` 后的规范化 JSON 的 sha256 前 16 位, 用于去重 (同构基因组不重复上真机)。
 
-Gen 0 = 上述 ESPCN 两变体 (`gen0-espcn-ps` / `gen0-espcn-bc`): params 1706 / 1211, FLOPs 1.74 G。
+Gen 0 = 上述两变体 (`gen0-espcn-ps` / `gen0-espcn-bc`, 均 skip=bilinear): params 1706 / 1211, FLOPs 1.80 G (含跳连)。
 
 ## 4. `phonefarm capture` 与数据集 A (Gate 2)
 
@@ -177,6 +180,9 @@ PSNR 定义 (全环统一): RGB 三通道联合 MSE, 像素域 [0,255] (或 [0,1
 ### 4.3 Gate 2 验收 (sr_loop/gate2.py)
 
 数据集构建未熔断 → `baseline.json` 锁定 → Gen 0 两变体各短训一次 → 最佳 `delta_db >= 0.5` 才 GATE2_PASS; 证据 `runs/gate2/report.json`。
+
+**真机秒筛的前提**: 跑 `bench` 时目标游戏不得在前台渲染 (前台游戏会占满 GPU, 标尺失真); capture 结束后先 HOME 把游戏切后台
+(Android 暂停后台 Activity 的渲染), 再进入秒筛/进化。bench 报告的 `device.focus` 记录当时的前台窗口作为证据。
 
 ## 5. 单代闭环与多代推进 (Gate 3 / Gate 4)
 

@@ -622,12 +622,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn device_info(phone: &crate::device::Device) -> Value {
     let get = |k: &str| phone.shell(&format!("getprop {k}"), 5000).trim().to_string();
+    // 前台窗口: 标尺的前提是没有游戏在前台渲染, 记进报告作证据
+    let focus = phone.shell("dumpsys window | grep -m1 mCurrentFocus", 6000);
+    let focus = focus.split("u0 ").nth(1).map(|t| t.trim_end_matches('}').trim().to_string()).unwrap_or_default();
     json!({
         "model": get("ro.product.model"),
         "platform": get("ro.board.platform"),
         "soc": get("ro.soc.model"),
         "android": get("ro.build.version.release"),
         "sdk": get("ro.build.version.sdk"),
+        "focus": focus,
     })
 }
 
