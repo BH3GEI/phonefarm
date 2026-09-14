@@ -658,6 +658,57 @@ fn cmd_tools(a: &Args) -> Result<(), String> {
         println!("已登记工具提议 {id}(kind={kind}),校准通过前不会进入正式反馈路径");
         return Ok(());
     }
+    if let Some(id) = a.opt("--calibrate") {
+        // 校准管线(SPEC_EVOLUTION §4.3): 标注样本集 tasks/_global/calibration/<id>.jsonl,
+        // 每行 {"input":{"kind":"log|xml","text":"..."},"label":"match|no_match"};
+        // 误报成功(把不成立判成成立)一票否决;达标自动 adopt 进正式反馈路径。
+        let mut store = crate::mtools::ToolStore::load(&p);
+        let Some(t) = store.by_id(&id) else {
+            return Err(format!("--calibrate: 工具 {id} 不存在"));
+        };
+        if t.status == crate::mtools::ToolStatus::Retired {
+            return Err(format!("--calibrate: 工具 {id} 已退役(终态),须重新 propose"));
+        }
+        let samp_path = data_root().join("_global").join("calibration").join(format!("{id}.jsonl"));
+        let samples: Vec<Value> = std::fs::read_to_string(&samp_path)
+            .map_err(|_| format!("校准样本集不存在: {}(每行 {{input:{{kind,text}},label}})", samp_path.display()))?
+            .lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        if samples.is_empty() { return Err(format!("校准样本集为空: {}", samp_path.display())); }
+        // 逐样本跑声明式执行器(纯函数,只碰样本文本)
+        let mut results: Vec<Value> = Vec::new();
+        for (i, sv) in samples.iter().enumerate() {
+            let label = sv["label"].as_str().unwrap_or("");
+            if !matches!(label, "match" | "no_match") {
+                return Err(format!("样本#{} label 必须是 match|no_match", i + 1));
+            }
+            let text = sv["input"]["text"].as_str().unwrap_or("");
+            let out = if t.kind == "logrep" { crate::mtools::run_logrep(&t.def, text) }
+                else { crate::mtools::run_xmlassert(&t.def, text) };
+            let got = if out["match"].as_bool().unwrap_or(false) { "match" } else { "no_match" };
+            results.push(json!({"i": i, "label": label, "got": got}));
+        }
+        let errors = results.iter().filter(|r| r["label"] != r["got"]).count() as u32;
+        // 误报成功: 真实 no_match 而工具判 match(校准语义下的"把失败粉饰成成功")
+        let fs = results.iter()
+            .filter(|r| r["label"] == "no_match" && r["got"] == "match").count() as u32;
+        const MIN_SAMPLES: u32 = 3; // v1 固定门槛(SPEC §4.3 达标线,后续入 def.limits)
+        const MAX_ERRORS: u32 = 0;
+        let ok = crate::mtools::calib_ok(results.len() as u32, errors, fs, MIN_SAMPLES, MAX_ERRORS);
+        let limits = if ok { "v1 全样本通过".to_string() }
+            else { format!("未达标: 样本{}(需>={}) 误判{}(需<={}) 误报{}(必须0)",
+                results.len(), MIN_SAMPLES, errors, MAX_ERRORS, fs) };
+        store.append(json!({
+            "r": "tool", "op": "calibrate", "id": id,
+            "samples": results, "errors": errors, "limits": limits,
+        }));
+        if ok {
+            store.append(json!({"r": "tool", "op": "adopt", "id": id, "by": "calibrate"}));
+            println!("校准通过: 工具 {id} 已启用,进入正式反馈路径(样本{} 误判0 误报0)", results.len());
+        } else {
+            println!("校准未通过: 工具 {id} {limits}");
+        }
+        return Ok(());
+    }
     if let Some(id) = a.opt("--retire") {
         let mut store = crate::mtools::ToolStore::load(&p);
         if store.by_id(&id).is_none() {
