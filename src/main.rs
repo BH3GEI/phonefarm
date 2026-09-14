@@ -11,6 +11,7 @@ mod parallel;
 mod device;
 mod fold;
 mod gamepad;
+mod hypo;
 mod plugins;
 mod runtime;
 mod script;
@@ -35,6 +36,36 @@ pub struct HookCfg {
     #[serde(default)]
     pub output: Option<String>,
 }
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct EvoCfg {
+    /// 总开关: false 时假设/检验/注入全部静默旁路,行为与旧版一致(SPEC_EVOLUTION §10)
+    #[serde(default = "d_evo_enabled")]
+    pub enabled: bool,
+    /// hypothesize 模型调用限额(每局)
+    #[serde(default = "d_evo_hyp_calls")]
+    pub hyp_calls_per_episode: u32,
+    /// 检验动作限额(每局)
+    #[serde(default = "d_evo_test_actions")]
+    pub test_actions_per_episode: u32,
+    /// 决策上下文注入假设上限
+    #[serde(default = "d_evo_inject_max")]
+    pub inject_max: usize,
+}
+impl Default for EvoCfg {
+    fn default() -> Self {
+        EvoCfg {
+            enabled: d_evo_enabled(),
+            hyp_calls_per_episode: d_evo_hyp_calls(),
+            test_actions_per_episode: d_evo_test_actions(),
+            inject_max: d_evo_inject_max(),
+        }
+    }
+}
+fn d_evo_enabled() -> bool { true }
+fn d_evo_hyp_calls() -> u32 { 2 } // 局内1次+局末1次(T1/T2 各占一次, SPEC_EVOLUTION v1.1)
+fn d_evo_test_actions() -> u32 { 2 }
+fn d_evo_inject_max() -> usize { 6 }
 
 #[derive(Deserialize, Serialize)]
 pub struct Config {
@@ -79,6 +110,9 @@ pub struct Config {
     #[serde(default, rename = "hook")]
     pub hooks: Vec<HookCfg>,
     pub providers: Vec<brain::ProviderCfg>,
+    /// 持续进化(假设—检验—证据闭环, SPEC_EVOLUTION §10)
+    #[serde(default)]
+    pub evolution: EvoCfg,
 }
 fn d_data_dir() -> String { ".".into() }
 fn d_max_steps() -> u32 { 12 }

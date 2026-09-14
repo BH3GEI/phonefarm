@@ -500,6 +500,66 @@ fn cmd_lessons(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// 假设物化视图(SPEC_EVOLUTION §2.1): 竞争解释的生命周期与 freq 证据
+fn cmd_hyp(a: &Args) -> Result<(), String> {
+    let task = task_or_latest(a)?;
+    let store = crate::hypo::Store::load(&data_root().join(&task).join("hypotheses.jsonl").to_string_lossy());
+    let hyps = store.hyps();
+    if a.flag("--json") {
+        let rows: Vec<Value> = hyps.iter().map(|h| json!({
+            "id": h.id, "q": h.q, "t": h.t, "conds": h.conds,
+            "status": format!("{:?}", h.status), "win": h.win, "lose": h.lose,
+        })).collect();
+        println!("{}", json!(rows));
+        return Ok(());
+    }
+    if hyps.is_empty() { println!("任务 {task}: 无假设(hypotheses.jsonl 空或不存在)"); return Ok(()); }
+    println!("任务 {task} 假设存储({}条,含已撤回历史):", hyps.len());
+    for h in &hyps {
+        let st = match h.status {
+            crate::hypo::Status::Candidate => "候选",
+            crate::hypo::Status::Active => "活跃",
+            crate::hypo::Status::Retracted => "已撤回",
+            crate::hypo::Status::Superseded => "已被替代",
+        };
+        let conf = if h.win + h.lose > 0 { format!("win{}/lose{}", h.win, h.lose) } else { "待证".into() };
+        let cond = if h.conds.is_empty() { String::new() } else { format!(" 适用[{}]", h.conds.join(",")) };
+        println!("  {} [{}|{}|{}]{cond} {}", h.id, h.q, st, conf, h.t);
+    }
+    Ok(())
+}
+
+/// 预测与检验台账(SPEC_EVOLUTION §2.2): 登记在前的预测、检验定义、结果链接
+fn cmd_pred(a: &Args) -> Result<(), String> {
+    let task = task_or_latest(a)?;
+    let store = crate::hypo::Store::load(&data_root().join(&task).join("hypotheses.jsonl").to_string_lossy());
+    let preds = store.preds();
+    if a.flag("--json") {
+        let rows: Vec<Value> = preds.iter().map(|p| json!({
+            "id": p.id, "hyps": p.hyps,
+            "expect": p.expect.iter().map(|(h, w)| json!({h: w})).collect::<Vec<_>>(),
+            "test": p.test, "page_hint": p.page_hint,
+            "outcome": p.outcome.as_ref().map(|o| json!({
+                "observed": o.observed, "assert": o.assert, "revises": o.revises,
+            })),
+        })).collect();
+        println!("{}", json!(rows));
+        return Ok(());
+    }
+    if preds.is_empty() { println!("任务 {task}: 无预测检验记录"); return Ok(()); }
+    println!("任务 {task} 预测检验({}条):", preds.len());
+    for p in &preds {
+        let exp = p.expect.iter().map(|(h, w)| format!("{h}→{w}")).collect::<Vec<_>>().join(",");
+        let out = match &p.outcome {
+            Some(o) => format!("{} ({})", o.assert, o.observed),
+            None => "待执行".into(),
+        };
+        println!("  {} {} 期望[{}] → {}", p.id,
+            serde_json::to_string(&p.test).unwrap_or_default(), exp, out);
+    }
+    Ok(())
+}
+
 fn cmd_campaign(a: &Args) -> Result<(), String> {
     let task = task_or_latest(a)?;
     let dir = data_root().join(&task);
@@ -678,6 +738,8 @@ pub fn dispatch(cmd: &str, rest: &[String]) -> Option<i32> {
         "schema" => cmd_schema(&a),
         "tree" => cmd_tree(&a),
         "lessons" => cmd_lessons(&a),
+        "hyp" => cmd_hyp(&a),
+        "pred" => cmd_pred(&a),
         "campaign" => cmd_campaign(&a),
         "tasks" => cmd_tasks(&a),
         "config" => cmd_config(&a),
