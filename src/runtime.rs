@@ -1591,10 +1591,49 @@ struct ParamsFile {
     origin_null_rate: Option<f32>,
 }
 
+/// 中断恢复信息(SPEC_EVOLUTION §6): 从旧局账本重建的最小状态。
+/// 语义: 账本最后动作无实测结果(diff/probe)时,该动作执行状态不明——
+/// 恢复局第一步只读核对现状,不得未经核对重放设备副作用。
+pub struct ResumeInfo {
+    pub old_run_id: String,
+    pub goal: String,
+    pub last_act: Option<Value>,
+    pub last_act_has_result: bool,
+    pub last_activity: String,
+}
+
+/// 由局ID前缀加载恢复信息;前缀无匹配/账本不可读 → None
+pub fn load_resume(task_dir: &str, run_prefix: &str) -> Option<ResumeInfo> {
+    let runs_dir = std::path::Path::new(task_dir).join("runs");
+    let mut cands: Vec<String> = fs::read_dir(&runs_dir).ok()?.flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .filter(|n| n.starts_with(run_prefix))
+        .collect();
+    cands.sort();
+    let old = cands.pop()?;
+    let text = fs::read_to_string(runs_dir.join(&old).join("log.jsonl")).ok()?;
+    let mut goal = String::new();
+    let mut last_act: Option<Value> = None;
+    let mut last_act_has_result = false;
+    let mut last_activity = String::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        match v["r"].as_str() {
+            Some("goal") => goal = v["t"].as_str().unwrap_or("").into(),
+            Some("act") => { last_act = Some(v); last_act_has_result = false; }
+            // diff(含rejected)与probe应答都是"该动作已有实测结果"的账本证据
+            Some("diff") | Some("probe") => { if last_act.is_some() { last_act_has_result = true; } }
+            Some("screen") => { last_activity = v["activity"].as_str().unwrap_or("").into(); }
+            _ => {}
+        }
+    }
+    Some(ResumeInfo { old_run_id: old, goal, last_act, last_act_has_result, last_activity })
+}
+
 pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                ext_cold_ms: Option<i64>,
                endless: bool, budget: u32, app: Option<String>, asserts: Vec<String>,
-               freeze_on_done: bool) -> EpisodeResult {
+               freeze_on_done: bool, resume: Option<ResumeInfo>) -> EpisodeResult {
     let t0 = std::time::Instant::now();
     let fail = |stop: &str, run_id: String| EpisodeResult {
         achieved: false, run_id, stop: stop.into(), steps: 0, calls: 0, tokens: 0,
@@ -1630,6 +1669,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64).unwrap_or(0)}));
     log.put(json!({"r": "goal", "t": goal}));
+    if let Some(rs) = &resume {
+        log.put(json!({"r":"hook","kind":"resume","from":rs.old_run_id}));
+    }
     if let Some(v) = &last_verdict {
         log.put(json!({"r": "last_verdict", "verdict": match v { Verdict::Pass => "pass", Verdict::Fail => "fail" }}));
     }
@@ -1799,6 +1841,27 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         eprintln!("✗ 首屏采集失败(设备复活无效)");
         return fail("capture_fail", run_id.clone());
     };
+    // ── 中断恢复核对(SPEC_EVOLUTION §6): 账末动作执行状态不明 → 只读核对现状落账,
+    //    并把"不得假设该动作已生效"注入第一次决策;绝不未经核对重放副作用 ──
+    if let Some(rs) = &resume {
+        let unknown = rs.last_act.is_some() && !rs.last_act_has_result;
+        let consistent = if rs.last_activity.is_empty() { "unknown".to_string() }
+            else if cap.activity == rs.last_activity { "same_activity".into() }
+            else { "activity_changed".into() };
+        log.put(json!({"r":"hook","kind":"resume_check","from":rs.old_run_id,
+            "last_act":rs.last_act,"had_result":rs.last_act_has_result,
+            "observed_activity":cap.activity,"ledger_activity":rs.last_activity,
+            "consistent":consistent}));
+        if unknown {
+            println!("      🔁 恢复核对: 上局最后动作执行状态不明,已只读采集现状(不重放副作用)");
+            let act_desc = rs.last_act.as_ref()
+                .map(|a| format!("{} {}", a["a"].as_str().unwrap_or(""), a["what"].as_str().unwrap_or(""))).unwrap_or_default();
+            alert = format!("【中断恢复】上一局在此画面中途中断,最后动作[{act_desc}]执行状态不明(账本无实测结果)。已只读核对:当前activity={},账末activity={}({consistent})。不得假设该动作已生效,依据当前画面重新决策。",
+                cap.activity, rs.last_activity);
+        } else {
+            println!("      🔁 恢复局: 上局账本闭合(最后动作已有实测结果),直接续跑");
+        }
+    }
     stream.push(format!("goal: {goal}"));
     if !last_verdict_line.is_empty() {
         stream.push(last_verdict_line.to_string());
@@ -3279,6 +3342,53 @@ mod tests {
         assert_eq!(assert_hits(&c, &ws), vec!["广告设置".to_string()], "全量层无截断盲区");
         c.full.clear();
         assert!(assert_hits(&c, &ws).is_empty(), "无全量层(OCR帧)退回文字清单,如实测不到就不注入");
+    }
+
+    #[test]
+    fn load_resume_tri_state() {
+        // SPEC_EVOLUTION §6 断点续跑: 末步 act 无 diff/probe 记录 = 执行结果未知 → last_act_has_result=false
+        let dir = std::env::temp_dir().join(format!("pf_resume_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let task_dir = dir.join("tasks").join("t1");
+        let runs_dir = task_dir.join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        let td = task_dir.to_str().unwrap();
+
+        // 1. runs 目录下无任何局 → None
+        assert!(load_resume(td, "run").is_none());
+
+        // 2. 末步 act 无 diff → 未知(false); 且按前缀挑字典序最新局
+        let older = runs_dir.join("run_20260101_000000_aaaa");
+        let newer = runs_dir.join("run_20260102_000000_bbbb");
+        std::fs::create_dir_all(&older).unwrap();
+        std::fs::create_dir_all(&newer).unwrap();
+        std::fs::write(older.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"旧目标\"}\n{\"r\":\"act\",\"a\":\"tap\",\"x\":1,\"y\":2}\n{\"r\":\"diff\",\"d\":\"+出现: 设置\"}\n").unwrap();
+        std::fs::write(newer.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"新目标\"}\n{\"r\":\"screen\",\"activity\":\"com.x.Home\",\"page_name\":\"P1\"}\n{\"r\":\"act\",\"a\":\"tap\",\"x\":3,\"y\":4}\n").unwrap();
+        let r = load_resume(td, "run").expect("应找到最新局");
+        assert_eq!(r.goal, "新目标");
+        assert!(!r.last_act_has_result, "act 后无 diff/probe = 执行结果未知");
+        assert_eq!(r.last_act.as_ref().unwrap()["a"].as_str(), Some("tap"));
+        assert_eq!(r.last_activity, "com.x.Home");
+        assert!(r.old_run_id.contains("20260102"), "按前缀挑最新局");
+
+        // 3. 末步 act 后有 probe → 已知(true)
+        std::fs::write(newer.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"新目标\"}\n{\"r\":\"act\",\"a\":\"find\"}\n{\"r\":\"probe\",\"q\":\"设置\",\"ans\":\"未找到\"}\n").unwrap();
+        assert!(load_resume(td, "run").unwrap().last_act_has_result, "probe 应答已记录 = 结果已知");
+
+        // 4. 末步 act 后有 diff(含 rejected 仲裁驳回) → 已知(true)
+        std::fs::write(newer.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"新目标\"}\n{\"r\":\"act\",\"a\":\"tap\"}\n{\"r\":\"diff\",\"d\":\"rejected(前科)\"}\n").unwrap();
+        assert!(load_resume(td, "run").unwrap().last_act_has_result, "diff(含rejected)已记录 = 结果已知");
+
+        // 5. 末尾 act 后只有 note(模型同轮便签,非实测结果) → 仍未知(false)
+        std::fs::write(newer.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"新目标\"}\n{\"r\":\"act\",\"a\":\"tap\"}\n{\"r\":\"note\",\"t\":\"点完等加载\"}\n").unwrap();
+        assert!(!load_resume(td, "run").unwrap().last_act_has_result, "note 不是实测结果,悬挂 act 仍未知");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

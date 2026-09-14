@@ -12,8 +12,8 @@ mod device;
 mod fold;
 mod gamepad;
 mod hypo;
-mod caps;
 mod mtools;
+mod caps;
 mod plugins;
 mod runtime;
 mod script;
@@ -298,6 +298,7 @@ fn main() {
             let mut asserts: Vec<String> = Vec::new();
             let mut detach = false;
             let mut freeze_on_done = false;
+            let mut resume_prefix: Option<String> = None;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -306,6 +307,7 @@ fn main() {
                     "--endless" => endless = true,
                     "--detach" => detach = true,
                     "--freeze-on-done" => freeze_on_done = true,
+                    "--resume" => resume_prefix = it.next().cloned(),
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--max-steps" => max_steps_override = it.next().and_then(|v| v.parse().ok()),
                     "--app" => app = it.next().cloned(),
@@ -322,8 +324,9 @@ fn main() {
                     _ => goal = a.clone(),
                 }
             }
-            if goal.is_empty() || task.is_empty() {
-                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--max-steps N] [--app <包名>] [--assert \"词1,词2\"] [--freeze-on-done] [--perceive ocr] \"<目标>\"");
+            if task.is_empty() || (goal.is_empty() && resume_prefix.is_none()) {
+                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--max-steps N] [--app <包名>] [--assert \"词1,词2\"] [--freeze-on-done] [--perceive ocr] [--resume <局ID前缀>] \"<目标>\"");
+                eprintln!("      --resume: 恢复中断局(可省略目标,继承旧局goal;账末动作状态不明时先只读核对)");
                 std::process::exit(2);
             }
             let cfg_text = match std::fs::read_to_string("phonefarm.toml") {
@@ -363,7 +366,21 @@ fn main() {
                 }
             }
             ensure_keys(&cfg);
-            let res = runtime::episode(&cfg, &task, &goal, serial, None, endless, budget, app, asserts, freeze_on_done);
+            // 中断恢复: 解析旧局账本(可继承 goal);局ID前缀无匹配直接拒绝开跑
+            let resume = match resume_prefix.as_deref() {
+                Some(rp) => {
+                    let task_dir = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
+                    match runtime::load_resume(&task_dir, rp) {
+                        Some(r) => Some(r),
+                        None => { eprintln!("--resume: 局ID前缀 {rp} 在任务 {task} 下无匹配局"); std::process::exit(2); }
+                    }
+                }
+                None => None,
+            };
+            if goal.is_empty() {
+                if let Some(r) = &resume { goal = r.goal.clone(); }
+            }
+            let res = runtime::episode(&cfg, &task, &goal, serial, None, endless, budget, app, asserts, freeze_on_done, resume);
             println!("summary: run={} stop={} steps={} calls={} tokens={} wall={:.1}s achieved={}",
                 res.run_id, res.stop, res.steps, res.calls, res.tokens,
                 res.wall_ms as f64 / 1000.0, res.achieved);
@@ -476,7 +493,7 @@ fn main() {
                     std::thread::sleep(std::time::Duration::from_secs(6));
                 }
                 let t0 = std::time::Instant::now();
-                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), cold_ms, true, budget, app.clone(), asserts.clone(), false);
+                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), cold_ms, true, budget, app.clone(), asserts.clone(), false, None);
                 let wall = t0.elapsed().as_secs();
                 append(&format!(
                     "{r}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{wall}",
