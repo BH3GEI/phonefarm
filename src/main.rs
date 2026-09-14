@@ -158,6 +158,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --dir APK目录) [--
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
        hyp | pred | caps [--adopt/--rollback id] | tools [--propose def.json|--retire id]
+       export [--task T] --split train|heldout --out <文件> [--redact-config toml]  (训练数据导出)
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)";
 

@@ -694,6 +694,140 @@ fn cmd_tools(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+// ══════════════ 训练数据导出(SPEC_EVOLUTION §8.1) ══════════════
+
+/// evalsets.toml 解析: heldout_tasks / heldout_runs(局ID前缀) 两清单(纯函数供单测)
+fn parse_evalsets(text: &str) -> (Vec<String>, Vec<String>) {
+    let get = |key: &str| -> Vec<String> {
+        toml::from_str::<Value>(text).ok()
+            .and_then(|v| v.get(key)?.as_array().map(|a| {
+                a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+            }))
+            .unwrap_or_default()
+    };
+    (get("heldout_tasks"), get("heldout_runs"))
+}
+
+/// ctx.log 切段(纯函数): "\n══ 步#N 决策上下文 ══\n<内容>" → {步号: 内容}
+fn ctx_segments(text: &str) -> std::collections::HashMap<u32, String> {
+    let mut m = std::collections::HashMap::new();
+    for seg in text.split("\n══ 步#").skip(1) {
+        if let Some((head, body)) = seg.split_once(" 决策上下文 ══\n") {
+            if let Ok(n) = head.trim().parse::<u32>() {
+                m.insert(n, body.trim_end().to_string());
+            }
+        }
+    }
+    m
+}
+
+/// 脱敏(纯函数): 关键词命中一律替换为 [REDACTED],返回 (新文本, 替换处数)
+fn redact_text(s: &str, keywords: &[String]) -> (String, usize) {
+    let mut out = s.to_string();
+    let mut n = 0usize;
+    for k in keywords {
+        if k.is_empty() { continue; }
+        let c = out.matches(k.as_str()).count();
+        if c > 0 { out = out.replace(k.as_str(), "[REDACTED]"); n += c; }
+    }
+    (out, n)
+}
+
+/// 训练数据导出: runs 的 raw 记录 + ctx.log 配对成 (输入,输出) 样本。
+/// heldout 硬过滤宁可少导;脱敏按 redact-config;写后自检(heldout混入/密钥模式=事故)。
+fn cmd_export(a: &Args) -> Result<(), String> {
+    let split = a.opt("--split").unwrap_or_else(|| "train".into());
+    if split != "train" && split != "heldout" {
+        return Err("--split 必须是 train|heldout".into());
+    }
+    let out = a.opt("--out").ok_or("--out <文件> 必填")?;
+    let (ho_tasks, ho_runs) = std::fs::read_to_string(data_root().join("_exp").join("evalsets.toml"))
+        .map(|t| parse_evalsets(&t)).unwrap_or_default();
+    let (kw, pkgs) = a.opt("--redact-config").and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|t| toml::from_str::<Value>(&t).ok())
+        .map(|v| {
+            let arr = |k: &str| -> Vec<String> { v.get(k).and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default() };
+            (arr("keywords"), arr("packages"))
+        })
+        .unwrap_or_default();
+    let is_ho = |task: &str, run: &str| ho_tasks.iter().any(|t| t == task)
+        || ho_runs.iter().any(|p| run.starts_with(p.as_str()));
+    let tasks: Vec<String> = match a.opt("--task") {
+        Some(t) => vec![t],
+        None => list_tasks(),
+    };
+    let mut lines: Vec<String> = vec![json!({"v":1,"kind":"pf-export","proto":"v1","split":split}).to_string()];
+    let (mut n_sample, mut n_redact, mut n_drop, mut n_skip_ho) = (0usize, 0usize, 0usize, 0usize);
+    for task in &tasks {
+        for run in runs_of(task) {
+            let ho = is_ho(task, &run);
+            // 硬过滤: train 排除 heldout; heldout 只导 heldout
+            if split == "train" && ho { n_skip_ho += 1; continue; }
+            if split == "heldout" && !ho { continue; }
+            let dir = data_root().join(task).join("runs").join(&run);
+            let ctxs = std::fs::read_to_string(dir.join("ctx.log"))
+                .map(|t| ctx_segments(&t)).unwrap_or_default();
+            for rec in read_jsonl(&dir.join("log.jsonl")) {
+                if rec["r"] != "raw" { continue; }
+                let n = rec["n"].as_u64().unwrap_or(0) as u32;
+                let hook = rec["hook"].as_str().unwrap_or("");
+                // 输入侧: step 的决策上下文在 ctx.log;其他 hook 的输入随 raw 自带(in 字段)
+                let input = if hook == "step" {
+                    ctxs.get(&n).cloned().unwrap_or_default()
+                } else {
+                    rec["in"].as_str().unwrap_or("").to_string()
+                };
+                if input.is_empty() { continue; } // 无输入侧的样本训不了,跳过
+                let (inp, c1) = redact_text(&input, &kw);
+                let (comp, c2) = redact_text(rec["t"].as_str().unwrap_or(""), &kw);
+                // 包名级脱敏: 命中私密包名整样本剔除
+                if pkgs.iter().any(|p| !p.is_empty() && (inp.contains(p) || comp.contains(p))) {
+                    n_drop += 1; continue;
+                }
+                n_redact += c1 + c2;
+                lines.push(json!({
+                    "task": task, "run": run, "step": n, "hook": hook,
+                    "model": rec["by"].as_str().unwrap_or(""),
+                    "proto": "v1", "split": split,
+                    "ctx": inp, "completion": comp,
+                }).to_string());
+                n_sample += 1;
+            }
+        }
+    }
+    // 自检(事故防线): 写盘后重读,heldout 混入与密钥模式一律报告
+    std::fs::write(&out, lines.join("\n") + "\n").map_err(|e| format!("写 {out}: {e}"))?;
+    let written = std::fs::read_to_string(&out).unwrap_or_default();
+    let mut incidents: Vec<String> = Vec::new();
+    if split == "train" {
+        for hr in &ho_runs {
+            if !hr.is_empty() && written.contains(hr.as_str()) {
+                incidents.push(format!("heldout局前缀 {hr} 混入导出"));
+            }
+        }
+        for ht in &ho_tasks {
+            if !ht.is_empty() && written.contains(&format!("\"task\":\"{ht}\"")) {
+                incidents.push(format!("heldout任务 {ht} 混入导出"));
+            }
+        }
+    }
+    if written.contains("sk-") { incidents.push("疑似密钥模式(sk-)出现在导出中".into()); }
+    let report = json!({
+        "out": out, "split": split, "samples": n_sample,
+        "redacted": n_redact, "dropped_private_pkg": n_drop, "skipped_heldout_runs": n_skip_ho,
+        "incidents": incidents,
+    });
+    if a.flag("--json") { println!("{report}"); } else {
+        println!("导出完成: {} 条样本 → {}(split={})", n_sample, report["out"], split);
+        println!("  脱敏替换{n_redact}处 私密包剔除{n_drop}条 跳过heldout局{n_skip_ho}个");
+        if incidents.is_empty() { println!("  自检: 无事故"); }
+        else { for i in &incidents { println!("  自检事故: {i}"); } }
+    }
+    if incidents.is_empty() { Ok(()) } else { Err("导出自检发现事故,见上".into()) }
+}
+
 fn cmd_campaign(a: &Args) -> Result<(), String> {
     let task = task_or_latest(a)?;
     let dir = data_root().join(&task);
@@ -876,6 +1010,7 @@ pub fn dispatch(cmd: &str, rest: &[String]) -> Option<i32> {
         "pred" => cmd_pred(&a),
         "caps" => cmd_caps(&a),
         "tools" => cmd_tools(&a),
+        "export" => cmd_export(&a),
         "campaign" => cmd_campaign(&a),
         "tasks" => cmd_tasks(&a),
         "config" => cmd_config(&a),
@@ -892,6 +1027,42 @@ pub fn dispatch(cmd: &str, rest: &[String]) -> Option<i32> {
             2
         }
     })
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn parse_evalsets_two_lists() {
+        let (t, r) = parse_evalsets("ver = 1\nheldout_tasks = [\"设置\", \"游戏\"]\nheldout_runs = [\"20260914\", \"20260915-aa\"]\n");
+        assert_eq!(t, vec!["设置".to_string(), "游戏".to_string()]);
+        assert_eq!(r, vec!["20260914".to_string(), "20260915-aa".to_string()]);
+        let (t2, r2) = parse_evalsets("ver = 1\n");
+        assert!(t2.is_empty() && r2.is_empty(), "缺省键=空清单");
+        let (t3, r3) = parse_evalsets("not toml {{{");
+        assert!(t3.is_empty() && r3.is_empty(), "坏文件=空清单(不 panic)");
+    }
+
+    #[test]
+    fn ctx_segments_split() {
+        let text = "\n══ 步#1 决策上下文 ══\n第一步内容\n多行\n\n══ 步#2 决策上下文 ══\n第二步内容\n";
+        let m = ctx_segments(text);
+        assert_eq!(m.get(&1).unwrap(), "第一步内容\n多行");
+        assert_eq!(m.get(&2).unwrap(), "第二步内容");
+        assert!(m.get(&3).is_none());
+        assert!(ctx_segments("").is_empty());
+    }
+
+    #[test]
+    fn redact_text_counts() {
+        let (s, n) = redact_text("密码是123,别问密码", &["密码".to_string()]);
+        assert_eq!(s, "[REDACTED]是123,别问[REDACTED]");
+        assert_eq!(n, 2);
+        let (s2, n2) = redact_text("干净文本", &["密码".to_string(), "".to_string()]);
+        assert_eq!(s2, "干净文本");
+        assert_eq!(n2, 0, "空关键词不炸");
+    }
 }
 
 #[cfg(test)]
