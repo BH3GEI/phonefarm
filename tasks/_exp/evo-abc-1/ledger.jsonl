@@ -1,0 +1,12 @@
+{"ablate":null,"achieved":true,"arm":"C","calls":5,"round":1,"run_id":"20260914-035731-53678-0","stop":"done","task":"exp-adapt","tokens":14553,"ts":"2026-09-14T03:58:03-0700","wall_ms":31270}
+{"ablate":null,"achieved":true,"arm":"C","calls":5,"round":1,"run_id":"20260914-035803-53818-0","stop":"done","task":"exp-eval","tokens":14563,"ts":"2026-09-14T03:58:29-0700","wall_ms":25981}
+{"ablate":null,"achieved":true,"arm":"C","calls":5,"round":2,"run_id":"20260914-035829-53918-0","stop":"done","task":"exp-adapt","tokens":14982,"ts":"2026-09-14T03:58:57-0700","wall_ms":28179}
+{"ablate":null,"achieved":true,"arm":"C","calls":5,"round":2,"run_id":"20260914-035857-58169-0","stop":"done","task":"exp-eval","tokens":14787,"ts":"2026-09-14T03:59:24-0700","wall_ms":27130}
+{"ablate":null,"achieved":true,"arm":"A","calls":5,"round":1,"run_id":"20260914-035929-58802-0","stop":"done","task":"exp-adapt","tokens":13816,"ts":"2026-09-14T03:59:55-0700","wall_ms":25461}
+{"ablate":null,"achieved":false,"arm":"A","calls":8,"round":1,"run_id":"20260914-035955-59023-0","stop":"max_steps","task":"exp-eval","tokens":24896,"ts":"2026-09-14T04:01:53-0700","wall_ms":118311}
+{"ablate":null,"achieved":false,"arm":"A","calls":9,"round":2,"run_id":"20260914-040153-59516-0","stop":"max_steps","task":"exp-adapt","tokens":28620,"ts":"2026-09-14T04:03:39-0700","wall_ms":105573}
+{"ablate":null,"achieved":true,"arm":"A","calls":9,"round":2,"run_id":"20260914-040614-60447-0","stop":"done","task":"exp-eval","tokens":31210,"ts":"2026-09-14T04:08:04-0700","wall_ms":109795}
+{"ablate":null,"achieved":true,"arm":"B","calls":5,"round":1,"run_id":"20260914-040808-65629-0","stop":"done","task":"exp-adapt","tokens":14597,"ts":"2026-09-14T04:08:44-0700","wall_ms":35863}
+{"ablate":null,"achieved":true,"arm":"B","calls":5,"round":1,"run_id":"20260914-040844-65726-0","stop":"done","task":"exp-eval","tokens":14591,"ts":"2026-09-14T04:09:22-0700","wall_ms":38234}
+{"ablate":null,"achieved":true,"arm":"B","calls":6,"round":2,"run_id":"20260914-040922-65884-0","stop":"done","task":"exp-adapt","tokens":15456,"ts":"2026-09-14T04:09:51-0700","wall_ms":28805}
+{"ablate":null,"achieved":true,"arm":"B","calls":5,"round":2,"run_id":"20260914-040951-65997-0","stop":"done","task":"exp-eval","tokens":14552,"ts":"2026-09-14T04:10:14-0700","wall_ms":23334}

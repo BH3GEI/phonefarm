@@ -1,0 +1,16 @@
+{"v":1}
+{"r":"hyp","op":"propose","id":"h1","q":"about-phone-visibility","t":"关于手机入口在设置列表底部,首屏不可见,需要下滑才能看到","conds":["settings"]}
+{"r":"hyp","op":"propose","id":"h2","q":"about-phone-visibility","t":"关于手机入口在设置首屏直接可见,无需滚动","conds":["settings"]}
+{"r":"pred","op":"register","id":"p1","hyps":["h1","h2"],"expect":{"h1":"probe_not_found","h2":"probe_found"},"test":{"kind":"probe","a":"find","q":"关于手机"},"page_hint":"com.android.settings"}
+{"assert":"pass","id":"p1","observed":"probe(find): 当前屏未找到'关于手机';可scroll后再找,或目标在别页","op":"outcome","r":"pred","revises":[{"id":"h1","op":"support"},{"id":"h2","op":"against"}]}
+{"ev":{"rec":"p1","run":"20260914-031853-16703-0","step":1},"id":"h1","op":"support","r":"hyp"}
+{"ev":{"rec":"p1","run":"20260914-031853-16703-0","step":1},"id":"h2","op":"against","r":"hyp"}
+{"r":"pred","op":"register","id":"p2","hyps":["h1","h2"],"expect":{"h1":"probe_not_found","h2":"probe_found"},"test":{"kind":"probe","a":"find","q":"关于手机"},"page_hint":"com.android.settings"}
+{"assert":"pass","id":"p2","observed":"probe(find): 当前屏未找到'关于手机';可scroll后再找,或目标在别页","op":"outcome","r":"pred","revises":[{"id":"h1","op":"support"},{"id":"h2","op":"against"}]}
+{"ev":{"rec":"p2","run":"20260914-033052-17961-0","step":1},"id":"h1","op":"support","r":"hyp"}
+{"ev":{"rec":"p2","run":"20260914-033052-17961-0","step":1},"id":"h2","op":"against","r":"hyp"}
+{"r":"pred","op":"register","id":"p3","hyps":["h1","h2"],"expect":{"h1":"probe_not_found","h2":"probe_found"},"test":{"kind":"probe","a":"find","q":"关于手机"},"page_hint":"com.android.settings"}
+{"assert":"pass","id":"p3","observed":"probe(find): 当前屏未找到'关于手机';可scroll后再找,或目标在别页","op":"outcome","r":"pred","revises":[{"id":"h1","op":"support"},{"id":"h2","op":"against"}]}
+{"ev":{"rec":"p3","run":"20260914-033506-23086-0","step":1},"id":"h1","op":"support","r":"hyp"}
+{"ev":{"rec":"p3","run":"20260914-033506-23086-0","step":1},"id":"h2","op":"against","r":"hyp"}
+{"id":"h2","op":"retract","r":"hyp","why":"3局T3反证(lose3):probe实测设置首屏无关于手机,与h2预测相反"}

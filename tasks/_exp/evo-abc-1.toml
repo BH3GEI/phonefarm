@@ -1,0 +1,28 @@
+# A/B/C 对比实验(issue #11 验收场景8): 持续进化是否改变后续局行为
+# A=无跨局经验(每局清), B=冻结快照(每局恢复起步态), C=持续演进(起步装载后不回滚)
+id = "evo-abc-1"
+arms = ["A", "B", "C"]
+rounds = 2
+budget_calls = 14
+max_steps = 14
+serial = "91253241019A"
+token_cap = 400000
+stall_device_failures = 3
+scoring_proto = "v1"
+min_meaningful_delta = 0.15
+
+[app_reset]
+pkg = "com.android.settings"
+clear = false
+
+# 适应任务: C 臂在此积累/演进经验与假设
+[[adapt_tasks]]
+task = "exp-adapt"
+goal = "在设置里找到并进入'显示'设置页"
+app = "com.android.settings"
+
+# 评测任务: 测经验是否迁移(显示页内的进阶操作)
+[[eval_tasks]]
+task = "exp-eval"
+goal = "在设置的显示页里找到'屏幕刷新率'相关条目并停留在该页"
+app = "com.android.settings"
