@@ -1448,7 +1448,7 @@ fn hypothesize_once(brain: &mut Brain, prompt: &str, trigger: &str, stream_tail:
         Ok(o) => o,
         Err(e) => {
             log.put(json!({"r":"hook","kind":"hypothesize","call_fail":tcut(&e,60)}));
-            println!("      🧪 hypothesize 调用失败: {}", tcut(&e, 60));
+            println!("      [evo] hypothesize 调用失败: {}", tcut(&e, 60));
             return None;
         }
     };
@@ -1458,7 +1458,7 @@ fn hypothesize_once(brain: &mut Brain, prompt: &str, trigger: &str, stream_tail:
         None => {
             brain.blame(&out.by);
             log.put(json!({"r":"hook","kind":"hypothesize","parse_fail":true,"by":out.by}));
-            println!("      🧪 hypothesize 输出不合契约,丢弃(不进证据链)");
+            println!("      [evo] hypothesize 输出不合契约,丢弃(不进证据链)");
             return None;
         }
     };
@@ -1471,7 +1471,7 @@ fn hypothesize_once(brain: &mut Brain, prompt: &str, trigger: &str, stream_tail:
             "t":t,"conds":conds,"origin":origin}));
         idmap.insert(lid.clone(), nid);
     }
-    println!("      🧪 hypothesize({}): q={} 竞争解释{}条", out.by, q, hyps.len());
+    println!("      [evo] hypothesize({}): q={} 竞争解释{}条", out.by, q, hyps.len());
     log.put(json!({"r":"hook","kind":"hypothesize","q":q,"hyps":hyps.len(),
         "trigger":tcut(trigger,60),"by":out.by}));
     let tv = test?;
@@ -2042,7 +2042,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     if page_ok {
                         test_actions_left -= 1;
                         let act = act_from_test(&pred.test);
-                        println!("      🧪 T3检验{}: {}(页面已复现)", pred.id,
+                        println!("      [T3] 检验{}: {}(页面已复现)", pred.id,
                             tcut(&serde_json::to_string(&pred.test).unwrap_or_default(), 60));
                         log.put(json!({"r":"hook","kind":"hypo_test","pred":pred.id,"via":"t3","test":pred.test}));
                         pending_test = Some((pred.id.clone(), pred.expect.clone()));
@@ -2053,7 +2053,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     } else {
                         t3_miss += 1;
                         if t3_miss >= 3 {
-                            println!("      🧪 T3检验{}: 页面3次未复现,判无结论", pred.id);
+                            println!("      [T3] 检验{}: 页面3次未复现,判无结论", pred.id);
                             hypo.append(json!({"r":"pred","op":"outcome","id":pred.id,
                                 "observed":format!("页面上下文未复现(activity={} ≠ hint={})", cap.activity, pred.page_hint),
                                 "assert":"inconclusive","revises":[]}));
@@ -2071,7 +2071,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     {
                         test_actions_left -= 1;
                         let act = act_from_test(&tj);
-                        println!("      🧪 T1检验{pid}已登记: {}",
+                        println!("      [T1] 检验{pid}已登记: {}",
                             tcut(&serde_json::to_string(&tj).unwrap_or_default(), 60));
                         log.put(json!({"r":"hook","kind":"hypo_test","pred":pid,"via":"t1","test":tj}));
                         pending_test = Some((pid, expects));
@@ -2080,7 +2080,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                         plan_ms = Some(0);
                     }
                 } else {
-                    println!("      🧪 T1信号已武装但未配置 hypothesize 提示词,丢弃(事件已落账)");
+                    println!("      [T1] 信号已武装但未配置 hypothesize 提示词,丢弃(事件已落账)");
                 }
             }
         }
@@ -2301,13 +2301,13 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 hypo.append(json!({"r":"pred","op":"outcome","id":pid,
                     "observed":format!("检验动作被驳回: {reason}"),"assert":"fail","revises":[]}));
                 log.put(json!({"r":"hook","kind":"pred_outcome","pred":pid,"assert":"fail"}));
-                println!("      🧪 检验{pid}: 动作被驳回,判检验失败(负结果保留)");
+                println!("      [evo] 检验{pid}: 动作被驳回,判检验失败(负结果保留)");
             } else if cfg.evolution.enabled && hypo_trigger.is_none() {
                 let sig = fail_sig(&act);
                 let c = { let e = fail_sigs.entry(sig).or_insert(0); *e += 1; *e };
                 if c >= 2 {
                     hypo_trigger = Some(format!("动作[{aline}]第{c}次被驳回({reason})"));
-                    println!("      🧪 T1武装: 同一目标第{c}次失败,待触发hypothesize");
+                    println!("      [T1] 武装: 同一目标第{c}次失败,待触发hypothesize");
                 }
             }
             if let Some(t) = pending_note.take() {
@@ -2367,7 +2367,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                     &crate::hypo::Obs::Probe(&ans),
                     &format!("probe({}): {}", act.a, tcut(&ans.replace('\n', " "), 60)), &run_id, n);
                 log.put(json!({"r":"hook","kind":"pred_outcome","pred":pid,"assert":pa}));
-                println!("      🧪 检验{pid}结果链接: {pa}");
+                println!("      [evo] 检验{pid}结果链接: {pa}");
             }
             if let Some(t) = pending_note.take() {
                 let t = tcut(&t, cfg.note_max_chars);
@@ -2610,7 +2610,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 &crate::hypo::Obs::Diff(&d),
                 &format!("{} → {}", act.a, tcut(&d, 60)), &run_id, n);
             log.put(json!({"r":"hook","kind":"pred_outcome","pred":pid,"assert":pa}));
-            println!("      🧪 检验{pid}结果链接: {pa}");
+            println!("      [evo] 检验{pid}结果链接: {pa}");
         }
         // WebView back被吞检测: 网页页上back无效 → 立旗,下一记back自动连按两次
         back_eaten = act.a == "back" && is_null && cap.webview;
@@ -2625,7 +2625,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 let c = { let e = fail_sigs.entry(sig).or_insert(0); *e += 1; *e };
                 if c >= 2 {
                     hypo_trigger = Some(format!("动作[{aline}]第{c}次实测无变化(diff=none)"));
-                    println!("      🧪 T1武装: 同一目标第{c}次空击,待触发hypothesize");
+                    println!("      [T1] 武装: 同一目标第{c}次空击,待触发hypothesize");
                 }
             }
         } else {
