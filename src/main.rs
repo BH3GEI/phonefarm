@@ -6,6 +6,7 @@
 mod brain;
 mod cli;
 mod cts;
+mod experiment;
 mod keepalive;
 mod parallel;
 mod device;
@@ -158,9 +159,22 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --dir APK目录) [--
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
        hyp | pred | caps [--adopt/--rollback id] | tools [--propose def.json|--retire id]
+       experiment <spec.toml> [--arm A|B|C] [--ablate no-active-testing|no-cap-screening] [--resume|--report-only] [--json]  (A/B/C 对比实验,SPEC_EVOLUTION §7)
        export [--task T] --split train|heldout --out <文件> [--redact-config toml]  (训练数据导出)
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)";
+
+/// 任务数据根(tasks 目录)解析: PF_TASKS_ROOT 环境变量优先(实验臂隔离/单测注入,
+/// 语义与 cli.rs data_root() 一致——指向 tasks 根本身);否则 <data_dir>/tasks。
+pub(crate) fn tasks_root(data_dir: &str) -> String {
+    if let Ok(o) = std::env::var("PF_TASKS_ROOT") {
+        let o = o.trim().trim_end_matches('/');
+        if !o.is_empty() {
+            return o.to_string();
+        }
+    }
+    format!("{}/tasks", data_dir.trim_end_matches('/'))
+}
 
 /// secrets.env 解析(Improve Spec): 只认 `export KEY="v"` / `KEY=v` 形态的行,
 /// 等价 source 语义但绝不执行任何命令。纯函数供单测。
@@ -353,7 +367,7 @@ fn main() {
             if detach {
                 // 先起跑回头取结果: 预分配局ID→建目录→分离子进程→立即回报(取结果走 status/show)
                 let id = runtime::alloc_run_id();
-                let run_dir = format!("{}/tasks/{}/runs/{}", cfg.data_dir.trim_end_matches('/'), task, id);
+                let run_dir = format!("{}/{}/runs/{}", tasks_root(&cfg.data_dir), task, id);
                 if std::fs::create_dir_all(&run_dir).is_err() {
                     eprintln!("✗ 建不了运行目录 {run_dir}");
                     std::process::exit(2);
@@ -371,7 +385,7 @@ fn main() {
             // 中断恢复: 解析旧局账本(可继承 goal);局ID前缀无匹配直接拒绝开跑
             let resume = match resume_prefix.as_deref() {
                 Some(rp) => {
-                    let task_dir = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
+                    let task_dir = format!("{}/{}", tasks_root(&cfg.data_dir), task);
                     match runtime::load_resume(&task_dir, rp) {
                         Some(r) => Some(r),
                         None => { eprintln!("--resume: 局ID前缀 {rp} 在任务 {task} 下无匹配局"); std::process::exit(2); }

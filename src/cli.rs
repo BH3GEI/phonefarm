@@ -221,7 +221,7 @@ impl Args {
         for v in &self.vals {
             if skip { skip = false; continue; }
             if let Some(s) = v.strip_prefix("--") {
-                skip = !matches!(s, "json" | "raw" | "hooks" | "events" | "crashes" | "anr" | "trace" | "markdown" | "yes" | "rebuild");
+                skip = !matches!(s, "json" | "raw" | "hooks" | "events" | "crashes" | "anr" | "trace" | "markdown" | "yes" | "rebuild" | "resume" | "report-only");
                 continue;
             }
             return Some(v.clone());
@@ -975,6 +975,74 @@ fn cmd_eval(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// A/B/C 对比实验(SPEC_EVOLUTION §7): spec.toml 驱动,臂隔离/交错排程/台账续跑/报告。
+/// 跑局由 experiment 执行层自调用 run 子进程完成;本函数只做参数解析与结果呈报。
+fn cmd_experiment(a: &Args) -> Result<(), String> {
+    let spec_path = a.positional().ok_or(
+        "用法: phonefarm experiment <spec.toml> [--arm A|B|C] [--ablate no-active-testing|no-cap-screening] [--resume] [--report-only] [--json]")?;
+    let text = std::fs::read_to_string(&spec_path).map_err(|e| format!("读 {spec_path}: {e}"))?;
+    let spec = crate::experiment::parse_spec(&text)?;
+    let only_arm = a.opt("--arm").map(|s| s.to_uppercase());
+    if let Some(arm) = &only_arm {
+        if !spec.arms.iter().any(|x| x == arm) {
+            return Err(format!("--arm {arm} 不在 spec 声明的臂 {:?} 里", spec.arms));
+        }
+    }
+    let ablate: Option<&str> = match a.opt("--ablate").as_deref() {
+        None => None,
+        Some("no-active-testing") => Some("no-active-testing"),
+        Some("no-cap-screening") => Some("no-cap-screening"),
+        Some(other) => return Err(format!("--ablate 只认 no-active-testing|no-cap-screening,收到 '{other}'")),
+    };
+    let report_only = a.flag("--report-only");
+    let resume = a.flag("--resume");
+    let root = data_root();
+    let summary = if report_only {
+        // 只重出报告: 臂集按 --arm(缺省 spec 全臂),从台账重算
+        let arms: Vec<String> = match &only_arm {
+            Some(x) => vec![x.clone()],
+            None => spec.arms.clone(),
+        };
+        let rep = crate::experiment::generate_report(&root, &spec, &arms, ablate)?;
+        serde_json::json!({
+            "exp_id": spec.id,
+            "report_json": crate::experiment::exp_root(&root, &spec.id).join("report.json").display().to_string(),
+            "report_md": crate::experiment::exp_root(&root, &spec.id).join("report.md").display().to_string(),
+            "declared_samples": rep["declared_samples"].clone(),
+            "actual_samples": rep["actual_samples"].clone(),
+            "arms_summary": rep["arms_summary"].clone(),
+            "findings": rep["findings"].clone(),
+        })
+    } else {
+        crate::experiment::run(&root, &spec, only_arm.as_deref(), ablate, resume)?
+    };
+    if a.flag("--json") {
+        println!("{}", serde_json::to_string_pretty(&summary).unwrap_or_default());
+    } else {
+        println!("实验 {} 完成", summary["exp_id"].as_str().unwrap_or("?"));
+        println!("  报告: {}", summary["report_md"].as_str().unwrap_or("?"));
+        println!("  数据: {}", summary["report_json"].as_str().unwrap_or("?"));
+        if let Some(n) = summary.get("ran_this_turn") {
+            println!("  本轮新跑 {} 局(声明 {} 局)", n, summary["declared_samples"]);
+        } else {
+            println!("  样本: 声明 {} / 实际 {}", summary["declared_samples"], summary["actual_samples"]);
+        }
+        let stopped = &summary["stopped_arms"];
+        if stopped.is_object() && !stopped.as_object().unwrap().is_empty() {
+            println!("  停臂: {}", stopped);
+        }
+        for a in summary["arms_summary"].as_array().cloned().unwrap_or_default() {
+            println!("  臂{}: {}局 达成{} 成功率{} calls{} tokens{}",
+                a["arm"].as_str().unwrap_or("?"), a["episodes"], a["achieved"],
+                a["success_overall"], a["calls"], a["tokens"]);
+        }
+        for f in summary["findings"].as_array().cloned().unwrap_or_default() {
+            println!("  结论: {}", f.as_str().unwrap_or(""));
+        }
+    }
+    Ok(())
+}
+
 fn cmd_campaign(a: &Args) -> Result<(), String> {
     let task = task_or_latest(a)?;
     let dir = data_root().join(&task);
@@ -1159,6 +1227,7 @@ pub fn dispatch(cmd: &str, rest: &[String]) -> Option<i32> {
         "tools" => cmd_tools(&a),
         "export" => cmd_export(&a),
         "eval" => cmd_eval(&a),
+        "experiment" => cmd_experiment(&a),
         "campaign" => cmd_campaign(&a),
         "tasks" => cmd_tasks(&a),
         "config" => cmd_config(&a),

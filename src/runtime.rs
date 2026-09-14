@@ -1670,7 +1670,8 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         wall_ms: t0.elapsed().as_millis() as u64,
     };
     // ── 目录与文件 ──
-    let task_dir = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
+    // PF_TASKS_ROOT 优先(实验臂隔离: tasks_root 语义与 cli.rs data_root() 一致)
+    let task_dir = format!("{}/{}", crate::tasks_root(&cfg.data_dir), task);
     let seq = run_seq();
     // PF_RUN_ID: detach 父进程预分配的局ID(先回报后开跑);常规路径局内自生成
     let run_id = match std::env::var("PF_RUN_ID") {
@@ -1722,7 +1723,7 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
     let lessons = load_lessons(&format!("{task_dir}/lessons.jsonl"));
     // 全局经验: 跨任务共享(tasks/_global/),"游戏里用home逃生"这类学费只交一次
-    let global_dir = format!("{}/tasks/_global", cfg.data_dir.trim_end_matches('/'));
+    let global_dir = format!("{}/_global", crate::tasks_root(&cfg.data_dir));
     let glessons = load_lessons(&format!("{global_dir}/lessons.jsonl"));
     // 持续进化: 假设—检验—证据存储(append-only 事件溯源;enabled=false 时照样加载供审计,但不触发不注入)
     let mut hypo = crate::hypo::Store::load(&format!("{task_dir}/hypotheses.jsonl"));
