@@ -1630,6 +1630,35 @@ pub fn load_resume(task_dir: &str, run_prefix: &str) -> Option<ResumeInfo> {
     Some(ResumeInfo { old_run_id: old, goal, last_act, last_act_has_result, last_activity })
 }
 
+/// 自动候选生成(SPEC_EVOLUTION §5,纯确定性): 活跃假设满足证据阈值
+/// (win>=3 且 lose==0 且 support/against 证据跨 >=2 个不同 run)→ 落 knowledge 类 candidate 事件。
+/// 幂等: 同 id(cap_<hyp_id>)已存在(任意状态)不重复生成;返回本次新登记条数。
+fn auto_candidate_caps(hypo: &crate::hypo::Store, caps_store: &mut crate::caps::CapStore, task: &str) -> usize {
+    let mut made = 0;
+    for h in hypo.hyps() {
+        if h.status != crate::hypo::Status::Active { continue; }
+        let runs: std::collections::HashSet<String> = hypo.events().iter()
+            .filter(|e| e["r"] == "hyp"
+                && (e["op"] == "support" || e["op"] == "against")
+                && e["id"].as_str() == Some(h.id.as_str()))
+            .filter_map(|e| e["ev"]["run"].as_str().map(String::from))
+            .collect();
+        if !crate::caps::auto_candidate_ok(h.win, h.lose, runs.len() as u32) { continue; }
+        let cid = format!("cap_{}", h.id);
+        if caps_store.caps().iter().any(|c| c.id == cid) { continue; }
+        caps_store.append(serde_json::json!({
+            "r": "cap", "op": "candidate", "id": cid, "kind": "knowledge", "t": h.t,
+            "scope": {"tasks": [task], "conds": h.conds},
+            "from": {"hyp": h.id, "win": h.win, "lose": h.lose, "runs": runs.len()},
+            "ver": 1,
+        }));
+        println!("(假设 {} 证据达标[win{} lose{} 跨{}局] → 能力候选 {})",
+            h.id, h.win, h.lose, runs.len(), cid);
+        made += 1;
+    }
+    made
+}
+
 pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                ext_cold_ms: Option<i64>,
                endless: bool, budget: u32, app: Option<String>, asserts: Vec<String>,
@@ -1697,6 +1726,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     // 持续进化: 假设—检验—证据存储(append-only 事件溯源;enabled=false 时照样加载供审计,但不触发不注入)
     let mut hypo = crate::hypo::Store::load(&format!("{task_dir}/hypotheses.jsonl"));
     let ghypo = crate::hypo::Store::load(&format!("{global_dir}/hypotheses.jsonl"));
+    // 能力固化层(SPEC_EVOLUTION §5): adopted 能力注入优先级高于 lesson,标注来源
+    let caps_store = crate::caps::CapStore::load(&format!("{task_dir}/capabilities.jsonl"));
+    let gcaps_store = crate::caps::CapStore::load(&format!("{global_dir}/capabilities.jsonl"));
     if cfg.evolution.enabled {
         let (na, np) = (hypo.injectable().len(), hypo.pending_preds().len());
         if na + np > 0 { println!("(载入假设存储: 可注入{na}条 待执行检验{np}条)"); }
@@ -2102,9 +2134,16 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             let hypo_line = if cfg.evolution.enabled {
                 let page_name = tree.as_ref().and_then(|t| t.page_of(&cap.els))
                     .map(|p| p.name.clone()).unwrap_or_default();
-                let mut s = hypo.inject_line(&cap.activity, &page_name, cfg.evolution.inject_max);
+                // 能力固化层优先注入(SPEC §2.3: adopted capability > lesson,标注来源)
+                let mut s = caps_store.inject_line(task, &cap.activity, &page_name, cfg.evolution.inject_max);
+                let gcap = gcaps_store.inject_line(task, &cap.activity, &page_name, 2);
+                s.push_str(&gcap);
                 if !s.is_empty() {
-                    s = format!("假设(竞争解释,经程序实证更新;与画面矛盾时以画面为准):\n{s}");
+                    s = format!("能力(已评测启用的固化经验,优先级高于经验条;与画面矛盾时以画面为准):\n{s}");
+                }
+                let h = hypo.inject_line(&cap.activity, &page_name, cfg.evolution.inject_max);
+                if !h.is_empty() {
+                    s.push_str(&format!("假设(竞争解释,经程序实证更新;与画面矛盾时以画面为准):\n{h}"));
                 }
                 let g = ghypo.inject_line(&cap.activity, &page_name, 2);
                 if !g.is_empty() {
@@ -2771,12 +2810,19 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     if cfg.evolution.enabled && done_claim && !achieved && hyp_calls_left > 0 {
         if let Some(pr) = cfg.prompts.get("hypothesize").map(|s| s.as_str()) {
             hyp_calls_left -= 1;
-            println!("      🧪 T2: done复核未达,局末hypothesize(本局余{hyp_calls_left}次)");
+            println!("      [T2] done复核未达,局末hypothesize(本局余{hyp_calls_left}次)");
             let tail: Vec<String> = stream.iter().rev().take(12).rev().cloned().collect();
             let _ = hypothesize_once(&mut brain, pr,
                 &format!("done复核未通过({})", tcut(&verdict_line, 80)),
                 &tail.join("\n"), &mut hypo, &ghypo, &mut log, &run_id, n, &cap.activity);
         }
+    }
+
+    // ── 持续进化: 自动候选生成(SPEC_EVOLUTION §5,确定性)——证据达标的活跃假设固化为能力候选 ──
+    if cfg.evolution.enabled {
+        let mut caps_mut = crate::caps::CapStore::load(&format!("{task_dir}/capabilities.jsonl"));
+        let made = auto_candidate_caps(&hypo, &mut caps_mut, task);
+        if made > 0 { println!("(自动固化 {made} 条能力候选: 证据阈值 win>=3 且 lose==0 且跨>=2局)"); }
     }
 
     // ── 时间点: 局末复盘 → lessons.jsonl ──
@@ -3342,6 +3388,50 @@ mod tests {
         assert_eq!(assert_hits(&c, &ws), vec!["广告设置".to_string()], "全量层无截断盲区");
         c.full.clear();
         assert!(assert_hits(&c, &ws).is_empty(), "无全量层(OCR帧)退回文字清单,如实测不到就不注入");
+    }
+
+    #[test]
+    fn auto_candidate_caps_thresholds_and_idempotent() {
+        // SPEC_EVOLUTION §5: win>=3 且 lose==0 且证据跨>=2局 的活跃假设 → 自动固化能力候选
+        let dir = std::env::temp_dir().join(format!("pf_autocap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hp = dir.join("hypotheses.jsonl").to_string_lossy().to_string();
+        let cp = dir.join("capabilities.jsonl").to_string_lossy().to_string();
+        let mut hs = crate::hypo::Store::load(&hp);
+        let sup = |id: &str, rec: &str, run: &str| serde_json::json!(
+            {"r":"hyp","op":"support","id":id,"ev":{"rec":rec,"run":run,"step":1}});
+        // h1: win3 lose0 跨2局 → 应生成
+        hs.append(serde_json::json!({"r":"hyp","op":"propose","id":"h1","q":"q1","t":"设置列表需先滑到底","conds":["settings"]}));
+        for (rec, run) in [("p1","r1"),("p2","r1"),("p3","r2")] { hs.append(sup("h1", rec, run)); }
+        // h2: win2 lose0 → 不达标
+        hs.append(serde_json::json!({"r":"hyp","op":"propose","id":"h2","q":"q2","t":"t2"}));
+        for (rec, run) in [("p4","r1"),("p5","r2")] { hs.append(sup("h2", rec, run)); }
+        // h3: win3 lose1 → 有反证不达标
+        hs.append(serde_json::json!({"r":"hyp","op":"propose","id":"h3","q":"q3","t":"t3"}));
+        for (rec, run) in [("p6","r1"),("p7","r2"),("p8","r2")] { hs.append(sup("h3", rec, run)); }
+        hs.append(serde_json::json!({"r":"hyp","op":"against","id":"h3","ev":{"rec":"p9","run":"r1","step":2}}));
+        // h4: win3 但只在1局 → 跨局不达标
+        hs.append(serde_json::json!({"r":"hyp","op":"propose","id":"h4","q":"q4","t":"t4"}));
+        for rec in ["p10","p11","p12"] { hs.append(sup("h4", rec, "r1")); }
+
+        let mut cs = crate::caps::CapStore::load(&cp);
+        let made = auto_candidate_caps(&hs, &mut cs, "demo");
+        assert_eq!(made, 1, "只有 h1 达标");
+        let caps = cs.caps();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].id, "cap_h1");
+        assert_eq!(caps[0].kind, "knowledge");
+        assert_eq!(caps[0].status, crate::caps::CapStatus::Candidate);
+        assert_eq!(caps[0].scope_tasks, vec!["demo".to_string()]);
+        assert_eq!(caps[0].scope_conds, vec!["settings".to_string()]);
+        // 幂等: 再跑不重复生成
+        assert_eq!(auto_candidate_caps(&hs, &mut cs, "demo"), 0);
+        assert_eq!(cs.caps().len(), 1);
+        // 落盘可重放
+        let cs2 = crate::caps::CapStore::load(&cp);
+        assert_eq!(cs2.caps().len(), 1, "capabilities.jsonl 持久化");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
