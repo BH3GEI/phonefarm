@@ -2150,6 +2150,15 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 if !g.is_empty() {
                     s.push_str(&format!("假设(通用,来自其他任务,_global溯源):\n{g}"));
                 }
+                // 已启用测量工具注入(SPEC §4.4): 模型可发 tool:<id> 探针,输出带 by:tool 标注
+                let tools = crate::mtools::ToolStore::load(&format!("{global_dir}/tools.jsonl")).adopted();
+                if !tools.is_empty() {
+                    s.push_str("测量工具(已校准启用,以 tool:<id> 动作调用,只读):\n");
+                    for t in tools.iter().take(3) {
+                        let def = tcut(&serde_json::to_string(&t.def).unwrap_or_default(), 60);
+                        s.push_str(&format!("  tool:{} [{}] {}\n", t.id, t.kind, def));
+                    }
+                }
                 s
             } else {
                 String::new()
