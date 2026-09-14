@@ -503,7 +503,32 @@ fn cmd_lessons(a: &Args) -> Result<(), String> {
 /// 假设物化视图(SPEC_EVOLUTION §2.1): 竞争解释的生命周期与 freq 证据
 fn cmd_hyp(a: &Args) -> Result<(), String> {
     let task = task_or_latest(a)?;
-    let store = crate::hypo::Store::load(&data_root().join(&task).join("hypotheses.jsonl").to_string_lossy());
+    let mut store = crate::hypo::Store::load(&data_root().join(&task).join("hypotheses.jsonl").to_string_lossy());
+    // 撤回/替代落账(SPEC_EVOLUTION §2.1 事件词表): 反证到位后人工裁决;
+    // 撤回/替代后不再注入,事件保留可审计。--why 必填(没有原因的撤回不可追责)
+    if let Some(id) = a.opt("--retract") {
+        let why = a.opt("--why").filter(|w| !w.trim().is_empty())
+            .ok_or("--retract 必须附 --why(反证/裁决原因,审计留痕)")?;
+        if store.hyps().iter().all(|h| h.id != id) {
+            return Err(format!("--retract: 假设 {id} 不存在"));
+        }
+        store.append(json!({"r":"hyp","op":"retract","id":id,"why":why}));
+        println!("已撤回假设 {id}(不再注入;事件保留可审计)");
+        return Ok(());
+    }
+    if let Some(id) = a.opt("--supersede") {
+        let by = a.opt("--by").filter(|w| !w.trim().is_empty())
+            .ok_or("--supersede 必须附 --by <新假设id>(替代关系可追责)")?;
+        if store.hyps().iter().all(|h| h.id != id) {
+            return Err(format!("--supersede: 假设 {id} 不存在"));
+        }
+        if store.hyps().iter().all(|h| h.id != by) {
+            return Err(format!("--supersede: 替代者 {by} 不存在(先 propose 再替代)"));
+        }
+        store.append(json!({"r":"hyp","op":"supersede","id":id,"by":by}));
+        println!("假设 {id} 已被 {by} 替代(不再注入;替代链可审计)");
+        return Ok(());
+    }
     let hyps = store.hyps();
     if a.flag("--json") {
         let rows: Vec<Value> = hyps.iter().map(|h| json!({
