@@ -12,6 +12,8 @@ mod device;
 mod fold;
 mod gamepad;
 mod hypo;
+mod caps;
+mod mtools;
 mod plugins;
 mod runtime;
 mod script;
