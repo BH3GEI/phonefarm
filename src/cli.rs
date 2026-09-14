@@ -828,6 +828,77 @@ fn cmd_export(a: &Args) -> Result<(), String> {
     if incidents.is_empty() { Ok(()) } else { Err("导出自检发现事故,见上".into()) }
 }
 
+/// 模型评估接口(SPEC_EVOLUTION §8.2,接口先行): 版本化评测集 × 候选(能力快照|整份配置)。
+/// caps 快照类可离线评(物化事件流报证据账);config 模型替换类需跑局执行器,v1 立协议壳。
+fn cmd_eval(a: &Args) -> Result<(), String> {
+    let set_path = a.opt("--set").ok_or("--set <evalset.toml> 必填")?;
+    let cand_path = a.opt("--candidate").ok_or("--candidate <caps快照|config路径> 必填")?;
+    let out = a.opt("--out").ok_or("--out <json> 必填")?;
+    let set_text = std::fs::read_to_string(&set_path).map_err(|e| format!("读 {set_path}: {e}"))?;
+    let set_v = toml::from_str::<Value>(&set_text).map_err(|e| format!("evalset.toml 解析: {e}"))?;
+    let set_ver = set_v.get("ver").and_then(|v| v.as_i64()).unwrap_or(0);
+    let set_tasks: Vec<String> = set_v.get("tasks").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if set_ver == 0 || set_tasks.is_empty() {
+        return Err("evalset.toml 必须带 ver 与非空 tasks(版本化评测集)".into());
+    }
+    let cand_text = std::fs::read_to_string(&cand_path).map_err(|e| format!("读 {cand_path}: {e}"))?;
+    // 候选类型判定: JSONL 事件流(首行 {"v":1})=caps 快照;TOML=整份配置(模型替换)
+    let is_caps = cand_text.lines().next()
+        .and_then(|l| serde_json::from_str::<Value>(l).ok())
+        .map(|v| v["v"].as_u64().unwrap_or(0) == 1).unwrap_or(false);
+    let report = if is_caps {
+        let store = crate::caps::CapStore::load(&cand_path);
+        let caps = store.caps();
+        let rows: Vec<Value> = caps.iter().map(|c| json!({
+            "id": c.id, "kind": c.kind, "ver": c.ver,
+            "status": format!("{:?}", c.status),
+            "eval": c.eval, "from": c.from,
+            "in_set": c.scope_tasks.is_empty() || c.scope_tasks.iter().any(|t| set_tasks.contains(t)),
+        })).collect();
+        let adopted = caps.iter().filter(|c| c.status == crate::caps::CapStatus::Adopted).count();
+        json!({
+            "candidate": {"type": "caps_snapshot", "path": cand_path},
+            "metrics": {"caps_total": caps.len(), "adopted": adopted,
+                "candidate": caps.iter().filter(|c| c.status == crate::caps::CapStatus::Candidate).count(),
+                "rolledback": caps.iter().filter(|c| c.status == crate::caps::CapStatus::Rolledback).count()},
+            "caps": rows,
+            "groups": {"target": "见 caps[].eval(逐能力证据账)", "novel": null, "regression": null},
+            "note": "caps 快照离线评估: 证据账来自事件流;adopt 闸门的实跑收益见 experiment(§7)",
+        })
+    } else {
+        // 模型替换类: 协议要求三组指标同报,不允许仅凭训练损失下降替换;v1 执行器未接
+        json!({
+            "candidate": {"type": "config", "path": cand_path},
+            "metrics": null,
+            "groups": {"target": null, "novel": null, "regression": null},
+            "note": "模型替换评测需跑局执行器(按 evalset 逐任务开臂),v1 接口先行: 三组指标(target/novel/regression)协议已固定,执行器接入后填充",
+        })
+    };
+    let full = json!({
+        "v": 1, "kind": "pf-eval", "proto": "v1",
+        "set": {"ver": set_ver, "tasks": set_tasks},
+    }).as_object().unwrap().clone().into_iter()
+        .chain(report.as_object().unwrap().clone().into_iter())
+        .collect::<serde_json::Map<String, Value>>();
+    let full = Value::Object(full);
+    std::fs::write(&out, serde_json::to_string_pretty(&full).unwrap() + "\n")
+        .map_err(|e| format!("写 {out}: {e}"))?;
+    if a.flag("--json") { println!("{full}"); }
+    else {
+        println!("评估报告 → {out}");
+        println!("  评测集 ver{set_ver} 任务{}个 候选类型: {}", set_tasks.len(), full["candidate"]["type"].as_str().unwrap_or(""));
+        if let Some(m) = full["metrics"].as_object() {
+            println!("  能力: 共{} 启用{} 候选{} 回退{}",
+                m["caps_total"], m["adopted"], m["candidate"], m["rolledback"]);
+        } else {
+            println!("  {}", full["note"].as_str().unwrap_or(""));
+        }
+    }
+    Ok(())
+}
+
 fn cmd_campaign(a: &Args) -> Result<(), String> {
     let task = task_or_latest(a)?;
     let dir = data_root().join(&task);
@@ -1011,6 +1082,7 @@ pub fn dispatch(cmd: &str, rest: &[String]) -> Option<i32> {
         "caps" => cmd_caps(&a),
         "tools" => cmd_tools(&a),
         "export" => cmd_export(&a),
+        "eval" => cmd_eval(&a),
         "campaign" => cmd_campaign(&a),
         "tasks" => cmd_tasks(&a),
         "config" => cmd_config(&a),
