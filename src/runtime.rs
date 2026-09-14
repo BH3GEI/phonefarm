@@ -1031,7 +1031,8 @@ fn parse_plan(text: &str, plan_max: usize) -> (Vec<ActN>, Option<String>) {
             acts.truncate(gi + 1);
         }
         // 探针同理只能收尾: 结果到下一轮决策才可见,排在其后的动作全是盲动
-        if let Some(pi) = acts.iter().position(|a| PROBES.contains(&a.a.as_str())) {
+        // (tool:<id> 测量工具探针同属只读探针,SPEC_EVOLUTION §4.4)
+        if let Some(pi) = acts.iter().position(|a| PROBES.contains(&a.a.as_str()) || a.a.starts_with("tool:")) {
             acts.truncate(pi + 1);
         }
     }
@@ -2333,6 +2334,53 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
         // 🔍 探针(v0.6 Step 3): 只读查询,不动屏幕不重采,答案注入下一轮决策。
         // 连续上限3次防空转——探针替代的是乱撞,不是行动;探针签名照进打摆账。
+        // 测量工具探针(SPEC_EVOLUTION §4.4): adopted 工具挂入探针注册点;
+        // 输出按 E3 注入与落账,带 by:tool:<id>@<ver> 标注,退役后可撤回其全部历史结论。
+        let tool_probe = act.a.strip_prefix("tool:").map(|s| s.to_string());
+        if let Some(tid) = tool_probe {
+            let tstore = crate::mtools::ToolStore::load(
+                &format!("{global_dir}/tools.jsonl"));
+            let ans = match tstore.by_id(&tid) {
+                None => format!("工具 {tid} 不存在(by:tool:{tid})"),
+                Some(t) if t.status != crate::mtools::ToolStatus::Adopted =>
+                    format!("工具 {tid} 未启用(状态{:?}),拒绝进入反馈路径(by:tool:{tid})", t.status),
+                Some(t) => {
+                    let ver = t.def["ver"].as_u64().unwrap_or(1);
+                    // 只读输入: logrep 吃局记录流尾部,xmlassert 吃当屏全量层文字
+                    let out = if t.kind == "logrep" {
+                        let tail: Vec<String> = stream.iter().rev().take(30).rev().cloned().collect();
+                        crate::mtools::run_logrep(&t.def, &tail.join("\n"))
+                    } else {
+                        let texts: Vec<&str> = cap.full.iter().map(|f| f.t.as_str()).collect();
+                        crate::mtools::run_xmlassert(&t.def, &texts.join("\n"))
+                    };
+                    format!("{} (by:tool:{tid}@{ver})",
+                        out["detail"].as_str().unwrap_or(""),
+                    ).replace("\\n", " ")
+                }
+            };
+            let ans = tcut(&ans, 1200);
+            log_act(&mut log, n, &act, &plan_by, ms_field);
+            log.put(json!({"r":"probe","n":n,"a":act.a,"q":act.text,"ans":ans}));
+            println!("[{n}] {ms_disp} {plan_by} | {aline} → probe✓({}字)", ans.chars().count());
+            run_push(&mut runs, aline.clone(), format!("probe✓({})", tcut(&ans.replace('\n', " "), 24)));
+            diffs_all.push(format!("probe({})", act.a));
+            stream.push(format!("{aline} → probe: {}", tcut(&ans.replace('\n', " "), 80)));
+            probe_ans = format!("{aline} → {ans}");
+            if let Some((pid, expects)) = pending_test.take() {
+                let pa = hypo_link_outcome(&mut hypo, &pid, &expects,
+                    &crate::hypo::Obs::Probe(&ans),
+                    &format!("probe({}): {}", act.a, tcut(&ans.replace('\n', " "), 60)), &run_id, n);
+                log.put(json!({"r":"hook","kind":"pred_outcome","pred":pid,"assert":pa}));
+                println!("      [evo] 检验{pid}结果链接: {pa}");
+            }
+            if let Some(t) = pending_note.take() {
+                let t = tcut(&t, cfg.note_max_chars);
+                log.put(json!({"r":"note","t":t}));
+                note = t;
+            }
+            continue; // 只读: 画面没动,同一cap直接进下一轮
+        }
         if PROBES.contains(&act.a.as_str()) {
             probe_streak += 1;
             if probe_streak > 3 {
