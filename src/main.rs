@@ -6,11 +6,15 @@
 mod brain;
 mod cli;
 mod cts;
+mod experiment;
 mod keepalive;
 mod parallel;
 mod device;
 mod fold;
 mod gamepad;
+mod hypo;
+mod mtools;
+mod caps;
 mod plugins;
 mod runtime;
 mod script;
@@ -35,6 +39,36 @@ pub struct HookCfg {
     #[serde(default)]
     pub output: Option<String>,
 }
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct EvoCfg {
+    /// 总开关: false 时假设/检验/注入全部静默旁路,行为与旧版一致(SPEC_EVOLUTION §10)
+    #[serde(default = "d_evo_enabled")]
+    pub enabled: bool,
+    /// hypothesize 模型调用限额(每局)
+    #[serde(default = "d_evo_hyp_calls")]
+    pub hyp_calls_per_episode: u32,
+    /// 检验动作限额(每局)
+    #[serde(default = "d_evo_test_actions")]
+    pub test_actions_per_episode: u32,
+    /// 决策上下文注入假设上限
+    #[serde(default = "d_evo_inject_max")]
+    pub inject_max: usize,
+}
+impl Default for EvoCfg {
+    fn default() -> Self {
+        EvoCfg {
+            enabled: d_evo_enabled(),
+            hyp_calls_per_episode: d_evo_hyp_calls(),
+            test_actions_per_episode: d_evo_test_actions(),
+            inject_max: d_evo_inject_max(),
+        }
+    }
+}
+fn d_evo_enabled() -> bool { true }
+fn d_evo_hyp_calls() -> u32 { 2 } // 局内1次+局末1次(T1/T2 各占一次, SPEC_EVOLUTION v1.1)
+fn d_evo_test_actions() -> u32 { 2 }
+fn d_evo_inject_max() -> usize { 6 }
 
 #[derive(Deserialize, Serialize)]
 pub struct Config {
@@ -79,6 +113,9 @@ pub struct Config {
     #[serde(default, rename = "hook")]
     pub hooks: Vec<HookCfg>,
     pub providers: Vec<brain::ProviderCfg>,
+    /// 持续进化(假设—检验—证据闭环, SPEC_EVOLUTION §10)
+    #[serde(default)]
+    pub evolution: EvoCfg,
 }
 fn d_data_dir() -> String { ".".into() }
 fn d_max_steps() -> u32 { 12 }
@@ -121,8 +158,23 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --dir APK目录) [--
 后台:  run/benchmark/script 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
 查看:  last | runs [--task T] | show <局ID> [--step N|--raw|--hooks|--events|--crashes|--anr|--trace]
        cat <路径> [--head/--tail N] [--grep 词] | stats <局ID> | tasks | tree | lessons | campaign
+       hyp | pred | caps [--adopt/--rollback id] | tools [--propose def.json|--retire id]
+       experiment <spec.toml> [--arm A|B|C] [--ablate no-active-testing|no-cap-screening] [--resume|--report-only] [--json]  (A/B/C 对比实验,SPEC_EVOLUTION §7)
+       export [--task T] --split train|heldout --out <文件> [--redact-config toml]  (训练数据导出)
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)";
+
+/// 任务数据根(tasks 目录)解析: PF_TASKS_ROOT 环境变量优先(实验臂隔离/单测注入,
+/// 语义与 cli.rs data_root() 一致——指向 tasks 根本身);否则 <data_dir>/tasks。
+pub(crate) fn tasks_root(data_dir: &str) -> String {
+    if let Ok(o) = std::env::var("PF_TASKS_ROOT") {
+        let o = o.trim().trim_end_matches('/');
+        if !o.is_empty() {
+            return o.to_string();
+        }
+    }
+    format!("{}/tasks", data_dir.trim_end_matches('/'))
+}
 
 /// secrets.env 解析(Improve Spec): 只认 `export KEY="v"` / `KEY=v` 形态的行,
 /// 等价 source 语义但绝不执行任何命令。纯函数供单测。
@@ -262,6 +314,7 @@ fn main() {
             let mut asserts: Vec<String> = Vec::new();
             let mut detach = false;
             let mut freeze_on_done = false;
+            let mut resume_prefix: Option<String> = None;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -270,6 +323,7 @@ fn main() {
                     "--endless" => endless = true,
                     "--detach" => detach = true,
                     "--freeze-on-done" => freeze_on_done = true,
+                    "--resume" => resume_prefix = it.next().cloned(),
                     "--budget-calls" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(40),
                     "--max-steps" => max_steps_override = it.next().and_then(|v| v.parse().ok()),
                     "--app" => app = it.next().cloned(),
@@ -286,8 +340,9 @@ fn main() {
                     _ => goal = a.clone(),
                 }
             }
-            if goal.is_empty() || task.is_empty() {
-                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--max-steps N] [--app <包名>] [--assert \"词1,词2\"] [--freeze-on-done] [--perceive ocr] \"<目标>\"");
+            if task.is_empty() || (goal.is_empty() && resume_prefix.is_none()) {
+                eprintln!("用法: phonefarm run --task <任务名> [--serial <设备>] [--endless] [--budget-calls N] [--max-steps N] [--app <包名>] [--assert \"词1,词2\"] [--freeze-on-done] [--perceive ocr] [--resume <局ID前缀>] \"<目标>\"");
+                eprintln!("      --resume: 恢复中断局(可省略目标,继承旧局goal;账末动作状态不明时先只读核对)");
                 std::process::exit(2);
             }
             let cfg_text = match std::fs::read_to_string("phonefarm.toml") {
@@ -312,7 +367,7 @@ fn main() {
             if detach {
                 // 先起跑回头取结果: 预分配局ID→建目录→分离子进程→立即回报(取结果走 status/show)
                 let id = runtime::alloc_run_id();
-                let run_dir = format!("{}/tasks/{}/runs/{}", cfg.data_dir.trim_end_matches('/'), task, id);
+                let run_dir = format!("{}/{}/runs/{}", tasks_root(&cfg.data_dir), task, id);
                 if std::fs::create_dir_all(&run_dir).is_err() {
                     eprintln!("✗ 建不了运行目录 {run_dir}");
                     std::process::exit(2);
@@ -327,7 +382,21 @@ fn main() {
                 }
             }
             ensure_keys(&cfg);
-            let res = runtime::episode(&cfg, &task, &goal, serial, None, endless, budget, app, asserts, freeze_on_done);
+            // 中断恢复: 解析旧局账本(可继承 goal);局ID前缀无匹配直接拒绝开跑
+            let resume = match resume_prefix.as_deref() {
+                Some(rp) => {
+                    let task_dir = format!("{}/{}", tasks_root(&cfg.data_dir), task);
+                    match runtime::load_resume(&task_dir, rp) {
+                        Some(r) => Some(r),
+                        None => { eprintln!("--resume: 局ID前缀 {rp} 在任务 {task} 下无匹配局"); std::process::exit(2); }
+                    }
+                }
+                None => None,
+            };
+            if goal.is_empty() {
+                if let Some(r) = &resume { goal = r.goal.clone(); }
+            }
+            let res = runtime::episode(&cfg, &task, &goal, serial, None, endless, budget, app, asserts, freeze_on_done, resume);
             println!("summary: run={} stop={} steps={} calls={} tokens={} wall={:.1}s achieved={}",
                 res.run_id, res.stop, res.steps, res.calls, res.tokens,
                 res.wall_ms as f64 / 1000.0, res.achieved);
@@ -440,7 +509,7 @@ fn main() {
                     std::thread::sleep(std::time::Duration::from_secs(6));
                 }
                 let t0 = std::time::Instant::now();
-                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), cold_ms, true, budget, app.clone(), asserts.clone(), false);
+                let res = runtime::episode(&cfg, &task, &goal, serial.clone(), cold_ms, true, budget, app.clone(), asserts.clone(), false, None);
                 let wall = t0.elapsed().as_secs();
                 append(&format!(
                     "{r}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{wall}",
