@@ -560,6 +560,140 @@ fn cmd_pred(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// 能力固化审计(SPEC_EVOLUTION §2.3/§5): 候选/启用/回退全生命周期。
+/// 默认只读列表;--adopt <id> 人工启用(评测结论随事件落账,落账属写操作但不动设备不烧token)。
+fn cmd_caps(a: &Args) -> Result<(), String> {
+    let task = task_or_latest(a)?;
+    let task_path = data_root().join(&task).join("capabilities.jsonl");
+    let glob_path = data_root().join("_global").join("capabilities.jsonl");
+    if let Some(id) = a.opt("--adopt") {
+        // 先任务域找,找不到去全局域;只能 adopt 当前 Candidate 且 ver 匹配
+        for path in [&task_path, &glob_path] {
+            let p = path.to_string_lossy().to_string();
+            let mut store = crate::caps::CapStore::load(&p);
+            if let Some(c) = store.caps().into_iter()
+                .find(|c| c.id == id && c.status == crate::caps::CapStatus::Candidate) {
+                let note = a.opt("--eval").unwrap_or_else(|| "人工评测:有收益".into());
+                store.append(json!({
+                    "r": "cap", "op": "adopt", "id": c.id, "ver": c.ver,
+                    "eval": {"by": "human", "note": note},
+                }));
+                println!("已启用能力 {}(ver{},{}): {}", c.id, c.ver,
+                    if path == &task_path { "任务域" } else { "全局域" }, c.t);
+                return Ok(());
+            }
+        }
+        return Err(format!("--adopt: 未找到候选状态的能力 {id}(已启用/已回退或不存在)"));
+    }
+    if let Some(id) = a.opt("--rollback") {
+        for path in [&task_path, &glob_path] {
+            let p = path.to_string_lossy().to_string();
+            let mut store = crate::caps::CapStore::load(&p);
+            if let Some(c) = store.caps().into_iter()
+                .find(|c| c.id == id && c.status == crate::caps::CapStatus::Adopted) {
+                store.append(json!({"r": "cap", "op": "rollback", "id": c.id, "ver": c.ver}));
+                println!("已回退能力 {}(ver{}),即刻停止注入", c.id, c.ver);
+                return Ok(());
+            }
+        }
+        return Err(format!("--rollback: 未找到启用状态的能力 {id}"));
+    }
+    let caps_t = crate::caps::CapStore::load(&task_path.to_string_lossy()).caps();
+    let caps_g = crate::caps::CapStore::load(&glob_path.to_string_lossy()).caps();
+    if a.flag("--json") {
+        let f = |c: &crate::caps::Cap, domain: &str| json!({
+            "id": c.id, "kind": c.kind, "t": c.t, "ver": c.ver, "domain": domain,
+            "status": format!("{:?}", c.status),
+            "scope_tasks": c.scope_tasks, "scope_conds": c.scope_conds,
+        });
+        let mut rows: Vec<Value> = caps_t.iter().map(|c| f(c, "task")).collect();
+        rows.extend(caps_g.iter().map(|c| f(c, "global")));
+        println!("{}", json!(rows));
+        return Ok(());
+    }
+    if caps_t.is_empty() && caps_g.is_empty() {
+        println!("任务 {task}: 无固化能力(capabilities.jsonl 空或不存在)");
+        return Ok(());
+    }
+    let show = |c: &crate::caps::Cap, domain: &str| {
+        let st = match c.status {
+            crate::caps::CapStatus::Candidate => "候选",
+            crate::caps::CapStatus::Adopted => "已启用",
+            crate::caps::CapStatus::Rolledback => "已回退",
+        };
+        let scope = if c.scope_tasks.is_empty() { "全局任务".into() }
+            else { format!("任务[{}]", c.scope_tasks.join(",")) };
+        let cond = if c.scope_conds.is_empty() { String::new() }
+            else { format!(" 条件[{}]", c.scope_conds.join(",")) };
+        println!("  {}(ver{})[{}|{}|{}]{cond} {} — {}", c.id, c.ver, c.kind, st, domain, scope, c.t);
+    };
+    if !caps_t.is_empty() { println!("任务 {task} 能力({}条):", caps_t.len()); for c in &caps_t { show(c, "任务域"); } }
+    if !caps_g.is_empty() { println!("全局能力({}条):", caps_g.len()); for c in &caps_g { show(c, "全局域"); } }
+    Ok(())
+}
+
+/// 候选测量工具审计(SPEC_EVOLUTION §2.4/§4): 提议→校准→启用→退役。
+/// --propose <def.json> 人工登记(文件路径或内联JSON);--retire <id> 退役(终态)。
+fn cmd_tools(a: &Args) -> Result<(), String> {
+    let path = data_root().join("_global").join("tools.jsonl");
+    let p = path.to_string_lossy().to_string();
+    if let Some(def) = a.opt("--propose") {
+        // 参数是文件路径则读文件,否则按内联 JSON 解析
+        let text = if std::path::Path::new(&def).exists() {
+            std::fs::read_to_string(&def).map_err(|e| format!("读 {def}: {e}"))?
+        } else { def.clone() };
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("--propose 的 JSON 无法解析: {e}"))?;
+        let kind = v["kind"].as_str().unwrap_or("");
+        if !matches!(kind, "logrep" | "xmlassert") {
+            return Err(format!("--propose: kind 必须是 logrep|xmlassert(v1 声明式封闭词表),收到 {kind:?}"));
+        }
+        if v["def"].is_null() { return Err("--propose: 缺 def 字段(工具定义)".into()); }
+        let mut store = crate::mtools::ToolStore::load(&p);
+        let id = store.next_id("tool");
+        store.append(json!({
+            "r": "tool", "op": "propose", "id": id,
+            "kind": kind, "def": v["def"], "by": "human",
+        }));
+        println!("已登记工具提议 {id}(kind={kind}),校准通过前不会进入正式反馈路径");
+        return Ok(());
+    }
+    if let Some(id) = a.opt("--retire") {
+        let mut store = crate::mtools::ToolStore::load(&p);
+        if store.by_id(&id).is_none() {
+            return Err(format!("--retire: 工具 {id} 不存在"));
+        }
+        store.append(json!({"r": "tool", "op": "retire", "id": id}));
+        println!("已退役工具 {id}(终态;其历史结论审计时标注'来源工具已退役')");
+        return Ok(());
+    }
+    let tools = crate::mtools::ToolStore::load(&p).tools();
+    if a.flag("--json") {
+        let rows: Vec<Value> = tools.iter().map(|t| json!({
+            "id": t.id, "kind": t.kind, "def": t.def,
+            "status": format!("{:?}", t.status),
+            "samples": t.samples, "errors": t.errors, "limits": t.limits,
+        })).collect();
+        println!("{}", json!(rows));
+        return Ok(());
+    }
+    if tools.is_empty() { println!("无测量工具(tasks/_global/tools.jsonl 空或不存在)"); return Ok(()); }
+    println!("测量工具({}条):", tools.len());
+    for t in &tools {
+        let st = match t.status {
+            crate::mtools::ToolStatus::Proposed => "已提议",
+            crate::mtools::ToolStatus::Calibrated => "已校准",
+            crate::mtools::ToolStatus::Adopted => "已启用",
+            crate::mtools::ToolStatus::Retired => "已退役",
+        };
+        let cal = if t.samples > 0 { format!(" 校准[样本{}误判{}]", t.samples, t.errors) } else { String::new() };
+        let lim = if t.limits.is_empty() { String::new() } else { format!(" 限制:{}", t.limits) };
+        println!("  {} [{}|{}]{cal}{lim} {}", t.id, t.kind, st,
+            serde_json::to_string(&t.def).unwrap_or_default());
+    }
+    Ok(())
+}
+
 fn cmd_campaign(a: &Args) -> Result<(), String> {
     let task = task_or_latest(a)?;
     let dir = data_root().join(&task);
@@ -740,6 +874,8 @@ pub fn dispatch(cmd: &str, rest: &[String]) -> Option<i32> {
         "lessons" => cmd_lessons(&a),
         "hyp" => cmd_hyp(&a),
         "pred" => cmd_pred(&a),
+        "caps" => cmd_caps(&a),
+        "tools" => cmd_tools(&a),
         "campaign" => cmd_campaign(&a),
         "tasks" => cmd_tasks(&a),
         "config" => cmd_config(&a),
