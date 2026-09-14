@@ -142,6 +142,18 @@ fn tools_list() -> Vec<Value> {
         tool("phonefarm_campaign",
             "Benchmark ledger (campaign.tsv rows) of a task. Read-only, free.",
             obj(json!({"task": s("task name; default = latest")}), &[])),
+        tool("phonefarm_hyp",
+            "Hypothesis store: competing explanations with lifecycle (candidate/active/retracted)              and evidence counters (win/lose from deterministic outcome linking only). Read-only, free.",
+            obj(json!({"task": s("task name; default = latest")}), &[])),
+        tool("phonefarm_pred",
+            "Prediction ledger: register-before-test predictions with expect words, test definitions              and linked outcomes (E3 evidence). Read-only, free.",
+            obj(json!({"task": s("task name; default = latest")}), &[])),
+        tool("phonefarm_caps",
+            "Solidified capabilities store: candidate/adopted/rolledback lifecycle with versions,              scope and eval provenance (task domain + global domain). Read-only, free.",
+            obj(json!({"task": s("task name; default = latest")}), &[])),
+        tool("phonefarm_tools",
+            "Candidate measurement tools store: proposed/calibrated/adopted/retired lifecycle              with calibration counters and limits. Read-only, free.",
+            obj(json!({}), &[])),
         tool("phonefarm_schema",
             "The log.jsonl record contract (all record types and fields). Read-only, free.",
             obj(json!({"record_type": s("single record type; default = all")}), &[])),
@@ -293,6 +305,24 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             v.push("campaign".into());
             push_opt(&mut v, "--task", arg_str(args, "task"));
             v.push("--json".into());
+        }
+        "phonefarm_hyp" => {
+            v.push("hyp".into());
+            push_opt(&mut v, "--task", arg_str(args, "task"));
+            v.push("--json".into());
+        }
+        "phonefarm_pred" => {
+            v.push("pred".into());
+            push_opt(&mut v, "--task", arg_str(args, "task"));
+            v.push("--json".into());
+        }
+        "phonefarm_caps" => {
+            v.push("caps".into());
+            push_opt(&mut v, "--task", arg_str(args, "task"));
+            v.push("--json".into());
+        }
+        "phonefarm_tools" => {
+            v.extend(["tools".into(), "--json".into()]);
         }
         "phonefarm_schema" => {
             v.push("schema".into());
@@ -507,7 +537,7 @@ mod tests {
         let line = json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}).to_string();
         let resp: Value = serde_json::from_str(&handle_line(&line).unwrap()).unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 17, "工具面数量变了要有意为之");
+        assert_eq!(tools.len(), 21, "工具面数量变了要有意为之(SPEC_EVOLUTION §9: +hyp/pred/caps/tools 只读)");
         for t in tools {
             assert!(t["name"].as_str().unwrap().starts_with("phonefarm_"));
             assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
