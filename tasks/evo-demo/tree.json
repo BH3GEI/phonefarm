@@ -1,0 +1,114 @@
+{
+  "edges": [
+    {
+      "fail": 0,
+      "from": 2,
+      "label": "返回",
+      "n": 1,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 1
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "find",
+      "n": 1,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 1
+    },
+    {
+      "fail": 0,
+      "from": 0,
+      "label": "返回",
+      "n": 6,
+      "pure": 1.0,
+      "ripe": true,
+      "to": 1
+    },
+    {
+      "fail": 0,
+      "from": 1,
+      "label": "下滑",
+      "n": 1,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 3
+    },
+    {
+      "fail": 0,
+      "from": 1,
+      "label": "点[已关闭]",
+      "n": 6,
+      "pure": 1.0,
+      "ripe": true,
+      "to": 0
+    },
+    {
+      "fail": 0,
+      "from": 3,
+      "label": "下滑",
+      "n": 1,
+      "pure": 1.0,
+      "ripe": false,
+      "to": 3
+    }
+  ],
+  "orphan_screens": 3,
+  "pages": [
+    {
+      "core": [
+        "显示",
+        "转到上一层级"
+      ],
+      "id": 2,
+      "name": "显示/转到上一层级",
+      "visits": 2
+    },
+    {
+      "core": [
+        "蓝牙",
+        "蓝牙帮助",
+        "转到上一层级"
+      ],
+      "id": 0,
+      "name": "蓝牙帮助/转到上一层级/蓝牙",
+      "visits": 10
+    },
+    {
+      "core": [
+        "WLAN",
+        "liyao",
+        "ly",
+        "主题和个性化",
+        "互联互通",
+        "声音和振动",
+        "已关闭",
+        "搜索设置项",
+        "显示",
+        "更多连接",
+        "桌面",
+        "移动网络",
+        "蓝牙",
+        "设置",
+        "通知和状态栏"
+      ],
+      "id": 1,
+      "name": "WLAN/liyao/ly/主题和个性化",
+      "visits": 9
+    },
+    {
+      "core": [
+        "搜索设置项",
+        "设置"
+      ],
+      "id": 3,
+      "name": "搜索设置项/设置",
+      "visits": 2
+    }
+  ],
+  "steps_total": 24,
+  "task": "./tasks/evo-demo",
+  "v": 1
+}

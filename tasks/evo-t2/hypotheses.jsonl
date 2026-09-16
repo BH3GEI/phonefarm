@@ -1,0 +1,14 @@
+{"v":1}
+{"conds":[],"id":"h1","op":"propose","origin":{"code":"0.2.0","model":"glm-53-flash","proto":"v1","run":"20260914-035215-42866-0","step":9},"q":"launch-no-effect","r":"hyp","t":"应用已在前台运行(设置页已打开),系统对重复launch不重建任务、界面无任何切换,故diff=none是正常去重,而非失败"}
+{"conds":[],"id":"h2","op":"propose","origin":{"code":"0.2.0","model":"glm-53-flash","proto":"v1","run":"20260914-035215-42866-0","step":9},"q":"launch-no-effect","r":"hyp","t":"页面存在过渡/加载未完成,launch已生效但界面在diff采样窗口内尚未变化,观察通道遗漏了切换"}
+{"conds":[],"id":"h3","op":"propose","origin":{"code":"0.2.0","model":"glm-53-flash","proto":"v1","run":"20260914-035215-42866-0","step":9},"q":"launch-no-effect","r":"hyp","t":"系统层拦截:弹出窗口或权限对话框覆盖在设置之上,launch被吞掉或焦点未切换到设置任务"}
+{"at":{"run":"20260914-035215-42866-0","step":9},"cost":1,"expect":{"h1":"probe_found","h2":"probe_found","h3":"probe_not_found"},"hyps":["h3","h2","h1"],"id":"p1","op":"register","page_hint":"","r":"pred","stop":"单次尝试","test":{"a":"get_state","kind":"probe","q":"亮度"}}
+{"assert":"inconclusive","id":"p1","observed":"probe(get_state): activity=未知 键盘=未知 剪贴板=空/不可读 前台=未知","op":"outcome","r":"pred","revises":[]}
+{"conds":["此前tap能命中设置页面元素,界面未离开设置任务"],"id":"h4","op":"propose","origin":{"code":"0.2.0","model":"glm-53-flash","proto":"v1","run":"20260914-035215-42866-0","step":15},"q":"launch-no-effect","r":"hyp","t":"设置任务已在前台,launch去重属正常;证据收窄:act#2/act#5对设置界面元素tap成功、act#5清单含'阅读模式''色彩模式',说明设置UI此前已可交互,重复launch无activity切换故diff=none"}
+{"conds":["get_state对activity/前台字段返回未知,通道可能整体失效于该字段"],"id":"h5","op":"propose","origin":{"code":"0.2.0","model":"glm-53-flash","proto":"v1","run":"20260914-035215-42866-0","step":15},"q":"launch-no-effect","r":"hyp","t":"diff判定依赖activity/任务切换信号,而本局get_state返回activity=未知/前台=未知,观察通道对launch类动作的可观察字段不可读,即使launch生效也无法在采样窗口体现为diff"}
+{"conds":[],"id":"h6","op":"propose","origin":{"code":"0.2.0","model":"glm-53-flash","proto":"v1","run":"20260914-035215-42866-0","step":15},"q":"launch-no-effect","r":"hyp","t":"设置应用被禁用或崩溃,ActivityTaskManager启动失败但系统静默返回,前台停留在当前任务,故diff=none是真实失败而非去重"}
+{"at":{"run":"20260914-035215-42866-0","step":15},"cost":1,"expect":{"h4":"probe_found","h5":"probe_found","h6":"probe_not_found"},"hyps":["h4","h5","h6"],"id":"p2","op":"register","page_hint":"","r":"pred","stop":"单次尝试","test":{"a":"find","kind":"probe","q":"阅读模式"}}
+{"assert":"pass","id":"p2","observed":"probe(find): 当前屏未找到'阅读模式';可scroll后再找,或目标在别页","op":"outcome","r":"pred","revises":[{"id":"h4","op":"against"},{"id":"h5","op":"against"},{"id":"h6","op":"support"}]}
+{"ev":{"rec":"p2","run":"20260914-035215-42866-0","step":15},"id":"h4","op":"against","r":"hyp"}
+{"ev":{"rec":"p2","run":"20260914-035215-42866-0","step":15},"id":"h5","op":"against","r":"hyp"}
+{"ev":{"rec":"p2","run":"20260914-035215-42866-0","step":15},"id":"h6","op":"support","r":"hyp"}

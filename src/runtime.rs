@@ -848,7 +848,7 @@ fn probe_answer(a: &ActN, cap: &Cap, runs: &[PageRun], clip: Option<String>, rea
 /// ② 上下文组装: goal + 通用/任务经验 + 安装清单 + 里程碑+当前页act/diff + ban + note + 小地图 + 前台应用 + 屏幕
 /// 静态段(goal/经验/apps)在前,动态段在后,保住能保的提示词缓存前缀。
 fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], last_verdict_line: &str, apps_line: &str, budget_line: &str,
-              map_line: &str, assert_line: &str, alert: &str, probe_line: &str, runs: &[PageRun], bans: &[Ban],
+              map_line: &str, assert_line: &str, alert: &str, probe_line: &str, hypo_line: &str, runs: &[PageRun], bans: &[Ban],
               note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
     let mut s = format!("goal: {goal}\n");
     if !assert_line.is_empty() {
@@ -876,6 +876,10 @@ fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], last_verdict_li
             l["lose"].as_i64().unwrap_or(0),
             l["t"].as_str().unwrap_or("")
         ));
+    }
+    // 竞争解释(持续进化): 经程序实证更新的假设,证据来源标注;与画面矛盾时以画面为准
+    if !hypo_line.is_empty() {
+        s.push_str(hypo_line);
     }
     if !apps_line.is_empty() {
         s.push_str(&format!("apps(可launch的包名): {apps_line}\n"));
@@ -1027,7 +1031,8 @@ fn parse_plan(text: &str, plan_max: usize) -> (Vec<ActN>, Option<String>) {
             acts.truncate(gi + 1);
         }
         // 探针同理只能收尾: 结果到下一轮决策才可见,排在其后的动作全是盲动
-        if let Some(pi) = acts.iter().position(|a| PROBES.contains(&a.a.as_str())) {
+        // (tool:<id> 测量工具探针同属只读探针,SPEC_EVOLUTION §4.4)
+        if let Some(pi) = acts.iter().position(|a| PROBES.contains(&a.a.as_str()) || a.a.starts_with("tool:")) {
             acts.truncate(pi + 1);
         }
     }
@@ -1384,6 +1389,126 @@ fn load_lessons(path: &str) -> Vec<Value> {
         .collect()
 }
 
+// ═══ 持续进化(SPEC_EVOLUTION §3): 假设—检验—证据闭环的运行时辅助 ═══
+
+/// 失败签名: 同一动作目标的归并键(what 点名优先,否则归一化坐标百格区域)
+fn fail_sig(act: &ActN) -> String {
+    match act.what.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+        Some(w) => format!("{}:{}", act.a, tcut(w, 30)),
+        None => format!("{}:@{},{}", act.a,
+            act.x.unwrap_or(0) / 100 * 100, act.y.unwrap_or(0) / 100 * 100),
+    }
+}
+
+/// hypothesize 调用的 user 材料: 触发信号 + 现有解释视图 + 记录尾部 + 可用词表
+fn hypo_user(trigger: &str, stream_tail: &str, store: &crate::hypo::Store, gstore: &crate::hypo::Store) -> String {
+    let view = store.view_text();
+    let gview = gstore.view_text();
+    format!(
+        "触发信号: {trigger}\n\n现有解释与待执行检验(勿重复提出已存在且未被反证的):\n{}\n通用(跨任务)解释:\n{}\n本局记录(尾部):\n{}\n\n可用检验: 只读探针(find/inspect/get_state/history) 或低风险动作(wait/scroll_up/scroll_down)\n可用断言词(封闭): diff_none diff_not_none probe_found probe_not_found probe_ans_contains:<词> rejected not_rejected",
+        if view.is_empty() { "(无)" } else { &view },
+        if gview.is_empty() { "(无)" } else { &gview },
+        stream_tail
+    )
+}
+
+/// 检验结果的确定性链接(E3): 按封闭断言词表比对实测,落 outcome 与 support/against 事件。
+/// 返回 (assert, revises数)。全部判不了 → inconclusive,不产生任何修订(负结果同样保留)。
+fn hypo_link_outcome(store: &mut crate::hypo::Store, pred_id: &str, expects: &[(String, String)],
+                     obs: &crate::hypo::Obs, observed_desc: &str, run_id: &str, step: u32) -> String {
+    use crate::hypo::eval_assert;
+    let mut revises: Vec<(String, String)> = Vec::new();
+    for (hid, w) in expects {
+        match eval_assert(w, obs) {
+            Some(true) => revises.push((hid.clone(), "support".into())),
+            Some(false) => revises.push((hid.clone(), "against".into())),
+            None => {}
+        }
+    }
+    let assert = if revises.is_empty() { "inconclusive" } else { "pass" };
+    store.append(json!({"r":"pred","op":"outcome","id":pred_id,"observed":observed_desc,
+        "assert":assert,
+        "revises":revises.iter().map(|(id,op)| json!({"id":id,"op":op})).collect::<Vec<_>>()}));
+    for (hid, op) in &revises {
+        store.append(json!({"r":"hyp","op":op,"id":hid,
+            "ev":{"run":run_id,"step":step,"rec":pred_id}}));
+    }
+    assert.to_string()
+}
+
+/// hypothesize 调用一次(T1 局内 / T2 局末共用): 提问→解析校验→事件落账。
+/// 返回 Some((pred_id, expect映射, test_json)) 表示登记了一条待执行检验(T1 由调用方立即入队,T2 留给 T3)。
+/// 模型只能 propose 与登记检验;support/against 永远由 hypo_link_outcome 的确定性代码落账。
+#[allow(clippy::too_many_arguments)]
+fn hypothesize_once(brain: &mut Brain, prompt: &str, trigger: &str, stream_tail: &str,
+                    hypo: &mut crate::hypo::Store, ghypo: &crate::hypo::Store,
+                    log: &mut Log, run_id: &str, step: u32, activity: &str)
+    -> Option<(String, Vec<(String, String)>, Value)> {
+    let u = hypo_user(trigger, stream_tail, hypo, ghypo);
+    let out = match brain.call(prompt, &u, &[], 800, 0) {
+        Ok(o) => o,
+        Err(e) => {
+            log.put(json!({"r":"hook","kind":"hypothesize","call_fail":tcut(&e,60)}));
+            println!("      [evo] hypothesize 调用失败: {}", tcut(&e, 60));
+            return None;
+        }
+    };
+    log_raw(log, "hypothesize", step, &out.by, out.ms, &out.text, Some(&u));
+    let (q, hyps, test) = match crate::hypo::parse_hypothesize(&out.text) {
+        Some(v) => v,
+        None => {
+            brain.blame(&out.by);
+            log.put(json!({"r":"hook","kind":"hypothesize","parse_fail":true,"by":out.by}));
+            println!("      [evo] hypothesize 输出不合契约,丢弃(不进证据链)");
+            return None;
+        }
+    };
+    let origin = json!({"run":run_id,"step":step,"code":env!("CARGO_PKG_VERSION"),
+        "model":out.by,"proto":"v1"});
+    let mut idmap: std::collections::HashMap<String, String> = Default::default();
+    for (lid, t, conds) in &hyps {
+        let nid = hypo.next_id("h");
+        hypo.append(json!({"r":"hyp","op":"propose","id":nid,"q":q,
+            "t":t,"conds":conds,"origin":origin}));
+        idmap.insert(lid.clone(), nid);
+    }
+    println!("      [evo] hypothesize({}): q={} 竞争解释{}条", out.by, q, hyps.len());
+    log.put(json!({"r":"hook","kind":"hypothesize","q":q,"hyps":hyps.len(),
+        "trigger":tcut(trigger,60),"by":out.by}));
+    let tv = test?;
+    let expect_v: Vec<(String, String)> = tv["expect"].as_array()
+        .map(|a| a.iter().filter_map(|e| {
+            let lid = e[0].as_str()?;
+            let w = e[1].as_str()?;
+            Some((idmap.get(lid)?.clone(), w.to_string()))
+        }).collect())
+        .unwrap_or_default();
+    if expect_v.is_empty() { return None; }
+    let pid = hypo.next_id("p");
+    let test_json = json!({"kind":tv["kind"],"a":tv["a"],"q":tv["q"]});
+    let mut em = serde_json::Map::new();
+    for (h, w) in &expect_v { em.insert(h.clone(), json!(w)); }
+    hypo.append(json!({"r":"pred","op":"register","id":pid,
+        "hyps":idmap.values().collect::<Vec<_>>(),
+        "expect":Value::Object(em),"test":test_json,
+        "cost":1,"stop":"单次尝试","page_hint":activity,
+        "at":{"run":run_id,"step":step}}));
+    Some((pid, expect_v, test_json))
+}
+
+/// 检验定义 → 可执行动作(probe 类带查询词,act 类为低风险动作)
+fn act_from_test(test: &Value) -> ActN {
+    if test["kind"] == "probe" {
+        ActN {
+            a: test["a"].as_str().unwrap_or("get_state").into(),
+            text: test["q"].as_str().filter(|q| !q.is_empty()).map(String::from),
+            ..Default::default()
+        }
+    } else {
+        ActN { a: test["a"].as_str().unwrap_or("wait").into(), ..Default::default() }
+    }
+}
+
 /// 官方判分信号(SCORE_FEEDBACK_SPEC v1): 接回外部考场 ground truth,打破"自信的错"死循环
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -1467,17 +1592,86 @@ struct ParamsFile {
     origin_null_rate: Option<f32>,
 }
 
+/// 中断恢复信息(SPEC_EVOLUTION §6): 从旧局账本重建的最小状态。
+/// 语义: 账本最后动作无实测结果(diff/probe)时,该动作执行状态不明——
+/// 恢复局第一步只读核对现状,不得未经核对重放设备副作用。
+pub struct ResumeInfo {
+    pub old_run_id: String,
+    pub goal: String,
+    pub last_act: Option<Value>,
+    pub last_act_has_result: bool,
+    pub last_activity: String,
+}
+
+/// 由局ID前缀加载恢复信息;前缀无匹配/账本不可读 → None
+pub fn load_resume(task_dir: &str, run_prefix: &str) -> Option<ResumeInfo> {
+    let runs_dir = std::path::Path::new(task_dir).join("runs");
+    let mut cands: Vec<String> = fs::read_dir(&runs_dir).ok()?.flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .filter(|n| n.starts_with(run_prefix))
+        .collect();
+    cands.sort();
+    let old = cands.pop()?;
+    let text = fs::read_to_string(runs_dir.join(&old).join("log.jsonl")).ok()?;
+    let mut goal = String::new();
+    let mut last_act: Option<Value> = None;
+    let mut last_act_has_result = false;
+    let mut last_activity = String::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        match v["r"].as_str() {
+            Some("goal") => goal = v["t"].as_str().unwrap_or("").into(),
+            Some("act") => { last_act = Some(v); last_act_has_result = false; }
+            // diff(含rejected)与probe应答都是"该动作已有实测结果"的账本证据
+            Some("diff") | Some("probe") => { if last_act.is_some() { last_act_has_result = true; } }
+            Some("screen") => { last_activity = v["activity"].as_str().unwrap_or("").into(); }
+            _ => {}
+        }
+    }
+    Some(ResumeInfo { old_run_id: old, goal, last_act, last_act_has_result, last_activity })
+}
+
+/// 自动候选生成(SPEC_EVOLUTION §5,纯确定性): 活跃假设满足证据阈值
+/// (win>=3 且 lose==0 且 support/against 证据跨 >=2 个不同 run)→ 落 knowledge 类 candidate 事件。
+/// 幂等: 同 id(cap_<hyp_id>)已存在(任意状态)不重复生成;返回本次新登记条数。
+fn auto_candidate_caps(hypo: &crate::hypo::Store, caps_store: &mut crate::caps::CapStore, task: &str) -> usize {
+    let mut made = 0;
+    for h in hypo.hyps() {
+        if h.status != crate::hypo::Status::Active { continue; }
+        let runs: std::collections::HashSet<String> = hypo.events().iter()
+            .filter(|e| e["r"] == "hyp"
+                && (e["op"] == "support" || e["op"] == "against")
+                && e["id"].as_str() == Some(h.id.as_str()))
+            .filter_map(|e| e["ev"]["run"].as_str().map(String::from))
+            .collect();
+        if !crate::caps::auto_candidate_ok(h.win, h.lose, runs.len() as u32) { continue; }
+        let cid = format!("cap_{}", h.id);
+        if caps_store.caps().iter().any(|c| c.id == cid) { continue; }
+        caps_store.append(serde_json::json!({
+            "r": "cap", "op": "candidate", "id": cid, "kind": "knowledge", "t": h.t,
+            "scope": {"tasks": [task], "conds": h.conds},
+            "from": {"hyp": h.id, "win": h.win, "lose": h.lose, "runs": runs.len()},
+            "ver": 1,
+        }));
+        println!("(假设 {} 证据达标[win{} lose{} 跨{}局] → 能力候选 {})",
+            h.id, h.win, h.lose, runs.len(), cid);
+        made += 1;
+    }
+    made
+}
+
 pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                ext_cold_ms: Option<i64>,
                endless: bool, budget: u32, app: Option<String>, asserts: Vec<String>,
-               freeze_on_done: bool) -> EpisodeResult {
+               freeze_on_done: bool, resume: Option<ResumeInfo>) -> EpisodeResult {
     let t0 = std::time::Instant::now();
     let fail = |stop: &str, run_id: String| EpisodeResult {
         achieved: false, run_id, stop: stop.into(), steps: 0, calls: 0, tokens: 0,
         wall_ms: t0.elapsed().as_millis() as u64,
     };
     // ── 目录与文件 ──
-    let task_dir = format!("{}/tasks/{}", cfg.data_dir.trim_end_matches('/'), task);
+    // PF_TASKS_ROOT 优先(实验臂隔离: tasks_root 语义与 cli.rs data_root() 一致)
+    let task_dir = format!("{}/{}", crate::tasks_root(&cfg.data_dir), task);
     let seq = run_seq();
     // PF_RUN_ID: detach 父进程预分配的局ID(先回报后开跑);常规路径局内自生成
     let run_id = match std::env::var("PF_RUN_ID") {
@@ -1506,6 +1700,9 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64).unwrap_or(0)}));
     log.put(json!({"r": "goal", "t": goal}));
+    if let Some(rs) = &resume {
+        log.put(json!({"r":"hook","kind":"resume","from":rs.old_run_id}));
+    }
     if let Some(v) = &last_verdict {
         log.put(json!({"r": "last_verdict", "verdict": match v { Verdict::Pass => "pass", Verdict::Fail => "fail" }}));
     }
@@ -1526,8 +1723,18 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
     let lessons = load_lessons(&format!("{task_dir}/lessons.jsonl"));
     // 全局经验: 跨任务共享(tasks/_global/),"游戏里用home逃生"这类学费只交一次
-    let global_dir = format!("{}/tasks/_global", cfg.data_dir.trim_end_matches('/'));
+    let global_dir = format!("{}/_global", crate::tasks_root(&cfg.data_dir));
     let glessons = load_lessons(&format!("{global_dir}/lessons.jsonl"));
+    // 持续进化: 假设—检验—证据存储(append-only 事件溯源;enabled=false 时照样加载供审计,但不触发不注入)
+    let mut hypo = crate::hypo::Store::load(&format!("{task_dir}/hypotheses.jsonl"));
+    let ghypo = crate::hypo::Store::load(&format!("{global_dir}/hypotheses.jsonl"));
+    // 能力固化层(SPEC_EVOLUTION §5): adopted 能力注入优先级高于 lesson,标注来源
+    let caps_store = crate::caps::CapStore::load(&format!("{task_dir}/capabilities.jsonl"));
+    let gcaps_store = crate::caps::CapStore::load(&format!("{global_dir}/capabilities.jsonl"));
+    if cfg.evolution.enabled {
+        let (na, np) = (hypo.injectable().len(), hypo.pending_preds().len());
+        if na + np > 0 { println!("(载入假设存储: 可注入{na}条 待执行检验{np}条)"); }
+    }
     // 交互网(tree::rebuild 局末自动重算的离线产物): 页面身份证+熟路。没有也能跑,只是没有goto
     let tree = Tree::load(&format!("{task_dir}/tree.json"));
     if tree.is_some() { println!("(载入交互网: {}页/{}边)", tree.as_ref().unwrap().pages.len(), tree.as_ref().unwrap().edges.len()); }
@@ -1646,6 +1853,13 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     let mut assert_hit_prev = false; // 验收词命中上升沿(只在新命中时记账,避免每步刷屏)
     let mut probe_streak = 0u32;    // 探针连击计数(上限3防空转,任一物理动作清零)
     let mut probe_ans = String::new(); // 探针应答(注入下一次决策,用过即清)
+    // ── 持续进化局内状态 ──
+    let mut fail_sigs: std::collections::HashMap<String, u32> = Default::default(); // 失败签名计数(T1: 同目标第2次失败才武装)
+    let mut hypo_trigger: Option<String> = None;   // 已武装的触发信号(T1/T2 文本)
+    let mut hyp_calls_left: u32 = cfg.evolution.hyp_calls_per_episode; // hypothesize 限额
+    let mut test_actions_left: u32 = cfg.evolution.test_actions_per_episode; // 检验动作限额
+    let mut pending_test: Option<(String, Vec<(String, String)>)> = None; // (pred_id, expect映射) 待链接的检验
+    let mut t3_miss: u32 = 0;                       // T3 待执行检验的页面未复现计数(3次判inconclusive)
     let mut bounce = BounceGuard::new(); // #20 边级推进度守卫(入口弹回记账)
     let mut seen_keys: std::collections::HashSet<(String, i64)> = Default::default(); // 本局见过的页key(推进度=覆盖增长)
 
@@ -1661,6 +1875,27 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         eprintln!("✗ 首屏采集失败(设备复活无效)");
         return fail("capture_fail", run_id.clone());
     };
+    // ── 中断恢复核对(SPEC_EVOLUTION §6): 账末动作执行状态不明 → 只读核对现状落账,
+    //    并把"不得假设该动作已生效"注入第一次决策;绝不未经核对重放副作用 ──
+    if let Some(rs) = &resume {
+        let unknown = rs.last_act.is_some() && !rs.last_act_has_result;
+        let consistent = if rs.last_activity.is_empty() { "unknown".to_string() }
+            else if cap.activity == rs.last_activity { "same_activity".into() }
+            else { "activity_changed".into() };
+        log.put(json!({"r":"hook","kind":"resume_check","from":rs.old_run_id,
+            "last_act":rs.last_act,"had_result":rs.last_act_has_result,
+            "observed_activity":cap.activity,"ledger_activity":rs.last_activity,
+            "consistent":consistent}));
+        if unknown {
+            println!("      🔁 恢复核对: 上局最后动作执行状态不明,已只读采集现状(不重放副作用)");
+            let act_desc = rs.last_act.as_ref()
+                .map(|a| format!("{} {}", a["a"].as_str().unwrap_or(""), a["what"].as_str().unwrap_or(""))).unwrap_or_default();
+            alert = format!("【中断恢复】上一局在此画面中途中断,最后动作[{act_desc}]执行状态不明(账本无实测结果)。已只读核对:当前activity={},账末activity={}({consistent})。不得假设该动作已生效,依据当前画面重新决策。",
+                cap.activity, rs.last_activity);
+        } else {
+            println!("      🔁 恢复局: 上局账本闭合(最后动作已有实测结果),直接续跑");
+        }
+    }
     stream.push(format!("goal: {goal}"));
     if !last_verdict_line.is_empty() {
         stream.push(last_verdict_line.to_string());
@@ -1799,6 +2034,59 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 hits.join(","))
         };
 
+        // ── 持续进化检验调度(SPEC_EVOLUTION §3.1): T3 待执行检验 > T1 触发 hypothesize ──
+        // 检验动作入队即跳过本轮常规规划(下一轮弹出的就是这个检验动作)
+        if queue.is_empty() && cfg.evolution.enabled && pending_test.is_none() {
+            let t3 = hypo.pending_preds().into_iter().next();
+            if let Some(pred) = t3 {
+                if test_actions_left > 0 {
+                    let page_ok = pred.page_hint.is_empty() || cap.activity.contains(&pred.page_hint);
+                    if page_ok {
+                        test_actions_left -= 1;
+                        let act = act_from_test(&pred.test);
+                        println!("      [T3] 检验{}: {}(页面已复现)", pred.id,
+                            tcut(&serde_json::to_string(&pred.test).unwrap_or_default(), 60));
+                        log.put(json!({"r":"hook","kind":"hypo_test","pred":pred.id,"via":"t3","test":pred.test}));
+                        pending_test = Some((pred.id.clone(), pred.expect.clone()));
+                        queue = vec![act].into();
+                        plan_by = "hypo-test".into();
+                        plan_ms = Some(0);
+                        t3_miss = 0;
+                    } else {
+                        t3_miss += 1;
+                        if t3_miss >= 3 {
+                            println!("      [T3] 检验{}: 页面3次未复现,判无结论", pred.id);
+                            hypo.append(json!({"r":"pred","op":"outcome","id":pred.id,
+                                "observed":format!("页面上下文未复现(activity={} ≠ hint={})", cap.activity, pred.page_hint),
+                                "assert":"inconclusive","revises":[]}));
+                            t3_miss = 0;
+                        }
+                    }
+                }
+            } else if hypo_trigger.is_some() && hyp_calls_left > 0 && test_actions_left > 0 {
+                let trigger = hypo_trigger.take().unwrap_or_default();
+                hyp_calls_left -= 1;
+                let tail: Vec<String> = stream.iter().rev().take(12).rev().cloned().collect();
+                if let Some(pr) = cfg.prompts.get("hypothesize").map(|s| s.as_str()) {
+                    if let Some((pid, expects, tj)) = hypothesize_once(&mut brain, pr, &trigger,
+                        &tail.join("\n"), &mut hypo, &ghypo, &mut log, &run_id, n, &cap.activity)
+                    {
+                        test_actions_left -= 1;
+                        let act = act_from_test(&tj);
+                        println!("      [T1] 检验{pid}已登记: {}",
+                            tcut(&serde_json::to_string(&tj).unwrap_or_default(), 60));
+                        log.put(json!({"r":"hook","kind":"hypo_test","pred":pid,"via":"t1","test":tj}));
+                        pending_test = Some((pid, expects));
+                        queue = vec![act].into();
+                        plan_by = "hypo-test".into();
+                        plan_ms = Some(0);
+                    }
+                } else {
+                    println!("      [T1] 信号已武装但未配置 hypothesize 提示词,丢弃(事件已落账)");
+                }
+            }
+        }
+
         // ②③ 队列空则组装上下文并要一份计划
         if queue.is_empty() {
             // 小地图/探索沙盘: 遍历类任务给沙盘看板(进度+本页未探索+建议目标),普通任务单行小地图
@@ -1845,7 +2133,38 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             } else {
                 format!("进度: 第{n}/{}步", cfg.max_steps)
             };
-            let user = render_ctx(goal, &glessons, &lessons, last_verdict_line, &apps_line, &budget_line, &map_line, &assert_line, &alert, &probe_ans, &runs, &bans, &note, &cap, realw, realh);
+            let hypo_line = if cfg.evolution.enabled {
+                let page_name = tree.as_ref().and_then(|t| t.page_of(&cap.els))
+                    .map(|p| p.name.clone()).unwrap_or_default();
+                // 能力固化层优先注入(SPEC §2.3: adopted capability > lesson,标注来源)
+                let mut s = caps_store.inject_line(task, &cap.activity, &page_name, cfg.evolution.inject_max);
+                let gcap = gcaps_store.inject_line(task, &cap.activity, &page_name, 2);
+                s.push_str(&gcap);
+                if !s.is_empty() {
+                    s = format!("能力(已评测启用的固化经验,优先级高于经验条;与画面矛盾时以画面为准):\n{s}");
+                }
+                let h = hypo.inject_line(&cap.activity, &page_name, cfg.evolution.inject_max);
+                if !h.is_empty() {
+                    s.push_str(&format!("假设(竞争解释,经程序实证更新;与画面矛盾时以画面为准):\n{h}"));
+                }
+                let g = ghypo.inject_line(&cap.activity, &page_name, 2);
+                if !g.is_empty() {
+                    s.push_str(&format!("假设(通用,来自其他任务,_global溯源):\n{g}"));
+                }
+                // 已启用测量工具注入(SPEC §4.4): 模型可发 tool:<id> 探针,输出带 by:tool 标注
+                let tools = crate::mtools::ToolStore::load(&format!("{global_dir}/tools.jsonl")).adopted();
+                if !tools.is_empty() {
+                    s.push_str("测量工具(已校准启用,以 tool:<id> 动作调用,只读):\n");
+                    for t in tools.iter().take(3) {
+                        let def = tcut(&serde_json::to_string(&t.def).unwrap_or_default(), 60);
+                        s.push_str(&format!("  tool:{} [{}] {}\n", t.id, t.kind, def));
+                    }
+                }
+                s
+            } else {
+                String::new()
+            };
+            let user = render_ctx(goal, &glessons, &lessons, last_verdict_line, &apps_line, &budget_line, &map_line, &assert_line, &alert, &probe_ans, &hypo_line, &runs, &bans, &note, &cap, realw, realh);
             ctx_bytes += user.len() as u64;
             ctx_calls += 1;
             // 模型视角存档: 这次决策发给模型的完整上下文(含警报/沙盘/清单/便签)
@@ -1987,6 +2306,21 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             diffs_all.push(d.clone());
             stream.push(format!("{aline} → {d}"));
             reject_streak += 1;
+            // 持续进化: 检验动作被驳回 → 检验自身失败落账(assert=fail,不产生修订);
+            // 任务动作同一目标第2次被驳回 → 武装T1触发信号
+            if let Some((pid, _)) = pending_test.take() {
+                hypo.append(json!({"r":"pred","op":"outcome","id":pid,
+                    "observed":format!("检验动作被驳回: {reason}"),"assert":"fail","revises":[]}));
+                log.put(json!({"r":"hook","kind":"pred_outcome","pred":pid,"assert":"fail"}));
+                println!("      [evo] 检验{pid}: 动作被驳回,判检验失败(负结果保留)");
+            } else if cfg.evolution.enabled && hypo_trigger.is_none() {
+                let sig = fail_sig(&act);
+                let c = { let e = fail_sigs.entry(sig).or_insert(0); *e += 1; *e };
+                if c >= 2 {
+                    hypo_trigger = Some(format!("动作[{aline}]第{c}次被驳回({reason})"));
+                    println!("      [T1] 武装: 同一目标第{c}次失败,待触发hypothesize");
+                }
+            }
             if let Some(t) = pending_note.take() {
                 let t = tcut(&t, cfg.note_max_chars);
                 log.put(json!({"r":"note","t":t}));
@@ -2010,6 +2344,53 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
 
         // 🔍 探针(v0.6 Step 3): 只读查询,不动屏幕不重采,答案注入下一轮决策。
         // 连续上限3次防空转——探针替代的是乱撞,不是行动;探针签名照进打摆账。
+        // 测量工具探针(SPEC_EVOLUTION §4.4): adopted 工具挂入探针注册点;
+        // 输出按 E3 注入与落账,带 by:tool:<id>@<ver> 标注,退役后可撤回其全部历史结论。
+        let tool_probe = act.a.strip_prefix("tool:").map(|s| s.to_string());
+        if let Some(tid) = tool_probe {
+            let tstore = crate::mtools::ToolStore::load(
+                &format!("{global_dir}/tools.jsonl"));
+            let ans = match tstore.by_id(&tid) {
+                None => format!("工具 {tid} 不存在(by:tool:{tid})"),
+                Some(t) if t.status != crate::mtools::ToolStatus::Adopted =>
+                    format!("工具 {tid} 未启用(状态{:?}),拒绝进入反馈路径(by:tool:{tid})", t.status),
+                Some(t) => {
+                    let ver = t.def["ver"].as_u64().unwrap_or(1);
+                    // 只读输入: logrep 吃局记录流尾部,xmlassert 吃当屏全量层文字
+                    let out = if t.kind == "logrep" {
+                        let tail: Vec<String> = stream.iter().rev().take(30).rev().cloned().collect();
+                        crate::mtools::run_logrep(&t.def, &tail.join("\n"))
+                    } else {
+                        let texts: Vec<&str> = cap.full.iter().map(|f| f.t.as_str()).collect();
+                        crate::mtools::run_xmlassert(&t.def, &texts.join("\n"))
+                    };
+                    format!("{} (by:tool:{tid}@{ver})",
+                        out["detail"].as_str().unwrap_or(""),
+                    ).replace("\\n", " ")
+                }
+            };
+            let ans = tcut(&ans, 1200);
+            log_act(&mut log, n, &act, &plan_by, ms_field);
+            log.put(json!({"r":"probe","n":n,"a":act.a,"q":act.text,"ans":ans}));
+            println!("[{n}] {ms_disp} {plan_by} | {aline} → probe✓({}字)", ans.chars().count());
+            run_push(&mut runs, aline.clone(), format!("probe✓({})", tcut(&ans.replace('\n', " "), 24)));
+            diffs_all.push(format!("probe({})", act.a));
+            stream.push(format!("{aline} → probe: {}", tcut(&ans.replace('\n', " "), 80)));
+            probe_ans = format!("{aline} → {ans}");
+            if let Some((pid, expects)) = pending_test.take() {
+                let pa = hypo_link_outcome(&mut hypo, &pid, &expects,
+                    &crate::hypo::Obs::Probe(&ans),
+                    &format!("probe({}): {}", act.a, tcut(&ans.replace('\n', " "), 60)), &run_id, n);
+                log.put(json!({"r":"hook","kind":"pred_outcome","pred":pid,"assert":pa}));
+                println!("      [evo] 检验{pid}结果链接: {pa}");
+            }
+            if let Some(t) = pending_note.take() {
+                let t = tcut(&t, cfg.note_max_chars);
+                log.put(json!({"r":"note","t":t}));
+                note = t;
+            }
+            continue; // 只读: 画面没动,同一cap直接进下一轮
+        }
         if PROBES.contains(&act.a.as_str()) {
             probe_streak += 1;
             if probe_streak > 3 {
@@ -2038,6 +2419,14 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 println!("      ⚠ 打摆检测命中(探针),警报已注入");
             }
             probe_ans = format!("{aline} → {ans}");
+            // 持续进化: 该探针若是已登记的检验,按封闭断言词表确定性链接结果(E3)
+            if let Some((pid, expects)) = pending_test.take() {
+                let pa = hypo_link_outcome(&mut hypo, &pid, &expects,
+                    &crate::hypo::Obs::Probe(&ans),
+                    &format!("probe({}): {}", act.a, tcut(&ans.replace('\n', " "), 60)), &run_id, n);
+                log.put(json!({"r":"hook","kind":"pred_outcome","pred":pid,"assert":pa}));
+                println!("      [evo] 检验{pid}结果链接: {pa}");
+            }
             if let Some(t) = pending_note.take() {
                 let t = tcut(&t, cfg.note_max_chars);
                 log.put(json!({"r":"note","t":t}));
@@ -2272,6 +2661,15 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
         stream.push(format!("{aline} → {d}"));
 
         let is_null = d == "none";
+        // 持续进化: 动作型检验(wait/scroll)的 diff 结果链接;检验动作不计入失败签名
+        let test_link = pending_test.take();
+        if let Some((pid, expects)) = &test_link {
+            let pa = hypo_link_outcome(&mut hypo, pid, expects,
+                &crate::hypo::Obs::Diff(&d),
+                &format!("{} → {}", act.a, tcut(&d, 60)), &run_id, n);
+            log.put(json!({"r":"hook","kind":"pred_outcome","pred":pid,"assert":pa}));
+            println!("      [evo] 检验{pid}结果链接: {pa}");
+        }
         // WebView back被吞检测: 网页页上back无效 → 立旗,下一记back自动连按两次
         back_eaten = act.a == "back" && is_null && cap.webview;
         if is_null {
@@ -2279,6 +2677,15 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             stall += 1;
             if stall == 1 { stall_anchor = Some(cap.img.clone()); } // 无进展段起点画面
             if !queue.is_empty() { println!("      ⏸ 动作无变化,剩余{}步计划作废", queue.len()); queue.clear(); }
+            // 持续进化: 同一目标第2次实测无变化 → 武装T1(检验动作自身不计)
+            if test_link.is_none() && cfg.evolution.enabled && hypo_trigger.is_none() && act.a != "wait" {
+                let sig = fail_sig(&act);
+                let c = { let e = fail_sigs.entry(sig).or_insert(0); *e += 1; *e };
+                if c >= 2 {
+                    hypo_trigger = Some(format!("动作[{aline}]第{c}次实测无变化(diff=none)"));
+                    println!("      [T1] 武装: 同一目标第{c}次空击,待触发hypothesize");
+                }
+            }
         } else {
             stall = 0;
             stall_anchor = None;
@@ -2455,6 +2862,25 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
                 println!("      ✔ 复核失败,无verdict记录");
             }
         }
+    }
+
+    // ── 持续进化: T2 done复核未达 → 局末 hypothesize(提出竞争解释,检验登记给后续局 T3 执行) ──
+    if cfg.evolution.enabled && done_claim && !achieved && hyp_calls_left > 0 {
+        if let Some(pr) = cfg.prompts.get("hypothesize").map(|s| s.as_str()) {
+            hyp_calls_left -= 1;
+            println!("      [T2] done复核未达,局末hypothesize(本局余{hyp_calls_left}次)");
+            let tail: Vec<String> = stream.iter().rev().take(12).rev().cloned().collect();
+            let _ = hypothesize_once(&mut brain, pr,
+                &format!("done复核未通过({})", tcut(&verdict_line, 80)),
+                &tail.join("\n"), &mut hypo, &ghypo, &mut log, &run_id, n, &cap.activity);
+        }
+    }
+
+    // ── 持续进化: 自动候选生成(SPEC_EVOLUTION §5,确定性)——证据达标的活跃假设固化为能力候选 ──
+    if cfg.evolution.enabled {
+        let mut caps_mut = crate::caps::CapStore::load(&format!("{task_dir}/capabilities.jsonl"));
+        let made = auto_candidate_caps(&hypo, &mut caps_mut, task);
+        if made > 0 { println!("(自动固化 {made} 条能力候选: 证据阈值 win>=3 且 lose==0 且跨>=2局)"); }
     }
 
     // ── 时间点: 局末复盘 → lessons.jsonl ──
@@ -3023,6 +3449,97 @@ mod tests {
     }
 
     #[test]
+    fn auto_candidate_caps_thresholds_and_idempotent() {
+        // SPEC_EVOLUTION §5: win>=3 且 lose==0 且证据跨>=2局 的活跃假设 → 自动固化能力候选
+        let dir = std::env::temp_dir().join(format!("pf_autocap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hp = dir.join("hypotheses.jsonl").to_string_lossy().to_string();
+        let cp = dir.join("capabilities.jsonl").to_string_lossy().to_string();
+        let mut hs = crate::hypo::Store::load(&hp);
+        let sup = |id: &str, rec: &str, run: &str| serde_json::json!(
+            {"r":"hyp","op":"support","id":id,"ev":{"rec":rec,"run":run,"step":1}});
+        // h1: win3 lose0 跨2局 → 应生成
+        hs.append(serde_json::json!({"r":"hyp","op":"propose","id":"h1","q":"q1","t":"设置列表需先滑到底","conds":["settings"]}));
+        for (rec, run) in [("p1","r1"),("p2","r1"),("p3","r2")] { hs.append(sup("h1", rec, run)); }
+        // h2: win2 lose0 → 不达标
+        hs.append(serde_json::json!({"r":"hyp","op":"propose","id":"h2","q":"q2","t":"t2"}));
+        for (rec, run) in [("p4","r1"),("p5","r2")] { hs.append(sup("h2", rec, run)); }
+        // h3: win3 lose1 → 有反证不达标
+        hs.append(serde_json::json!({"r":"hyp","op":"propose","id":"h3","q":"q3","t":"t3"}));
+        for (rec, run) in [("p6","r1"),("p7","r2"),("p8","r2")] { hs.append(sup("h3", rec, run)); }
+        hs.append(serde_json::json!({"r":"hyp","op":"against","id":"h3","ev":{"rec":"p9","run":"r1","step":2}}));
+        // h4: win3 但只在1局 → 跨局不达标
+        hs.append(serde_json::json!({"r":"hyp","op":"propose","id":"h4","q":"q4","t":"t4"}));
+        for rec in ["p10","p11","p12"] { hs.append(sup("h4", rec, "r1")); }
+
+        let mut cs = crate::caps::CapStore::load(&cp);
+        let made = auto_candidate_caps(&hs, &mut cs, "demo");
+        assert_eq!(made, 1, "只有 h1 达标");
+        let caps = cs.caps();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].id, "cap_h1");
+        assert_eq!(caps[0].kind, "knowledge");
+        assert_eq!(caps[0].status, crate::caps::CapStatus::Candidate);
+        assert_eq!(caps[0].scope_tasks, vec!["demo".to_string()]);
+        assert_eq!(caps[0].scope_conds, vec!["settings".to_string()]);
+        // 幂等: 再跑不重复生成
+        assert_eq!(auto_candidate_caps(&hs, &mut cs, "demo"), 0);
+        assert_eq!(cs.caps().len(), 1);
+        // 落盘可重放
+        let cs2 = crate::caps::CapStore::load(&cp);
+        assert_eq!(cs2.caps().len(), 1, "capabilities.jsonl 持久化");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_resume_tri_state() {
+        // SPEC_EVOLUTION §6 断点续跑: 末步 act 无 diff/probe 记录 = 执行结果未知 → last_act_has_result=false
+        let dir = std::env::temp_dir().join(format!("pf_resume_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let task_dir = dir.join("tasks").join("t1");
+        let runs_dir = task_dir.join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        let td = task_dir.to_str().unwrap();
+
+        // 1. runs 目录下无任何局 → None
+        assert!(load_resume(td, "run").is_none());
+
+        // 2. 末步 act 无 diff → 未知(false); 且按前缀挑字典序最新局
+        let older = runs_dir.join("run_20260101_000000_aaaa");
+        let newer = runs_dir.join("run_20260102_000000_bbbb");
+        std::fs::create_dir_all(&older).unwrap();
+        std::fs::create_dir_all(&newer).unwrap();
+        std::fs::write(older.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"旧目标\"}\n{\"r\":\"act\",\"a\":\"tap\",\"x\":1,\"y\":2}\n{\"r\":\"diff\",\"d\":\"+出现: 设置\"}\n").unwrap();
+        std::fs::write(newer.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"新目标\"}\n{\"r\":\"screen\",\"activity\":\"com.x.Home\",\"page_name\":\"P1\"}\n{\"r\":\"act\",\"a\":\"tap\",\"x\":3,\"y\":4}\n").unwrap();
+        let r = load_resume(td, "run").expect("应找到最新局");
+        assert_eq!(r.goal, "新目标");
+        assert!(!r.last_act_has_result, "act 后无 diff/probe = 执行结果未知");
+        assert_eq!(r.last_act.as_ref().unwrap()["a"].as_str(), Some("tap"));
+        assert_eq!(r.last_activity, "com.x.Home");
+        assert!(r.old_run_id.contains("20260102"), "按前缀挑最新局");
+
+        // 3. 末步 act 后有 probe → 已知(true)
+        std::fs::write(newer.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"新目标\"}\n{\"r\":\"act\",\"a\":\"find\"}\n{\"r\":\"probe\",\"q\":\"设置\",\"ans\":\"未找到\"}\n").unwrap();
+        assert!(load_resume(td, "run").unwrap().last_act_has_result, "probe 应答已记录 = 结果已知");
+
+        // 4. 末步 act 后有 diff(含 rejected 仲裁驳回) → 已知(true)
+        std::fs::write(newer.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"新目标\"}\n{\"r\":\"act\",\"a\":\"tap\"}\n{\"r\":\"diff\",\"d\":\"rejected(前科)\"}\n").unwrap();
+        assert!(load_resume(td, "run").unwrap().last_act_has_result, "diff(含rejected)已记录 = 结果已知");
+
+        // 5. 末尾 act 后只有 note(模型同轮便签,非实测结果) → 仍未知(false)
+        std::fs::write(newer.join("log.jsonl"),
+            "{\"r\":\"goal\",\"t\":\"新目标\"}\n{\"r\":\"act\",\"a\":\"tap\"}\n{\"r\":\"note\",\"t\":\"点完等加载\"}\n").unwrap();
+        assert!(!load_resume(td, "run").unwrap().last_act_has_result, "note 不是实测结果,悬挂 act 仍未知");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn verdict_parse_and_prompt_line() {
         assert_eq!(Verdict::from_json_str(r#"{"success": 1, "task": "test"}"#), Some(Verdict::Pass));
         assert_eq!(Verdict::from_json_str(r#"{"success": 0, "task": "test"}"#), Some(Verdict::Fail));
@@ -3059,20 +3576,20 @@ mod tests {
         assert_eq!(scan_last_verdict(&runs_dir, None), None, "runs目录不存在时安全返回 None");
         std::fs::create_dir_all(runs_dir.join("20260901-010000")).unwrap();
         assert_eq!(scan_last_verdict(&runs_dir, None), None, "无 verdict 文件时返回 None");
-        let ctx_missing = render_ctx("test goal", &[], &[], "", "app", "budget", "map", "", "", "", &[], &[], "note", &c, 1080, 2340);
+        let ctx_missing = render_ctx("test goal", &[], &[], "", "app", "budget", "map", "", "", "", "", &[], &[], "note", &c, 1080, 2340);
         assert!(!ctx_missing.contains("上轮官方判分"), "缺失时不注入任何判分行");
 
         // 2. 损坏情况 (文件存在但为破损 json / 缺少 success 字段)
         std::fs::write(runs_dir.join("20260901-010000/aw-verdict.json"), r#"{"broken": json"#).unwrap();
         assert_eq!(scan_last_verdict(&runs_dir, None), None, "verdict 损坏时不报错且返回 None");
-        let ctx_corrupted = render_ctx("test goal", &[], &[], "", "app", "budget", "map", "", "", "", &[], &[], "note", &c, 1080, 2340);
+        let ctx_corrupted = render_ctx("test goal", &[], &[], "", "app", "budget", "map", "", "", "", "", &[], &[], "note", &c, 1080, 2340);
         assert!(!ctx_corrupted.contains("上轮官方判分"), "损坏时不注入任何判分行");
 
         // 3. 存在情况 (上一局 fail)
         std::fs::write(runs_dir.join("20260901-010000/aw-verdict.json"), r#"{"success": 0, "task": "AudioRecorder"}"#).unwrap();
         let v_fail = scan_last_verdict(&runs_dir, None);
         assert_eq!(v_fail, Some(Verdict::Fail), "上一局判分 fail 正确解析");
-        let ctx_fail = render_ctx("test goal", &[], &[], v_fail.unwrap().prompt_line(), "app", "budget", "map", "", "", "", &[], &[], "note", &c, 1080, 2340);
+        let ctx_fail = render_ctx("test goal", &[], &[], v_fail.unwrap().prompt_line(), "app", "budget", "map", "", "", "", "", &[], &[], "note", &c, 1080, 2340);
         assert!(ctx_fail.contains("上轮官方判分: fail（外部考场对终态的程序化判定，优先级高于一切自评）"), "正确注入 fail 判分行");
 
         // 4. 存在情况 (新局 pass 覆盖旧局 fail)
@@ -3080,7 +3597,7 @@ mod tests {
         std::fs::write(runs_dir.join("20260902-020000/aw-verdict.json"), r#"{"success": 1, "task": "AudioRecorder"}"#).unwrap();
         let v_pass = scan_last_verdict(&runs_dir, None);
         assert_eq!(v_pass, Some(Verdict::Pass), "多局时取最近一局 pass");
-        let ctx_pass = render_ctx("test goal", &[], &[], v_pass.unwrap().prompt_line(), "app", "budget", "map", "", "", "", &[], &[], "note", &c, 1080, 2340);
+        let ctx_pass = render_ctx("test goal", &[], &[], v_pass.unwrap().prompt_line(), "app", "budget", "map", "", "", "", "", &[], &[], "note", &c, 1080, 2340);
         assert!(ctx_pass.contains("上轮官方判分: pass（外部考场对终态的程序化判定，优先级高于一切自评）"), "正确注入 pass 判分行");
 
         // 5. 当前局隔离 (current_run_id 排除)
