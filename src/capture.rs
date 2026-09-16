@@ -17,6 +17,8 @@ const DUP_THRESH: f32 = 1.0;
 const SEGMENT_FRAMES: u32 = 10;
 /// 同一非探索态连续卡住这么多步 (公告/弹窗类界面, 插件的 A 键推不动) 就发一次 BACK 键 (Genshin 弹窗通用关闭键)
 const STUCK_STEPS_BACK: u32 = 6;
+/// --ready-only 模式下最多连续观察多少次 (每次间隔 --settle-ms) 来确认探索态
+const READY_ONLY_TRIES: u32 = 8;
 
 fn emit(text: &str) {
     let mut out = std::io::stdout().lock();
@@ -33,6 +35,8 @@ pub struct CaptureArgs {
     serial: Option<String>,
     out: Option<String>,
     frames: u32,
+    /// 只确认已在大世界探索态 (不执行插件单步, 不走位): 探索态+HUD 即保留 1 帧并结束; 否则退回常规巡航
+    ready_only: bool,
     max_steps: u32,
     settle_ms: u64,
     mode: String,
@@ -41,11 +45,11 @@ pub struct CaptureArgs {
 }
 
 const USAGE: &str = "用法: phonefarm capture --serial <设备> [--out <目录>] [--frames 200] [--max-steps N] [--settle-ms 800]\n\
-      [--mode auto|navigate|dialogue] [--no-shutdown] [--json]";
+      [--mode auto|navigate|dialogue] [--no-shutdown] [--ready-only] [--json]";
 
 fn parse_args(args: &[String]) -> Result<CaptureArgs, String> {
     let mut a = CaptureArgs { serial: None, out: None, frames: 200, max_steps: 0, settle_ms: 800,
-                              mode: "auto".into(), shutdown: true, json: false };
+                              mode: "auto".into(), shutdown: true, json: false, ready_only: false };
     let need = |args: &[String], i: usize, name: &str| -> Result<String, String> {
         args.get(i + 1).cloned().ok_or_else(|| format!("{name} 需要一个值\n{USAGE}"))
     };
@@ -59,6 +63,7 @@ fn parse_args(args: &[String]) -> Result<CaptureArgs, String> {
             "--settle-ms" => { a.settle_ms = need(args, i, "--settle-ms")?.parse().map_err(|_| "--settle-ms 需为整数")?; i += 1; }
             "--mode" => { a.mode = need(args, i, "--mode")?; i += 1; }
             "--no-shutdown" => a.shutdown = false,
+            "--ready-only" => a.ready_only = true,
             "--json" => a.json = true,
             other => return Err(format!("无法识别的参数 '{other}'\n{USAGE}")),
         }
@@ -171,6 +176,34 @@ fn capture(a: &CaptureArgs) -> Result<(Value, i32), String> {
     let mut stuck_state: Option<&'static str> = None;
     let mut stuck_n = 0u32;
     let mut prev_thumb: Vec<u8> = Vec::new();
+    if a.ready_only {
+        // 只看不动: 连续截图确认 探索态 + 小地图 + 技能栏, 命中即保留该帧并结束; READY_ONLY_TRIES 次内未命中则退回常规巡航
+        for _ in 0..READY_ONLY_TRIES {
+            std::thread::sleep(Duration::from_millis(a.settle_ms));
+            let Some(png) = screencap_png(&adb, &serial) else { grab_fail += 1; continue; };
+            let Ok(img) = image::load_from_memory(&png) else { grab_fail += 1; continue; };
+            let (w, h) = (img.width(), img.height());
+            if w < h { portrait += 1; continue; }
+            let (state, _) = classify_state(&img);
+            let (minimap, combat) = hud_present(&img);
+            if state != GenshinState::OpenWorldExplore || !(minimap && combat) {
+                progress(&format!("ready-only: 状态 {} (小地图={minimap} 技能栏={combat}), 再看", state_name(state)));
+                continue;
+            }
+            let file = format!("frame_{kept:05}.png");
+            std::fs::write(out_dir.join(&file), &png).map_err(|e| format!("写不了 {file}: {e}"))?;
+            let row = json!({
+                "i": kept, "file": file, "ts_ms": chrono::Utc::now().timestamp_millis(), "step": steps,
+                "state": state_name(state), "w": w, "h": h, "bytes": png.len(), "sha256": sha256_hex(&png),
+                "segment": kept / SEGMENT_FRAMES, "diff_prev": Value::Null, "ready_only": true,
+            });
+            writeln!(manifest, "{row}").map_err(|e| format!("manifest 写入失败: {e}"))?;
+            prev_thumb = thumb(&img);
+            kept += 1;
+            progress(&format!("ready-only: 已在大世界探索态, 保留 {file} ({w}x{h}), 不走位"));
+            break;
+        }
+    }
     while kept < a.frames && steps < a.max_steps {
         steps += 1;
         // 巡航一步: 决策完全在插件里, 这里只负责在两步之间抓帧
@@ -234,7 +267,7 @@ fn capture(a: &CaptureArgs) -> Result<(Value, i32), String> {
         "frames": kept, "target": a.frames, "steps": steps, "max_steps": a.max_steps,
         "skipped": skipped.values().sum::<u32>(), "skipped_by_state": skipped, "duplicates": dups,
         "portrait": portrait, "grab_failed": grab_fail, "explore_without_hud": no_hud, "back_presses": backs, "segment_frames": SEGMENT_FRAMES, "dup_thresh": DUP_THRESH,
-        "mode": a.mode, "shutdown": a.shutdown, "wall_s": t_all.elapsed().as_secs_f64(),
+        "mode": a.mode, "shutdown": a.shutdown, "ready_only": a.ready_only, "wall_s": t_all.elapsed().as_secs_f64(),
     });
     let _ = std::fs::write(out_dir.join("capture.json"), serde_json::to_string_pretty(&report).unwrap_or_default());
     Ok((report, if ok { 0 } else { 1 }))
@@ -258,6 +291,9 @@ mod tests {
         assert_eq!((a.frames, a.max_steps, a.settle_ms, a.shutdown, a.json), (200, 800, 800, true, false));
         let a = parse_args(&["--serial".into(), "X".into(), "--frames".into(), "3".into(), "--no-shutdown".into(), "--json".into()]).unwrap();
         assert_eq!((a.frames, a.max_steps, a.shutdown, a.json), (3, 20, false, true));
+        assert!(!a.ready_only, "缺省不是 ready-only");
+        let a = parse_args(&["--serial".into(), "X".into(), "--frames".into(), "1".into(), "--ready-only".into(), "--no-shutdown".into()]).unwrap();
+        assert!(a.ready_only && !a.shutdown && a.frames == 1);
         assert!(parse_args(&[]).is_err());
         assert!(parse_args(&["--serial".into(), "X".into(), "--bogus".into()]).is_err());
     }
