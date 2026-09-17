@@ -1,0 +1,28 @@
+{
+  "back_presses": 3,
+  "dup_thresh": 1.0,
+  "duplicates": 0,
+  "explore_without_hud": 2,
+  "frames": 0,
+  "grab_failed": 0,
+  "manifest": "/Users/mac/projects/phonefarm/loop_v1/runs/_ready_probe/manifest.jsonl",
+  "max_steps": 20,
+  "mode": "auto",
+  "ok": false,
+  "out": "/Users/mac/projects/phonefarm/loop_v1/runs/_ready_probe",
+  "portrait": 0,
+  "ready_only": true,
+  "segment_frames": 10,
+  "serial": "91253241019A",
+  "shutdown": false,
+  "skipped": 20,
+  "skipped_by_state": {
+    "choice": 6,
+    "explore_no_hud": 2,
+    "title": 12
+  },
+  "steps": 20,
+  "target": 1,
+  "v": 1,
+  "wall_s": 101.4536515
+}

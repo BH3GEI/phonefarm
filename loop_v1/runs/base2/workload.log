@@ -1,0 +1,18 @@
+════ 启动脚本模式 (Script Mode) ════
+目标任务: loop_v1_base2
+运行ID:   20260916-103819-86161-0
+单轮步数: 7 | 轮数: 1 | 总执行步: 7
+监控应用: com.miHoYo.Yuanshen (Root 遥测: 开启)
+落盘目录: ./tasks/loop_v1_base2/runs/20260916-103819-86161-0
+────────────────────────────────────
+[1/7] 动作: gamepad_reset 复位手柄状态 | CPU:26% | PSS:2760.3MB | 电池:43.0℃
+[2/7] 动作: sleep 等待 3000ms | FPS:0 | CPU:26% | PSS:2760.2MB | 电池:43.0℃
+[3/7] 动作: gamepad_stick 推动手柄right摇杆 (0.60, 0.00) 保持 12000ms | FPS:0 | CPU:26% | PSS:2761.9MB | 电池:43.0℃
+[4/7] 动作: gamepad_stick 推动手柄right摇杆 (0.60, 0.00) 保持 12000ms | FPS:0 | CPU:26% | PSS:2762.1MB | 电池:43.0℃
+[5/7] 动作: gamepad_stick 推动手柄right摇杆 (0.60, 0.00) 保持 12000ms | FPS:0 | CPU:26% | PSS:2761.1MB | 电池:43.0℃
+[6/7] 动作: gamepad_reset 复位手柄状态 | FPS:0 | CPU:26% | PSS:2760.7MB | 电池:43.0℃
+[7/7] 动作: sleep 等待 1000ms | FPS:0 | CPU:26% | PSS:2760.1MB | 电池:43.0℃
+────────────────────────────────────
+summary: run=20260916-103819-86161-0 stop=done steps=7 calls=0 tokens=0 wall=56.0s achieved=true
+📊 查看遥测指标曲线: phonefarm stats 20260916-103819-86161-0
+🔍 检查单步动作回溯: phonefarm show 20260916-103819-86161-0
