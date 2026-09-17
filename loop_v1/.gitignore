@@ -10,3 +10,7 @@ runs/*.txt
 !runs/*/snap_*.txt
 !runs/report.json
 !runs/report.cmd
+
+# Python 字节码
+__pycache__/
+*.pyc
