@@ -36,20 +36,22 @@ for _ in $(seq 1 360); do
 done
 echo "[$LABEL] 起跑 gpu_temp=${T}mC"
 
-# 2) 轮内起始快照 + 清场
+# 2) 轮内起始快照 + 清场 (上一轮的输出与开始标记都清掉)
+APPFILES="/storage/emulated/0/Android/data/$PKG/files"
 ashell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDIR/snap_at_run.txt" 2>&1
 ashell "am force-stop $PKG" >/dev/null 2>&1 || true
-ashell "rm -f /storage/emulated/0/Android/data/$PKG/files/refbench_out.json" >/dev/null 2>&1 || true
-adb -s "$SERIAL" logcat -c || true
+ashell "rm -f $APPFILES/refbench_out.json $APPFILES/refbench_started" >/dev/null 2>&1 || true
 
-# 3) 启动并等渲染真正开始 (REFBENCH_START 出现, 有界轮询)
+# 3) 启动并等渲染真正开始 (靶子进渲染循环前落 refbench_started 标记;
+#    不用 logcat —— 这台设备的 logcat 会整个哑掉, 进度信号全走文件系统)
 ashell "am start -n $PKG/android.app.NativeActivity --es scene $SCENE --es run_id $LABEL --es frames $FRAMES --es intensity $INTEN --es knob.loadop $LOADOP" > "$OUTDIR/am.log" 2>&1
 STARTED=0
 for _ in $(seq 1 40); do
-  if adb -s "$SERIAL" logcat -d 2>/dev/null | grep -q REFBENCH_START; then STARTED=1; break; fi
+  M=$(ashell "cat $APPFILES/refbench_started 2>/dev/null" | tr -d '\r' || true)
+  [ -n "$M" ] && { STARTED=1; break; }
   sleep 0.5
 done
-[ "$STARTED" = 1 ] || { echo "[$LABEL] 应用未进入渲染"; exit 2; }
+[ "$STARTED" = 1 ] || { echo "[$LABEL] 应用未进入渲染"; ashell "am force-stop $PKG" || true; exit 2; }
 
 # 4) 稳态窗口内采集 (ftrace_capture.sh 自带四项状态存档还原)
 ashell "su -c 'sh /data/local/tmp/ftrace_capture.sh $CAPDUR /data/local/tmp/rb_$LABEL.txt'" > "$OUTDIR/capture.log" 2>&1
