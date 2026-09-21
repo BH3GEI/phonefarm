@@ -36,6 +36,7 @@ run, and inspect phonefarm is in this file and the `references/` folder.
 | Conformance tests (CTS/XTS) | `test-batch` `cts-fetch` | none |
 | On-device model benchmark | `bench` | none |
 | Frame capture | `capture` | none |
+| Performance optimization loop | `loop_v1/` toolchain (not a subcommand) | none |
 | Hypothesis-experiment-evidence | `hyp` `pred` `caps` `tools` `experiment` `export` `eval` | some |
 | Read-only inspection | `last` `runs` `show` `status` `stats` `cat` `tasks` `tree` `lessons` `campaign` `schema` `config` | none |
 | MCP tool service | `serve` | none |
@@ -196,3 +197,16 @@ The full CLI surface is in `references/cli.md`.
 - `references/architecture.md` — architecture, directory layout, data contract, six-step loop
 - `references/cli.md` — every CLI subcommand with flags
 - `references/telemetry.md` — the ten telemetry layers and collection mechanics
+
+In the repo checkout (not bundled with this skill):
+
+- `loop_v1/README.md` — the performance optimization loop. Read it **before**
+  attempting any frame-timing work: `SurfaceFlinger --latency`, `gfxinfo` and
+  the Perfetto GPU producer have all been ruled out on real hardware there, and
+  raw ftrace kgsl is what is actually used. Its three disciplines are binding:
+  the decision rule is frozen to disk before candidate data is seen; every
+  sysfs write is restored on exit and the device snapshot must match line for
+  line; parsing is pure functions so re-running on the same trace is
+  byte-identical.
+- `docs/MOBILE_GPU_OPT_ROUTES.md` — candidate optimization routes, each tagged
+  with how it would be verified inside that loop

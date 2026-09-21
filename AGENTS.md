@@ -71,6 +71,20 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ./phonefarm capture --serial S --out 目录 --frames 200 [--ready-only] [--json]
 ```
 
+**性能优化闭环**（零 Token，需 root）
+
+实现在 `loop_v1/`（工具链 + 纯函数解析器），**不是 phonefarm 子命令**。
+跑法与五条判据见 `loop_v1/README.md`；候选改动从 `docs/MOBILE_GPU_OPT_ROUTES.md` 的清单里挑。
+
+三条纪律，动手前必须清楚：
+
+- **判定规则先于数据冻结**——统计判据在看到候选数据之前落盘，不达标自动回退且不留痕
+- **sysfs 写入退出前全部恢复**，进出设备快照逐行相等才算这轮成立
+- **解析全是纯函数**，同一份 trace 每次重算必须逐字节一致
+
+帧时序走 raw ftrace 的 kgsl 事件（不侵入游戏进程）。`SurfaceFlinger --latency`、
+`gfxinfo`、Perfetto GPU producer 三条路都已在本机实测排除，别再重复试，原因见 `loop_v1/README.md`。
+
 **假设—实验—证据闭环**
 
 ```bash
@@ -130,9 +144,9 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ## 架构：不变内核 + 并列上层
 
 ```
-   run/benchmark/parallel/quest   script   test-batch/cts-fetch   bench   capture   experiment
-                │                   │              │                │        │          │
-                └───────────────────┴──────────────┴────────────────┴────────┴──────────┘
+ run/benchmark/quest   script   test-batch/cts-fetch   bench   capture   loop_v1   experiment
+          │              │              │                │        │         │          │
+          └──────────────┴──────────────┴────────────────┴────────┴─────────┴──────────┘
                                           │
               ┌───────────────────────────┴────────────────────────────┐
               │ 不变内核：设备抽象(adb/hdc) · 记录契约 · 遥测           │
@@ -150,6 +164,7 @@ VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`de
 ## 目录结构
 
 ```
+loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（非 Rust，独立工具链）
 src/                   Rust 内核源码
   universal/           通用核心：统一动作协议、三大算子、优先级引擎、插件契约
   plugins/             场景插件层
