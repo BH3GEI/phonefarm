@@ -15,7 +15,7 @@ SCENE="${3:?缺 scene}"
 INTEN="${4:?缺 intensity}"
 LOADOP="${5:?缺 loadop}"
 FRAMES="${6:?缺 frames}"
-CAPDUR="${7:-20}"
+CAPDUR="${7:-12}"   # 12s ≈ 1200+ 帧, 够稳分位; 比 20s 少积热 → 更易拿到 0 热事件轮
 
 SERIAL="${REFBENCH_SERIAL:-91253241019A}"
 PKG=io.github.hgamey.refbench

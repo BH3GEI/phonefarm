@@ -46,15 +46,20 @@ wait_plateau() {  # 风扇开+空闲下, 等 max_gpuclk 连续 3 次不变 (热�
   echo "  热台阶等待超时 (max_gpuclk=$cur)"
 }
 
-ashell "su -c 'echo 1 > /sys/kernel/fan/fan_enable'" >/dev/null 2>&1 || true
+ashell "su -c 'echo 1 > /sys/kernel/fan/fan_enable; echo 5 > /sys/kernel/fan/fan_speed_level'" >/dev/null 2>&1 || true
 ashell "am force-stop $PKG" >/dev/null 2>&1 || true   # 确保 GPU 空闲再等台阶
 echo "── 起始热台阶 (风扇开+空闲) ──"; wait_plateau
 ashell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUT/snap_before.txt" 2>&1
 
 # ── 单轮 + 无效重试 ──
+# 设备被本会话连续压测热浸透, 起测温度偏高 → 满载时偶发单次 kgsl_thermal_constraint。
+# 实测该单次事件对帧时无影响 (无效 i06 与有效重试 p50 差 0.05%), 但 attribute.py 只要
+# n_thermal>0 就判"热降频受限", 污染判据4 的归因, 所以仍须拿到 0 事件轮 —— 靠更深的
+# 轮前散热 (REFBENCH_COOL_MC) + 更多重试, 而非放宽判定。
+export REFBENCH_COOL_MC=39500   # 松散热地板 (快速轮转), 靠 12s 短采集 + 6 次重试拿 0 事件轮
 run_valid() { # run_valid <label> <scene> <intensity> <loadop> <frames>
   local lab="$1" dir rc
-  for att in 0 1 2; do
+  for att in 0 1 2 3 4 5; do
     dir="$OUT/$lab"; [ "$att" -gt 0 ] && dir="$OUT/${lab}_retry$att"
     bash "$RB/run_refbench.sh" "$lab" "$dir" "$2" "$3" "$4" "$5"
     rc=$?
@@ -62,7 +67,7 @@ run_valid() { # run_valid <label> <scene> <intensity> <loadop> <frames>
     [ "$rc" = 3 ] && { echo "[$lab] 无效, 重试"; continue; }
     echo "[$lab] 硬失败 rc=$rc"; return "$rc"
   done
-  echo "[$lab] 连续三次无效"; return 3
+  echo "[$lab] 连续六次无效 (设备热浸透, 需更长物理静置)"; return 3
 }
 
 FAIL=0
