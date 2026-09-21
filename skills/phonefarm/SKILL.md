@@ -9,10 +9,21 @@ metadata:
 
 # phonefarm
 
-phonefarm is a **device automation and measurement infrastructure**: one Rust
-kernel, two device backends (Android `adb` / OpenHarmony `hdc`), carrying
-several independent upper paths on one shared foundation of device abstraction,
-record contract, telemetry, and evidence grading.
+phonefarm is an **agent harness for mobile game performance evaluation and
+optimization**, and a general mobile automation base underneath it.
+
+The mainline capability is the **performance loop**: measure a baseline, find
+the bottleneck, propose a change, re-measure against a control, then decide to
+keep or roll back — unattended. The decision rule is frozen to disk *before*
+any candidate data is seen; anything that misses the bar is rolled back leaving
+no trace. That loop lives in `loop_v1/` (scripts + pure-function parsers), not
+in the Rust binary. Read `loop_v1/README.md` and
+`docs/MOBILE_GPU_OPT_ROUTES.md` before proposing optimizations.
+
+Underneath is one Rust kernel with two device backends (Android `adb` /
+OpenHarmony `hdc`), carrying several independent upper paths on one shared
+foundation of device abstraction, record contract, telemetry, and evidence
+grading.
 
 A vision-language model drives **one** of those paths. It is not what the
 project is. `script`, `test-batch`, `cts-fetch`, `bench`, `capture` and
@@ -30,6 +41,7 @@ run, and inspect phonefarm is in this file and the `references/` folder.
 
 | Path | Commands | Tokens |
 | :--- | :--- | :--- |
+| **Performance loop (mainline)** | `loop_v1/` scripts | none |
 | Device & farm ops | `devices` `keepalive` `probe` `exec` | none |
 | VLM UI traversal | `run` `benchmark` `parallel` `quest` `plugins` | **burns tokens** |
 | Deterministic script & replay | `script` | none |
@@ -196,3 +208,11 @@ The full CLI surface is in `references/cli.md`.
 - `references/architecture.md` — architecture, directory layout, data contract, six-step loop
 - `references/cli.md` — every CLI subcommand with flags
 - `references/telemetry.md` — the ten telemetry layers and collection mechanics
+
+In the repo itself (not bundled with this skill, read them from the checkout):
+
+- `loop_v1/README.md` — the performance loop: why the usual frame-timing tools
+  (`SurfaceFlinger --latency`, `gfxinfo`, Perfetto GPU producer) were all ruled
+  out on real hardware, and what raw ftrace kgsl gives instead
+- `docs/MOBILE_GPU_OPT_ROUTES.md` — the candidate optimization routes, each
+  tagged with how it would be verified inside the loop
