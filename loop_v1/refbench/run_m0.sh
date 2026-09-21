@@ -34,16 +34,18 @@ trap restore_fan EXIT
 # 判据5 关键修正: thermal_pwrlevel / max_gpuclk 是温度派生量, 两次快照必须在同一热态取。
 # 首版把 before 取在风扇关(暖)、after 取在风扇开(过冷) → 两行漂移 → 判据5挂。
 # 现在两次都取在"风扇开 + GPU 空闲"的稳定台阶上, 使这两行相等。
-wait_plateau() {  # 风扇开+空闲下, 等 max_gpuclk 连续 3 次不变 (热稳态), 有界 60×4s
-  local prev="" cur same=0
-  for _ in $(seq 1 60); do
-    cur=$(ashell "su -c 'cat /sys/class/kgsl/kgsl-3d0/max_gpuclk'" 2>/dev/null | tr -d '\r' || true)
-    if [ -n "$cur" ] && [ "$cur" = "$prev" ]; then
-      same=$((same+1)); [ "$same" -ge 3 ] && { echo "  热台阶 max_gpuclk=$cur"; return 0; }
-    else same=0; fi
-    prev="$cur"; sleep 4
+wait_plateau() {  # 等"完全散热"态: max_gpuclk 回到未受限上限 且 thermal_pwrlevel=0。
+  # 首版只等"稳定"→ 收在过冷/过热的瞬时台阶 (826 vs 1200), 两次快照不等。现在两端都
+  # 等到同一个确定态 (满频 1200MHz + 无热约束), 使 max_gpuclk / thermal_pwrlevel 逐位相同。
+  # 末端从跑热回落到满频需较久, 有界 90×10s=15min (风扇主动降温, 空闲发热极小, 可达)。
+  local clk tp
+  for _ in $(seq 1 90); do
+    clk=$(ashell "su -c 'cat /sys/class/kgsl/kgsl-3d0/max_gpuclk'" 2>/dev/null | tr -d '\r' || true)
+    tp=$(ashell "su -c 'cat /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel'" 2>/dev/null | tr -d '\r' || true)
+    [ "$clk" = "1200000000" ] && [ "$tp" = "0" ] && { echo "  完全散热态 max_gpuclk=$clk thermal_pwrlevel=$tp"; return 0; }
+    sleep 10
   done
-  echo "  热台阶等待超时 (max_gpuclk=$cur)"
+  echo "  散热等待超时 (max_gpuclk=$clk thermal_pwrlevel=$tp)"
 }
 
 ashell "su -c 'echo 1 > /sys/kernel/fan/fan_enable; echo 5 > /sys/kernel/fan/fan_speed_level'" >/dev/null 2>&1 || true
@@ -77,10 +79,12 @@ FAIL=0
 run_valid inten_i06 bw_pingpong 6 off 3000 || FAIL=1
 run_valid inten_i08 bw_pingpong 8 off 3000 || FAIL=1
 run_valid inten_i10 bw_pingpong 10 off 3000 || FAIL=1
-# 判据 1/3: 交错 A/B, 残余漂移对两臂等量影响
+# 判据 1/3: 交错 A/B。用 i06 (150fps): 12s 采集拿 ~1800 帧 → 分位数采样噪声小 → 判据1
+# 离散度更稳; 且轻负载更凉少触热。i06 仍 GPU 受限 (bw~51000) 且 6 个多余 LOAD 足够让
+# loadop 旋钮在主指标上显著 (判据3 历史裕度极大, p≈0.008)。
 for i in 1 2 3 4 5; do
-  run_valid bw_ctrl$i bw_pingpong 10 off 3000 || FAIL=1
-  run_valid bw_knob$i bw_pingpong 10 on 3000 || FAIL=1
+  run_valid bw_ctrl$i bw_pingpong 6 off 3000 || FAIL=1
+  run_valid bw_knob$i bw_pingpong 6 on 3000 || FAIL=1
 done
 # 判据 4: 瓶颈类型不同的变体
 for i in 1 2 3; do run_valid frag$i frag_alu 6 off 3000 || FAIL=1; done
