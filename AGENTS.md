@@ -1,17 +1,12 @@
 # phonefarm
 
-移动游戏性能评估与优化的 agent harness，兼通用移动端自动化底座。
+**设备自动化与实测基础设施**：一个 Rust 内核，两种设备后端（Android `adb` / OpenHarmony `hdc`），
+在同一套「设备抽象 + 记录契约 + 遥测 + 证据分级」之上，并列提供多条互不依赖的上层能力。
 
-**主线是性能闭环**：把「量基线 → 找瓶颈 → 提改动 → 对照复量 → 判定保留或回退」
-无人值守地跑完，判定规则在看到候选数据**之前**落盘冻结，不达标自动回退且不留痕。
-实现在 `loop_v1/`，动手前先读 `docs/MOBILE_GPU_OPT_ROUTES.md` 与 `loop_v1/README.md`。
-
-底座是一个 Rust 内核 + 两种设备后端（Android `adb` / OpenHarmony `hdc`），
-在「设备抽象 + 记录契约 + 遥测 + 证据分级」之上并列挂多条互不依赖的上层通路。
-多模态视觉模型（VLM）只是其中**一条**通路，不是这个项目的定义——
-`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `keepalive` 全程零 Token，
-不碰模型也各自成立。宿主架构实现执行回路与决策机制分离：模型只做屏幕理解与动作规划，
-状态采集、规则拦截、校验、复盘与系统监控全部由 Rust 宿主进程控制。
+多模态视觉模型（VLM）只是其中**一条**上层通路，不是这个项目的定义。
+`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `keepalive` 全程零 Token，不碰模型也能独立工作。
+宿主架构实现执行回路与决策机制分离：模型只做屏幕理解与动作规划，状态采集、规则拦截、
+校验、复盘与系统监控全部由 Rust 宿主进程控制。
 
 ## 能力族与常用命令
 
@@ -68,14 +63,6 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 跳过/假设失败不计为通过；崩溃、看门狗超时、runner 报错都会把未交代的用例如实标成
 `NOT_RUN` / `ENV_BLOCKED` 并对账，绝不静默零记。
 
-**性能优化闭环**（主线，零 Token，需 root）
-
-实现在 `loop_v1/`（脚本 + 纯函数解析器），不是 phonefarm 子命令。用法与五条判据见
-`loop_v1/README.md`；候选改动从 `docs/MOBILE_GPU_OPT_ROUTES.md` 的清单里挑。
-纪律：**判定规则先于数据冻结**；sysfs 写入退出前全部恢复，进出设备快照逐行相等才算这轮成立；
-解析全是纯函数，同一份 trace 每次重算必须逐字节一致。帧时序走 raw ftrace 的 kgsl 事件
-（`SurfaceFlinger --latency` / `gfxinfo` / Perfetto GPU producer 三条路已实测排除）。
-
 **端侧模型标尺与采集**（零 Token，需 root）
 
 ```bash
@@ -83,6 +70,20 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ./phonefarm bench --serial S --unlock                           # 回滚遗留锁频态
 ./phonefarm capture --serial S --out 目录 --frames 200 [--ready-only] [--json]
 ```
+
+**性能优化闭环**（零 Token，需 root）
+
+实现在 `loop_v1/`（工具链 + 纯函数解析器），**不是 phonefarm 子命令**。
+跑法与五条判据见 `loop_v1/README.md`；候选改动从 `docs/MOBILE_GPU_OPT_ROUTES.md` 的清单里挑。
+
+三条纪律，动手前必须清楚：
+
+- **判定规则先于数据冻结**——统计判据在看到候选数据之前落盘，不达标自动回退且不留痕
+- **sysfs 写入退出前全部恢复**，进出设备快照逐行相等才算这轮成立
+- **解析全是纯函数**，同一份 trace 每次重算必须逐字节一致
+
+帧时序走 raw ftrace 的 kgsl 事件（不侵入游戏进程）。`SurfaceFlinger --latency`、
+`gfxinfo`、Perfetto GPU producer 三条路都已在本机实测排除，别再重复试，原因见 `loop_v1/README.md`。
 
 **假设—实验—证据闭环**
 
@@ -143,9 +144,9 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ## 架构：不变内核 + 并列上层
 
 ```
-  性能优化闭环   run/benchmark/quest   script   test-batch/cts-fetch   bench   capture   experiment
-   (loop_v1)            │               │              │                │        │          │
-        └───────────────┴───────────────┴──────────────┴────────────────┴────────┴──────────┘
+ run/benchmark/quest   script   test-batch/cts-fetch   bench   capture   loop_v1   experiment
+          │              │              │                │        │         │          │
+          └──────────────┴──────────────┴────────────────┴────────┴─────────┴──────────┘
                                           │
               ┌───────────────────────────┴────────────────────────────┐
               │ 不变内核：设备抽象(adb/hdc) · 记录契约 · 遥测           │
@@ -163,7 +164,7 @@ VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`de
 ## 目录结构
 
 ```
-loop_v1/               性能优化闭环（主线）：采集/归因/旋钮/统计判定/回滚/证据归档
+loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（非 Rust，独立工具链）
 src/                   Rust 内核源码
   universal/           通用核心：统一动作协议、三大算子、优先级引擎、插件契约
   plugins/             场景插件层
