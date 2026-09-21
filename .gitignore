@@ -19,3 +19,6 @@ tasks/test_*
 
 # TFLite benchmark_model 真机二进制 (tools/tflite/fetch.sh 拉取)
 tools/tflite/android_aarch64_benchmark_model*
+
+# refbench 实跑原始产物 (大 trace, 证据已提交到 HGamey/refbench)
+loop_v1/runs_refbench/
