@@ -175,5 +175,7 @@ octos 侧挂载（`config.json` 或 profile 的 `[[mcp_servers]]`）：
 - `docs/DESIGN.md` — 设计文档 v1（核心契约 / 状态机循环 / 数据隔离 / 写入规范）
 - `docs/SPEC_MCP_SERVE.md` — MCP stdio 工具服务规格（工具面 / 协议子集 / 安全护栏 / octos 接法）
 - `docs/SPEC_SCRIPT_MODE.md` — 确定性脚本与历史轨迹回放规格（纯离线 / 零 Token / 全遥测 / 重放契约）
+- `docs/MOBILE_GPU_OPT_ROUTES.md` — 移动 GPU 优化技术路线梳理（五类候选 / 每条怎么在 loop_v1 里验 / 黑盒白盒分叉 / NN 的实测代价）
+- `loop_v1/README.md` — 端到端性能优化闭环（负载→采集→归因→旋钮→复量→统计判定→回滚→证据，五条判据实测通过）
 - 工作区 SPEC：`TELEMETRY_SPEC.md`（遥测指标详情）、`CLI_SPEC.md`（命令行交互规范）、`IMPROVE_SPEC.md`（自举部署流程）
 - `phonefarm schema` — log.jsonl 全部合法记录的字段模型手册
