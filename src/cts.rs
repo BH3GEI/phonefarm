@@ -80,13 +80,45 @@ impl CaseResult {
 
 // ══════════════ instrument 原语 ══════════════
 
+/// 目标平台: Android(am instrument)/ OpenHarmony(aa test, arkxtest 官方 runner)。
+/// 判定枚举与证据契约两族完全共用;仅命令合成与输出协议不同(解析层做归一化)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Platform {
+    #[default]
+    Android,
+    Oh,
+}
+
+impl Platform {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Platform::Android => "android",
+            Platform::Oh => "oh",
+        }
+    }
+    /// 宽松解析(profile/CLI 字符串 → Platform);未知值返 None 由调用方报错
+    pub fn parse(s: &str) -> Option<Platform> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "android" | "adb" | "" => Some(Platform::Android),
+            "oh" | "hdc" | "openharmony" | "harmonyos" => Some(Platform::Oh),
+            _ => None,
+        }
+    }
+}
+
 /// instrument 动作规格: 原生支持 Class#method 级切片
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstrumentSpec {
-    /// 被测包名(target package)
+    /// 被测包名(target package / OH bundle 名)
     pub package: String,
-    /// Instrumentation runner(类名,可含包前缀或相对写法)
+    /// Instrumentation runner(AndroidJUnitRunner / OpenHarmonyTestRunner 等)
     pub runner: String,
+    /// OH(stage model)HAP 模块名(aa test -m);Android 忽略
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    /// 目标平台;缺省 Android(既有行为零变化)
+    #[serde(default)]
+    pub platform: Platform,
     /// 可选 Class 或 Class#method;缺省=整个 runner 全量
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class_or_method: Option<String>,
@@ -96,7 +128,7 @@ pub struct InstrumentSpec {
     /// 静默超时(毫秒): 管道长时间无字符流判定锁死
     #[serde(default = "d_idle_ms")]
     pub idle_timeout_ms: u64,
-    /// 透传 -e key value 运行器参数
+    /// 透传运行器参数(Android: -e k v / OH: -s k v)
     #[serde(default)]
     pub env_args: Vec<(String, String)>,
 }
@@ -107,28 +139,64 @@ fn d_idle_ms() -> u64 {
     90_000
 }
 
-/// 组装 am instrument 命令(纯函数供单测)。
-/// runner 已含包名(含'.')时原样使用,相对写法(".FooRunner")补包名前缀。
+/// 组装 instrument 命令(纯函数供单测)。
+/// Android: `am instrument -r -w`;runner 已含包名(含'.')时原样使用,相对写法(".FooRunner")补包名前缀。
+/// OH: `aa test -b <bundle> [-m <module>] -s unittest <runner> [-s class C[#m]] [-s k v]…`
+/// (arkxtest Delegator 契约;runner 类名原样使用,不补包名;OH 的 timeout 单位是秒,透传时自行换算)
 pub fn instrument_command(spec: &InstrumentSpec) -> String {
-    let mut c = String::from("am instrument -r -w");
-    for (k, v) in &spec.env_args {
-        c.push_str(&format!(" -e {} {}", k, v));
-    }
-    if let Some(cm) = &spec.class_or_method {
-        if !cm.is_empty() {
-            c.push_str(&format!(" -e class {}", cm));
+    match spec.platform {
+        Platform::Oh => {
+            let mut c = format!("aa test -b {}", spec.package);
+            if let Some(m) = &spec.module {
+                if !m.is_empty() {
+                    c.push_str(&format!(" -m {m}"));
+                }
+            }
+            c.push_str(&format!(" -s unittest {}", spec.runner));
+            if let Some(cm) = &spec.class_or_method {
+                if !cm.is_empty() {
+                    c.push_str(&format!(" -s class {}", cm));
+                }
+            }
+            for (k, v) in &spec.env_args {
+                c.push_str(&format!(" -s {} {}", k, v));
+            }
+            c
+        }
+        Platform::Android => {
+            let mut c = String::from("am instrument -r -w");
+            for (k, v) in &spec.env_args {
+                c.push_str(&format!(" -e {} {}", k, v));
+            }
+            if let Some(cm) = &spec.class_or_method {
+                if !cm.is_empty() {
+                    c.push_str(&format!(" -e class {}", cm));
+                }
+            }
+            let runner = if spec.runner.contains('.') {
+                spec.runner.clone()
+            } else {
+                format!("{}.{}", spec.package, spec.runner)
+            };
+            c.push_str(&format!(" {}/{}", spec.package, runner));
+            c
         }
     }
-    let runner = if spec.runner.contains('.') {
-        spec.runner.clone()
-    } else {
-        format!("{}.{}", spec.package, spec.runner)
-    };
-    c.push_str(&format!(" {}/{}", spec.package, runner));
-    c
 }
 
 // ══════════════ 流式输出解析状态机 ══════════════
+
+/// OH 用例收官码(OHOS_REPORT_CODE)→ Android STATUS_CODE 语义(纯函数供单测)。
+/// 0=PASS; -2=断言失败; -1=用例错误(未捕获异常,按断言失败记,栈随 stack 字段保留);
+/// 其余负值=未运行;无法识别返 99(不会匹配任何收官分支,本行被忽略)。
+fn oh_case_code(s: &str) -> i32 {
+    match s.parse::<i32>() {
+        Ok(0) => 0,
+        Ok(-1 | -2) => -2,
+        Ok(n) if n < 0 => -3,
+        _ => 99,
+    }
+}
 
 /// 解析器产出的事件: 用例开始/用例结束/整轮结束
 #[derive(Debug, Clone, PartialEq)]
@@ -138,8 +206,8 @@ pub enum ParseEvent {
     RunFinished { code: i32, tail: Vec<String> },
 }
 
-/// `am instrument -r` 输出流状态机。
-/// 协议要点(实测 AndroidJUnitRunner):
+/// `am instrument -r` / `aa test`(OH 归一化后)输出流状态机。
+/// 协议要点(实测 AndroidJUnitRunner;OH 官方 runner 行在入口归一化,见 feed_line):
 ///   INSTRUMENTATION_STATUS: <key>=<value>   — 字段行;stream/stack 的值可延续到
 ///                                             后续不带 INSTRUMENTATION_ 前缀的行
 ///   INSTRUMENTATION_STATUS_CODE: <n>        — 状态码: 1=开始 0=PASS -2=断言失败
@@ -162,6 +230,9 @@ pub struct InstrumentParser {
     numtests: Option<u32>,
     /// runner 级错误(INSTRUMENTATION_STATUS: Error=...,组件缺失/参数非法等)
     runner_error: Option<String>,
+    /// 最近一次收官的用例(去重: 部分 OH 版本同一用例既发 OHOS_REPORT_CODE
+    /// 又发 STATUS_CODE 收官行,不得双记;Android 每用例必先 STATUS_CODE: 1 重开,不受影响)
+    last_finished: Option<(String, String)>,
 }
 
 impl Default for InstrumentParser {
@@ -183,14 +254,45 @@ impl InstrumentParser {
             crashed: false,
             numtests: None,
             runner_error: None,
+            last_finished: None,
         }
     }
 
     /// 喂入一行原始输出,返回本行触发的事件(可能为空)
     pub fn feed_line(&mut self, line: &str) -> Vec<ParseEvent> {
         let mut events = Vec::new();
-        let l = line.trim_end();
-        self.cur_lines.push(l.to_string());
+        let raw = line.trim_end();
+        // 证据行(cur_lines/raw_lines)永远存原始行,协议识别可用归一化行
+        self.cur_lines.push(raw.to_string());
+
+        // ── OH 官方 runner 协议行归一化(arkxtest OpenHarmonyTestRunner → Android 等价)──
+        // 字段语义逐位对齐: STATUS/STATUS_CODE/RESULT/RESULT_CODE 两族互为镜像。
+        // OH 独立的用例收官行 OHOS_REPORT_CODE 映射进 STATUS_CODE 语义
+        //   (见 oh_case_code: 0=PASS -1=用例错误按断言失败记 -2=断言失败 其余负值=NOT_RUN)
+        // OH 用例错误(STATUS_CODE: -1)仅当行来自 OH 归一化且带用例名时才记失败,
+        // Android 既有路径 -1 行为不变(绝对增量)。
+        let mut oh_line = false;
+        let owned;
+        let l: &str = if let Some(r) = raw.strip_prefix("OHOS_REPORT_STATUS_CODE: ") {
+            oh_line = true;
+            owned = format!("INSTRUMENTATION_STATUS_CODE: {r}");
+            &owned
+        } else if let Some(r) = raw.strip_prefix("OHOS_REPORT_STATUS: ") {
+            owned = format!("INSTRUMENTATION_STATUS: {r}");
+            &owned
+        } else if let Some(r) = raw.strip_prefix("OHOS_REPORT_RESULT_CODE: ") {
+            owned = format!("INSTRUMENTATION_CODE: {r}");
+            &owned
+        } else if let Some(r) = raw.strip_prefix("OHOS_REPORT_RESULT: ") {
+            owned = format!("INSTRUMENTATION_RESULT: {r}");
+            &owned
+        } else if let Some(r) = raw.strip_prefix("OHOS_REPORT_CODE: ") {
+            oh_line = true;
+            owned = format!("INSTRUMENTATION_STATUS_CODE: {}", oh_case_code(r.trim()));
+            &owned
+        } else {
+            raw
+        };
 
         if l.contains("Process crashed") || l.contains("shortMsg=Process crashed") {
             self.crashed = true;
@@ -200,7 +302,6 @@ impl InstrumentParser {
         if l.contains("INSTRUMENTATION_FAILED") && self.runner_error.is_none() {
             self.runner_error = Some(l.trim().to_string());
         }
-
         if let Some(rest) = l.strip_prefix("INSTRUMENTATION_STATUS: ") {
             self.cont_key = None;
             if let Some((k, v)) = rest.split_once('=') {
@@ -225,19 +326,41 @@ impl InstrumentParser {
             let f = &self.fields;
             let class_name = f.get("class").cloned().unwrap_or_default();
             let method = f.get("test").cloned().unwrap_or_default();
-            match code {
-                1 => {
+            // 收官时的用例身份: 行内字段优先,缺失回落到本用例开始时记下的身份。
+            // (每条 STATUS_CODE 行处理完都会清空 fields,OH 的收官行往往只剩 stack)
+            let id_class = if class_name.is_empty() {
+                self.cur_class.clone()
+            } else {
+                class_name.clone()
+            };
+            let id_method = if method.is_empty() {
+                self.cur_method.clone()
+            } else {
+                method.clone()
+            };
+            // 收官码归一: Android 0/-2/-3/-4 原样;OH 用例错误(-1,仅 OH 归一化行且已知用例名)
+            // 按断言失败记(栈在 stack 字段,绝不静默零记)——Android 既有路径 -1 行为零变化
+            let finish = if matches!(code, 0 | -2 | -3 | -4) {
+                Some(code)
+            } else if code == -1 && oh_line && (!id_class.is_empty() || !id_method.is_empty()) {
+                Some(-2)
+            } else {
+                None
+            };
+            match (code, finish) {
+                (1, _) => {
                     // 用例开始
                     self.cur_class = class_name.clone();
                     self.cur_method = method.clone();
                     self.cur_lines.clear();
                     self.cur_start = Some(Instant::now());
+                    self.last_finished = None;
                     if !class_name.is_empty() {
                         events.push(ParseEvent::CaseStarted { class_name, method });
                     }
                 }
-                0 | -2 | -3 | -4 => {
-                    let verdict = match code {
+                (_, Some(fc)) => {
+                    let verdict = match fc {
                         0 => CaseVerdict::PASS,
                         -2 => CaseVerdict::ASSERTION_FAIL,
                         // 跳过/假设失败不得计为通过(同事流程: 跳过不算 PASS)
@@ -247,16 +370,15 @@ impl InstrumentParser {
                         .cur_start
                         .map(|t| t.elapsed().as_millis() as u64)
                         .unwrap_or(0);
-                    let cn = if class_name.is_empty() {
-                        self.cur_class.clone()
-                    } else {
-                        class_name
-                    };
-                    let m = if method.is_empty() {
-                        self.cur_method.clone()
-                    } else {
-                        method
-                    };
+                    let (cn, m) = (id_class, id_method);
+                    // OH 双收官去重: 同一用例既发 OHOS_REPORT_CODE 又发 STATUS_CODE 时只记一次
+                    // (Android 每用例必先 STATUS_CODE: 1 重开,会清空本标记,不受影响)
+                    let key = (cn.clone(), m.clone());
+                    if self.last_finished.as_ref() == Some(&key) {
+                        self.fields.clear();
+                        return events;
+                    }
+                    self.last_finished = Some(key);
                     events.push(ParseEvent::CaseFinished(CaseResult {
                         class_name: cn,
                         method: m,
@@ -613,17 +735,17 @@ fn cascade_cleanup(
     log_sink("  [1/3] 终止本地管道(child.kill)");
     let _ = child.kill();
     let _ = child.wait();
+    // 按后端分发: adb→am force-stop / hdc→aa force-stop+pidof 补刀(内部已含)
     log_sink(&format!("  [2/3] 设备端强杀被测进程 {pkg}"));
-    let out = phone.shell(&format!("am force-stop {pkg}"), 8000);
-    if !out.trim().is_empty() {
-        log_sink(&format!("    force-stop: {}", out.trim()));
+    phone.force_stop(pkg);
+    if phone.backend_name() == "adb" {
+        // runner 宿主进程(与 target 同包名)若仍在,按 pidof 补刀(OH 后端 force_stop 已内置)
+        let out2 = phone.shell(
+            &format!("p=$(pidof {pkg}); [ -n \"$p\" ] && kill -9 $p; echo rc=$?"),
+            6000,
+        );
+        log_sink(&format!("    pidof-kill: {}", out2.trim()));
     }
-    // runner 宿主进程(与 target 同包名)若仍在,按 pidof 补刀
-    let out2 = phone.shell(
-        &format!("p=$(pidof {pkg}); [ -n \"$p\" ] && kill -9 $p; echo rc=$?"),
-        6000,
-    );
-    log_sink(&format!("    pidof-kill: {}", out2.trim()));
     log_sink("  [3/3] 残余环境清理(回 HOME,释放输入焦点)");
     phone.home();
 }
@@ -1017,6 +1139,13 @@ pub struct CtsProfile {
     /// instrumentation runner
     #[serde(default)]
     pub runner: String,
+    /// OH(stage model)HAP 模块名(aa test -m);Android 忽略。
+    /// 注意不要与上面的 `module`(原始 CTS 模块名,仅作报表标识)混淆。
+    #[serde(default, alias = "hap", alias = "oh_module", skip_serializing_if = "Option::is_none")]
+    pub hap_module: Option<String>,
+    /// 目标平台: "android"(缺省)/ "oh"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// Class#method 列表(空=整模块)
     #[serde(default, alias = "methods", alias = "test_cases")]
     pub cases: Vec<String>,
@@ -1239,6 +1368,10 @@ pub struct BatchCfg {
 pub struct ModulePlan {
     package: String,
     runner: String,
+    /// OH(stage model)HAP 模块名;Android 为 None
+    module: Option<String>,
+    /// 目标平台(决定 instrument 命令合成与输出协议)
+    platform: Platform,
     methods: Vec<String>,
     apk: Option<PathBuf>,
 }
@@ -1258,6 +1391,39 @@ pub fn parse_module_arg(s: &str) -> Option<(String, String)> {
     Some((pkg.to_string(), runner.to_string()))
 }
 
+/// 解析 --module 为 ModulePlan(纯函数供单测):
+///   "pkg/runner"                → Android(am instrument)
+///   "oh:bundle/module/Runner"   → OpenHarmony(aa test;bundle/module/runner 三段,
+///                                  module 即 stage model 的 HAP 模块名)
+pub fn parse_module_plan(s: &str) -> Result<ModulePlan, String> {
+    if let Some(rest) = s.strip_prefix("oh:") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
+            return Err(format!(
+                "OH 模块格式应为 oh:bundle/module/Runner,收到 '{s}'"
+            ));
+        }
+        return Ok(ModulePlan {
+            package: parts[0].to_string(),
+            module: Some(parts[1].to_string()),
+            runner: parts[2].to_string(),
+            platform: Platform::Oh,
+            methods: vec![],
+            apk: None,
+        });
+    }
+    let (pkg, runner) = parse_module_arg(s)
+        .ok_or_else(|| format!("--module 格式应为 pkg/runner 或 oh:bundle/module/Runner,收到 '{s}'"))?;
+    Ok(ModulePlan {
+        package: pkg,
+        module: None,
+        runner,
+        platform: Platform::Android,
+        methods: vec![],
+        apk: None,
+    })
+}
+
 /// profile → ModulePlan(纯函数): cases 列表原样作为 Class#method 切片
 pub fn plan_from_profile(p: &CtsProfile) -> Result<ModulePlan, String> {
     if p.package.is_empty() || p.runner.is_empty() {
@@ -1271,8 +1437,16 @@ pub fn plan_from_profile(p: &CtsProfile) -> Result<ModulePlan, String> {
             );
         }
     }
+    // 平台缺省 Android(既有 profile 零改动);写了但不认识的值直接报错,不猜
+    let platform = match p.platform.as_deref() {
+        None => Platform::Android,
+        Some(s) => Platform::parse(s)
+            .ok_or_else(|| format!("profile platform 不认识: {s:?}(可选 android / oh)"))?,
+    };
     Ok(ModulePlan {
         package: p.package.clone(),
+        module: p.hap_module.clone(),
+        platform,
         runner: p.runner.clone(),
         methods: p.cases.clone(),
         apk: p.apk_path.as_ref().map(PathBuf::from),
@@ -1327,6 +1501,8 @@ fn scan_apk_dir(
                 if target == pkg_guess || tp == pkg_guess || target.starts_with(&pkg_guess) {
                     plans.push(ModulePlan {
                         package: target,
+                        module: None,
+                        platform: Platform::Android,
                         runner,
                         methods: vec![],
                         apk: Some(apk.clone()),
@@ -1338,6 +1514,8 @@ fn scan_apk_dir(
                 if target == &pkg_guess || tp == &pkg_guess || target.starts_with(&pkg_guess) {
                     plans.push(ModulePlan {
                         package: target.clone(),
+                        module: None,
+                        platform: Platform::Android,
                         runner: runner.clone(),
                         methods: vec![],
                         apk: Some(apk.clone()),
@@ -1403,14 +1581,13 @@ pub fn run_batch(cfg: &BatchCfg) -> Result<i32, String> {
         plans.push(plan_from_profile(&profile)?);
     }
     for m in &cfg.modules {
-        let (pkg, runner) = parse_module_arg(m)
-            .ok_or_else(|| format!("--module 格式应为 pkg/runner,收到 '{m}'"))?;
-        plans.push(ModulePlan {
-            package: pkg,
-            runner,
-            methods: vec![],
-            apk: None,
-        });
+        let plan = parse_module_plan(m)?;
+        if plan.platform == Platform::Android && phone.backend_name() == "hdc" {
+            println!(
+                "  ⚠ 当前设备是 OH(hdc)后端,Android 模块写法 '{m}' 多半跑不通——\n    OH 官方 runner 请用 oh:bundle/module/Runner 三段式"
+            );
+        }
+        plans.push(plan);
     }
     if let Some(dir) = &cfg.apk_dir {
         plans.extend(scan_apk_dir(
@@ -1498,7 +1675,7 @@ pub fn run_batch(cfg: &BatchCfg) -> Result<i32, String> {
             }
             continue;
         }
-        println!("── 模块 {mname} (切片 {} 条) ──", plan.methods.len());
+        println!("── 模块 {mname} [{}] (切片 {} 条) ──", plan.platform.as_str(), plan.methods.len());
 
         // profile 的 APK 尚未部署时(直接给 --profile 而非 --dir),补差量部署
         if let Some(apk) = &plan.apk {
@@ -1533,6 +1710,8 @@ pub fn run_batch(cfg: &BatchCfg) -> Result<i32, String> {
             let spec = InstrumentSpec {
                 package: plan.package.clone(),
                 runner: plan.runner.clone(),
+                module: plan.module.clone(),
+                platform: plan.platform,
                 class_or_method: method.clone(),
                 timeout_ms: cfg.timeout_ms,
                 idle_timeout_ms: cfg.idle_timeout_ms,
@@ -1745,6 +1924,282 @@ pub fn run_batch(cfg: &BatchCfg) -> Result<i32, String> {
     Ok(if clean { 0 } else { 1 })
 }
 
+// ══════════════ 结果提取(cts-fetch): 设备上已有 CTS/XTS 结果 → 拉回 + 断言扫描 ══════════════
+// 场景: 官方 CTS/XTS 套件(或同事工具)已把结果落在设备上,不想再 hdc shell 进机器翻断言。
+// 本命令把结果树拉回本地,对文本类文件做断言扫描,产出 assertions.json + 终端摘要。
+// 设备侧只读(find/pull 之外零写入),与 test-batch(自己拉起 instrument)互补。
+
+/// cts-fetch 参数
+#[derive(Debug, Clone)]
+pub struct FetchCfg {
+    pub serial: Option<String>,
+    /// 设备侧结果路径(文件或目录)
+    pub remote: String,
+    /// 本地输出目录(缺省 cts-fetch-<时间戳>)
+    pub out: Option<String>,
+    /// 断言扫描正则覆盖(缺省 DEFAULT_ASSERTION_PATTERN)
+    pub pattern: Option<String>,
+    /// 单文件扫描上限(MB,缺省 16)
+    pub max_mb: u64,
+}
+
+/// 拉回整个结果树: 先整点 pull(adb pull -a / hdc file recv),零产物则 find 枚举
+/// 逐文件镜像拉回(hdc file recv 目录递归支持依版本而定)。返回拉到的文件数。
+fn pull_tree(
+    phone: &crate::device::Device,
+    remote: &str,
+    local_root: &Path,
+    log: &mut dyn FnMut(&str),
+) -> Result<usize, String> {
+    if phone.pull(remote, &local_root.to_string_lossy()) {
+        let n = walk_files(local_root).len();
+        if n > 0 {
+            return Ok(n);
+        }
+    }
+    log(&format!("  整点拉取无产物,改用 find 枚举逐文件拉回: {remote}"));
+    let listing = phone.shell(&format!("find '{remote}' -type f 2>/dev/null"), 30_000);
+    let prefix = remote.trim_end_matches('/');
+    let mut n = 0usize;
+    for line in listing.lines() {
+        let r = line.trim();
+        if !r.starts_with('/') {
+            continue;
+        }
+        let rel = r
+            .strip_prefix(prefix)
+            .unwrap_or(r)
+            .trim_start_matches('/')
+            .to_string();
+        let dest = local_root.join(&rel);
+        if let Some(p) = dest.parent() {
+            let _ = fs::create_dir_all(p);
+        }
+        if phone.pull(r, &dest.to_string_lossy()) && dest.is_file() {
+            n += 1;
+        } else {
+            log(&format!("    ⚠ 拉取失败(跳过): {r}"));
+        }
+    }
+    Ok(n)
+}
+
+/// 递归收集文件(单文件入参 → 返回它自己);同名排序保证扫描顺序确定
+fn walk_files(p: &Path) -> Vec<PathBuf> {
+    if p.is_file() {
+        return vec![p.to_path_buf()];
+    }
+    let mut out = Vec::new();
+    if let Ok(rd) = fs::read_dir(p) {
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for e in entries {
+            if e.is_dir() {
+                out.extend(walk_files(&e));
+            } else if e.is_file() {
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
+/// 默认断言扫描模式(junit failure/error、断言异常族、本工具 verdict 行、
+/// instrument/OH 收官负码、套件级失败计数)。--pattern 可整体覆盖。
+pub const DEFAULT_ASSERTION_PATTERN: &str = concat!(
+    r#"(?i)(assertionfailederror|assertionerror|comparisonfailure|junit\.framework\.assert|"#,
+    r#"<failure\b|<error\b|"#,
+    r#""verdict"\s*:\s*"(ASSERTION_FAIL|ENV_BLOCKED|TIMEOUT|NOT_RUN)"|"#,
+    r#"OHOS_REPORT_CODE: -|INSTRUMENTATION_STATUS_CODE: -|"#,
+    r#"FAILURES!!!|failures="[1-9]|errors="[1-9]|Failures: [1-9]|Errors: [1-9])"#
+);
+
+/// 断言扫描结果(可序列化进 assertions.json)
+#[derive(Debug, Clone, Serialize)]
+pub struct AssertionScan {
+    pub scanned_files: usize,
+    pub skipped_files: usize,
+    pub total_matches: usize,
+    pub files: Vec<FileAssertions>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FileAssertions {
+    pub path: String,
+    pub truncated: bool,
+    pub hits: Vec<AssertionHit>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssertionHit {
+    pub line: u64,
+    pub text: String,
+}
+
+/// 对本地目录(树)做断言扫描(供单测): 文本类文件逐行匹配 pattern。
+/// 跳过: 超过 max_file_bytes、二进制嗅探(首 8KB 含 NUL)、媒体/归档扩展名。
+/// 每文件命中上限 500 行(truncated 标记),文件数上限 5000。
+pub fn scan_assertions(root: &Path, pattern: &Regex, max_file_bytes: u64) -> AssertionScan {
+    const MAX_HITS_PER_FILE: usize = 500;
+    const MAX_FILES: usize = 5000;
+    const SCAN_SKIP_EXT: &[&str] = &[
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "mp4", "mp3", "zip", "gz", "tgz",
+        "tar", "so", "apk", "hap", "bin", "pdf", "dex", "jar", "abc", "wav", "ogg",
+    ];
+    let mut scan = AssertionScan {
+        scanned_files: 0,
+        skipped_files: 0,
+        total_matches: 0,
+        files: vec![],
+    };
+    for f in walk_files(root) {
+        if scan.scanned_files >= MAX_FILES {
+            break;
+        }
+        let ext = f
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase());
+        if ext.as_deref().map_or(false, |e| SCAN_SKIP_EXT.contains(&e)) {
+            scan.skipped_files += 1;
+            continue;
+        }
+        let ok = fs::metadata(&f).map(|m| m.len() <= max_file_bytes).unwrap_or(false);
+        let bytes = if ok { fs::read(&f).unwrap_or_default() } else { vec![] };
+        if !ok || bytes.iter().take(8192).any(|&b| b == 0) {
+            scan.skipped_files += 1;
+            continue;
+        }
+        let mut hits = Vec::new();
+        let mut truncated = false;
+        for (i, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
+            if pattern.is_match(line) {
+                if hits.len() >= MAX_HITS_PER_FILE {
+                    truncated = true;
+                    break;
+                }
+                let t: String = line.trim().chars().take(500).collect();
+                hits.push(AssertionHit { line: (i + 1) as u64, text: t });
+            }
+        }
+        scan.scanned_files += 1;
+        if !hits.is_empty() {
+            scan.total_matches += hits.len();
+            scan.files.push(FileAssertions {
+                path: f.to_string_lossy().to_string(),
+                truncated,
+                hits,
+            });
+        }
+    }
+    scan
+}
+
+/// cts-fetch 主入口: 拉回 → 扫描 → assertions.json + 终端摘要。返回退出码(0=成功)。
+pub fn run_fetch(cfg: &FetchCfg) -> Result<i32, String> {
+    let t0 = Instant::now();
+    let batch_id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let out_dir = PathBuf::from(
+        cfg.out
+            .clone()
+            .unwrap_or_else(|| format!("cts-fetch-{batch_id}")),
+    );
+    fs::create_dir_all(&out_dir).map_err(|e| format!("建输出目录失败: {e}"))?;
+    let raw_root = out_dir.join("raw");
+
+    let tmp = std::env::temp_dir()
+        .join(format!("phonefarm-ctsfetch-{}", std::process::id()))
+        .to_string_lossy()
+        .to_string();
+    let _ = fs::create_dir_all(&tmp);
+    let phone = crate::device::Device::new(cfg.serial.clone(), tmp);
+    let backend = phone.backend_name();
+    if !phone.health_check(8000) {
+        return Err(format!(
+            "设备无心跳(serial={:?} backend={backend})——先 phonefarm devices 核对",
+            cfg.serial
+        ));
+    }
+
+    println!("════ CTS 结果提取 {batch_id} ════");
+    println!("设备: {:?} [{backend}] | 设备侧路径: {}", cfg.serial, cfg.remote);
+    let mut sink = |line: &str| println!("{line}");
+    let n = pull_tree(&phone, &cfg.remote, &raw_root, &mut sink)?;
+    if n == 0 {
+        return Err(format!(
+            "设备上拉不到任何文件: {} 不存在或为空(设备侧 find 无产物)",
+            cfg.remote
+        ));
+    }
+    println!("拉回 {n} 个文件 → {}", raw_root.display());
+
+    let pattern_src = cfg
+        .pattern
+        .clone()
+        .unwrap_or_else(|| DEFAULT_ASSERTION_PATTERN.to_string());
+    let pattern = Regex::new(&pattern_src).map_err(|e| format!("--pattern 正则无效: {e}"))?;
+    let max_bytes = cfg.max_mb.saturating_mul(1024 * 1024).max(1);
+    let scan = scan_assertions(&raw_root, &pattern, max_bytes);
+
+    // phonefarm 自产报告提示(拉回的若是本工具的批次目录,直接点出报告位置)
+    let pf_reports: Vec<String> = walk_files(&raw_root)
+        .iter()
+        .filter(|p| {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            name == "summary.json" || name.starts_with("junit_")
+        })
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    println!(
+        "断言扫描: {} 处命中 / {} 个文件(扫描 {} 跳过 {})",
+        scan.total_matches,
+        scan.files.len(),
+        scan.scanned_files,
+        scan.skipped_files
+    );
+    for fa in scan.files.iter().take(10) {
+        println!(
+            "  ▸ {} ({} 处{})",
+            fa.path,
+            fa.hits.len(),
+            if fa.truncated { ",已截断" } else { "" }
+        );
+        for h in fa.hits.iter().take(3) {
+            println!("      L{}: {}", h.line, h.text);
+        }
+    }
+    if scan.files.len() > 10 {
+        println!("  … 其余 {} 个文件详见 assertions.json", scan.files.len() - 10);
+    }
+    for r in &pf_reports {
+        println!("  📦 含 phonefarm 批次报告: {r}");
+    }
+
+    let report = json!({
+        "batch_id": batch_id,
+        "serial": cfg.serial.clone().unwrap_or_default(),
+        "backend": backend,
+        "remote": cfg.remote,
+        "pattern": pattern_src,
+        "wall_ms": t0.elapsed().as_millis() as u64,
+        "pulled_files": n,
+        "scan": scan,
+    });
+    let report_path = out_dir.join("assertions.json");
+    fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    )
+    .map_err(|e| format!("写报告失败: {e}"))?;
+    println!(
+        "报告: {} ({:.1}s)",
+        report_path.display(),
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(0)
+}
+
 // ══════════════ 单测 ══════════════
 
 #[cfg(test)]
@@ -1859,6 +2314,8 @@ INSTRUMENTATION_CODE: -1
         let spec = InstrumentSpec {
             package: "android.content.cts".into(),
             runner: "androidx.test.runner.AndroidJUnitRunner".into(),
+            module: None,
+            platform: Platform::Android,
             class_or_method: Some(
                 "android.content.pm.cts.PackageManagerTest#testGetPackageInfo".into(),
             ),
@@ -1878,6 +2335,8 @@ INSTRUMENTATION_CODE: -1
         let spec2 = InstrumentSpec {
             package: "com.x".into(),
             runner: ".MyRunner".into(),
+            module: None,
+            platform: Platform::Android,
             class_or_method: None,
             timeout_ms: 0,
             idle_timeout_ms: 0,
@@ -2232,5 +2691,165 @@ INSTRUMENTATION_CODE: -1
         assert_eq!(cases.len(), 1);
         assert_eq!(cases[0].verdict, CaseVerdict::ENV_BLOCKED);
         assert_eq!(cases[0].id(), "a.C#m1");
+    }
+
+    // ── OH 官方 runner(arkxtest OpenHarmonyTestRunner)协议 ──
+
+    const OH_RUN: &str = r"OHOS_REPORT_STATUS: class=com.example.UnitTest
+OHOS_REPORT_STATUS: test=assertPass
+OHOS_REPORT_STATUS: current=1
+OHOS_REPORT_STATUS: numtests=2
+OHOS_REPORT_STATUS_CODE: 1
+OHOS_REPORT_CODE: 0
+OHOS_REPORT_STATUS: class=com.example.UnitTest
+OHOS_REPORT_STATUS: test=assertFail
+OHOS_REPORT_STATUS: current=2
+OHOS_REPORT_STATUS_CODE: 1
+OHOS_REPORT_STATUS: stack=junit.framework.AssertionFailedError: expected:<1> but was:<2>
+ at com.example.UnitTest.assertFail(UnitTest.java:42)
+OHOS_REPORT_CODE: -2
+OHOS_REPORT_RESULT: stream=Tests: 2, Init: 0, Fail: 1, Error: 0, Pass: 1
+OHOS_REPORT_RESULT_CODE: -1";
+
+    #[test]
+    fn oh_protocol_parses_pass_fail_stack_and_run_end() {
+        let (p, cases) = feed(OH_RUN);
+        assert_eq!(cases.len(), 2, "两条用例各自在 OHOS_REPORT_CODE 到达即收官");
+        assert_eq!(cases[0].verdict, CaseVerdict::PASS);
+        assert_eq!(cases[0].id(), "com.example.UnitTest#assertPass");
+        assert_eq!(cases[1].verdict, CaseVerdict::ASSERTION_FAIL);
+        assert!(cases[1].stack.contains("AssertionFailedError"), "断言栈完整保留");
+        assert!(cases[1].stack.contains("UnitTest.java:42"), "多行续行拼入栈");
+        assert!(p.numtests() == Some(2));
+        // 证据行存原始 OH 行,不存归一化行
+        assert!(cases[1].raw_lines.iter().any(|l| l.starts_with("OHOS_REPORT_CODE: -2")));
+    }
+
+    #[test]
+    fn oh_case_error_neg1_counts_as_fail_never_silent() {
+        // OH 用例错误(未捕获异常): STATUS_CODE -1 + 带用例名 → 按断言失败记,栈保留
+        let (_, cases) = feed(
+            "OHOS_REPORT_STATUS: class=a.C\n\
+             OHOS_REPORT_STATUS: test=m1\n\
+             OHOS_REPORT_STATUS_CODE: 1\n\
+             OHOS_REPORT_STATUS: stack=java.lang.NullPointerException: boom\n\
+             OHOS_REPORT_STATUS_CODE: -1",
+        );
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].verdict, CaseVerdict::ASSERTION_FAIL);
+        assert!(cases[0].stack.contains("NullPointerException"));
+    }
+
+    #[test]
+    fn oh_double_finish_deduped() {
+        // 部分 OH 版本同一用例既发 OHOS_REPORT_CODE 又发 STATUS_CODE 收官行 → 只记一次
+        let (_, cases) = feed(
+            "OHOS_REPORT_STATUS: class=a.C\n\
+             OHOS_REPORT_STATUS: test=m1\n\
+             OHOS_REPORT_STATUS_CODE: 1\n\
+             OHOS_REPORT_CODE: -2\n\
+             OHOS_REPORT_STATUS_CODE: -2",
+        );
+        assert_eq!(cases.len(), 1, "双收官不得双记");
+    }
+
+    #[test]
+    fn oh_android_neg1_unchanged() {
+        // Android 既有路径: STATUS_CODE -1 不带用例名/非 OH 行 → 零变化(不记用例)
+        let (_, cases) = feed(
+            "INSTRUMENTATION_STATUS: class=a.C\n\
+             INSTRUMENTATION_STATUS: test=m1\n\
+             INSTRUMENTATION_STATUS_CODE: 1\n\
+             INSTRUMENTATION_STATUS_CODE: -1",
+        );
+        assert!(cases.is_empty(), "Android -1 行为不变");
+    }
+
+    #[test]
+    fn oh_case_code_mapping_table() {
+        assert_eq!(oh_case_code("0"), 0);
+        assert_eq!(oh_case_code("-1"), -2, "用例错误按断言失败");
+        assert_eq!(oh_case_code("-2"), -2);
+        assert_eq!(oh_case_code("-3"), -3);
+        assert_eq!(oh_case_code("junk"), 99);
+    }
+
+    #[test]
+    fn oh_command_composition() {
+        let spec = InstrumentSpec {
+            package: "com.example.ut".into(),
+            runner: "OpenHarmonyTestRunner".into(),
+            module: Some("entry".into()),
+            platform: Platform::Oh,
+            class_or_method: Some("a.C#b".into()),
+            timeout_ms: 1,
+            idle_timeout_ms: 1,
+            env_args: vec![("timeout".into(), "30".into())],
+        };
+        assert_eq!(
+            instrument_command(&spec),
+            "aa test -b com.example.ut -m entry -s unittest OpenHarmonyTestRunner -s class a.C#b -s timeout 30"
+        );
+        // Android 默认平台零变化
+        let plain = InstrumentSpec {
+            package: "com.x".into(),
+            runner: "androidx.test.runner.AndroidJUnitRunner".into(),
+            module: None,
+            platform: Platform::Android,
+            class_or_method: None,
+            timeout_ms: 1,
+            idle_timeout_ms: 1,
+            env_args: vec![],
+        };
+        assert_eq!(
+            instrument_command(&plain),
+            "am instrument -r -w com.x/androidx.test.runner.AndroidJUnitRunner"
+        );
+    }
+
+    #[test]
+    fn parse_module_plan_android_and_oh() {
+        let a = parse_module_plan("com.x/androidx.test.runner.AndroidJUnitRunner").unwrap();
+        assert_eq!(a.package, "com.x");
+        assert_eq!(a.platform, Platform::Android);
+        assert!(a.module.is_none());
+        let o = parse_module_plan("oh:com.example.ut/entry/OpenHarmonyTestRunner").unwrap();
+        assert_eq!(o.package, "com.example.ut");
+        assert_eq!(o.module.as_deref(), Some("entry"));
+        assert_eq!(o.runner, "OpenHarmonyTestRunner");
+        assert_eq!(o.platform, Platform::Oh);
+        assert!(parse_module_plan("oh:bad/2part").is_err());
+        assert!(parse_module_plan("no-slash").is_err());
+    }
+
+    #[test]
+    fn scan_assertions_finds_failures_skips_binary_and_oversize() {
+        let root = std::env::temp_dir().join(format!("pf_scan_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("res/a")).unwrap();
+        std::fs::create_dir_all(root.join("res/img")).unwrap();
+        std::fs::write(
+            root.join("res/a/junit.xml"),
+            "<testsuite tests=\"2\" failures=\"1\">\n<failure message=\"expected 1\">stack</failure>\n</testsuite>",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("res/a/stack.log"),
+            "OK line\njunit.framework.AssertionFailedError: boom\n\tat com.x.C.m(C.java:7)",
+        )
+        .unwrap();
+        std::fs::write(root.join("res/img/blob.png"), [0x89u8, 0x50, 0, 1]).unwrap();
+        std::fs::write(root.join("res/big.log"), "x Failures: 3".repeat(64)).unwrap();
+        let re = Regex::new(DEFAULT_ASSERTION_PATTERN).unwrap();
+        let scan = scan_assertions(&root, &re, 256); // big.log 故意超限
+        assert_eq!(scan.scanned_files, 2, "png 按扩展名跳, big.log 按尺寸跳");
+        assert_eq!(scan.skipped_files, 2);
+        assert!(scan.total_matches >= 3);
+        let jf = scan.files.iter().find(|f| f.path.ends_with("junit.xml")).unwrap();
+        assert!(jf.hits.iter().any(|h| h.text.contains("failures=\"1\"")));
+        assert!(jf.hits.iter().any(|h| h.text.contains("<failure")));
+        let sl = scan.files.iter().find(|f| f.path.ends_with("stack.log")).unwrap();
+        assert!(sl.hits.iter().any(|h| h.line == 2 && h.text.contains("AssertionFailedError")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

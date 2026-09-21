@@ -1,5 +1,10 @@
 # phonefarm Telemetry Reference
 
+One 72-field `Telemetry` struct (`src/telemetry.rs`) serves **every** upper path
+— VLM sessions, deterministic scripts, conformance-test batches. Same fields,
+same units, so runs from different paths are directly comparable. Fields the
+device cannot supply are left empty rather than defaulted to zero.
+
 ## Collection mechanics
 
 - One `r=telemetry` record per step, unified into log.jsonl (no separate
