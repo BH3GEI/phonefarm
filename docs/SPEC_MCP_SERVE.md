@@ -31,10 +31,20 @@ phonefarm serve [--root <目录>]
 
 `id` 无论数字还是字符串都原样回显(以 `Value` 透传, 不重解释)。
 
-## 3. 工具清单(15 个)
+## 3. 工具清单(21 个 = 17 只读 + 4 执行)
 
 全部工具 = **对现有 CLI 契约的自调用**(`std::env::current_exe()` + 子命令), 零重构 cli.rs/runtime.rs。
 自调用 stdout→text 内容; 退出码非 0 → `isError: true` 并带上 stderr。
+
+清单以 `tools/list` 的实际返回为准(代码即事实)，可随时自查：
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  | phonefarm serve --root /path/to/repo
+```
+
+**只读面(17)** —— 零 Token、不碰设备写操作:
 
 | 工具 | 自调用 | 说明 |
 |---|---|---|
@@ -46,17 +56,39 @@ phonefarm serve [--root <目录>]
 | `phonefarm_show` | `show <局ID> [--task T] [--step N \| --raw/--hooks/--events/--crashes/--anr/--trace] --json` | 局概要/单步下钻/分类记录 |
 | `phonefarm_stats` | `stats <局ID> [--task T] --json` | 遥测汇总 |
 | `phonefarm_lessons` | `lessons [--task T] --json` | 经验库 |
-| `phonefarm_tree` | `tree [--task T] --json` | 交互网(v1 不暴露 --rebuild) |
+| `phonefarm_tree` | `tree [--task T] --json` | 交互网(不暴露 --rebuild) |
 | `phonefarm_campaign` | `campaign [--task T] --json` | 评测账 |
+| `phonefarm_hyp` | `hyp --json` | 假设库: 竞争解释与其生命周期 |
+| `phonefarm_pred` | `pred --json` | 预测台账: 登记在先的预测与兑现情况 |
+| `phonefarm_caps` | `caps --json` | 能力候选库(不暴露 --adopt/--rollback 写操作) |
+| `phonefarm_tools` | `tools --json` | 测量工具候选库(不暴露 --propose/--retire) |
 | `phonefarm_schema` | `schema [--type T]` | log.jsonl 记录契约 |
 | `phonefarm_config` | `config [--key K] --json` | 生效配置(只读) |
 | `phonefarm_cat` | `cat <路径> [--head N] [--tail N] [--grep 词]` | 万能查看器, **路径监狱见 §4** |
-| `phonefarm_run` | `run --task T [--serial S] [--app P] [--budget-calls N] [--assert ...] --detach "<目标>"` | 起一局, **强制 --detach** 立即回报局 ID |
-| `phonefarm_benchmark` | `benchmark --task T [--rounds N] ... --detach "<目标>"` | 起评测, 同样强制 detach |
 
-**v1 不暴露**: `probe`/`exec`(裸 shell 绕过六步循环的三道拦截, 设备写操作的唯一入口必须是受检回路)、
+**执行面(4)** —— 会动设备：
+
+| 工具 | 自调用 | detach | 说明 |
+|---|---|---|---|
+| `phonefarm_run` | `run --task T [--serial S] [--app P] [--budget-calls N] [--assert ...] --detach "<目标>"` | 强制 | 起一局遍历，**烧 Token** |
+| `phonefarm_benchmark` | `benchmark --task T [--rounds N] ... --detach "<目标>"` | 强制 | 起多轮评测，**烧 Token** |
+| `phonefarm_script` | `script --task T ... --detach <脚本或局ID>` | 强制 | 确定性脚本执行或历史回放，零 Token |
+| `phonefarm_quest` | `quest [--mode M] [--sec N] [--serial S]` | **否，前台跑** | 场景插件的独立长跑 Agent |
+
+前三个强制 `--detach`，立即回报局 ID，进度用 `phonefarm_status` / `phonefarm_show` 轮询
+(适配客户端 60s 工具超时)。
+
+> **已知缺口**: `phonefarm_quest` 是唯一不 detach 的执行工具，而它的 `--sec` 缺省 1800，
+> 远超客户端 60s 工具超时——经 MCP 调用时除非显式把 `sec` 压到 60 以内，否则会超时。
+> 该工具目前也不产出可轮询的局 ID。修法应与前三个对齐(强制 detach + 回报局 ID)，
+> 未做之前，经 MCP 驱动长跑 Agent 请改用 CLI 直接起。
+
+**不暴露**: `probe`/`exec`(裸 shell 绕过六步循环的三道拦截, 设备写操作的唯一入口必须是受检回路)、
 `parallel`(fan-out 语义留给 octos swarm 层, 不在工具内复制)、`tree --rebuild`(写操作, 留给 CLI 人工)、
-`run --endless`(无界烧钱; budget-calls 已是上限)。
+`run --endless`(无界烧钱; budget-calls 已是上限)、
+`caps --adopt/--rollback` 与 `tools --propose/--retire`(能力固化与退役属人工裁决, 只读面只给看)、
+`test-batch`/`cts-fetch`/`bench`/`capture`(长时批次与需 root 的实测, 由 CLI 直接驱动;
+其产物不落在 tasks 数据根下, 不适用 §4 的路径监狱)。
 
 ## 4. 安全与资源护栏
 

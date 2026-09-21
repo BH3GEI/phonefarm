@@ -152,9 +152,12 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
 脚本:  script [--task T] [--serial S] [--app P] [--repeat N] [--settle-ms M] [--no-screen] [--detach] <脚本文件或局ID>
 插件:  plugins                                   (列出已登记的专用场景插件)
-CTS:   test-batch (--profile P.json | --module pkg/runner | --dir APK目录) [--environment E.json] [--serial S]
-       [--include 正则] [--exclude 正则] [--resume] [--retry N] [--timeout-ms N] [--idle-timeout-ms N]
-       [--heal-script 路径] [--install-cmd '模板{apk}'] [--out 目录]   (A2OH CTS 批量挂机执行器)
+CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/module/Runner | --dir APK目录)
+       [--environment E.json] [--serial S] [--include 正则] [--exclude 正则] [--resume] [--retry N]
+       [--timeout-ms N] [--idle-timeout-ms N] [--heal-script 路径] [--install-cmd '模板{apk}'] [--out 目录]
+       [--detach 后台跑,轮询 <out>/summary.json]   (A2OH CTS 批量挂机执行器,Android/OH 双协议)
+取数:  cts-fetch --remote <设备侧结果路径> [--serial S] [--out 目录] [--pattern 正则] [--max-mb N]
+       (设备上已有 CTS/XTS 结果 → hdc file recv/adb pull 拉回 + 断言扫描 → assertions.json)
 任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神场景插件的独立长跑Agent)
 设备:  devices | keepalive [--status|--watch [秒]] [--serial S] [--json] | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
@@ -251,12 +254,17 @@ fn strip_detach(args: &[String]) -> Vec<String> {
 /// 后台分离自进程: 同参重入(去 --detach),stdout/stderr 归 console 文件,
 /// 新进程组免受调用方作业信号牵连(nohup 收编)。返回子进程 pid。
 fn spawn_detached(console: &str, envs: &[(&str, &str)]) -> std::io::Result<u32> {
-    let exe = std::env::current_exe()?;
     let args = strip_detach(&std::env::args().skip(1).collect::<Vec<_>>());
+    spawn_detached_with(&args, console, envs)
+}
+
+/// 同上,但子进程参数由调用方显式给出(test-batch --detach 需注入 --out)
+fn spawn_detached_with(args: &[String], console: &str, envs: &[(&str, &str)]) -> std::io::Result<u32> {
+    let exe = std::env::current_exe()?;
     let f = std::fs::File::create(console)?;
     let f2 = f.try_clone()?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(&args)
+    cmd.args(args)
         .stdout(f).stderr(f2).stdin(std::process::Stdio::null());
     for (k, v) in envs {
         cmd.env(k, v);
@@ -639,6 +647,7 @@ fn main() {
                 install_cmd: None,
                 out_dir: None,
             };
+            let mut detach = false;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -658,13 +667,73 @@ fn main() {
                     "--heal-script" => cfg.heal_script = it.next().cloned(),
                     "--install-cmd" => cfg.install_cmd = it.next().cloned(),
                     "--out" => cfg.out_dir = it.next().cloned(),
+                    "--detach" => detach = true,
                     _ => {}
                 }
+            }
+            if detach {
+                // 后台挂机: 立即回报输出目录;子进程同参重入(去 --detach),console 落盘
+                let out = cfg.out_dir.clone().unwrap_or_else(|| {
+                    format!("cts-batch-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"))
+                });
+                cfg.out_dir = Some(out.clone());
+                let _ = std::fs::create_dir_all(&out);
+                let console = format!("{out}/console.log");
+                let mut child_args = strip_detach(&args);
+                if !args.iter().any(|a| a == "--out") {
+                    child_args.push("--out".into());
+                    child_args.push(out.clone());
+                }
+                match spawn_detached_with(&child_args, &console, &[]) {
+                    Ok(pid) => {
+                        println!("后台批次已启动 pid={pid}");
+                        println!("输出目录: {out}");
+                        println!("跟进: 实时日志 tail -f {console}\n收官总账: cat {out}/summary.json (跑完才有)");
+                    }
+                    Err(e) => {
+                        eprintln!("后台启动失败: {e}");
+                        std::process::exit(2);
+                    }
+                }
+                std::process::exit(0);
             }
             match cts::run_batch(&cfg) {
                 Ok(code) => std::process::exit(code),
                 Err(e) => {
                     eprintln!("test-batch 失败: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Some("cts-fetch") => {
+            // CTS 结果提取 (SPEC_CTS_HARNESS v1.1): 设备上已有 CTS/XTS 结果 → 拉回 +
+            // 断言扫描 → assertions.json。设备侧只读,与 test-batch 互补;纯增量子命令。
+            let mut cfg = cts::FetchCfg {
+                serial: None,
+                remote: String::new(),
+                out: None,
+                pattern: None,
+                max_mb: 16,
+            };
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--serial" => cfg.serial = it.next().cloned(),
+                    "--remote" => cfg.remote = it.next().cloned().unwrap_or_default(),
+                    "--out" => cfg.out = it.next().cloned(),
+                    "--pattern" => cfg.pattern = it.next().cloned(),
+                    "--max-mb" => cfg.max_mb = it.next().and_then(|v| v.parse().ok()).unwrap_or(16),
+                    _ => {}
+                }
+            }
+            if cfg.remote.is_empty() {
+                eprintln!("缺必填 --remote <设备侧结果路径>(文件或目录)");
+                std::process::exit(2);
+            }
+            match cts::run_fetch(&cfg) {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("cts-fetch 失败: {e}");
                     std::process::exit(2);
                 }
             }

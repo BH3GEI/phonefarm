@@ -99,6 +99,10 @@ pub struct ScriptStep {
     /// 静默超时(毫秒): instrument 管道长时间无输出判定锁死;缺省 90s
     #[serde(default, alias = "idle_ms", alias = "idle_timeout_ms")]
     pub idle_ms: Option<u64>,
+
+    /// OH(stage model)HAP 模块名(aa test -m);Android 设备上忽略
+    #[serde(default, alias = "hap", alias = "hap_module")]
+    pub module: Option<String>,
 }
 
 /// 脚本执行配置
@@ -547,9 +551,17 @@ pub fn execute_script(cfg: &ScriptRunConfig) -> Result<ScriptResult, String> {
                                 .filter_map(|kv| kv.split_once('=')
                                     .map(|(k, v)| (k.to_string(), v.to_string())))
                                 .collect();
+                            // 平台跟设备后端走: hdc → OH(aa test),否则 Android(am instrument)
+                            let platform = if phone.backend_name() == "hdc" {
+                                crate::cts::Platform::Oh
+                            } else {
+                                crate::cts::Platform::Android
+                            };
                             let spec = crate::cts::InstrumentSpec {
                                 package: pkg.clone(),
                                 runner: runner.clone(),
+                                module: step.module.clone(),
+                                platform,
                                 class_or_method: step.class_or_method.clone(),
                                 timeout_ms: step.ms.unwrap_or(600_000),
                                 idle_timeout_ms: step.idle_ms.unwrap_or(90_000),

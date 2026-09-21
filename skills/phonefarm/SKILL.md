@@ -1,36 +1,52 @@
 ---
 name: phonefarm
-description: Drive the phonefarm mobile-device automation harness (Rust core + vision-language model). Use when operating Android emulators or OpenHarmony devices through the phonefarm binary — running or benchmarking automated UI-traversal sessions (run/benchmark/parallel), inspecting run results via the read-only CLI (last/runs/show/cat/stats/schema/probe), or working on the Rust codebase (src/runtime.rs, src/device.rs, src/cli.rs, src/telemetry.rs). Covers both Android (adb) and OpenHarmony (hdc) backends, telemetry collection, lesson/tree state, and the house rules for spending model tokens and pushing changes.
+description: Drive the phonefarm device automation and measurement infrastructure (Rust core, adb + hdc backends). Use when operating Android emulators or OpenHarmony devices through the phonefarm binary — VLM-driven UI traversal (run/benchmark/parallel/quest), zero-token deterministic scripts and replay (script), conformance-test batches and result extraction (test-batch/cts-fetch), on-device model latency benchmarking (bench), frame capture (capture), device farm keep-alive (keepalive/devices/probe), the hypothesis-experiment-evidence loop (hyp/pred/caps/tools/experiment/export), inspecting results via the read-only CLI (last/runs/show/cat/stats/schema), the MCP tool service (serve), or working on the Rust codebase. Covers both Android (adb) and OpenHarmony (hdc) backends, telemetry, and the house rules for spending model tokens and pushing changes.
 license: MIT
 metadata:
-  version: 2.0
+  version: 3.0
   source-repo: github.com/BH3GEI/phonefarm
 ---
 
 # phonefarm
 
-phonefarm is an agentic mobile-device automation, testing, and telemetry harness.
-A Rust kernel drives devices (Android emulators / OpenHarmony physical phones)
-while a vision-language model looks at the screen and decides the next action.
-It performs deep automated traversal of mobile apps and produces fully
-replayable run records.
+phonefarm is a **device automation and measurement infrastructure**: one Rust
+kernel, two device backends (Android `adb` / OpenHarmony `hdc`), carrying
+several independent upper paths on one shared foundation of device abstraction,
+record contract, telemetry, and evidence grading.
 
-Architecture: the decision loop and the execution loop are separated. The model
-only does screen understanding and action planning; state capture, validation,
-safety interception, post-run review, and performance monitoring are all
-enforced by deterministic Rust code in the host process.
+A vision-language model drives **one** of those paths. It is not what the
+project is. `script`, `test-batch`, `cts-fetch`, `bench`, `capture` and
+`keepalive` spend zero tokens and work with no model at all.
+
+Architecture: decision and execution are separated. Where a model is used at
+all, it only does screen understanding and action planning; state capture,
+validation, safety interception, post-run review, and performance monitoring
+are all enforced by deterministic Rust code in the host process.
 
 This skill is self-contained: everything an agent needs to install, build,
 run, and inspect phonefarm is in this file and the `references/` folder.
 
+## Capability map
+
+| Path | Commands | Tokens |
+| :--- | :--- | :--- |
+| Device & farm ops | `devices` `keepalive` `probe` `exec` | none |
+| VLM UI traversal | `run` `benchmark` `parallel` `quest` `plugins` | **burns tokens** |
+| Deterministic script & replay | `script` | none |
+| Conformance tests (CTS/XTS) | `test-batch` `cts-fetch` | none |
+| On-device model benchmark | `bench` | none |
+| Frame capture | `capture` | none |
+| Hypothesis-experiment-evidence | `hyp` `pred` `caps` `tools` `experiment` `export` `eval` | some |
+| Read-only inspection | `last` `runs` `show` `status` `stats` `cat` `tasks` `tree` `lessons` `campaign` `schema` `config` | none |
+| MCP tool service | `serve` | none |
+
 ## When to use this skill
 
-- Running a single session (`run`), a multi-round evaluation (`benchmark`), or
-  multi-device parallel runs (`parallel`)
+- Running any of the paths above against a device
 - Inspecting results (`last` / `runs` / `show` / `cat` / `stats`) or reading the
   ledger schema (`schema`)
-- Modifying the Rust kernel (`runtime` / `device` / `cli` / `telemetry`) or
-  adding new capabilities
+- Modifying the Rust kernel (`runtime` / `device` / `cli` / `telemetry` / `cts`)
+  or adding new capabilities
 
 ## Setup from scratch
 
@@ -103,6 +119,22 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd ..
 ./phonefarm script --task game-bench --app com.pkg --repeat 10 script.json
 ./phonefarm script --task replay <run-id>
 
+# Conformance test batches (zero tokens; Android and OpenHarmony both supported)
+./phonefarm test-batch --profile P.json --environment E.json --serial <S> --out results/
+./phonefarm test-batch --module android.content.cts/androidx.test.runner.AndroidJUnitRunner
+./phonefarm test-batch --module oh:com.example.demo/entry_test/OpenHarmonyTestRunner --serial hdc:<key>
+./phonefarm test-batch --dir /path/to/apks --install-cmd 'pm install -r {apk}'
+# Produces summary.json (per-case verdict + full assertion stack) and JUnit XML.
+# Failing cases carry the complete stack — no need to shell into the device for logs.
+
+# Pull results another tool already left on the device, and scan them for assertions
+./phonefarm cts-fetch --remote /data/local/tmp/cts_result --serial hdc:<key> --out fetched/
+
+# On-device model latency ruler (needs root) and frame capture
+./phonefarm bench --serial <S> --model m.tflite --runs 3 --json   # exit 0/1/2 = PASS/FAIL/ERROR
+./phonefarm bench --serial <S> --unlock                           # roll back a stuck freq lock
+./phonefarm capture --serial <S> --out dir --frames 200 --json
+
 # Inspecting results (read-only, offline, zero model tokens)
 ./phonefarm last                                  # latest session verdict
 ./phonefarm show <run-id> --step N                # drill into one step
@@ -116,9 +148,11 @@ The full CLI surface is in `references/cli.md`.
 
 ## House rules (must follow)
 
-- **Running sessions burns GLM tokens (real money).** Quote the cost and get
-  the user's consent before long or physical-device sessions. Unit tests,
-  offline CLI queries, and builds are always free to run.
+- **Only the VLM path burns tokens (real money)**: `run`, `benchmark`,
+  `parallel`, and the `[evolution]` quota. Quote the cost and get the user's
+  consent before long or physical-device sessions. Everything else —
+  `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `keepalive`, all
+  read-only inspection, unit tests and builds — is free and safe to run.
 - Keys come from `./secrets.env` automatically. Never commit it; never
   fabricate keys.
 - Data only lives under `tasks/<task>/`: `log.jsonl` is append-only,
@@ -140,14 +174,22 @@ The full CLI surface is in `references/cli.md`.
 - Read results top-down: `phonefarm last` → `show <run-id> --step N` →
   `cat .../stepN.xml.gz`. Run IDs accept prefix matching (ambiguous prefixes
   list candidates).
-- Each step has six phases: capture → context assembly → model decision →
-  three deterministic gates → execution → acceptance diff. See
+- In the VLM path each step has six phases: capture → context assembly → model
+  decision → three deterministic gates → execution → acceptance diff. See
   `references/architecture.md`.
 - All inspection commands are offline local parsing and consume no API quota.
-- MCP hosts (e.g. octos): `phonefarm serve [--root <dir>]` exposes the same
-  CLI surface as newline-delimited JSON-RPC tools (`phonefarm_*`). run and
-  benchmark are always detached; `cat` is jailed to the tasks root; raw-shell
-  probe/exec are not exposed. Spec: `docs/SPEC_MCP_SERVE.md`.
+- Telemetry is shared across every path, so a script run, a CTS run and a VLM
+  run are directly comparable — same fields, same units.
+- Verdicts are never guessed. Anything the harness could not account for is
+  labelled as such (`NOT_RUN` / `ENV_BLOCKED` / left empty), never silently
+  zeroed and never counted as a pass.
+- MCP hosts (e.g. octos): `phonefarm serve [--root <dir>]` exposes 21
+  newline-delimited JSON-RPC tools (`phonefarm_*`): 17 read-only + 4 that touch
+  the device. `run` / `benchmark` / `script` are always detached — poll with
+  `phonefarm_status`; `cat` is jailed to the tasks root; raw-shell probe/exec
+  are not exposed. Spec: `docs/SPEC_MCP_SERVE.md`.
+- For conformance-test work specifically, the `phonefarm-cts` skill has the
+  full contract (verdict enum, reconciliation rules, both wire protocols).
 
 ## Detailed references
 

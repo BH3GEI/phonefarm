@@ -1,61 +1,175 @@
 # phonefarm
 
-Agent 自动化移动端并行、测试、采集工具：由 Rust 内核驱动设备（Android 模拟器 / OpenHarmony 真机），通过多模态视觉语言模型进行动作决策，实现移动端应用的深度自动遍历，并提供标准化的运行遥测与状态追溯记录。
+**设备自动化与实测基础设施**：一个 Rust 内核，两种设备后端（Android `adb` / OpenHarmony `hdc`），
+在同一套「设备抽象 + 记录契约 + 遥测 + 证据分级」之上，并列提供多条互不依赖的上层能力。
 
-宿主程序架构实现了执行回路与决策机制的分离。模型提供屏幕多模态动作决策，状态采集、规则拦截、复盘和系统监控全部由 Rust 宿主进程控制。
+多模态视觉模型（VLM）只是其中**一条**上层通路，不是这个项目的定义。
+`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `keepalive` 全程零 Token，不碰模型也能独立工作。
+宿主架构实现执行回路与决策机制分离：模型只做屏幕理解与动作规划，状态采集、规则拦截、
+校验、复盘与系统监控全部由 Rust 宿主进程控制。
 
-## 常用命令
+## 能力族与常用命令
 
 ```bash
-# 编译构建
-cd src && cargo build --release && cp target/release/phonefarm ..
+# 编译构建（Apple Silicon 必须重新签名，见「安全边界」第 6 条）
+cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && codesign --force --sign - ./phonefarm
+```
 
-# 运行单次遍历任务（Android）
-./phonefarm run --task 今日头条遍历 --endless --budget-calls 90 --app com.ss.android.article.news "<目标文本>"
+**设备与农场运维**（零 Token）
 
-# 运行多轮评测与指标统计
-./phonefarm benchmark --task 今日头条遍历 --rounds 10 --budget-calls 90 --app com.ss.android.article.news --json "<目标文本>"
+```bash
+./phonefarm devices                        # adb 与 hdc 两族设备一并列出
+./phonefarm keepalive [--status|--watch]   # 农场级保活：唤醒 + 解锁 + 不息屏
+./phonefarm probe --serial S "只读命令"     # 只读调试通道
+./phonefarm exec --serial S "命令" --yes    # 写操作通道，高危，必须显式 --yes
+```
 
-# 运行 OpenHarmony 设备任务
+**自主 UI 遍历**（VLM 通路，**烧 Token**）
+
+```bash
+./phonefarm run --task 今日头条遍历 --endless --budget-calls 90 --app com.ss.android.article.news "<目标>"
+./phonefarm benchmark --task 今日头条遍历 --rounds 10 --budget-calls 90 --app <pkg> --json "<目标>"
 ./phonefarm run --serial hdc:<serial_id> --task OH设置冒烟 --budget-calls 30 "<目标>"
+./phonefarm parallel --job "任务A|目标A|emulator-5554|com.pkg" --job "任务B|目标B|hdc:<key>"
+./phonefarm plugins                        # 列出场景插件
+./phonefarm quest --mode auto --sec 1800   # 原神插件的独立长跑 Agent
+```
 
-# 使用 CLI 解析运行记录（不消耗 API 调用额度）
-./phonefarm last                                  # 最近一局运行结论与性能概要
-./phonefarm runs [--task T]                       # 指定任务的所有运行历史
-./phonefarm show <局ID> [--step N]                # 局级概要 / 步骤级上下文与遥测快照
-./phonefarm show <局ID> --raw|--hooks|--events    # 模型回复原文 / 拦截规则记录 / 异常事件流
-./phonefarm stats <局ID>                          # 局级多维度性能遥测统计指标
-./phonefarm cat <文件路径>                         # 压缩文件、JSONL 美化及图片万能查看器
-./phonefarm schema                                # 输出运行日志 log.jsonl 的完备模型 schema
-./phonefarm probe --serial S "只读命令"             # 目标设备只读调试通道
-./phonefarm bench --serial S --model m.tflite --json # 端侧模型真机延迟标尺(锁频+等冷+GPU Delegate, 需 root; docs/SPEC_SR_LOOP.md)
+**确定性脚本与回放**（零 Token，同一套遥测）
+
+```bash
+./phonefarm script --task 游戏压测 --app <pkg> --repeat 10 examples/sample_game_benchmark.json
+./phonefarm script --task 轨迹重放 20260831-213215      # 原样回放历史对局
+./phonefarm script --detach ...                        # 后台跑，立即回报局 ID
+```
+
+**一致性测试 harness（CTS / XTS）**（零 Token，Android/OH 双协议）
+
+```bash
+# 批量执行：profile / 模块 / APK 目录三种入口
+./phonefarm test-batch --profile P.json --environment E.json --serial S --out 结果目录
+./phonefarm test-batch --module android.content.cts/androidx.test.runner.AndroidJUnitRunner
+./phonefarm test-batch --module oh:com.example.demo/entry_test/OpenHarmonyTestRunner --serial hdc:<key>
+./phonefarm test-batch --dir /path/to/apks --install-cmd 'pm install -r {apk}'
+#   --include/--exclude 正则  --resume 断点续跑  --retry N  --timeout-ms/--idle-timeout-ms 双重看门狗
+#   --heal-script 自愈脚本    --detach 后台跑，轮询 <out>/summary.json
+
+# 结果提取：结果已由别的工具落在设备上时，不重跑，只拉回来扫断言
+./phonefarm cts-fetch --remote /data/local/tmp/cts_result --serial hdc:<key> --out 本地目录
+#   --pattern 正则  自定义断言行匹配     --max-mb N  单文件上限(缺省16)，超限与二进制跳过并如实标注
+```
+
+产出 `summary.json`（逐用例判定 + 完整断言栈）与 JUnit XML，**不必再 hdc 进机器翻日志**。
+跳过/假设失败不计为通过；崩溃、看门狗超时、runner 报错都会把未交代的用例如实标成
+`NOT_RUN` / `ENV_BLOCKED` 并对账，绝不静默零记。
+
+**端侧模型标尺与采集**（零 Token，需 root）
+
+```bash
+./phonefarm bench --serial S --model m.tflite --runs 3 --json   # 锁频+等冷+GPU Delegate，退出码 0/1/2
+./phonefarm bench --serial S --unlock                           # 回滚遗留锁频态
+./phonefarm capture --serial S --out 目录 --frames 200 [--ready-only] [--json]
+```
+
+**假设—实验—证据闭环**
+
+```bash
+./phonefarm hyp [--retract id|--supersede id]     # 竞争解释与人工裁决
+./phonefarm pred                                   # 预测台账（登记在先）
+./phonefarm caps [--adopt id|--rollback id]        # 能力候选固化与回滚
+./phonefarm tools [--propose def.json|--retire id] # 测量工具提案/校准/退役
+./phonefarm experiment <spec.toml> [--arm A|B|C] [--ablate ...] [--resume|--report-only] [--json]
+./phonefarm export [--task T] --split train|heldout --out <文件>
+./phonefarm eval --set <evalset.toml>              # 模型评估接口（骨架）
+```
+
+**只读下钻**（零 Token，全部离线解析本地产物；均支持 `--json`）
+
+```bash
+./phonefarm last                                  # 最近一局结论与性能概要
+./phonefarm runs [--task T] | status [<局ID>|--task T]
+./phonefarm show <局ID> [--step N]                # 局概要 / 步骤级上下文与遥测快照
+./phonefarm show <局ID> --raw|--hooks|--events|--crashes|--anr|--trace
+./phonefarm stats <局ID>                          # 局级遥测统计
+./phonefarm cat <路径> [--head/--tail N] [--grep 词]  # gz 解压、JSONL 美化、图片查看
+./phonefarm schema [--type r类型]                 # log.jsonl 完备记录 schema
+./phonefarm tasks | tree | lessons | campaign | config
+```
+
+**MCP 工具服务**
+
+```bash
+./phonefarm serve [--root 目录]    # 21 个 phonefarm_* 工具（17 只读 + 4 执行），stdio JSON-RPC 2.0
 ```
 
 ## 安全边界与执行规范
 
-- **财务约束**：多模态大模型调用会产生真实的 API Token 消耗。在执行涉及真机测试、大规模并行对局或高并发压力测试前，必须向用户进行执行预算汇报，经明确授权同意后方可运行；单测运行、CLI 数据解析、本地离线编译可自由执行。
-- **密钥管理**：程序在运行时自动检测并加载 `./secrets.env`。缺失密钥时，程序会提示格式并退出。严禁在代码、日志及任何可提交文件（如 `AGENTS.md`、`README.md` 等）中硬编码真实 API 密钥。
-- **测试环境约束**：Android 设备统一使用 AVD 模拟器（AVD 名称：`agentphone`）；OpenHarmony 测试需在特定的 intel-mac 物理中转端上通过 ssh 控制，连接真机前需核实目标物理端是否完成本地构建与代码同步。
-- **数据持久化规范**：程序唯一合法的写入路径为 `tasks/<任务名>/` 目录。对运行日志 `log.jsonl` 仅执行追加（append）写入；对 `lessons.jsonl` 的更新必须保证原子写（atomic write）；禁止自行清理 runs/ 历史目录，相关的媒体或树结构大文件已由 `.gitignore` 规则排除，严禁人为提交大体积非文本文件至 Git 仓库。
-- **代码稳定性**：任何逻辑或代码变更后，必须在本地运行 `cd src && cargo test`，确保单测保持 100% 通过（全绿）。
-- **缺陷修复规范**：新缺陷修复需遵循项目的编号管理（从 #20 开始递增）。代码修复必须保证通用性，严禁针对特定任务或界面编写硬编码硬拦截逻辑。完成修复后，需使用今日头条断言局进行标准回归测试。
-- **版本控制与提交**：`push` 权限属于用户。开发人员或 Agent 完成本地提交后，将提交哈希与变更概要呈报给用户，由用户决定执行推送操作。部署时使用 mv 进行原子的产物替换，防止进程踩踏。
-- **汇报规范**：向用户呈报工作进度或结果时，要求提供最直接的技术事实、运行指标及对局结论（如：成功率、耗时分位数、Token 支出），禁止使用含糊夸张的非技术词汇，严禁在文档中堆砌虚假的性能或战绩宣称。
+1. **财务约束**：只有 VLM 通路（`run`/`benchmark`/`parallel` 及 `[evolution]` 配额）会产生真实 API Token 消耗。
+   执行真机测试、大规模并行或高并发压测前，必须向用户汇报执行预算，经明确授权后方可运行。
+   单测、CLI 数据解析、本地离线编译，以及 `script`/`test-batch`/`cts-fetch`/`bench`/`capture`/`keepalive`
+   这些零 Token 通路，可自由执行。
+2. **密钥管理**：程序运行时自动检测并加载 `./secrets.env`。缺失密钥时提示格式并安全退出。
+   严禁在代码、日志及任何可提交文件（`AGENTS.md`、`README.md` 等）中硬编码真实密钥。
+3. **测试环境约束**：Android 统一使用 AVD 模拟器（AVD 名 `agentphone`）；OpenHarmony 需在特定的
+   intel-mac 物理中转端上通过 ssh 控制，连接真机前先核实该物理端是否完成本地构建与代码同步。
+4. **数据持久化规范**：程序唯一合法写入路径为 `tasks/<任务名>/`。`log.jsonl` 只追加；
+   `lessons.jsonl` 必须原子写；禁止自行清理 `runs/` 历史目录；媒体与树结构大文件已由 `.gitignore`
+   排除，严禁提交大体积非文本文件。`test-batch`/`cts-fetch`/`bench`/`capture` 的产物写入各自 `--out` 目录。
+5. **代码稳定性**：任何逻辑或代码变更后，必须在本地运行 `cd src && cargo test`，确保单测 100% 通过。
+6. **构建后必须重新签名（Apple Silicon 硬性要求）**：`[profile.release] strip = true` 会在链接后剥离符号，
+   使 ad-hoc 代码签名失效；失效的二进制在 macOS 上不报错，而是**静默卡死在 `_dyld_start`**
+   （进程存活、CPU 为零、无输出），极易被误判为死循环或设备失联。跑任何实机测试前，
+   先确认用的是当前源码构建并已签名的二进制。
+7. **缺陷修复规范**：新缺陷修复遵循项目编号管理（从 #20 起递增）。修复必须保证通用性，
+   严禁针对特定任务或界面编写硬编码拦截逻辑。完成后用今日头条断言局做标准回归。
+8. **版本控制与提交**：`push` 权限属于用户。完成本地提交后，把提交哈希与变更概要呈报用户，
+   由用户决定推送。部署时用 `mv` 做原子产物替换，防止进程踩踏。
+9. **汇报规范**：呈报进度或结果时给最直接的技术事实、运行指标与对局结论（成功率、耗时分位数、
+   Token 支出），禁止含糊夸张的非技术词汇，严禁在文档中堆砌虚假的性能或战绩宣称。
+
+## 架构：不变内核 + 并列上层
+
+```
+   run/benchmark/parallel/quest   script   test-batch/cts-fetch   bench   capture   experiment
+                │                   │              │                │        │          │
+                └───────────────────┴──────────────┴────────────────┴────────┴──────────┘
+                                          │
+              ┌───────────────────────────┴────────────────────────────┐
+              │ 不变内核：设备抽象(adb/hdc) · 记录契约 · 遥测           │
+              │           确定性纪律(三道检查/双重看门狗) · 证据分级     │
+              └────────────────────────────────────────────────────────┘
+```
+
+上层各通路互不依赖：卸掉 VLM 通路，`script`/`test-batch`/`bench` 照常工作；反之亦然。
+**新增一条上层通路不应该修改内核。**
+
+VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`device.rs`）只做通用能力，
+不含任何具体应用的包名、文案或流程假设；插件层（`src/plugins/`）承载全部专用场景。
+若某需求迫使你改核心去迁就单一应用，那是设计错了，应改为插件。
 
 ## 目录结构
 
 ```
-src/                   Rust 内核源码目录
+src/                   Rust 内核源码
+  universal/           通用核心：统一动作协议、三大算子、优先级引擎、插件契约
+  plugins/             场景插件层
+  cts.rs               一致性测试 harness（双协议解析、对账、报告、结果提取）
+  bench.rs capture.rs  端侧模型标尺 / 数据采集管线
+  hypo.rs caps.rs mtools.rs experiment.rs   假设—实验—证据闭环
+  keepalive.rs serve.rs script.rs parallel.rs telemetry.rs device.rs
 phonefarm.toml         控制参数、规则阈值及模型 Provider 回退链配置
-docs/DESIGN.md         系统核心架构设计规范（记录契约、六步执行回路、数据隔离设计）
-round.sh               单轮调度外壳脚本（保留兼容，生产环境建议使用 benchmark 命令）
-ocr.swift / ocr        OCR 辅助文字识别模块
-tasks/<任务名>/        任务数据目录（经验库 lessons.jsonl、转移图 tree.json、 campaign 汇总）
+docs/                  架构契约与各能力规格（索引见 README「文档索引」）
+skills/                给 AI Agent 直接阅读的英文说明书（phonefarm / phonefarm-cts / a2oh-diagnose）
+examples/              示例脚本与 CTS profile 样例
+round.sh               单轮调度外壳脚本（保留兼容，生产建议用 benchmark）
+ocr.swift / ocr        OCR 辅助识别模块
+tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campaign.tsv、runs/<局ID>/）
 ```
 
 ## 下钻分析流程
 
-- 运行记录排查首选 `phonefarm last` 命令；定位到异常局 ID 后，通过 `show --step N` 定位到具体步骤上下文；使用 `cat ...stepN.xml.gz` 查看当时的原始 UI 树，进行离线解析与断言复盘。
+- 排查首选 `phonefarm last`；定位异常局 ID 后 `show --step N` 看具体步骤上下文；
+  `cat ...stepN.xml.gz` 查原始 UI 树做离线解析与断言复盘。
 - 局 ID 支持前缀模糊匹配。
-- 严格遵守单步执行六阶段回路（采集 -> 组装 -> 决策 -> 校验 -> 执行 -> 验收）。
-- 项目的核心架构契约与设计逻辑被定义在 `docs/DESIGN.md` 中。任何核心功能升级、协议重写，必须先进行设计规格（SPEC）定义，并与已有架构保持一致。
+- VLM 通路严格遵守单步六阶段回路（采集 → 组装 → 决策 → 校验 → 执行 → 验收）。
+- 核心架构契约见 `docs/DESIGN.md`；任何核心功能升级或协议重写，必须先做 SPEC 定义，并与既有架构保持一致。
