@@ -189,7 +189,7 @@ fn tools_list() -> Vec<Value> {
                 &["task", "goal"])),
         tool("phonefarm_script",
             "Deterministic script/macro execution or historical run replay without LLM tokens. \
-             Collects full 68-metric telemetry (FPS, CPU, PSS, Battery, Temp). Runs detached.",
+             Collects the full telemetry set (FPS, CPU, PSS, Battery, Temp). Runs detached.",
             obj(json!({"task": s("task name for storing data"),
                        "script": s("path to script file (.json/.jsonl/.toml) or past run ID to replay"),
                        "serial": s("device: adb serial or hdc:<key>"),

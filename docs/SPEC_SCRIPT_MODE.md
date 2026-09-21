@@ -15,7 +15,9 @@
 
 ### 设计原则
 - **零 Token 消耗，纯离线执行**：不检查、不依赖任何云端模型 Key（无需 `GLM_KEY`）。
-- **完整保留 68 项全维度遥测**：每步无差别采集 FPS、Janky 占比、各 CPU 核心频率、内存 Pss 详情、SoC/电池温度、Root 层 `/proc/$PID/io`、FD 泄露监控等。
+- **完整保留全维度遥测**：与 VLM 局共用同一套 `Telemetry`（72 项字段，定义见 `src/telemetry.rs`），
+  每步无差别采集 FPS、Janky 占比、各 CPU 核心频率、内存 Pss 详情、SoC/电池温度、
+  Root 层 `/proc/$PID/io`、FD 泄露监控等。口径一致因此脚本局与 VLM 局可直接横向对比。
 - **账本契约 100% 兼容**：产出标准 `log.jsonl`，原生支持 `phonefarm stats`、`phonefarm show`、`phonefarm last`、`phonefarm status`。
 - **代码是给人看的，只是机器恰好可以运行**：简洁、直观、容错性强的格式设计。
 
