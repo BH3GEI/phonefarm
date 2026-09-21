@@ -529,6 +529,12 @@ impl Adb {
         String::from_utf8_lossy(&out).trim().parse::<u64>().unwrap_or(0) > 0
     }
 
+    /// 拉回设备文件/目录(CTS 结果提取用): adb pull -a;本地产物由调用方验证
+    pub fn pull(&self, remote: &str, local: &str) -> bool {
+        self.run_timeout(&["pull", "-a", remote, local], 300_000);
+        std::path::Path::new(local).exists()
+    }
+
     /// 获取或懒加载虚拟手柄控制器会话
     fn get_gamepad(&self) -> Result<std::sync::MutexGuard<'_, Option<crate::gamepad::Gamepad>>, String> {
         let mut guard = self.gamepad.lock().map_err(|e| format!("手柄锁争用失败: {e}"))?;
@@ -1004,6 +1010,16 @@ impl Hdc {
         let out = self.run_timeout(&["shell", "stat", "-c", "%s", remote], 5000, "push");
         String::from_utf8_lossy(&out).trim().parse::<u64>().unwrap_or(0) > 0
     }
+
+    /// 拉回设备文件/目录(CTS 结果提取用): file recv 是 hdc 顶层命令。
+    /// 目录递归支持依 hdc 版本而定;失败/零产物由调用方兜底(cts::pull_tree 逐文件镜像)
+    pub fn pull(&self, remote: &str, local: &str) -> bool {
+        if std::path::Path::new(local).is_file() {
+            let _ = std::fs::remove_file(local); // 先删旧文件,防陈旧内容冒充
+        }
+        self.run_timeout(&["file", "recv", remote, local], 300_000, "pull");
+        std::path::Path::new(local).exists()
+    }
 }
 
 /// 设备后端统一分发。调用方一律持 Device,方法面与 Adb 逐位同构;选择按 serial 前缀:
@@ -1108,6 +1124,10 @@ impl Device {
     /// 送文件上设备(CTS 差量部署)
     pub fn push_file(&self, local: &str, remote: &str) -> bool {
         match self { Device::Adb(d) => d.push_file(local, remote), Device::Hdc(d) => d.push_file(local, remote) }
+    }
+    /// 拉回设备文件/目录(CTS 结果提取;单次 best-effort,产物由调用方验证)
+    pub fn pull(&self, remote: &str, local: &str) -> bool {
+        match self { Device::Adb(d) => d.pull(remote, local), Device::Hdc(d) => d.pull(remote, local) }
     }
     /// 后端名(CTS 日志通道选择: hdc→hilog, adb→logcat)
     pub fn backend_name(&self) -> &'static str {
