@@ -12,37 +12,24 @@
 //! 每轮协议 (2026-09-09 实测定论): 未锁频等冷 → 锁频 → 测 → 立刻解锁。锁频只持续跑测那几秒。
 //! 反例: 先锁再等冷, performance 调速器让 8 核待机在最高电压, 结温从 33C 爬到 48C 永远过不了
 //! 40C 门禁, 进程被杀后设备还停在锁频态。故锁前把快照存到本机状态文件, 下次启动/--unlock 先回滚。
+use crate::hwcond::{
+    dispersion_pct, lock_state_path, nearest_level, parse_samples, read_snapshot, read_thermal,
+    recover_stale_lock, root_ok, soc_max_c, wait_cool, Lock, Snapshot, BUS_DCVS, KGSL,
+};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-const KGSL: &str = "/sys/class/kgsl/kgsl-3d0";
-const CPUFREQ: &str = "/sys/devices/system/cpu/cpufreq";
-/// 内存总线 DCVS (Qualcomm bus_dcvs): DDR 与 LLCC 的用户态下限 boost_freq 在跑测期间钉到 hw_max_freq
-/// (hw_min_freq 是内核私有只读节点, root 也写不进)。
-/// 反例 (2026-09-09): DDR 待机 547MHz 随负载爬升, resize 这类访存算子轮间离散 5.3%; 钉住后消除。
-const BUS_DCVS: &str = "/sys/devices/system/cpu/bus_dcvs";
-const BUS_NODES: [&str; 2] = ["DDR", "LLCC"];
 /// 单轮内 GPU 内核时延变异系数 std/avg 超过此值 = 该轮受到干扰 (总线抢占 / 后台突发), 不计入判定窗口
 const CLEAN_CV_LIMIT_PCT: f64 = 5.0;
 const REMOTE_DIR: &str = "/data/local/tmp/phonefarm_bench";
 const DEFAULT_BIN: &str = "tools/tflite/android_aarch64_benchmark_model";
 const BIN_URL: &str = "https://storage.googleapis.com/tensorflow-nightly-public/prod/tensorflow/release/lite/tools/nightly/latest/android_aarch64_benchmark_model";
-/// 热区前缀: SoC 结温 (CPU 各核 / CPU LLC / GPU 子系统); 皮肤温等外壳传感器不参与冷机判定
-const SOC_ZONE_PREFIXES: [&str; 3] = ["cpu-", "cpullc", "gpuss"];
 /// 轮间离散度门槛 (Max-Min)/Median, 百分比 (SPEC_SR_LOOP Gate 0 验收判据)
 const DISPERSION_LIMIT_PCT: f64 = 5.0;
-/// 锁频前的设备快照落到本机状态文件 (按 serial 区分); 进程被杀留下的锁态由下次启动或 --unlock 回滚。
-/// (kgsl 的 force_clk_on/force_rail_on 等强制供电位在此内核上写入即失败, 不纳入协议。)
-fn lock_state_path(serial: &Option<String>) -> std::path::PathBuf {
-    let tag: String = serial.as_deref().unwrap_or("default").chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    std::env::temp_dir().join(format!("phonefarm-bench-lock-{tag}.txt"))
-}
-
 /// 进度一律走 stderr: --json 时 stdout 只有 JSON, 而卡在哪一步必须能被看见 (等冷死循环的教训)
 fn progress(msg: &str) {
-    eprintln!("[bench] {msg}");
+    crate::hwcond::progress("bench", msg);
 }
 
 fn emit(text: &str) {
@@ -324,266 +311,7 @@ pub fn parse_round_log(text: &str) -> RoundStats {
     r
 }
 
-// ══════════════ 设备状态快照 (纯解析) ══════════════
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CpuPolicy { pub path: String, pub governor: String, pub min_khz: u64, pub max_khz: u64, pub cur_khz: u64, pub cpus: String }
-
-#[derive(Debug, Clone, PartialEq)]
-/// floor_khz = boost_freq (用户态下限), max_khz = hw_max_freq, cur_khz = cur_freq
-pub struct BusNode { pub name: String, pub floor_khz: u64, pub max_khz: u64, pub cur_khz: u64 }
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Snapshot {
-    pub cpu: Vec<CpuPolicy>,
-    /// bus_dcvs 节点 (DDR / LLCC), 没有该 sysfs 的内核为空
-    pub bus: Vec<BusNode>,
-    pub gpu_max_level: Option<u32>,
-    pub gpu_min_level: Option<u32>,
-    pub gpu_thermal_level: Option<u32>,
-    pub gpuclk_hz: Option<u64>,
-    pub gpu_model: Option<String>,
-    /// 按档位索引排列的 GPU 频率表 (Hz), 索引 0 = 最高档
-    pub gpu_freqs: Vec<u64>,
-}
-
-/// 快照命令 (root): 一次 su 往返把 CPU 各簇 / kgsl 档位 / 频率表 / 强制供电位全采回
-fn snapshot_cmd() -> String {
-    format!(
-        "su -c 'for p in {CPUFREQ}/policy*; do echo CPU $p $(cat $p/scaling_governor) $(cat $p/scaling_min_freq) $(cat $p/scaling_max_freq) $(cat $p/scaling_cur_freq) $(cat $p/related_cpus | tr \" \" ,); done; \
-K={KGSL}; echo GPU $(cat $K/max_pwrlevel) $(cat $K/min_pwrlevel) $(cat $K/thermal_pwrlevel) $(cat $K/gpuclk) $(cat $K/gpu_model); \
-echo GPUFREQS $(cat $K/gpu_available_frequencies); \
-for b in {}; do d={BUS_DCVS}/$b; [ -d $d ] && echo BUS $b $(cat $d/boost_freq) $(cat $d/hw_max_freq) $(cat $d/cur_freq); done'",
-        BUS_NODES.join(" ")
-    )
-}
-
-pub fn parse_snapshot(text: &str) -> Snapshot {
-    let mut s = Snapshot::default();
-    for line in text.lines() {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        match cols.first().copied() {
-            Some("CPU") if cols.len() >= 6 => s.cpu.push(CpuPolicy {
-                path: cols[1].to_string(),
-                governor: cols[2].to_string(),
-                min_khz: cols[3].parse().unwrap_or(0),
-                max_khz: cols[4].parse().unwrap_or(0),
-                cur_khz: cols[5].parse().unwrap_or(0),
-                cpus: cols.get(6).unwrap_or(&"").to_string(),
-            }),
-            Some("GPU") if cols.len() >= 5 => {
-                s.gpu_max_level = cols[1].parse().ok();
-                s.gpu_min_level = cols[2].parse().ok();
-                s.gpu_thermal_level = cols[3].parse().ok();
-                s.gpuclk_hz = cols[4].parse().ok();
-                s.gpu_model = cols.get(5).map(|v| v.to_string());
-            }
-            Some("GPUFREQS") => s.gpu_freqs = cols[1..].iter().filter_map(|v| v.parse().ok()).collect(),
-            Some("BUS") if cols.len() >= 5 => s.bus.push(BusNode {
-                name: cols[1].to_string(),
-                floor_khz: cols[2].parse().unwrap_or(0),
-                max_khz: cols[3].parse().unwrap_or(0),
-                cur_khz: cols[4].parse().unwrap_or(0),
-            }),
-            _ => {}
-        }
-    }
-    s
-}
-
-/// 热区行 "type temp_millidegree" → (type, 毫摄氏度)
-pub fn parse_thermal(text: &str) -> Vec<(String, i64)> {
-    text.lines().filter_map(|l| {
-        let mut it = l.split_whitespace();
-        let ty = it.next()?;
-        let temp: i64 = it.next()?.parse().ok()?;
-        Some((ty.to_string(), temp))
-    }).collect()
-}
-
-/// SoC 结温最高的热区 (只看 cpu-/cpullc/gpuss 前缀; 0 或 >=100C 的哨兵值跳过)
-pub fn soc_max_c(zones: &[(String, i64)]) -> Option<(String, f64)> {
-    zones.iter()
-        .filter(|(ty, t)| SOC_ZONE_PREFIXES.iter().any(|p| ty.starts_with(p)) && *t > 0 && *t < 100_000)
-        .max_by_key(|(_, t)| *t)
-        .map(|(ty, t)| (ty.clone(), *t as f64 / 1000.0))
-}
-
-/// 目标 MHz → 频率表里最接近的档位索引
-pub fn nearest_level(freqs: &[u64], mhz: u64) -> Option<u32> {
-    let target = mhz * 1_000_000;
-    freqs.iter().enumerate()
-        .min_by_key(|(_, f)| (**f as i64 - target as i64).abs())
-        .map(|(i, _)| i as u32)
-}
-
-/// (Max-Min)/Median, 百分比; 样本不足 2 个记 0
-pub fn dispersion_pct(vals: &[f64]) -> (f64, f64, f64, f64) {
-    let mut v: Vec<f64> = vals.iter().copied().filter(|x| x.is_finite()).collect();
-    if v.is_empty() { return (0.0, 0.0, 0.0, 0.0); }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = v.len();
-    let median = if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 };
-    let (min, max) = (v[0], v[n - 1]);
-    let disp = if median > 0.0 && n >= 2 { (max - min) / median * 100.0 } else { 0.0 };
-    (median, min, max, disp)
-}
-
-/// 采样器输出 "gpuclk cpu0 cpu6 ..." 行 → 各列的 (众数, 最小, 最大)
-pub fn parse_samples(text: &str) -> Vec<(u64, u64, u64)> {
-    let rows: Vec<Vec<u64>> = text.lines()
-        .map(|l| l.split_whitespace().filter_map(|v| v.parse().ok()).collect::<Vec<u64>>())
-        .filter(|r| !r.is_empty())
-        .collect();
-    let Some(width) = rows.iter().map(|r| r.len()).min() else { return vec![] };
-    (0..width).map(|c| {
-        let col: Vec<u64> = rows.iter().map(|r| r[c]).collect();
-        let mut counts: std::collections::HashMap<u64, usize> = Default::default();
-        for v in &col { *counts.entry(*v).or_default() += 1; }
-        let mode = counts.iter().max_by_key(|(v, n)| (**n, **v)).map(|(v, _)| *v).unwrap_or(0);
-        (mode, *col.iter().min().unwrap(), *col.iter().max().unwrap())
-    }).collect()
-}
-
-// ══════════════ 设备操作 ══════════════
-
-fn root_ok(phone: &crate::device::Device) -> bool {
-    phone.shell("su -c id", 8000).contains("uid=0(")
-}
-
-fn read_snapshot(phone: &crate::device::Device) -> Snapshot {
-    parse_snapshot(&phone.shell(&snapshot_cmd(), 15000))
-}
-
-fn read_thermal(phone: &crate::device::Device) -> Vec<(String, i64)> {
-    parse_thermal(&phone.shell(
-        "for z in /sys/class/thermal/thermal_zone*; do echo \"$(cat $z/type) $(cat $z/temp)\"; done 2>/dev/null", 15000))
-}
-
-/// 冷机门禁: SoC 结温最高热区 < cool_c 才放行; 超时即报错(安全阀, 不是时间预设)
-fn wait_cool(phone: &crate::device::Device, cool_c: f64, timeout_s: u64) -> Result<(String, f64, u64), String> {
-    let t0 = Instant::now();
-    loop {
-        let (zone, c) = soc_max_c(&read_thermal(phone))
-            .ok_or("读不到任何 cpu-/gpuss 热区, 无法做冷机判定")?;
-        if c < cool_c {
-            return Ok((zone, c, t0.elapsed().as_secs()));
-        }
-        if t0.elapsed() > Duration::from_secs(timeout_s) {
-            return Err(format!("等冷超时 {timeout_s}s: {zone}={c:.1}C 仍 >= {cool_c}C"));
-        }
-        progress(&format!("等冷: {zone}={c:.1}C >= {cool_c}C, 3s 后重测 (已等 {}s)", t0.elapsed().as_secs()));
-        std::thread::sleep(Duration::from_secs(3));
-    }
-}
-
-struct Lock {
-    before: Snapshot,
-    state_path: std::path::PathBuf,
-    applied: bool,
-}
-
-/// 快照 → 状态文件文本 (与 snapshot_cmd 输出同形, parse_snapshot 可直接回读)
-fn snapshot_text(s: &Snapshot) -> String {
-    let mut t = String::new();
-    for p in &s.cpu {
-        t.push_str(&format!("CPU {} {} {} {} {} {}\n", p.path, p.governor, p.min_khz, p.max_khz, p.cur_khz, p.cpus));
-    }
-    if let (Some(mx), Some(mn)) = (s.gpu_max_level, s.gpu_min_level) {
-        t.push_str(&format!("GPU {} {} {} {} {}\n", mx, mn, s.gpu_thermal_level.unwrap_or(0),
-            s.gpuclk_hz.unwrap_or(0), s.gpu_model.clone().unwrap_or_default()));
-    }
-    if !s.gpu_freqs.is_empty() {
-        t.push_str(&format!("GPUFREQS {}\n", s.gpu_freqs.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(" ")));
-    }
-    for b in &s.bus {
-        t.push_str(&format!("BUS {} {} {} {}\n", b.name, b.floor_khz, b.max_khz, b.cur_khz));
-    }
-    t
-}
-
-/// 把快照里的调速器与 kgsl 档位写回设备; 返回回读是否一致
-fn restore_snapshot(phone: &crate::device::Device, before: &Snapshot) -> bool {
-    let mut cmd = String::from("su -c '");
-    for p in &before.cpu {
-        cmd.push_str(&format!("echo {} > {}/scaling_governor; ", p.governor, p.path));
-    }
-    // 恢复顺序: 先 min(数值大) 再 max, 与 kgsl 钳位规则一致
-    if let (Some(mx), Some(mn)) = (before.gpu_max_level, before.gpu_min_level) {
-        cmd.push_str(&format!("K={KGSL}; echo {mn} > $K/min_pwrlevel; echo {mx} > $K/max_pwrlevel; "));
-    }
-    for b in &before.bus {
-        cmd.push_str(&format!("echo {} > {BUS_DCVS}/{}/boost_freq; ", b.floor_khz, b.name));
-    }
-    cmd.push_str("echo RESTORED'");
-    let out = phone.shell(&cmd, 15000);
-    if !out.contains("RESTORED") { return false; }
-    let after = read_snapshot(phone);
-    let cpu_ok = after.cpu.len() == before.cpu.len()
-        && after.cpu.iter().zip(&before.cpu).all(|(a, b)| a.governor == b.governor);
-    let bus_ok = after.bus.len() == before.bus.len()
-        && after.bus.iter().zip(&before.bus).all(|(a, b)| a.floor_khz == b.floor_khz);
-    cpu_ok && bus_ok && after.gpu_max_level == before.gpu_max_level && after.gpu_min_level == before.gpu_min_level
-}
-
-/// 上次异常退出遗留的锁态: 状态文件在就按它回滚。返回 Some(是否回滚成功); 无遗留 None
-fn recover_stale_lock(phone: &crate::device::Device, state_path: &std::path::Path) -> Option<bool> {
-    let text = std::fs::read_to_string(state_path).ok()?;
-    let before = parse_snapshot(&text);
-    if before.cpu.is_empty() && before.gpu_max_level.is_none() {
-        let _ = std::fs::remove_file(state_path);
-        return None;
-    }
-    progress(&format!("发现上次遗留的锁频状态 {}, 先回滚", state_path.display()));
-    let ok = restore_snapshot(phone, &before);
-    if ok { let _ = std::fs::remove_file(state_path); }
-    Some(ok)
-}
-
-impl Lock {
-    fn apply(phone: &crate::device::Device, state_path: &std::path::Path, before: Snapshot, level: u32) -> Result<Lock, String> {
-        // 先落状态文件再动设备: 中途被杀也能回滚
-        std::fs::write(state_path, snapshot_text(&before))
-            .map_err(|e| format!("写不了锁频状态文件 {}: {e}", state_path.display()))?;
-        let mut cmd = String::from("su -c '");
-        for p in &before.cpu {
-            cmd.push_str(&format!("echo performance > {}/scaling_governor; ", p.path));
-        }
-        // 先 max 再 min 再 max: kgsl 的 store 互相钳位 (max<=min, min>=max), 这个顺序对任意目标档都成立
-        cmd.push_str(&format!("K={KGSL}; echo {level} > $K/max_pwrlevel; echo {level} > $K/min_pwrlevel; echo {level} > $K/max_pwrlevel; "));
-        // 总线钉在 hw_max_freq: 访存算子的时延不再随 DDR/LLCC DCVS 漂移
-        for b in &before.bus {
-            cmd.push_str(&format!("echo {} > {BUS_DCVS}/{}/boost_freq; ", b.max_khz, b.name));
-        }
-        cmd.push_str("echo LOCKED'");
-        let out = phone.shell(&cmd, 15000);
-        let lock = Lock { before, state_path: state_path.to_path_buf(), applied: true };
-        if !out.contains("LOCKED") {
-            lock.restore(phone);
-            return Err(format!("锁频命令未执行完: {}; 已回滚", out.trim()));
-        }
-        let after = read_snapshot(phone);
-        let cpu_ok = !after.cpu.is_empty() && after.cpu.iter().all(|p| p.governor == "performance");
-        let gpu_ok = after.gpu_max_level == Some(level) && after.gpu_min_level == Some(level);
-        let bus_ok = after.bus.len() == lock.before.bus.len() && after.bus.iter().all(|b| b.floor_khz == b.max_khz);
-        if !cpu_ok || !gpu_ok || !bus_ok {
-            lock.restore(phone);
-            return Err(format!("锁频回读不符: cpu_governor={:?} gpu(max,min)=({:?},{:?}) 目标档 {level} bus={:?}; 已回滚",
-                after.cpu.iter().map(|p| p.governor.as_str()).collect::<Vec<_>>(),
-                after.gpu_max_level, after.gpu_min_level,
-                after.bus.iter().map(|b| format!("{}:{}/{}", b.name, b.floor_khz, b.max_khz)).collect::<Vec<_>>()));
-        }
-        Ok(lock)
-    }
-
-    /// 恢复原值并清掉状态文件; 返回回读是否与锁前一致
-    fn restore(&self, phone: &crate::device::Device) -> bool {
-        if !self.applied { return true; }
-        let ok = restore_snapshot(phone, &self.before);
-        if ok { let _ = std::fs::remove_file(&self.state_path); }
-        ok
-    }
-}
+// ══════════════ 本地产物定位与部署 ══════════════
 
 fn locate_bin(a: &BenchArgs) -> Result<String, String> {
     let cands: Vec<String> = a.bin.iter().cloned()
@@ -706,9 +434,9 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     if !phone.health_check(8000) {
         return Err("设备无心跳 (adb devices 里不是 device 态, 或未指定 --serial)".into());
     }
-    let state_path = lock_state_path(&serial);
+    let state_path = lock_state_path("bench", &serial);
     let root = root_ok(&phone);
-    let recovered = if root { recover_stale_lock(&phone, &state_path) } else { None };
+    let recovered = if root { recover_stale_lock("bench", &phone, &state_path) } else { None };
     if a.unlock {
         let msg = match recovered {
             Some(true) => "已回滚遗留锁频态",
@@ -762,7 +490,7 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     while i < a.max_rounds {
         i += 1;
         // 1. 未锁频等冷: 结温门禁在待机态判定, 锁频只覆盖跑测那几秒
-        let (zone, c, waited) = match wait_cool(&phone, a.cool_c, a.cool_timeout_s) {
+        let (zone, c, waited) = match wait_cool("bench", &phone, a.cool_c, a.cool_timeout_s) {
             Ok(v) => v,
             Err(e) => { first_err = Some(format!("第{i}轮: {e}")); break; }
         };
@@ -1089,49 +817,7 @@ INFO: Inference timings in us: Init: 188735, First inference: 26307, Warmup (avg
         assert_eq!(parse_round_log(LOG).fallback_reason(), None);
     }
 
-    #[test]
-    fn snapshot_thermal_and_levels() {
-        let text = "CPU /sys/devices/system/cpu/cpufreq/policy0 walt 787200 3628800 1324800 0,1,2,3,4,5\n\
-CPU /sys/devices/system/cpu/cpufreq/policy6 walt 883200 4396800 883200 6,7\n\
-GPU 3 17 0 191000000 Adreno840v2\n\
-GPUFREQS 1200000000 1050000000 967000000 902000000 826000000\n\
-BUS DDR 547000 5333000 547000\n\
-BUS LLCC 282000 1350000 605600\n";
-        let s = parse_snapshot(text);
-        assert_eq!(s.cpu.len(), 2);
-        assert_eq!(s.cpu[1].governor, "walt");
-        assert_eq!(s.cpu[1].cpus, "6,7");
-        assert_eq!((s.gpu_max_level, s.gpu_min_level, s.gpu_thermal_level), (Some(3), Some(17), Some(0)));
-        assert_eq!(s.gpuclk_hz, Some(191000000));
-        assert_eq!(s.gpu_model.as_deref(), Some("Adreno840v2"));
-        assert_eq!(s.gpu_freqs[3], 902000000);
-        assert_eq!(s.bus.len(), 2);
-        assert_eq!((s.bus[0].name.as_str(), s.bus[0].floor_khz, s.bus[0].max_khz, s.bus[0].cur_khz), ("DDR", 547000, 5333000, 547000));
-        // 状态文件往返: 写出再解析必须与原快照一致 (崩溃回滚的地基)
-        assert_eq!(parse_snapshot(&snapshot_text(&s)), s);
-        assert_eq!(nearest_level(&s.gpu_freqs, 900), Some(3));
-        assert_eq!(nearest_level(&s.gpu_freqs, 1300), Some(0));
-        let zones = parse_thermal("cpu-0-0-0 33300\ngpuss-2 41900\nskin-msm-therm 45000\ncpu-hw-trip-0 105000\nsocd 0\nbatt-therm 25470\n");
-        assert_eq!(zones.len(), 6);
-        // 皮肤温 45C 不参与; 105000 哨兵与 0 值跳过; 取 gpuss-2
-        assert_eq!(soc_max_c(&zones), Some(("gpuss-2".into(), 41.9)));
-        assert_eq!(soc_max_c(&[]), None);
-    }
 
-    #[test]
-    fn dispersion_and_samples() {
-        let (median, min, max, d) = dispersion_pct(&[1722.0, 1700.0, 1750.0]);
-        assert_eq!((median, min, max), (1722.0, 1700.0, 1750.0));
-        assert!((d - 50.0 / 1722.0 * 100.0).abs() < 1e-9);
-        let (median, _, _, d) = dispersion_pct(&[10.0, 20.0]);
-        assert_eq!(median, 15.0);
-        assert!((d - 200.0 / 3.0).abs() < 1e-9);
-        assert_eq!(dispersion_pct(&[]).3, 0.0);
-        let s = parse_samples("902000000 3628800 4396800\n902000000 3628800 4396800\n191000000 3628800 4396800\n");
-        assert_eq!(s[0], (902000000, 191000000, 902000000));
-        assert_eq!(s[1], (3628800, 3628800, 3628800));
-        assert!(parse_samples("").is_empty());
-    }
 
     #[test]
     fn args_forms() {
@@ -1146,15 +832,6 @@ BUS LLCC 282000 1350000 605600\n";
         assert!(parse_args(&["--model".into(), "m".into(), "--bogus".into()]).is_err());
     }
 
-    #[test]
-    fn snapshot_cmd_is_single_quoted_root_payload() {
-        let c = snapshot_cmd();
-        assert!(c.starts_with("su -c '") && c.ends_with("'"));
-        // su 载荷内不许出现单引号, 否则远端 sh 会把命令截断
-        assert_eq!(c[7..c.len() - 1].matches('\'').count(), 0);
-        assert!(c.contains("gpu_available_frequencies"));
-        assert!(c.contains("bus_dcvs/$b") && c.contains("DDR LLCC") && c.contains("boost_freq") && !c.contains("hw_min_freq"));
-    }
 
     #[test]
     fn max_rounds_defaults_and_bounds() {

@@ -71,6 +71,17 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ./phonefarm capture --serial S --out 目录 --frames 200 [--ready-only] [--json]
 ```
 
+**Compute Shader 算子标尺**（零 Token，需 root）
+
+```bash
+./phonefarm gpu-op --request <eval_request.json> --serial S --json   # 等冷+锁频+A/B/A/B+Welch t 检验
+./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
+```
+
+`game_opt_loop` 自主进化闭环的物理采样与统计裁决端，契约见 `docs/SPEC_GPU_OP.md`。
+设备条件化与功耗遥测提在 `src/hwcond.rs`（与 `bench` 共享），统计在 `src/gpustat.rs`。
+**当前阻塞**：设备侧 `vkop_runner` 需要 Android NDK 构建，尚未就绪。
+
 **性能优化闭环**（零 Token，需 root）
 
 实现在 `loop_v1/`（工具链 + 纯函数解析器），**不是 phonefarm 子命令**。
@@ -170,6 +181,8 @@ src/                   Rust 内核源码
   plugins/             场景插件层
   cts.rs               一致性测试 harness（双协议解析、对账、报告、结果提取）
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
+  gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
+  hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测
   hypo.rs caps.rs mtools.rs experiment.rs   假设—实验—证据闭环
   keepalive.rs serve.rs script.rs parallel.rs telemetry.rs device.rs
 phonefarm.toml         控制参数、规则阈值及模型 Provider 回退链配置
