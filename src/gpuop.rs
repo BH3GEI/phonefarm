@@ -519,6 +519,8 @@ pub struct GpuOpArgs {
     pub runner_bin: Option<String>,
     pub power_rail: PowerRail,
     pub out_dir: Option<String>,
+    /// 画质真值参考帧 (PNG/JPEG)。缺省用 runner 内置的程序化图案。
+    pub reference: Option<String>,
     pub cool_timeout_s: u64,
     pub gpu_level: Option<u32>,
     pub unlock_only: bool,
@@ -526,7 +528,7 @@ pub struct GpuOpArgs {
 
 const USAGE: &str = "用法: phonefarm gpu-op --request <eval_request.json> [--serial S] [--json]\n\
 \x20                    [--runner <本地 runner 路径>] [--power-rail usb|battery]\n\
-\x20                    [--out 目录] [--cool-timeout-s N] [--gpu-level N]\n\
+\x20                    [--out 目录] [--reference <参考帧.png>] [--cool-timeout-s N] [--gpu-level N]\n\
 \x20      phonefarm gpu-op --serial S --unlock        回滚遗留的锁频态\n\
 \n\
 Compute Shader 算子的真机标尺: 等冷 → 锁频 → A/B/A/B 交替跑测 → Welch t 检验 → eval_report。\n\
@@ -540,6 +542,7 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
         runner_bin: None,
         power_rail: PowerRail::Usb,
         out_dir: None,
+        reference: None,
         cool_timeout_s: 600,
         gpu_level: None,
         unlock_only: false,
@@ -552,6 +555,7 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
             "--json" => a.as_json = true,
             "--runner" => a.runner_bin = it.next().cloned(),
             "--out" => a.out_dir = it.next().cloned(),
+            "--reference" => a.reference = it.next().cloned(),
             "--unlock" => a.unlock_only = true,
             "--cool-timeout-s" => {
                 a.cool_timeout_s = it
@@ -729,6 +733,35 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         return 2;
     }
 
+    // ---- 参考帧: 有就转成裸 RGBA8 推上去, 没有就用 runner 内置的程序化图案 ----
+    let mut remote_reference: Option<String> = None;
+    if let Some(png) = a.reference.as_ref() {
+        let raw = std::path::Path::new(&out_dir).join("reference.rgba");
+        match prepare_reference(png, 1920, 1080, &raw) {
+            Ok((w, h)) => {
+                let remote = format!("{REMOTE_DIR}/reference.rgba");
+                if !phone.push_file(&raw.to_string_lossy(), &remote) {
+                    eprintln!("推送参考帧失败");
+                    cleanup(&phone);
+                    return 2;
+                }
+                progress(&format!(
+                    "画质真值: {png} ({w}x{h} 中心裁剪到 1920x1080)"
+                ));
+                remote_reference = Some(remote);
+            }
+            Err(e) => {
+                eprintln!("参考帧不可用: {e}");
+                cleanup(&phone);
+                return 2;
+            }
+        }
+    } else {
+        progress(
+            "画质真值: runner 内置程序化图案 (非真实游戏帧;              绝对 PSNR 不可与换了参考图之后的数字比较)",
+        );
+    }
+
     // ---- 回滚上次异常退出遗留的锁态 ----
     let recovered = hwcond::recover_stale_lock("gpu-op", &phone, &state_path);
     if recovered == Some(false) {
@@ -743,6 +776,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     let mut lat_b: Vec<f64> = Vec::new();
     let mut pwr_a: Vec<f64> = Vec::new();
     let mut pwr_b: Vec<f64> = Vec::new();
+    let mut psnr_a: Vec<f64> = Vec::new();
     let mut psnr_b: Vec<f64> = Vec::new();
     let mut crashed = false;
     let mut fatal: Option<String> = None;
@@ -781,7 +815,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             }
         };
 
-        let (out, power) = run_one(&phone, *arm, &req, a.power_rail);
+        let (out, power) = run_one(&phone, *arm, &req, a.power_rail, remote_reference.as_deref());
         let restored = lock.restore(&phone);
         if !restored {
             fatal = Some("锁频态回读与锁前不一致, 设备状态未能 100% 还原".into());
@@ -799,6 +833,11 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
                     Arm::Baseline => {
                         lat_a.push(ms);
                         if let Some(w) = w { pwr_a.push(w); }
+                        // 基线臂的画质也要收: 它是**同一张参考图上**的画质地板。
+                        // 绝对 dB 不可跨参考图比较 (实测: 同一算子在程序化图上
+                        // 42.83 dB, 换成真机截帧只有 31.33 dB), 所以地板必须
+                        // 来自本次同场测出来的基线, 不能用别处搬来的常数。
+                        if let Some(q) = r.psnr_db { psnr_a.push(q); }
                     }
                     Arm::Candidate => {
                         lat_b.push(ms);
@@ -853,7 +892,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             operator_latency_ms: gpustat::mean(&lat_a) as f32,
             fps_p95_ms: None,
             power_watt: gpustat::mean(&pwr_a) as f32,
-            psnr_db: f32::NAN,
+            psnr_db: if psnr_a.is_empty() { f32::NAN } else { gpustat::mean(&psnr_a) as f32 },
         })
     };
     let candidate = Metrics {
@@ -864,6 +903,19 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         power_watt: if pwr_b.is_empty() { f32::NAN } else { gpustat::mean(&pwr_b) as f32 },
         psnr_db: if psnr_b.is_empty() { f32::NAN } else { gpustat::mean(&psnr_b) as f32 },
     };
+
+    // 画质地板: 优先用本次同场测出来的基线臂画质。
+    // 契约里带来的 quality_baseline_db 是在别的参考图上得到的, 只作兜底。
+    let mut rules = rules;
+    if let Some(b) = base.as_ref() {
+        if b.psnr_db.is_finite() {
+            progress(&format!(
+                "画质地板改用本场基线实测 {:.3} dB (契约携带的 {:.3} dB 来自另一张参考图, 仅作兜底)",
+                b.psnr_db, rules.quality_baseline_db
+            ));
+            rules.quality_baseline_db = b.psnr_db;
+        }
+    }
 
     let (status, verdict) = decide(&rules, &candidate, base.as_ref(), welch.as_ref(), crashed);
 
@@ -885,6 +937,36 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         Status::Pass => 0,
         _ => 1,
     }
+}
+
+/// 把参考帧转成 runner 吃的裸 RGBA8, 并推到设备。
+///
+/// 为什么**中心裁剪**而不是缩放: 参考帧是画质真值。把一张 2688x1216 的真机截帧
+/// 缩到 1920x1080, 缩放本身就引入了一次重采样 —— 算子再去"重建"这张已经被
+/// 重采样过的图, 量出来的 PSNR 里混进了缩放器的特性, 不再只是算子的画质。
+/// 中心裁剪保留原生像素, 真值才是真值。
+///
+/// 源图小于目标时直接报错, 不做放大: 放大出来的"真值"是假的。
+fn prepare_reference(
+    local_png: &str,
+    out_w: u32,
+    out_h: u32,
+    dst: &std::path::Path,
+) -> Result<(u32, u32), String> {
+    let img = image::open(local_png).map_err(|e| format!("解不开参考帧 {local_png}: {e}"))?;
+    let (w, h) = (img.width(), img.height());
+    if w < out_w || h < out_h {
+        return Err(format!(
+            "参考帧 {w}x{h} 小于目标 {out_w}x{out_h}: 放大出来的真值是假的, 拒绝使用"
+        ));
+    }
+    let x = (w - out_w) / 2;
+    let y = (h - out_h) / 2;
+    let rgba = image::imageops::crop_imm(&img.to_rgba8(), x, y, out_w, out_h)
+        .to_image()
+        .into_raw();
+    std::fs::write(dst, &rgba).map_err(|e| format!("写入 {} 失败: {e}", dst.display()))?;
+    Ok((w, h))
 }
 
 /// 把 runner 与两份 SPIR-V 推到设备。
@@ -933,6 +1015,7 @@ fn run_one(
     arm: Arm,
     req: &EvalRequest,
     rail: PowerRail,
+    reference: Option<&str>,
 ) -> (String, Vec<hwcond::PowerSample>) {
     let spv = match arm {
         Arm::Baseline => "baseline.spv",
@@ -950,9 +1033,13 @@ fn run_one(
     let sampler = phone.stream_shell(&sampler_cmd).ok();
     std::thread::sleep(std::time::Duration::from_millis(300));
 
+    // 两臂必须用同一张参考帧, 否则 PSNR 不可比。
+    let ref_arg = reference
+        .map(|r| format!(" --reference {r}"))
+        .unwrap_or_default();
     let cmd = format!(
-        "cd {REMOTE_DIR} && ./vkop_runner --shader {spv} --seconds {} --json 2>&1",
-        req.protocol.replay_seconds
+        "cd {REMOTE_DIR} && ./vkop_runner --shader {spv} --track {} --seconds {}{ref_arg} --json 2>&1",
+        req.track, req.protocol.replay_seconds
     );
     let out = phone.shell(&cmd, (req.protocol.replay_seconds as u64 + 60) * 1000);
 
@@ -1003,6 +1090,78 @@ fn render_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("gpuop_ref_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_png(path: &std::path::Path, w: u32, h: u32) {
+        image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        })
+        .save(path)
+        .unwrap();
+    }
+
+    /// 中心裁剪而不是缩放: 缩放会把缩放器的特性混进 PSNR,
+    /// 量到的就不只是算子画质了。参考帧必须是原生像素。
+    #[test]
+    fn a_reference_frame_is_centre_cropped_not_rescaled() {
+        let dir = scratch("crop");
+        let png = dir.join("src.png");
+        write_png(&png, 2688, 1216); // NX809J 横屏真机截帧尺寸
+        let raw = dir.join("out.rgba");
+
+        let (w, h) = prepare_reference(&png.to_string_lossy(), 1920, 1080, &raw).unwrap();
+        assert_eq!((w, h), (2688, 1216));
+
+        let bytes = std::fs::read(&raw).unwrap();
+        assert_eq!(bytes.len(), 1920 * 1080 * 4, "必须是裸 RGBA8");
+
+        let x0 = (2688 - 1920) / 2;
+        let y0 = (1216 - 1080) / 2;
+        assert_eq!(bytes[0], (x0 % 256) as u8, "不是原生像素, 被重采样过");
+        assert_eq!(bytes[1], (y0 % 256) as u8, "不是原生像素, 被重采样过");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 源图比目标小就报错 —— 放大出来的「真值」是假的, 不能当画质基准。
+    #[test]
+    fn a_reference_frame_smaller_than_the_target_is_rejected() {
+        let dir = scratch("small");
+        let png = dir.join("s.png");
+        write_png(&png, 1280, 720);
+        let raw = dir.join("out.rgba");
+        let err = prepare_reference(&png.to_string_lossy(), 1920, 1080, &raw).unwrap_err();
+        assert!(err.contains("假的"), "{err}");
+        assert!(!raw.exists(), "失败时不该留下半个文件");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_reference_is_reported() {
+        let dir = scratch("bad");
+        assert!(prepare_reference("/nonexistent.png", 8, 8, &dir.join("o")).is_err());
+        let junk = dir.join("junk.png");
+        std::fs::write(&junk, b"not a png").unwrap();
+        assert!(prepare_reference(&junk.to_string_lossy(), 8, 8, &dir.join("o")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reference_is_optional_on_the_command_line() {
+        let a = parse_args(&["--request".into(), "r.json".into()]).unwrap();
+        assert!(a.reference.is_none());
+        let b = parse_args(&[
+            "--request".into(), "r.json".into(),
+            "--reference".into(), "frame.png".into(),
+        ]).unwrap();
+        assert_eq!(b.reference.as_deref(), Some("frame.png"));
+    }
 
     // ---------- 契约 ----------
 
