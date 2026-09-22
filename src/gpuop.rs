@@ -828,6 +828,17 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         eprintln!("eval_request 校验失败: {e}");
         return 2;
     }
+    // 每臂 4 轮是生产口径。轮次少于此照样跑, 但结论的说服力会明显变薄:
+    // 每臂 2 轮时 Welch 的自由度低到个位数, 单轮的一次热漂移就能翻转判定。
+    // 不拦, 但必须说出来 —— 免得薄样本的 p 值被当成厚样本的 p 值用。
+    const PRODUCTION_ROUNDS: u32 = 4;
+    if req.protocol.rounds < PRODUCTION_ROUNDS {
+        progress(&format!(
+            "注意: 每臂仅 {} 轮, 低于生产口径 {}。样本偏薄, p 值与功耗差的说服力相应下降",
+            req.protocol.rounds, PRODUCTION_ROUNDS
+        ));
+    }
+
     progress(&format!(
         "候选 {} | 赛道 {} | 预算 {:.2} ms | 画质基线 {:.3} dB | 每臂 {} 轮 | p<{}",
         req.candidate_id,
