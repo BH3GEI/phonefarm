@@ -95,6 +95,12 @@ pub struct EvalReport {
     pub verdict: Verdict,
     /// 恒为 "phonefarm": 本通路只产出真机实测数据。
     pub source: String,
+    /// 插帧赛道的伪影读数与裁决。其它赛道为 None。
+    ///
+    /// 这是契约的**附加**字段: 上游用 serde 解析时会忽略不认识的字段,
+    /// 所以加它不会破坏已有的 eval_report 消费者。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<Artifacts>,
 }
 
 /// 校验 eval_request 的必填项与取值范围。
@@ -337,6 +343,12 @@ pub struct RunnerReport {
     /// 每次 dispatch 的 GPU 侧耗时 (微秒)
     pub timing_us: Vec<f64>,
     pub psnr_db: Option<f64>,
+    /// 插帧专属: HUD 区域 PSNR。HUD 在屏幕空间静止, 正确插帧应与真值逐像素吻合;
+    /// 块匹配把 HUD 当成运动内容时字会被拉成双份, 这个数断崖下跌。
+    pub hud_ghost_db: Option<f64>,
+    /// 插帧专属: 落在前后帧邻域包络之外的像素占比 (%)。
+    /// 出了包络 = 算子凭空造了前后帧都没有的内容, 即拉扯/撕裂。
+    pub stretch_pct: Option<f64>,
     pub device_name: Option<String>,
     pub error: Option<String>,
 }
@@ -412,6 +424,8 @@ pub fn parse_runner_output(stdout: &str) -> Result<RunnerReport, String> {
         ok,
         timing_us,
         psnr_db: v.get("psnr_db").and_then(Value::as_f64),
+        hud_ghost_db: v.pointer("/artifacts/hud_ghost_db").and_then(Value::as_f64),
+        stretch_pct: v.pointer("/artifacts/stretch_pct").and_then(Value::as_f64),
         device_name: v
             .pointer("/device/name")
             .and_then(Value::as_str)
@@ -421,6 +435,81 @@ pub fn parse_runner_output(stdout: &str) -> Result<RunnerReport, String> {
 }
 
 // ══════════════ 冻结判定规则 ══════════════
+
+/// 插帧赛道的伪影判据。
+///
+/// 为什么不用绝对阈值: 这两个量和参考场景强相关 (运动幅度、HUD 面积、纹理复杂度
+/// 都会改变绝对值), 跟 PSNR 的绝对 dB 一样不可跨场景搬。所以判据是
+/// **相对本场基线臂不得明显变差** —— A/B 本就同场同素材跑, 这个比较才有意义。
+///
+/// 容差是工程判断, 不是测量结果: HUD 重影 3 dB, 拉扯 1 个百分点。
+/// 实测参考: 干净算子 hud_ghost 99.0 dB / stretch 0.00%,
+/// 故意做坏的对照组 5.32 dB / 55.72% —— 真出问题时差距是数量级的, 不在容差附近。
+#[derive(Debug, Clone, Copy)]
+pub struct ArtifactGates {
+    pub hud_ghost_margin_db: f64,
+    pub stretch_margin_pct: f64,
+}
+
+impl Default for ArtifactGates {
+    fn default() -> Self {
+        Self {
+            hud_ghost_margin_db: 3.0,
+            stretch_margin_pct: 1.0,
+        }
+    }
+}
+
+/// 一次伪影裁决的结果。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Artifacts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hud_ghost_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stretch_pct: Option<f64>,
+    /// 相对基线臂是否出现了明显的伪影退化。
+    pub regressed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// 拿候选与基线的伪影读数做裁决。两边都有读数才谈得上比较。
+pub fn judge_artifacts(
+    gates: &ArtifactGates,
+    cand_ghost: Option<f64>,
+    base_ghost: Option<f64>,
+    cand_stretch: Option<f64>,
+    base_stretch: Option<f64>,
+) -> Artifacts {
+    let mut reason: Option<String> = None;
+
+    if let (Some(c), Some(b)) = (cand_ghost, base_ghost) {
+        if c < b - gates.hud_ghost_margin_db {
+            reason = Some(format!(
+                "HUD 重影: {c:.2} dB 比基线 {b:.2} dB 差了 {:.2} dB (容差 {:.1})",
+                b - c,
+                gates.hud_ghost_margin_db
+            ));
+        }
+    }
+    if reason.is_none() {
+        if let (Some(c), Some(b)) = (cand_stretch, base_stretch) {
+            if c > b + gates.stretch_margin_pct {
+                reason = Some(format!(
+                    "拉扯果冻: {c:.2}% 的像素落在前后帧包络之外, 基线只有 {b:.2}% (容差 {:.1})",
+                    gates.stretch_margin_pct
+                ));
+            }
+        }
+    }
+
+    Artifacts {
+        hud_ghost_db: cand_ghost,
+        stretch_pct: cand_stretch,
+        regressed: reason.is_some(),
+        reason,
+    }
+}
 
 /// 判定所需的全部输入。构造之后不可变 —— 判据在看到数据之前就定死了。
 #[derive(Debug, Clone, Copy)]
@@ -777,6 +866,10 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     let mut pwr_a: Vec<f64> = Vec::new();
     let mut pwr_b: Vec<f64> = Vec::new();
     let mut psnr_a: Vec<f64> = Vec::new();
+    let mut ghost_a: Vec<f64> = Vec::new();
+    let mut ghost_b: Vec<f64> = Vec::new();
+    let mut stretch_a: Vec<f64> = Vec::new();
+    let mut stretch_b: Vec<f64> = Vec::new();
     let mut psnr_b: Vec<f64> = Vec::new();
     let mut crashed = false;
     let mut fatal: Option<String> = None;
@@ -838,11 +931,15 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
                         // 42.83 dB, 换成真机截帧只有 31.33 dB), 所以地板必须
                         // 来自本次同场测出来的基线, 不能用别处搬来的常数。
                         if let Some(q) = r.psnr_db { psnr_a.push(q); }
+                        if let Some(v) = r.hud_ghost_db { ghost_a.push(v); }
+                        if let Some(v) = r.stretch_pct { stretch_a.push(v); }
                     }
                     Arm::Candidate => {
                         lat_b.push(ms);
                         if let Some(w) = w { pwr_b.push(w); }
                         if let Some(q) = r.psnr_db { psnr_b.push(q); }
+                        if let Some(v) = r.hud_ghost_db { ghost_b.push(v); }
+                        if let Some(v) = r.stretch_pct { stretch_b.push(v); }
                     }
                 }
                 progress(&format!(
@@ -917,7 +1014,27 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         }
     }
 
-    let (status, verdict) = decide(&rules, &candidate, base.as_ref(), welch.as_ref(), crashed);
+    // 插帧伪影裁决。PSNR 是全图平均, 对这两类伪影极不敏感 ——
+    // HUD 只占几个百分点面积, 拉扯只发生在运动边界; 全图 PSNR 看着还行,
+    // 人眼已经无法忍受。所以单独判, 并且单独一票否决。
+    let mean_opt = |v: &Vec<f64>| if v.is_empty() { None } else { Some(gpustat::mean(v)) };
+    let artifacts = judge_artifacts(
+        &ArtifactGates::default(),
+        mean_opt(&ghost_b),
+        mean_opt(&ghost_a),
+        mean_opt(&stretch_b),
+        mean_opt(&stretch_a),
+    );
+    if let Some(why) = artifacts.reason.as_ref() {
+        progress(&format!("伪影门禁不通过 -> POOR_QUALITY: {why}"));
+    }
+
+    let (mut status, verdict) = decide(&rules, &candidate, base.as_ref(), welch.as_ref(), crashed);
+    // 伪影退化按画质不合格处理。不新增 status 取值: 契约枚举是两仓库共用的,
+    // 单方面加一个值会让上游解析不了。
+    if artifacts.regressed && status == Status::Pass {
+        status = Status::PoorQuality;
+    }
 
     let report = EvalReport {
         candidate_id: req.candidate_id.clone(),
@@ -925,6 +1042,11 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         metrics: candidate,
         verdict,
         source: "phonefarm".into(),
+        artifacts: if artifacts.hud_ghost_db.is_some() || artifacts.stretch_pct.is_some() {
+            Some(artifacts)
+        } else {
+            None
+        },
     };
 
     if a.as_json {
@@ -1261,6 +1383,7 @@ mod tests {
                 p_value: 0.004,
             },
             source: "phonefarm".into(),
+            artifacts: None,
         };
         let v = serde_json::to_value(&rep).unwrap();
         assert_eq!(v["status"], "POOR_QUALITY");
@@ -1453,6 +1576,83 @@ mod tests {
     fn rejects_empty_or_unparseable_runner_output() {
         assert!(parse_runner_output("").is_err());
         assert!(parse_runner_output("Segmentation fault").is_err());
+    }
+
+    // ---------- 插帧伪影门禁 ----------
+    //
+    // 真机实测四个点 (2026-09-22, NX809J, 合成插帧场景):
+    //   干净算子                 hud_ghost 99.00 dB / stretch  0.00%
+    //   故意做重影的对照组        hud_ghost  5.32 dB / stretch  0.00%
+    //   故意做拉扯的对照组        hud_ghost 99.00 dB / stretch 55.72%
+    // 两个对照组各自只触发一个门 —— 说明两项量的是不同的失效模式,
+    // 不是换个名字重读一遍 PSNR。
+
+    #[test]
+    fn a_clean_operator_trips_neither_artifact_gate() {
+        let g = ArtifactGates::default();
+        let a = judge_artifacts(&g, Some(99.0), Some(99.0), Some(0.0), Some(0.0));
+        assert!(!a.regressed, "{:?}", a.reason);
+    }
+
+    /// HUD 重影必须被抓到: 世界在动而 HUD 不动, 块匹配把 HUD 当成运动内容,
+    /// 字就被拉成双份 —— 插帧在手游上最刺眼的失效。
+    #[test]
+    fn hud_ghosting_is_caught() {
+        let g = ArtifactGates::default();
+        let a = judge_artifacts(&g, Some(5.32), Some(99.0), Some(0.0), Some(0.0));
+        assert!(a.regressed);
+        assert!(a.reason.as_ref().unwrap().contains("HUD 重影"), "{:?}", a.reason);
+    }
+
+    /// 拉扯果冻必须被抓到, 且与重影互不干扰。
+    #[test]
+    fn stretching_is_caught_independently_of_ghosting() {
+        let g = ArtifactGates::default();
+        let a = judge_artifacts(&g, Some(99.0), Some(99.0), Some(55.72), Some(0.0));
+        assert!(a.regressed);
+        assert!(a.reason.as_ref().unwrap().contains("拉扯"), "{:?}", a.reason);
+    }
+
+    /// 容差之内的小波动不算退化, 否则每一轮的测量噪声都会变成一次误杀。
+    #[test]
+    fn small_fluctuations_within_tolerance_are_not_a_regression() {
+        let g = ArtifactGates::default();
+        assert!(!judge_artifacts(&g, Some(97.0), Some(99.0), Some(0.5), Some(0.0)).regressed);
+        assert!(judge_artifacts(&g, Some(95.0), Some(99.0), Some(0.0), Some(0.0)).regressed);
+        assert!(judge_artifacts(&g, Some(99.0), Some(99.0), Some(1.6), Some(0.0)).regressed);
+    }
+
+    #[test]
+    fn beating_the_baseline_is_never_a_regression() {
+        let g = ArtifactGates::default();
+        assert!(!judge_artifacts(&g, Some(99.0), Some(40.0), Some(0.0), Some(9.0)).regressed);
+    }
+
+    /// 缺读数时不下结论 —— SR 赛道没有这两项, 不能因为"没量到"就判失败。
+    #[test]
+    fn missing_readings_yield_no_verdict() {
+        let g = ArtifactGates::default();
+        let a = judge_artifacts(&g, None, None, None, None);
+        assert!(!a.regressed);
+        assert!(a.hud_ghost_db.is_none() && a.stretch_pct.is_none());
+        assert!(!judge_artifacts(&g, Some(5.0), None, None, None).regressed);
+    }
+
+    #[test]
+    fn runner_report_parses_the_artifact_block() {
+        let out = r#"{"ok":true,"timing_us":{"samples":[900.0,910.0]},
+            "psnr_db":40.5,"artifacts":{"hud_ghost_db":5.318,"stretch_pct":55.721}}"#;
+        let r = parse_runner_output(out).unwrap();
+        assert_eq!(r.hud_ghost_db, Some(5.318));
+        assert_eq!(r.stretch_pct, Some(55.721));
+    }
+
+    /// SR 赛道的回包没有 artifacts 段, 解析必须照常。
+    #[test]
+    fn a_report_without_artifacts_still_parses() {
+        let out = r#"{"ok":true,"timing_us":{"samples":[900.0,910.0]},"psnr_db":42.8}"#;
+        let r = parse_runner_output(out).unwrap();
+        assert!(r.hud_ghost_db.is_none() && r.stretch_pct.is_none());
     }
 
     // ---------- 冻结判定 ----------

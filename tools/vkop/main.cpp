@@ -181,6 +181,84 @@ std::vector<uint8_t> downsample(const std::vector<uint8_t> &src, int sw, int sh,
   return dst;
 }
 
+/// 水平平移 dx 像素 (边缘钳位)。用于合成插帧赛道的前后帧与真值中间帧。
+std::vector<uint8_t> shift_image(const std::vector<uint8_t> &src, int w, int h, int dx) {
+  std::vector<uint8_t> dst(src.size());
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      int sx = x - dx;
+      if (sx < 0) sx = 0;
+      if (sx >= w) sx = w - 1;
+      memcpy(&dst[(static_cast<size_t>(y) * w + x) * 4],
+             &src[(static_cast<size_t>(y) * w + sx) * 4], 4);
+    }
+  return dst;
+}
+
+/// HUD 区域 (相对坐标)。屏幕空间静止, 不随镜头移动 —— 插帧算子最容易在这里出重影。
+struct HudBand { int x0, y0, x1, y1; };
+HudBand hud_band(int w, int h) {
+  return HudBand{w * 6 / 100, h * 72 / 100, w * 34 / 100, h * 92 / 100};
+}
+
+/// 往帧里盖一块静止的高对比细竖条 —— 模拟 HUD 文字。
+/// 文字类高频是重影最先暴露的地方: 世界在动而 HUD 不动, 块匹配一旦把 HUD
+/// 也当成运动内容, 字就会被拉成双份。
+void stamp_hud(std::vector<uint8_t> &px, int w, int h) {
+  HudBand b = hud_band(w, h);
+  for (int y = b.y0; y < b.y1; y++)
+    for (int x = b.x0; x < b.x1; x++) {
+      bool ink = ((x / 3) % 2 == 0) && ((y / 7) % 3 != 2);
+      uint8_t v = ink ? 250 : 12;
+      size_t o = (static_cast<size_t>(y) * w + x) * 4;
+      px[o + 0] = v;
+      px[o + 1] = v;
+      px[o + 2] = v;
+      px[o + 3] = 255;
+    }
+}
+
+/// 可分离的邻域 min/max 包络 (半径 r)。先横后纵, O(w*h*r) 而不是 O(w*h*r^2)。
+void envelope(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b, int w,
+              int h, int r, std::vector<uint8_t> &lo, std::vector<uint8_t> &hi) {
+  size_t n = static_cast<size_t>(w) * h * 4;
+  std::vector<uint8_t> tlo(n), thi(n);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++)
+      for (int c = 0; c < 4; c++) {
+        uint8_t mn = 255, mx = 0;
+        for (int d = -r; d <= r; d++) {
+          int sx = x + d;
+          if (sx < 0) sx = 0;
+          if (sx >= w) sx = w - 1;
+          size_t o = (static_cast<size_t>(y) * w + sx) * 4 + c;
+          mn = std::min({mn, a[o], b[o]});
+          mx = std::max({mx, a[o], b[o]});
+        }
+        size_t o = (static_cast<size_t>(y) * w + x) * 4 + c;
+        tlo[o] = mn;
+        thi[o] = mx;
+      }
+  lo.assign(n, 255);
+  hi.assign(n, 0);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++)
+      for (int c = 0; c < 4; c++) {
+        uint8_t mn = 255, mx = 0;
+        for (int d = -r; d <= r; d++) {
+          int sy = y + d;
+          if (sy < 0) sy = 0;
+          if (sy >= h) sy = h - 1;
+          size_t o = (static_cast<size_t>(sy) * w + x) * 4 + c;
+          mn = std::min(mn, tlo[o]);
+          mx = std::max(mx, thi[o]);
+        }
+        size_t o = (static_cast<size_t>(y) * w + x) * 4 + c;
+        lo[o] = mn;
+        hi[o] = mx;
+      }
+}
+
 /// RGB 三通道联合 MSE 的 PSNR, 像素域 [0,255]。与全环口径一致 (alpha 不参与)。
 double psnr_rgb(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b,
                 int w, int h) {
@@ -591,6 +669,8 @@ int main(int argc, char **argv) {
     reference = make_reference(ref_w, ref_h);
   }
 
+  std::vector<uint8_t> prev_frame, curr_frame, truth_frame;
+
   if (a.track == "sr") {
     std::vector<uint8_t> lowres = downsample(reference, ref_w, ref_h, a.in_w, a.in_h);
     if (!upload(c, c.images[0], lowres)) { emit_failure(g_error); return 2; }
@@ -598,19 +678,24 @@ int main(int argc, char **argv) {
     std::vector<uint8_t> zero(static_cast<size_t>(a.out_w) * a.out_h * 4, 0);
     if (!upload(c, c.images[1], zero)) { emit_failure(g_error); return 2; }
   } else {
-    // 插帧: 前后两帧取参考图与其平移版本, 中间帧留空
-    std::vector<uint8_t> prev = reference;
-    std::vector<uint8_t> curr(reference.size());
-    const int shift = 4;
-    for (int y = 0; y < ref_h; y++)
-      for (int x = 0; x < ref_w; x++) {
-        int sx = x - shift < 0 ? 0 : x - shift;
-        memcpy(&curr[(static_cast<size_t>(y) * ref_w + x) * 4],
-               &reference[(static_cast<size_t>(y) * ref_w + sx) * 4], 4);
-      }
+    // 插帧赛道的合成场景: 世界横向平移 SHIFT 像素 (模拟镜头转动),
+    // HUD 在屏幕空间静止。
+    //
+    // 真值是**中间帧** (平移 SHIFT/2), 不是前帧。
+    // 这一条以前是错的 —— 拿 interp 去和前帧比, 一个什么都不做、直接把前帧
+    // 抄出来的算子会拿满分, 指标反过来奖励"不插帧"。
+    const int kShift = 8;
+    prev_frame = reference;
+    curr_frame = shift_image(reference, ref_w, ref_h, kShift);
+    truth_frame = shift_image(reference, ref_w, ref_h, kShift / 2);
+    // HUD 盖在三帧的同一位置: 它不随世界移动
+    stamp_hud(prev_frame, ref_w, ref_h);
+    stamp_hud(curr_frame, ref_w, ref_h);
+    stamp_hud(truth_frame, ref_w, ref_h);
+
     std::vector<uint8_t> zero(reference.size(), 0);
-    if (!upload(c, c.images[0], prev)) { emit_failure(g_error); return 2; }
-    if (!upload(c, c.images[1], curr)) { emit_failure(g_error); return 2; }
+    if (!upload(c, c.images[0], prev_frame)) { emit_failure(g_error); return 2; }
+    if (!upload(c, c.images[1], curr_frame)) { emit_failure(g_error); return 2; }
     if (!upload(c, c.images[2], zero)) { emit_failure(g_error); return 2; }
   }
 
@@ -663,9 +748,60 @@ int main(int argc, char **argv) {
   std::vector<uint8_t> produced;
   if (!readback(c, c.images[out_idx], produced)) { emit_failure(g_error); return 2; }
 
-  double q = (a.track == "sr")
-                 ? psnr_rgb(produced, reference, a.out_w, a.out_h)
-                 : psnr_rgb(produced, reference, a.out_w, a.out_h);
+  // 画质: SR 比参考图, 插帧比**真值中间帧**
+  const std::vector<uint8_t> &truth =
+      (a.track == "sr") ? reference : truth_frame;
+  double q = psnr_rgb(produced, truth, a.out_w, a.out_h);
+
+  // ── 插帧专属伪影门禁 ──
+  //
+  // PSNR 是全图平均, 对这两类伪影极不敏感: HUD 只占几个百分点的面积,
+  // 拉扯只发生在运动边界。全图 PSNR 看着还行, 人眼已经无法忍受。
+  // 所以这两项单独量, 交给上层单独裁决。
+  double hud_ghost_db = -1.0;
+  double stretch_pct = -1.0;
+  if (a.track == "frame_gen") {
+    // 1) HUD 重影: 只在 HUD 区域内算 PSNR。HUD 在屏幕空间静止,
+    //    正确的插帧结果在这块应当与真值逐像素吻合; 块匹配若把 HUD 当成
+    //    运动内容, 字会被拉成双份, 这里的 PSNR 会断崖下跌。
+    HudBand b = hud_band(a.out_w, a.out_h);
+    double se = 0.0;
+    size_t n = 0;
+    for (int y = b.y0; y < b.y1; y++)
+      for (int x = b.x0; x < b.x1; x++) {
+        size_t o = (static_cast<size_t>(y) * a.out_w + x) * 4;
+        for (int ch = 0; ch < 3; ch++) {
+          double d = static_cast<double>(produced[o + ch]) -
+                     static_cast<double>(truth_frame[o + ch]);
+          se += d * d;
+        }
+        n++;
+      }
+    double mse = n ? se / (static_cast<double>(n) * 3.0) : 0.0;
+    hud_ghost_db = (mse <= 0.0) ? 99.0 : 10.0 * log10(255.0 * 255.0 / mse);
+
+    // 2) 拉扯果冻: 插出来的像素必须能在前后两帧的**邻域包络**里找到出处。
+    //    落在包络之外 = 算子凭空造了前后帧都没有的内容, 那就是拉扯/撕裂。
+    //    用邻域而不是同位, 是因为运动补偿本来就会从位移处取样, 同位包络
+    //    会把正常的运动补偿全判成伪影。
+    std::vector<uint8_t> lo, hi;
+    envelope(prev_frame, curr_frame, a.out_w, a.out_h, 12, lo, hi);
+    const int tol = 6;  // 允许滤波带来的小幅溢出
+    size_t bad = 0, tot = 0;
+    for (size_t i = 0; i < static_cast<size_t>(a.out_w) * a.out_h; i++) {
+      bool out = false;
+      for (int ch = 0; ch < 3; ch++) {
+        int v = produced[i * 4 + ch];
+        if (v < static_cast<int>(lo[i * 4 + ch]) - tol ||
+            v > static_cast<int>(hi[i * 4 + ch]) + tol) {
+          out = true;
+        }
+      }
+      if (out) bad++;
+      tot++;
+    }
+    stretch_pct = tot ? 100.0 * static_cast<double>(bad) / static_cast<double>(tot) : 0.0;
+  }
 
   std::vector<double> sorted = samples;
   for (size_t i = 1; i < sorted.size(); i++) {
@@ -691,6 +827,10 @@ int main(int argc, char **argv) {
   }
   printf("],\"count\":%zu,\"emitted_stride\":%zu,\"median\":%.3f},\"psnr_db\":%.4f,",
          samples.size(), stride, median, q);
+  if (a.track == "frame_gen") {
+    printf("\"artifacts\":{\"hud_ghost_db\":%.4f,\"stretch_pct\":%.4f},",
+           hud_ghost_db, stretch_pct);
+  }
   printf("\"device\":{\"name\":\"%s\",\"timestamp_period_ns\":%.4f},",
          c.props.deviceName, c.props.limits.timestampPeriod);
   printf("\"params\":{\"track\":\"%s\",\"in\":[%d,%d],\"out\":[%d,%d],"
