@@ -61,7 +61,12 @@ pub struct EvalRequest {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Metrics {
     pub operator_latency_ms: f32,
-    pub fps_p95_ms: f32,
+    /// `None` = 本次没有量到, 不是 0。
+    ///
+    /// headless 算子标尺量的是算子自身的 GPU 耗时, 帧时 p95 需要真实渲染上下文。
+    /// 2026-09-22 真机回的第一份报告这一项就是 null, 而两边当时都声明成 f32,
+    /// 上游直接解析失败 —— 契约必须容得下「未测量」这个状态。
+    pub fps_p95_ms: Option<f32>,
     pub power_watt: f32,
     pub psnr_db: f32,
 }
@@ -846,7 +851,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     } else {
         Some(Metrics {
             operator_latency_ms: gpustat::mean(&lat_a) as f32,
-            fps_p95_ms: f32::NAN,
+            fps_p95_ms: None,
             power_watt: gpustat::mean(&pwr_a) as f32,
             psnr_db: f32::NAN,
         })
@@ -854,8 +859,8 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     let candidate = Metrics {
         operator_latency_ms: cand_lat,
         // 帧时 p95 需要在真实渲染上下文里量, headless 算子标尺给不出来。
-        // 留 NaN 而不是填 0 —— 量不到的指标不许用默认值填补。
-        fps_p95_ms: f32::NAN,
+        // 留 None 而不是填 0 —— 量不到的指标不许用默认值填补。
+        fps_p95_ms: None,
         power_watt: if pwr_b.is_empty() { f32::NAN } else { gpustat::mean(&pwr_b) as f32 },
         psnr_db: if psnr_b.is_empty() { f32::NAN } else { gpustat::mean(&psnr_b) as f32 },
     };
@@ -1088,7 +1093,7 @@ mod tests {
             status: Status::PoorQuality,
             metrics: Metrics {
                 operator_latency_ms: 1.1,
-                fps_p95_ms: 16.9,
+                fps_p95_ms: Some(16.9),
                 power_watt: 4.7,
                 psnr_db: 36.0,
             },
@@ -1304,7 +1309,7 @@ mod tests {
     fn metrics(lat: f32, psnr: f32) -> Metrics {
         Metrics {
             operator_latency_ms: lat,
-            fps_p95_ms: 16.9,
+            fps_p95_ms: Some(16.9),
             power_watt: 4.7,
             psnr_db: psnr,
         }
