@@ -595,8 +595,9 @@ fn locate_runner(a: &GpuOpArgs) -> Result<String, String> {
         "找不到设备侧 Vulkan 算子 runner (试过 {cands:?})。\n\
          该二进制负责在真机上建 Vulkan 设备、分配常驻显存的输入/输出 image、\n\
          用 VkQueryPool 时间戳量 dispatch 的 GPU 侧耗时并算 PSNR。\n\
-         构建它需要 Android NDK (aarch64-linux-android), 当前宿主机未安装。\n\
-         回包契约见 src/gpuop.rs 的 RunnerReport。"
+         用 NDK (aarch64-linux-androidNN-clang++) 编出 arm64-v8a 二进制后, \n\
+         放到 tools/vkop/ 或用 --runner / PF_VKOP_RUNNER 指路。\n\
+         回包契约见 src/gpuop.rs 的 RunnerReport 与 docs/SPEC_GPU_OP.md §6。"
     ))
 }
 

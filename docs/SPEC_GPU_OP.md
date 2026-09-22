@@ -133,8 +133,11 @@ USB 轨待机读数 5.127V x 0.144A = 0.738 W, 随负载变化。
 
 ## 7. 当前阻塞
 
-`vkop_runner` **尚未构建**。构建它需要 Android NDK (`aarch64-linux-android`),
-当前宿主机没有安装 NDK / SDK / cargo-ndk / Rust android target。
+`vkop_runner` **尚未构建**。工具链是齐的 ——
+NDK r28 (`/opt/homebrew/share/android-commandlinetools/ndk/28.2.13676358`),
+clang 19, Vulkan 头文件与 `libvulkan.so` stub 均在位;
+同级 `../refbench/build/build.sh` 与 `../knobs/gray/build/build_layer.sh`
+已有零交互直编 arm64-v8a 的成例, 照搬即可。
 
 在此之前 `phonefarm gpu-op` 会走完「读契约 → 预检 SPIR-V → root 检查 → 找 runner」
 然后如实报错退出 (退出码 2), 不产出任何假数字。
@@ -147,7 +150,7 @@ USB 轨待机读数 5.127V x 0.144A = 0.738 W, 随负载变化。
 本标尺是 **headless 算子标尺**: 它量的是算子自身的 GPU 耗时与重建画质,
 量不到 `fps_p95_ms` (帧时 p95 需要真实渲染上下文)。该字段现记 `NaN`。
 
-若上游需要真实帧时与在场景中的整机功耗, 需要的是一个**白盒渲染靶子**
-(我们自己能控的 Vulkan 应用, 渲染 720p → 算子放大 → 呈现 1080p),
-而不是第三方黑盒游戏 —— 对后者做后处理挂载会触碰反作弊与代码注入红线。
-`docs/MOBILE_GPU_OPT_ROUTES.md` §6 已把「拿一个白盒靶子」列为当前最大单点阻塞。
+若上游需要真实帧时与在场景中的整机功耗, 被测物用同级的第一方白盒靶场
+`../refbench` (纯 Vulkan 原生应用, 自带 720p 渲染管线): 把算子挂进它的后处理队列,
+即可同时拿到真实帧时、USB 轨瓦数波动与确定的画质真值。
+不碰任何第三方黑盒游戏的反作弊与注入。
