@@ -1,8 +1,7 @@
 # phonefarm
 
-> **来源声明 / Provenance**: 本仓库源自 [BH3GEI/phonefarm](https://github.com/BH3GEI/phonefarm)，原创作者与初始代码著作权属于 **BH3GEI**。上游公开仓库持续公开，作为署名与时间戳凭证；本仓库为组织内私有开发分支。
+> **仓库来源说明**：本项目基于 [BH3GEI/phonefarm](https://github.com/BH3GEI/phonefarm) 开源工程协同演化，由 HGamey 组织承载面向多平台渲染能效的专用特性开发。
 
-移动游戏性能评估与优化的 agent harness，兼通用移动端自动化底座。
 
 **harness 既是评估性能 gap 的框架，也是优化性能的 loop。** 主线能力是把「量基线 → 找瓶颈 → 提改动 → 对照复量 → 判定保留或回退」这个循环无人值守地跑完，判定规则在看到候选数据**之前**落盘冻结，不达标自动回退且不留痕。底层由 Rust 内核驱动设备（Android adb / OpenHarmony hdc），并提供标准化的运行遥测与状态追溯记录。
 
