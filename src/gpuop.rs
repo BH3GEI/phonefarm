@@ -745,13 +745,25 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
 }
 
 /// 找设备侧 runner 二进制。
+///
+/// 相对路径必须同时相对**当前目录**与 **phonefarm 可执行文件所在目录**去找。
+/// 只按 CWD 找会有一类只在集成时才暴露的坑: 手工跑都在 phonefarm 目录下,
+/// 一切正常; 换成上游 game_opt_loop 调起来, CWD 变成它自己的仓库根,
+/// `tools/vkop/...` 就指到了一个不存在的地方 —— 而错误信息只会说"找不到 runner",
+/// 看不出是路径基准的问题。
 fn locate_runner(a: &GpuOpArgs) -> Result<String, String> {
+    let exe_rel = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(DEFAULT_RUNNER)))
+        .map(|p| p.to_string_lossy().into_owned());
+
     let cands: Vec<String> = a
         .runner_bin
         .iter()
         .cloned()
         .chain(std::env::var("PF_VKOP_RUNNER").ok())
         .chain(std::iter::once(DEFAULT_RUNNER.to_string()))
+        .chain(exe_rel)
         .collect();
     for c in &cands {
         if std::fs::metadata(c).map(|m| m.is_file()).unwrap_or(false) {
@@ -874,14 +886,22 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         eprintln!("设备无 root: 等冷/锁频/功耗遥测都需要 root");
         return 2;
     }
-    let runner = match locate_runner(&a) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
+    // refbench 载体不需要 headless 工装 —— 算子由 refbench 自己装载。
+    // 之前这里无条件去找 runner, 于是 refbench 载体也被一个用不到的二进制卡死。
+    let runner = if a.carrier == Carrier::Headless {
+        match locate_runner(&a) {
+            Ok(v) => {
+                progress(&format!("设备侧 runner: {v}"));
+                v
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
         }
+    } else {
+        String::new()
     };
-    progress(&format!("设备侧 runner: {runner}"));
 
     // ---- 功耗轨可用性先探一次: 量不了就当场说, 不要跑完 10 分钟再报 0 W ----
     let probe: Vec<_> = (0..3)
