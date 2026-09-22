@@ -55,6 +55,14 @@ pub struct EvalRequest {
     pub spirv_path: String,
     pub budget_ms: f32,
     pub quality_baseline_db: f32,
+    /// 在位冠军算子的实测耗时 (ms)。上游没有冠军时省略。
+    ///
+    /// refbench 载体的 A 臂跑的是**不挂算子**的场景, 所以基线臂的算子耗时
+    /// 按定义是 0。没有这个字段的话, "候选比基线快吗" 在该载体上等价于
+    /// `正数 < 0` —— 恒假, `is_pareto_improvement` 于是永远回 false,
+    /// 哪怕候选确实比上一代冠军便宜一半。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incumbent_latency_ms: Option<f32>,
     pub protocol: EvalProtocol,
 }
 
@@ -555,6 +563,8 @@ pub struct FrozenRules {
     pub budget_ms: f32,
     pub quality_baseline_db: f32,
     pub p_threshold: f64,
+    /// 在位冠军耗时。见 `EvalRequest::incumbent_latency_ms`。
+    pub incumbent_latency_ms: Option<f32>,
 }
 
 impl FrozenRules {
@@ -563,6 +573,7 @@ impl FrozenRules {
             budget_ms: r.budget_ms,
             quality_baseline_db: r.quality_baseline_db,
             p_threshold: r.protocol.p_threshold,
+            incumbent_latency_ms: r.incumbent_latency_ms,
         }
     }
 }
@@ -623,8 +634,15 @@ pub fn decide(
     let significant = welch
         .map(|w| w.significant(rules.p_threshold))
         .unwrap_or(false);
-    let faster = baseline
-        .map(|b| candidate.operator_latency_ms < b.operator_latency_ms)
+    // "更快" 要跟谁比:
+    //   上游带了在位冠军耗时 → 跟冠军比 (refbench 载体下唯一说得通的问法:
+    //     基线臂根本没挂算子, 它的算子耗时是 0)。
+    //   没带 → 退回跟基线臂比 (headless 载体: A 臂跑的就是上一代算子)。
+    let reference_ms = rules
+        .incumbent_latency_ms
+        .or_else(|| baseline.map(|b| b.operator_latency_ms));
+    let faster = reference_ms
+        .map(|r| candidate.operator_latency_ms < r)
         .unwrap_or(false);
 
     (
@@ -657,12 +675,25 @@ pub struct GpuOpArgs {
     pub cool_timeout_s: u64,
     pub gpu_level: Option<u32>,
     pub unlock_only: bool,
+    /// refbench 载体跑完之后, 补一次画质测量。
+    ///
+    /// refbench 只量帧时与瓦数 —— 它是个渲染靶场, 按边界约定不带任何测量逻辑,
+    /// 拿不出 PSNR。于是 refbench 载体下 `psnr_db` 恒为 null, 上游的画质硬底线
+    /// **一次都不会触发**。一个永远不触发的门禁比没有门禁更糟: 它让人以为画质
+    /// 被守住了。
+    ///
+    /// 补测为什么不需要 A/B/A/B + t 检验: 画质对 (着色器, 参考帧) 是**确定性**的,
+    /// 同一份输入跑一百遍是同一个 dB。A/B/A/B、等冷、锁频、Welch 检验那一整套
+    /// 是用来对付**热漂移**的, 而热漂移只污染时延和功耗, 污染不了算术。
+    /// 所以这里两臂各跑一次就够, 不等冷不锁频 —— 省下来的是几分钟真机时间。
+    pub quality_pass: bool,
 }
 
 const USAGE: &str = "用法: phonefarm gpu-op --request <eval_request.json> [--serial S] [--json]\n\
 \x20                    [--runner <本地 runner 路径>] [--power-rail usb|battery]\n\
 \x20                    [--carrier headless|refbench] [--out 目录] [--reference <参考帧.png>]\n\
 \x20                    [--intensity N] [--frames N] [--cool-timeout-s N] [--gpu-level N]\n\
+\x20                    [--no-quality-pass]  refbench 载体下跳过画质补测 (画质硬底线随之失守)\n\
 \x20      phonefarm gpu-op --serial S --unlock        回滚遗留的锁频态\n\
 \n\
 Compute Shader 算子的真机标尺: 等冷 → 锁频 → A/B/A/B 交替跑测 → Welch t 检验 → eval_report。\n\
@@ -683,6 +714,8 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
         cool_timeout_s: 600,
         gpu_level: None,
         unlock_only: false,
+        // 缺省开: 画质是硬底线, 关掉它必须是个显式动作。
+        quality_pass: true,
     };
     let mut it = args.iter();
     while let Some(k) = it.next() {
@@ -715,6 +748,7 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
                     .ok_or("--frames 需要正整数")?
             }
             "--unlock" => a.unlock_only = true,
+            "--no-quality-pass" => a.quality_pass = false,
             "--cool-timeout-s" => {
                 a.cool_timeout_s = it
                     .next()
@@ -886,22 +920,28 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         eprintln!("设备无 root: 等冷/锁频/功耗遥测都需要 root");
         return 2;
     }
-    // refbench 载体不需要 headless 工装 —— 算子由 refbench 自己装载。
+    // refbench 载体不需要 headless 工装来跑主测 —— 算子由 refbench 自己装载。
     // 之前这里无条件去找 runner, 于是 refbench 载体也被一个用不到的二进制卡死。
-    let runner = if a.carrier == Carrier::Headless {
-        match locate_runner(&a) {
-            Ok(v) => {
-                progress(&format!("设备侧 runner: {v}"));
-                v
-            }
-            Err(e) => {
+    //
+    // 但画质补测要用它: refbench 拿不出 PSNR, 补测就只能落在 headless runner 上。
+    // 找不到 runner 时 refbench 不该整次失败 —— 主测 (帧时/瓦数) 照跑,
+    // 只是画质这一项如实留空, 并把原因喊出来。
+    let needs_runner = a.carrier == Carrier::Headless;
+    let runner = match locate_runner(&a) {
+        Ok(v) => {
+            progress(&format!("设备侧 runner: {v}"));
+            v
+        }
+        Err(e) => {
+            if needs_runner {
                 eprintln!("{e}");
                 return 2;
             }
+            progress(&format!("画质补测不可用 (找不到 runner): {e}"));
+            String::new()
         }
-    } else {
-        String::new()
     };
+    let quality_pass = a.quality_pass && a.carrier == Carrier::Refbench && !runner.is_empty();
 
     // ---- 功耗轨可用性先探一次: 量不了就当场说, 不要跑完 10 分钟再报 0 W ----
     let probe: Vec<_> = (0..3)
@@ -1160,6 +1200,31 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         }
     }
 
+    // ---- 画质补测 (refbench 载体) ----
+    //
+    // 放在 A/B 之后、cleanup 之前: 主测期间设备要么在等冷要么在锁频跑分,
+    // 插进去会把热状态搅乱; 跑完了再补则完全不影响已经落袋的帧时与瓦数。
+    if quality_pass && fatal.is_none() {
+        match run_quality_pass(&phone, &runner, &req, remote_reference.as_deref()) {
+            Ok((qb, qc)) => {
+                if let Some(v) = qb.psnr_db { psnr_a.push(v); }
+                if let Some(v) = qb.hud_ghost_db { ghost_a.push(v); }
+                if let Some(v) = qb.stretch_pct { stretch_a.push(v); }
+                if let Some(v) = qc.psnr_db { psnr_b.push(v); }
+                if let Some(v) = qc.hud_ghost_db { ghost_b.push(v); }
+                if let Some(v) = qc.stretch_pct { stretch_b.push(v); }
+                progress(&format!(
+                    "画质补测: 基线 {} | 候选 {}",
+                    qb.psnr_db.map(|v| format!("{v:.3} dB")).unwrap_or_else(|| "未测到".into()),
+                    qc.psnr_db.map(|v| format!("{v:.3} dB")).unwrap_or_else(|| "未测到".into()),
+                ));
+            }
+            // 补测失败不作废主测: 帧时与瓦数是真跑出来的, 不该被画质这一步连坐。
+            // 但画质就如实留空 —— 绝不拿基线值或默认值顶上。
+            Err(e) => progress(&format!("画质补测失败, 该项如实留空: {e}")),
+        }
+    }
+
     cleanup(&phone);
 
     if let Some(e) = fatal {
@@ -1350,6 +1415,60 @@ fn deploy(
         return Err(format!("推送基线 SPIR-V 到 {remote_base} 失败"));
     }
     Ok(())
+}
+
+/// 画质补测的一臂产出。时延一概不收 —— 这一步的数字没有统计意义,
+/// 混进主测样本会污染 Welch 检验。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QualitySample {
+    pub psnr_db: Option<f64>,
+    pub hud_ghost_db: Option<f64>,
+    pub stretch_pct: Option<f64>,
+}
+
+/// 补测迭代次数。画质是确定性的, 1 次就够;
+/// 取 3 次是为了让 runner 自己的 warmup/资源初始化走完再出数。
+const QUALITY_ITERS: u32 = 3;
+
+/// refbench 载体下的画质补测: headless runner 各跑一次基线与候选。
+///
+/// 两臂必须用**同一张**参考帧, 否则 dB 不可比 (实测: 同一算子在程序化图案上
+/// 42.83 dB, 换成真机截帧只剩 31.33 dB)。上游的画质地板也因此取本次基线臂的
+/// 实测值, 而不是契约里搬来的常数。
+fn run_quality_pass(
+    phone: &crate::device::Device,
+    runner_local: &str,
+    req: &EvalRequest,
+    reference: Option<&str>,
+) -> Result<(QualitySample, QualitySample), String> {
+    deploy(phone, runner_local, req)?;
+    // refbench 主测会把 REMOTE_SPV 下的候选换掉, 但 deploy 推的是 REMOTE_DIR
+    // 下另一份, 两者互不影响。
+    let ref_arg = reference
+        .map(|r| format!(" --reference {r}"))
+        .unwrap_or_default();
+
+    let one = |spv: &str| -> Result<QualitySample, String> {
+        let cmd = format!(
+            "cd {REMOTE_DIR} && ./vkop_runner --shader {spv} --track {} --iterations {QUALITY_ITERS}{ref_arg} --json 2>&1",
+            req.track
+        );
+        let out = phone.shell(&cmd, 120_000);
+        let r = parse_runner_output(&out)?;
+        if !r.ok {
+            return Err(format!("{spv} 跑失败: {:?}", r.error));
+        }
+        Ok(QualitySample {
+            psnr_db: r.psnr_db,
+            hud_ghost_db: r.hud_ghost_db,
+            stretch_pct: r.stretch_pct,
+        })
+    };
+
+    // 基线先跑: 它跑不起来说明工装坏了, 候选的数字也就没有参照。
+    let base = one("baseline.spv").map_err(|e| format!("基线臂 {e}"))?;
+    let cand = one("candidate.spv").map_err(|e| format!("候选臂 {e}"))?;
+    Ok((base, cand))
 }
 
 /// 设备上不留任何残留。
@@ -1669,6 +1788,7 @@ mod tests {
             spirv_path: "runs/evo/candidates/gen2_llm1.spv".into(),
             budget_ms: 1.5,
             quality_baseline_db: 37.286,
+            incumbent_latency_ms: None,
             protocol: EvalProtocol {
                 cool_c: 32.0,
                 replay_seconds: 60,
@@ -2032,6 +2152,7 @@ mod tests {
             budget_ms: 1.5,
             quality_baseline_db: 37.286,
             p_threshold: 0.01,
+            incumbent_latency_ms: None,
         }
     }
 
@@ -2153,6 +2274,97 @@ mod tests {
         assert!(parse_args(&["--json".into()]).is_err());
         assert!(parse_args(&["--request".into(), "r.json".into(), "--power-rail".into(), "solar".into()]).is_err());
         assert!(parse_args(&["--nope".into()]).is_err());
+    }
+
+    /// refbench 载体: 基线臂不挂算子, 它的算子耗时按定义是 0。
+    ///
+    /// 不带在位冠军耗时的话, "候选更快吗" 就成了 `正数 < 0` —— 恒假,
+    /// `is_pareto_improvement` 永远 false。实跑验证过: 一整轮 5 个候选
+    /// p 值全在 1e-7 量级 (测量极显著), 却一个 true 都没有。
+    #[test]
+    fn against_an_empty_baseline_arm_the_incumbent_decides_what_faster_means() {
+        let strong = welch(1e-7);
+        // refbench 的基线臂: 算子耗时 0 (没挂算子)。
+        let empty_arm = Metrics {
+            operator_latency_ms: 0.0,
+            fps_p95_ms: Some(7.24),
+            power_watt: 6.35,
+            psnr_db: 38.7,
+        };
+        let cand = Metrics {
+            operator_latency_ms: 0.29,
+            fps_p95_ms: Some(7.28),
+            power_watt: 6.41,
+            psnr_db: 38.9,
+        };
+
+        // 没有冠军可比 → 跟空基线臂比, 只能是 false。这是老行为, 保留它作对照。
+        let (s, v) = decide(&rules(), &cand, Some(&empty_arm), Some(&strong), false);
+        assert_eq!(s, Status::Pass);
+        assert!(
+            !v.is_pareto_improvement,
+            "跟一个不挂算子的基线比, 任何算子都不可能'更快'"
+        );
+
+        // 带上冠军 0.50 ms → 候选 0.29 ms 确实更便宜, 这才是真问题的答案。
+        let mut r = rules();
+        r.incumbent_latency_ms = Some(0.50);
+        let (s, v) = decide(&r, &cand, Some(&empty_arm), Some(&strong), false);
+        assert_eq!(s, Status::Pass);
+        assert!(v.is_pareto_improvement, "比在位冠军便宜却没判成改进");
+
+        // 冠军比它还便宜 → 不是改进。
+        r.incumbent_latency_ms = Some(0.18);
+        let (_, v) = decide(&r, &cand, Some(&empty_arm), Some(&strong), false);
+        assert!(!v.is_pareto_improvement);
+
+        // 显著性仍是必要条件: 不显著就谈不上改进, 哪怕数字更小。
+        r.incumbent_latency_ms = Some(0.50);
+        let noise = welch(0.6);
+        let (_, v) = decide(&r, &cand, Some(&empty_arm), Some(&noise), false);
+        assert!(!v.is_pareto_improvement, "不显著的差异不算改进");
+    }
+
+    /// 画质补测缺省开 —— 关掉画质硬底线必须是个显式动作。
+    #[test]
+    fn the_quality_pass_is_on_unless_explicitly_waived() {
+        let on = parse_args(&["--request".into(), "r.json".into()]).unwrap();
+        assert!(on.quality_pass);
+        let off = parse_args(&[
+            "--request".into(),
+            "r.json".into(),
+            "--no-quality-pass".into(),
+        ])
+        .unwrap();
+        assert!(!off.quality_pass);
+    }
+
+    /// 量不到的指标必须序列化成 `null`, 不能变成 0 或 NaN 字面量。
+    ///
+    /// 上游把 `psnr_db` / `fps_p95_ms` 声明成可空是**踩过两次**才改的:
+    /// 两次都是真机头一回回 null 才暴露, 而那一批候选的真实数字就躺在回包里
+    /// 被整批打成 eval_error。这条钉死在这里, 免得第三次。
+    #[test]
+    fn unmeasured_metrics_serialize_as_null_not_as_zero() {
+        let m = Metrics {
+            operator_latency_ms: 0.29,
+            fps_p95_ms: Some(7.28),
+            power_watt: 6.34,
+            psnr_db: f32::NAN,
+        };
+        let v: serde_json::Value = serde_json::to_value(&m).unwrap();
+        assert!(v["psnr_db"].is_null(), "NaN 没有落成 null: {v}");
+        assert_eq!(v["fps_p95_ms"].as_f64().map(|x| (x * 100.0).round()), Some(728.0));
+
+        let none = Metrics {
+            operator_latency_ms: 0.29,
+            fps_p95_ms: None,
+            power_watt: f32::NAN,
+            psnr_db: f32::NAN,
+        };
+        let v: serde_json::Value = serde_json::to_value(&none).unwrap();
+        assert!(v["fps_p95_ms"].is_null());
+        assert!(v["power_watt"].is_null());
     }
 
     #[test]
