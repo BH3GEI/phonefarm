@@ -283,6 +283,44 @@ pub fn parse_spirv(bytes: &[u8]) -> Result<SpirvInfo, String> {
     Ok(info)
 }
 
+// ══════════════ 评测载体 ══════════════
+
+/// 算子挂在哪里跑。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Carrier {
+    /// headless 工装 (`vkop_runner`): 孤立跑 dispatch。
+    /// 给得出算子自己的微秒数与 PSNR, 给不出帧时与场景内功耗。
+    Headless,
+    /// refbench 的 `sr_pipeline` 场景: 算子挂在整条渲染管线尾部。
+    /// 给得出真实帧时与场景内整机功耗; 画质不在这里量 ——
+    /// refbench 的边界不允许它自带任何测量逻辑。
+    Refbench,
+}
+
+impl Carrier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Carrier::Headless => "headless",
+            Carrier::Refbench => "refbench",
+        }
+    }
+}
+
+/// refbench 的接口常量。来源: `../refbench/contract/launch.json`。
+pub mod refbench {
+    pub const PACKAGE: &str = "io.github.hgamey.refbench";
+    pub const ACTIVITY: &str = "io.github.hgamey.refbench/android.app.NativeActivity";
+    pub const SCENE: &str = "sr_pipeline";
+    /// 驱动提交线程名。Adreno 驱动从自己的 in-process 线程提交 cmdbatch,
+    /// refbench 通过 /proc/self/task/<tid>/comm 改名, 便于按 comm 过滤。
+    pub const SUBMIT_COMM: &str = "RefbenchDrv";
+    pub const FILES: &str = "/storage/emulated/0/Android/data/io.github.hgamey.refbench/files";
+    /// 契约写死每帧一次提交 —— 因此提交间隔可直接当帧间隔。
+    /// 原神那种每帧两次提交的必须先自检, 否则帧率会算成两倍。
+    pub const SUBMITS_PER_FRAME: u32 = 1;
+    pub const REMOTE_SPV: &str = "/data/local/tmp/phonefarm_gpuop/postfx_candidate.spv";
+}
+
 // ══════════════ A/B/A/B 调度 ══════════════
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,6 +645,12 @@ pub struct GpuOpArgs {
     pub as_json: bool,
     pub runner_bin: Option<String>,
     pub power_rail: PowerRail,
+    /// 评测载体。
+    pub carrier: Carrier,
+    /// refbench 场景的 fragment 负载强度。
+    pub intensity: u32,
+    /// refbench 每臂渲染帧数。
+    pub frames: u32,
     pub out_dir: Option<String>,
     /// 画质真值参考帧 (PNG/JPEG)。缺省用 runner 内置的程序化图案。
     pub reference: Option<String>,
@@ -617,7 +661,8 @@ pub struct GpuOpArgs {
 
 const USAGE: &str = "用法: phonefarm gpu-op --request <eval_request.json> [--serial S] [--json]\n\
 \x20                    [--runner <本地 runner 路径>] [--power-rail usb|battery]\n\
-\x20                    [--out 目录] [--reference <参考帧.png>] [--cool-timeout-s N] [--gpu-level N]\n\
+\x20                    [--carrier headless|refbench] [--out 目录] [--reference <参考帧.png>]\n\
+\x20                    [--intensity N] [--frames N] [--cool-timeout-s N] [--gpu-level N]\n\
 \x20      phonefarm gpu-op --serial S --unlock        回滚遗留的锁频态\n\
 \n\
 Compute Shader 算子的真机标尺: 等冷 → 锁频 → A/B/A/B 交替跑测 → Welch t 检验 → eval_report。\n\
@@ -630,6 +675,9 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
         as_json: false,
         runner_bin: None,
         power_rail: PowerRail::Usb,
+        carrier: Carrier::Headless,
+        intensity: 6,
+        frames: 3000,
         out_dir: None,
         reference: None,
         cool_timeout_s: 600,
@@ -645,6 +693,27 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
             "--runner" => a.runner_bin = it.next().cloned(),
             "--out" => a.out_dir = it.next().cloned(),
             "--reference" => a.reference = it.next().cloned(),
+            "--carrier" => {
+                a.carrier = match it.next().map(|s| s.as_str()) {
+                    Some("headless") => Carrier::Headless,
+                    Some("refbench") => Carrier::Refbench,
+                    other => {
+                        return Err(format!("--carrier 只能是 headless 或 refbench, 收到 {other:?}"))
+                    }
+                }
+            }
+            "--intensity" => {
+                a.intensity = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--intensity 需要正整数")?
+            }
+            "--frames" => {
+                a.frames = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--frames 需要正整数")?
+            }
             "--unlock" => a.unlock_only = true,
             "--cool-timeout-s" => {
                 a.cool_timeout_s = it
@@ -816,10 +885,44 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         return 2;
     }
 
-    // ---- 部署: runner + 候选/基线 SPIR-V ----
+    // ---- 部署 ----
+    if a.carrier == Carrier::Refbench {
+        let installed = phone.shell(
+            &format!("pm list packages {} 2>/dev/null", refbench::PACKAGE),
+            15_000,
+        );
+        if !installed.contains(refbench::PACKAGE) {
+            eprintln!(
+                "设备上没装 refbench ({})。出包: cd ../refbench && bash build/build.sh, \n\
+                 再 adb install -r build/out/refbench.apk",
+                refbench::PACKAGE
+            );
+            return 2;
+        }
+        phone.shell(
+            &format!("mkdir -p $(dirname {})", refbench::REMOTE_SPV),
+            10_000,
+        );
+        if !phone.push_file(&req.spirv_path, refbench::REMOTE_SPV) {
+            eprintln!("推送候选 SPIR-V 到 {} 失败", refbench::REMOTE_SPV);
+            return 2;
+        }
+        phone.shell(&format!("chmod 644 {}", refbench::REMOTE_SPV), 10_000);
+        progress(&format!(
+            "载体 refbench: 场景 {} | 每臂 {} 帧 | intensity {} | 每帧 {} 次提交",
+            refbench::SCENE,
+            a.frames,
+            a.intensity,
+            refbench::SUBMITS_PER_FRAME
+        ));
+    }
+
+    // ---- 部署: runner + 候选/基线 SPIR-V (headless 载体) ----
+    if a.carrier == Carrier::Headless {
     if let Err(e) = deploy(&phone, &runner, &req) {
         eprintln!("部署失败: {e}");
         return 2;
+    }
     }
 
     // ---- 参考帧: 有就转成裸 RGBA8 推上去, 没有就用 runner 内置的程序化图案 ----
@@ -865,6 +968,10 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     let mut lat_b: Vec<f64> = Vec::new();
     let mut pwr_a: Vec<f64> = Vec::new();
     let mut pwr_b: Vec<f64> = Vec::new();
+    let mut fps_a: Vec<f64> = Vec::new();   // 每轮的帧时 p95 (ms)
+    let mut fps_b: Vec<f64> = Vec::new();
+    let mut busy_a: Vec<f64> = Vec::new();  // 每轮的每帧 GPU 忙时均值 (ms)
+    let mut busy_b: Vec<f64> = Vec::new();
     let mut psnr_a: Vec<f64> = Vec::new();
     let mut ghost_a: Vec<f64> = Vec::new();
     let mut ghost_b: Vec<f64> = Vec::new();
@@ -907,6 +1014,62 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
                 break;
             }
         };
+
+        // ── refbench 载体 ──
+        if a.carrier == Carrier::Refbench {
+            let (res, power) = run_refbench_arm(&phone, *arm, &a, a.power_rail);
+            let restored = lock.restore(&phone);
+            if !restored {
+                fatal = Some("锁频态回读与锁前不一致, 设备状态未能 100% 还原".into());
+                break;
+            }
+            if let Some(e) = res.error {
+                if *arm == Arm::Baseline {
+                    fatal = Some(format!("基线臂失败: {e}"));
+                    break;
+                }
+                progress(&format!("  [{}] 候选臂失败: {e}", arm.as_str()));
+                crashed = true;
+                continue;
+            }
+            if !res.clean_exit || res.intervals_ms.len() < 8 {
+                fatal = Some(format!(
+                    "本轮样本不可用: clean_exit={} 帧间隔样本 {} 个",
+                    res.clean_exit,
+                    res.intervals_ms.len()
+                ));
+                break;
+            }
+
+            let p95 = gpustat::percentile(&res.intervals_ms, 0.95);
+            let busy = if res.gpu_busy_ms.is_empty() {
+                f64::NAN
+            } else {
+                gpustat::mean(&res.gpu_busy_ms)
+            };
+            let w = hwcond::power_stats(&power).map(|(mean, _, _, _)| mean);
+            match arm {
+                Arm::Baseline => {
+                    fps_a.push(p95);
+                    if busy.is_finite() { busy_a.push(busy); }
+                    if let Some(w) = w { pwr_a.push(w); }
+                }
+                Arm::Candidate => {
+                    fps_b.push(p95);
+                    if busy.is_finite() { busy_b.push(busy); }
+                    if let Some(w) = w { pwr_b.push(w); }
+                }
+            }
+            progress(&format!(
+                "  [{}] 帧时 p95 {:.3} ms | GPU 忙 {:.3} ms/帧 | {} 帧{}",
+                arm.as_str(),
+                p95,
+                busy,
+                res.frames_submitted,
+                w.map(|w| format!(" | {w:.2} W")).unwrap_or_default()
+            ));
+            continue;
+        }
 
         let (out, power) = run_one(&phone, *arm, &req, a.power_rail, remote_reference.as_deref());
         let restored = lock.restore(&phone);
@@ -974,29 +1137,61 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     }
 
     // ---- 统计裁决 ----
-    let welch = gpustat::welch_t_test(&lat_a, &lat_b);
+    //
+    // 两个载体的主指标不是同一个量, 检验的对象也就不同:
+    //   headless: lat_* 是每轮的 dispatch 中位耗时 —— 直接就是算子耗时;
+    //   refbench: 算子挂在整条管线上, 分不出"只属于它"的那一段。
+    //             主指标改成**帧时 p95**, 算子的代价用 A/B 的每帧 GPU 忙时之差表达。
+    let (sample_a, sample_b) = if a.carrier == Carrier::Refbench {
+        (fps_a.clone(), fps_b.clone())
+    } else {
+        (lat_a.clone(), lat_b.clone())
+    };
+    let welch = gpustat::welch_t_test(&sample_a, &sample_b);
     let rules = FrozenRules::from_request(&req);
 
-    let cand_lat = if lat_b.is_empty() {
+    // refbench 载体下的"算子耗时" = 每帧 GPU 忙时的 A/B 之差, 即算子的**边际**开销。
+    // 直接拿 B 臂的整帧 GPU 忙时当算子耗时是错的 —— 那里面绝大部分是场景 pass。
+    let cand_lat = if a.carrier == Carrier::Refbench {
+        if busy_a.is_empty() || busy_b.is_empty() {
+            f32::NAN
+        } else {
+            (gpustat::mean(&busy_b) - gpustat::mean(&busy_a)) as f32
+        }
+    } else if lat_b.is_empty() {
         f32::NAN
     } else {
         gpustat::mean(&lat_b) as f32
     };
-    let base = if lat_a.is_empty() {
+    let base = if (a.carrier == Carrier::Refbench && fps_a.is_empty())
+        || (a.carrier == Carrier::Headless && lat_a.is_empty())
+    {
         None
     } else {
         Some(Metrics {
-            operator_latency_ms: gpustat::mean(&lat_a) as f32,
-            fps_p95_ms: None,
+            operator_latency_ms: if a.carrier == Carrier::Refbench {
+                0.0  // 基线臂按定义不含算子
+            } else {
+                gpustat::mean(&lat_a) as f32
+            },
+            fps_p95_ms: if fps_a.is_empty() {
+                None
+            } else {
+                Some(gpustat::mean(&fps_a) as f32)
+            },
             power_watt: gpustat::mean(&pwr_a) as f32,
             psnr_db: if psnr_a.is_empty() { f32::NAN } else { gpustat::mean(&psnr_a) as f32 },
         })
     };
     let candidate = Metrics {
         operator_latency_ms: cand_lat,
-        // 帧时 p95 需要在真实渲染上下文里量, headless 算子标尺给不出来。
-        // 留 None 而不是填 0 —— 量不到的指标不许用默认值填补。
-        fps_p95_ms: None,
+        // headless 算子标尺给不出帧时 p95 (没有渲染上下文), 留 None 不填 0;
+        // refbench 载体下这里是真实测量值。
+        fps_p95_ms: if fps_b.is_empty() {
+            None
+        } else {
+            Some(gpustat::mean(&fps_b) as f32)
+        },
         power_watt: if pwr_b.is_empty() { f32::NAN } else { gpustat::mean(&pwr_b) as f32 },
         psnr_db: if psnr_b.is_empty() { f32::NAN } else { gpustat::mean(&psnr_b) as f32 },
     };
@@ -1129,6 +1324,150 @@ fn deploy(
 /// 设备上不留任何残留。
 fn cleanup(phone: &crate::device::Device) {
     phone.shell(&format!("rm -rf {REMOTE_DIR}"), 10_000);
+}
+
+/// refbench 一臂的产出。
+#[derive(Debug, Clone, Default)]
+pub struct RefbenchArm {
+    pub frames_submitted: u32,
+    pub clean_exit: bool,
+    pub postfx_active: bool,
+    /// 帧间隔 (ms)
+    pub intervals_ms: Vec<f64>,
+    /// 每帧 GPU 忙时 (ms)
+    pub gpu_busy_ms: Vec<f64>,
+    pub error: Option<String>,
+}
+
+/// 驱动 refbench 跑一臂: 开 ftrace → 拉起场景 → 采功耗 → 等自退 → 收 trace 与回包。
+fn run_refbench_arm(
+    phone: &crate::device::Device,
+    arm: Arm,
+    a: &GpuOpArgs,
+    rail: PowerRail,
+) -> (RefbenchArm, Vec<hwcond::PowerSample>) {
+    let mut out = RefbenchArm::default();
+    let run_id = format!("gpuop_{}", arm.as_str());
+    let started = format!("{}/refbench_started", refbench::FILES);
+    let result = format!("{}/refbench_out.json", refbench::FILES);
+
+    // 上一轮的残留会让"起跑了没"和"跑完了没"都判错
+    phone.shell(&format!("rm -f {started} {result}"), 10_000);
+    phone.shell(&format!("am force-stop {}", refbench::PACKAGE), 10_000);
+
+    let mut session = match crate::ftrace::TraceSession::begin(phone, 65536) {
+        Ok(s) => s,
+        Err(e) => {
+            out.error = Some(format!("ftrace 打不开: {e}"));
+            return (out, Vec::new());
+        }
+    };
+
+    let knob = match arm {
+        Arm::Baseline => "--es knob.postfx off".to_string(),
+        Arm::Candidate => format!(
+            "--es knob.postfx on --es postfx.shader {}",
+            refbench::REMOTE_SPV
+        ),
+    };
+    let cmd = format!(
+        "am start -W -n {} --es scene {} --es run_id {run_id} --es frames {} --es intensity {} {knob}",
+        refbench::ACTIVITY,
+        refbench::SCENE,
+        a.frames,
+        a.intensity
+    );
+    phone.shell(&cmd, 60_000);
+
+    // 轮询起跑标记。logcat 在本机观测到会完全静默, 所以契约用的是这个文件。
+    let mut launched = false;
+    for _ in 0..60 {
+        if phone
+            .shell(&format!("ls {started} 2>/dev/null"), 8_000)
+            .contains("refbench_started")
+        {
+            launched = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if !launched {
+        out.error = Some("refbench 没有起跑 (未见 refbench_started 标记)".into());
+        let _ = session.stop_and_read();
+        return (out, Vec::new());
+    }
+
+    // 边跑边采功耗
+    let ticks = 160u32;
+    let inner = hwcond::power_sample_cmd(rail)
+        .trim_start_matches("su -c '")
+        .trim_end_matches('\'')
+        .to_string();
+    let sampler = phone
+        .stream_shell(&format!(
+            "su -c 'i=0; while [ $i -lt {ticks} ]; do {inner}; sleep 0.25; i=$((i+1)); done'"
+        ))
+        .ok();
+
+    // 等自退。refbench 跑满 frames 后自己结束, 不需要我们杀它。
+    let mut exited = false;
+    for _ in 0..240 {
+        if phone
+            .shell(&format!("pidof {} 2>/dev/null", refbench::PACKAGE), 8_000)
+            .trim()
+            .is_empty()
+        {
+            exited = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    let mut power = Vec::new();
+    if let Some(mut child) = sampler {
+        let _ = child.kill();
+        if let Ok(o) = child.wait_with_output() {
+            power = hwcond::parse_power_samples(&String::from_utf8_lossy(&o.stdout));
+        }
+    }
+
+    let trace = session.stop_and_read();
+    let stats = crate::ftrace::frame_stats(&trace, refbench::SUBMIT_COMM);
+    out.intervals_ms = stats.intervals_ms;
+    out.gpu_busy_ms = stats.gpu_busy_ms;
+
+    if !exited {
+        phone.shell(&format!("am force-stop {}", refbench::PACKAGE), 10_000);
+        out.error = Some("refbench 未在预期内自退".into());
+        return (out, power);
+    }
+
+    // 回包: 它自己说跑了多少帧、干不干净、算子挂上没有
+    let raw = phone.shell(&format!("cat {result} 2>/dev/null"), 20_000);
+    match serde_json::from_str::<Value>(raw.trim()) {
+        Ok(v) => {
+            out.frames_submitted = v
+                .get("frames_submitted")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32;
+            out.clean_exit = v.get("clean_exit").and_then(Value::as_bool).unwrap_or(false);
+            out.postfx_active = v
+                .pointer("/postfx/active")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        }
+        Err(e) => out.error = Some(format!("refbench 回包不可解析: {e}")),
+    }
+
+    // 算子该挂上却没挂上 = 这一臂在测别的东西, 绝不能当成有效样本。
+    if arm == Arm::Candidate && !out.postfx_active && out.error.is_none() {
+        out.error = Some("候选臂的 postfx 没有生效, 这一臂测的不是候选算子".into());
+    }
+    if arm == Arm::Baseline && out.postfx_active && out.error.is_none() {
+        out.error = Some("基线臂却挂上了算子, A/B 被污染".into());
+    }
+
+    (out, power)
 }
 
 /// 跑一个臂, 同时在设备侧采功耗。

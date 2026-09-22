@@ -4,6 +4,7 @@
 //! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod bench;
+mod ftrace;
 mod gpuop;
 mod gpustat;
 mod hwcond;

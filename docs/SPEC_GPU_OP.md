@@ -145,6 +145,49 @@ PSNR 是全图平均, 对插帧最刺眼的两类伪影**极不敏感**: HUD 只
 注意那个重影对照组的耗时: **0.351 ms, 和基线 0.352 ms 一模一样**。
 只看耗时和全图 PSNR 的话它像个免费的胜利; 是伪影门禁把它拦下来的。
 
+## 4.3 两个评测载体
+
+`--carrier` 选算子挂在哪里跑。两个载体量的**不是同一个量**, 不可混着比。
+
+| | `headless` (缺省) | `refbench` |
+|---|---|---|
+| 载体 | `vkop_runner`, 孤立跑 dispatch | refbench `sr_pipeline` 场景, 算子挂在管线尾部 |
+| `operator_latency_ms` | VkQueryPool 时间戳量到的**单次 dispatch** 耗时 | 每帧 GPU 忙时的 **A/B 之差**, 即算子的**边际**开销 |
+| `fps_p95_ms` | `null` (没有渲染上下文) | 真实帧时 p95 |
+| `power_watt` | 空设备上的功耗 | **场景内**整机功耗 |
+| `psnr_db` | 真实测量 | `null` —— refbench 的边界不允许它自带测量逻辑 |
+
+refbench 载体下 t 检验的主指标是**帧时 p95**, 不是算子耗时: 算子挂在整条管线上,
+分不出"只属于它"的那一段。直接拿 B 臂的整帧 GPU 忙时当算子耗时是错的 ——
+那里面绝大部分是场景 pass。
+
+帧时序取自 raw ftrace 的 `adreno_cmdbatch_submitted`, 按 refbench 改名过的提交线程
+`RefbenchDrv` 过滤; GPU 忙时取自 `adreno_cmdbatch_retired` 的 `active` ticks
+(19.2 MHz), 按 ctx 归属回被测应用 —— retired 事件由 GMU 线程发出, 不带应用 comm,
+不按 ctx 过滤就会把 SurfaceFlinger 的提交一起算进来。
+
+refbench 契约写死 `submits_per_frame: 1`, 所以提交间隔可直接当帧间隔。
+原神那种每帧两次提交的必须先做自检, 否则帧率会算成两倍
+(见 `loop_v1/tools/parse_trace.py` 的 `detect_submits_per_frame`)。
+
+**A/B 污染防护**: 候选臂 `postfx.active` 必须为 true, 基线臂必须为 false;
+不符即整轮作废。算子没挂上却当成有效样本, 等于拿 A 去和 A 比。
+
+### 2026-09-22 首次完整跑组 (NX809J, 每臂 2 轮 x 1200 帧, intensity 5)
+
+| 臂 | 帧时 p95 | 每帧 GPU 忙 | 场景内功耗 |
+|---|---|---|---|
+| A (postfx=off) | 6.854 ms | 6.316 ms | 6.17 W |
+| B (postfx=on) | 7.331 / 7.386 ms | 6.797 / 6.795 ms | 6.60 / 6.42 W |
+
+报告: `operator_latency_ms` 0.477 ms (边际), `fps_p95_ms` **7.358 ms (不再是 null)**,
+`power_watt` 6.507 W, p = 0.005, `is_pareto_improvement` = false (显著更慢)。
+
+**值得注意的对照**: 同一个算子 `gen1_loc1`, headless 孤立跑是 **0.942 ms**,
+挂进管线后的边际开销只有 **0.477 ms** —— 约一半。孤立跑的微秒数不等于它在真实
+渲染上下文里的代价。这正是要做这层挂接的原因。
+(该结论建立在每臂 2 轮之上, 样本偏薄; 要下定论需要更多轮次。)
+
 ## 5. 功耗口径
 
 两条轨, 各有各的适用条件, **不可混用**:
