@@ -10,7 +10,7 @@
 
 ## 现状（2026-09-21 立项当天）
 
-**灰档只读层已就绪、待上机**（NX809J 正被 refbench 的判定电池占用，不抢设备）：
+**灰档只读层已就绪、待上机**（测试设备正被 refbench 的评测流水线占用，不抢设备）：
 
 ```bash
 bash gray/build/build_layer.sh          # NDK 直编 libVkLayer_refknobs.so ✅ 已验证可编译
