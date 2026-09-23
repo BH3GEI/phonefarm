@@ -79,7 +79,7 @@ tools/
   ftrace_capture.sh     ftrace 采集, 自带四项状态存档与 trap 还原
   knob_ddr_boost.sh     旋钮: DDR/LLCC 总线下限钉到硬件上限, apply/restore/status
   pf_bin.sh             解析 phonefarm 二进制路径 (供各脚本 source)
-  pybridge.py           迁移期通道: 尚未搬走的 Python 从这里转调二进制拿统计口径
+  pybridge.py           迁移期通道: 尚未搬走的 Python 从这里转调二进制拿统计与判定口径
   replay_test.sh        离线回放自检 (判据 5)
   run_once.sh           一轮"负载 + 采集"的编排
 scripts/

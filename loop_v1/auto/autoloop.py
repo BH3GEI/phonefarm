@@ -6,9 +6,9 @@
 
 每一层的职责边界
 ----------------
-- `whitelist.py` 决定「准改什么」, 不决定改成什么
+- 白名单 (src/sysparam.rs) 决定「准改什么」, 不决定改成什么
 - `llm.py`       决定「改成什么」, 不决定好不好
-- `verdict.py`   决定「好不好」, 规则在看数据之前冻结
+- 判定规则 (src/sysparam.rs) 决定「好不好」, 规则在看数据之前冻结
 - 本文件只做编排与证据归档, 不含任何判定口径
 
 复用而非重造: 负载回放与 ftrace 采集直接调 `tools/run_once.sh`, 统计用
@@ -34,10 +34,11 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, TOOLS)
 sys.path.insert(0, HERE)
 
-# 统计口径已搬进 phonefarm 二进制, 经 pybridge 转调 —— 不在 Python 侧留第二份实现
+# 统计、白名单、判定都已搬进 phonefarm 二进制, 经 pybridge 转调 ——
+# 不在 Python 侧留第二份实现。llm 还是本地模块。
+import pybridge as WL                                       # noqa: E402
+import pybridge as V                                        # noqa: E402
 from pybridge import compare, describe, snapshot_diff       # noqa: E402
-import whitelist as WL                                      # noqa: E402
-import verdict as V                                         # noqa: E402
 import llm as LLM                                           # noqa: E402
 import spin_check as SPIN                                   # noqa: E402
 
@@ -529,8 +530,7 @@ def main() -> int:
     probe_txt = su(f"sh {DEV_TMP}/probe_sysparam.sh", timeout=600)
     with open(os.path.join(out, "probe.txt"), "w") as f:
         f.write(probe_txt)
-    probe = WL.parse_probe(probe_txt)
-    wl = WL.build_whitelist(probe)
+    wl = WL.build_whitelist(probe_txt)
     with open(os.path.join(out, "whitelist.json"), "w") as f:
         json.dump(wl, f, ensure_ascii=False, indent=1, sort_keys=True)
     log(f"白名单 {len(wl)} 项: {', '.join(sorted(wl))}")
