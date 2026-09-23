@@ -1,0 +1,5 @@
+serial=91253241019A
+workload=genshin_touch
+frame_diff_pct=13.637
+
+charge_suspended=yes

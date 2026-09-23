@@ -1,0 +1,22 @@
+{
+ "source": "android_sysfs",
+ "sample_count": 150,
+ "fps": null,
+ "frame_time_mean_ms": null,
+ "fps_p95_ms": null,
+ "power_watt": 4.8123,
+ "soc_temp_c": null,
+ "gpu_temp_c": null,
+ "battery_temp_c": null,
+ "meta": null,
+ "unavailable": [
+  {
+   "field": "fps",
+   "reason": "sysfs 电源轨通路不出帧率"
+  },
+  {
+   "field": "soc_temp_c",
+   "reason": "这条通路只读电源轨"
+  }
+ ]
+}

@@ -1,0 +1,8 @@
+soc_thermal 46000
+gpuss-0 0
+gpu 44100
+Battery 31200
+rf-pa0 -273000
+vbat 4200
+cpu-1-0 42500
+bad line

@@ -1,0 +1,13 @@
+{
+ "source": "android_smartperf",
+ "sample_count": 0,
+ "fps": null,
+ "frame_time_mean_ms": null,
+ "fps_p95_ms": null,
+ "power_watt": 0.0,
+ "soc_temp_c": null,
+ "gpu_temp_c": null,
+ "battery_temp_c": null,
+ "meta": {},
+ "unavailable": []
+}
