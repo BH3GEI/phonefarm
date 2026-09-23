@@ -9,7 +9,7 @@
 #   · 靶子不是我们写的, 没有 `*_started` 标记 → 用 fps_logger 落进日志文件的第一行
 #     "FPS:" 当"渲染已开始"信号 (第一条在进循环后约 0.5s)
 #   · 靶子不自报 JSON → clean_exit 由"进程在超时前自己消失"判定
-#   · 提交线程名不固定 → 采完当场用 pick_comm.py 从数据里认, 不写死
+#   · 提交线程名不固定 → 采完当场用 phonefarm vks-pick-comm 从数据里认, 不写死
 #
 # 退出码: 0=有效轮  2=硬失败  3=无效轮 (热事件 / 非干净退出 / 提交线程不唯一)
 set -euo pipefail
@@ -34,7 +34,7 @@ COMM_SHARE_MIN="${VKS_COMM_SHARE_MIN:-0.80}"
 # 帧时间这个主指标直接失去分辨力。关掉后出帧速度才反映这一帧真实的 GPU 成本。
 VSYNC="${VKS_VSYNC:-OFF}"
 # 等待"真实渲染稳态"的上界(秒)。本机窗口合成要约 9.6s, 给 30s 余量。
-# 真正的就绪判据在 ready.py 里 (帧率阶跃), 这里只是个上界。
+# 真正的就绪判据在 src/vks.rs 里 (帧率阶跃), 这里只是个上界。
 SETTLE="${VKS_SETTLE_S:-30}"
 
 ashell() { adb -s "$SERIAL" shell "$@" </dev/null; }
@@ -76,12 +76,12 @@ done
   ashell "cat $APPFILES/run.log 2>/dev/null" > "$OUTDIR/run.log" 2>&1 || true
   echo "[$LABEL] 应用未进入渲染"; ashell "am force-stop $PKG" || true; exit 2; }
 
-# 4b) 等"真实渲染稳态" —— 不是等固定秒数, 是等帧率序列里那一级阶跃下降 (见 ready.py)。
+# 4b) 等"真实渲染稳态" —— 不是等固定秒数, 是等帧率序列里那一级阶跃下降 (见 src/vks.rs)。
 #     有界 SETTLE 秒; 超时也照常往下走, 因为第 8 步的 crosscheck 会兜底判无效。
 READY=0
 for _ in $(seq 1 "$SETTLE"); do
   ashell "cat $APPFILES/run.log 2>/dev/null" > "$OUTDIR/run_pre.log" 2>/dev/null || true
-  if python3 "$HERE/ready.py" "$OUTDIR/run_pre.log"; then READY=1; break; fi
+  if "$PF" vks-ready "$OUTDIR/run_pre.log"; then READY=1; break; fi
   sleep 1
 done
 echo "[$LABEL] 进入稳态: ready=$READY"
@@ -107,7 +107,7 @@ printf '{"min_refresh_rate":"%s","peak_refresh_rate":"%s"}\n' \
 
 # 5) 稳态窗口内采集 (ftrace_capture.sh 自带四项状态存档还原)
 #    采集窗的**设备墙钟**边界要记下来: 日志里的 FPS 行带的是设备本地时间, 而 trace 里
-#    的是 ftrace 时钟, 两者对不上。记下边界后 crosscheck.py 才能只拿同一段时间的
+#    的是 ftrace 时钟, 两者对不上。记下边界后对账才能只拿同一段时间的
 #    FPS 样本去和 trace 对账 —— 否则拿整段运行的中位数去比 12 秒的窗口, 本来好的轮
 #    也会被判掉(2026-09-23 实测就是这么误杀了好几轮)。
 CAP_T0=$(ashell "date '+%Y-%m-%d %H:%M:%S'" | tr -d '\r')
@@ -138,7 +138,7 @@ if [ "$EXITED" != 1 ]; then
 fi
 
 # 7) 认提交线程 → 解析 → 归因
-python3 "$HERE/pick_comm.py" "$OUTDIR/trace.txt" > "$OUTDIR/comm.json" || {
+"$PF" vks-pick-comm "$OUTDIR/trace.txt" > "$OUTDIR/comm.json" || {
   echo "no_cmdbatch_events" > "$OUTDIR/INVALID"; echo "[$LABEL] 无效轮: trace 里没有 GPU 提交事件"; exit 3; }
 NSUB=$(python3 -c "import json;print(json.load(open('$OUTDIR/comm.json'))['total'])")
 # 采集窗内的提交数下限: 真渲染时每帧至少一次提交, 12s 怎么也不止几十次。
@@ -159,8 +159,8 @@ fi
 "$PF" parse-trace "$OUTDIR/trace.txt" --comm "$COMM" > "$OUTDIR/summary.json"
 "$PF" attribute "$OUTDIR/summary.json" > "$OUTDIR/attribution.json"
 
-# 8) 交叉校验: 内核侧提交节奏 vs 应用侧自报帧率 (两个独立来源对账, 细节见 crosscheck.py)
-python3 "$HERE/crosscheck.py" "$OUTDIR/run.log" "$OUTDIR/summary.json" "$OUTDIR/window.json" > "$OUTDIR/crosscheck.json"
+# 8) 交叉校验: 内核侧提交节奏 vs 应用侧自报帧率 (两个独立来源对账, 细节见 src/vks.rs)
+"$PF" vks-crosscheck "$OUTDIR/run.log" "$OUTDIR/summary.json" "$OUTDIR/window.json" > "$OUTDIR/crosscheck.json"
 WINDOWED=$(python3 -c "import json;print(json.load(open('$OUTDIR/crosscheck.json'))['windowed'])")
 OK=$(python3 -c "import json;print(1 if json.load(open('$OUTDIR/crosscheck.json'))['in_band'] else 0)")
 RATIO=$(python3 -c "import json;print(json.load(open('$OUTDIR/crosscheck.json'))['ratio_to_log_fps'])")

@@ -163,7 +163,7 @@ def main() -> int:
     print("═" * 78)
 
     comms = collect_comms(args.root)
-    print(f"\n提交线程 (由 pick_comm.py 从 trace 里认出, 非写死):")
+    print(f"\n提交线程 (由 phonefarm vks-pick-comm 从 trace 里认出, 非写死):")
     for c, rounds in comms.items():
         shares = sorted(s for _, s in rounds if s is not None)
         print(f"  {c}: {len(rounds)} 轮, 占比 {min(shares):.3f}~{max(shares):.3f}" if shares

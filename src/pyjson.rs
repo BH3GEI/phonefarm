@@ -502,7 +502,7 @@ fn write_str(out: &mut String, s: &str) {
     out.push('"');
 }
 
-fn write_val(out: &mut String, v: &PyVal, depth: usize) {
+fn write_val(out: &mut String, v: &PyVal, depth: usize, ind: usize) {
     match v {
         PyVal::Null => out.push_str("null"),
         PyVal::Bool(true) => out.push_str("true"),
@@ -520,11 +520,11 @@ fn write_val(out: &mut String, v: &PyVal, depth: usize) {
                 if i > 0 {
                     out.push_str(",\n");
                 }
-                out.push_str(&" ".repeat(depth + 1));
-                write_val(out, x, depth + 1);
+                out.push_str(&" ".repeat((depth + 1) * ind));
+                write_val(out, x, depth + 1, ind);
             }
             out.push('\n');
-            out.push_str(&" ".repeat(depth));
+            out.push_str(&" ".repeat(depth * ind));
             out.push(']');
         }
         PyVal::Obj(kvs) => {
@@ -537,13 +537,13 @@ fn write_val(out: &mut String, v: &PyVal, depth: usize) {
                 if i > 0 {
                     out.push_str(",\n");
                 }
-                out.push_str(&" ".repeat(depth + 1));
+                out.push_str(&" ".repeat((depth + 1) * ind));
                 write_str(out, k);
                 out.push_str(": ");
-                write_val(out, x, depth + 1);
+                write_val(out, x, depth + 1, ind);
             }
             out.push('\n');
-            out.push_str(&" ".repeat(depth));
+            out.push_str(&" ".repeat(depth * ind));
             out.push('}');
         }
     }
@@ -551,8 +551,13 @@ fn write_val(out: &mut String, v: &PyVal, depth: usize) {
 
 /// `json.dumps(v, ensure_ascii=False, indent=1)` —— 不含结尾换行。
 pub fn dumps(v: &PyVal) -> String {
+    dumps_indent(v, 1)
+}
+
+/// `json.dumps(v, ensure_ascii=False, indent=n)`
+pub fn dumps_indent(v: &PyVal, n: usize) -> String {
     let mut out = String::new();
-    write_val(&mut out, v, 0);
+    write_val(&mut out, v, 0, n);
     out
 }
 
@@ -577,7 +582,7 @@ pub fn dumps_compact(v: &PyVal) -> String {
         ),
         other => {
             let mut out = String::new();
-            write_val(&mut out, other, 0);
+            write_val(&mut out, other, 0, 1);
             out
         }
     }

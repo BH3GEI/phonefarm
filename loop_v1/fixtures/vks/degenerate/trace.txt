@@ -1,0 +1,3 @@
+  Only-9   [003] ..... 1045979.109679: adreno_cmdbatch_submitted: ctx=41 ts=1
+  Only-9   [003] ..... 1045979.109679: adreno_cmdbatch_submitted: ctx=41 ts=1
+  Only-9   [003] ..... 1045979.109679: adreno_cmdbatch_submitted: ctx=41 ts=1

@@ -1,0 +1,9 @@
+{
+  "comm": "GameActivity",
+  "share": 0.9874,
+  "dist": {
+    "GameActivity": 940,
+    "RenderThread": 12
+  },
+  "total": 952
+}
