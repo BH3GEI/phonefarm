@@ -307,6 +307,8 @@ pub fn execute_script(cfg: &ScriptRunConfig) -> Result<ScriptResult, String> {
         json!({
             "r": "start",
             "pid": std::process::id(),
+            // 与 runtime 那条一致: 记下这一局落在哪台机器上, 判不出记 null
+            "serial": crate::device::resolve_serial(cfg.serial.as_deref()),
             "ts": SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
         })
     )

@@ -1,0 +1,408 @@
+{
+ "params": {
+  "cpu.policy6.scaling_governor": "performance",
+  "cpu.policy6.scaling_min_freq": "1497600"
+ },
+ "why": "保持小核现状, 只把中簇钉到 performance, 验证中簇调度延迟对 frame_p95 的贡献",
+ "plan": "# loop_v1 sysparam plan\nsysfs\t/sys/devices/system/cpu/cpufreq/policy6/scaling_governor\tperformance\nsysfs\t/sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq\t1497600\n",
+ "pairs_completed": 1,
+ "apply_ok": false,
+ "apply_log": [
+  "KNOB_APPLIED /sys/devices/system/cpu/cpufreq/policy6/scaling_governor: walt -> performance\nKNOB_APPLIED /sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq: 883200 -> 1497600\n",
+  "KNOB_APPLIED /sys/devices/system/cpu/cpufreq/policy6/scaling_governor: walt -> performance\nKNOB_FAIL /sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq: 想写 1497600, 回读 1382400 (原值 883200)\n"
+ ],
+ "restore_ok": true,
+ "restore_fail": null,
+ "restore_log": [
+  "KNOB_NOT_APPLIED (无 /data/local/tmp/loop_v1_sysparam.state, 无需回滚)"
+ ],
+ "knob_state_after": [
+  "state: 未施加"
+ ],
+ "cooldown": {
+  "ok": true,
+  "zone": "cpu-0-2-1",
+  "c": 50.0,
+  "waited_s": 110.6
+ },
+ "charge_suspend_log": [
+  "CHARGE_SUSPENDED /sys/class/qcom-battery/charging_enabled: 1 -> 0",
+  "CHARGE_STATE status=Discharging current_now=-821000 capacity=98 on_battery=yes"
+ ],
+ "charge_restore_log": [
+  "CHARGE_RESTORED /sys/class/qcom-battery/charging_enabled: -> 1",
+  "CHARGE_STATE status=Charging current_now=-1083000 capacity=97 on_battery=no"
+ ],
+ "on_battery_uniform": true,
+ "snapshot_check": {
+  "checked": true,
+  "n_lines": 39,
+  "strict_identical": true,
+  "strict_n_diff": 0,
+  "ours_identical": true,
+  "ours_diffs": [],
+  "driver_owned_diffs": []
+ },
+ "temp_max_c": 59.0,
+ "temp_cap_c": 70.0,
+ "arms": {
+  "ctrl": {
+   "title": "ctrl",
+   "n_runs": 2,
+   "runs": [
+    "ctrl1",
+    "ctrl2"
+   ],
+   "metrics": {
+    "frame_p50": {
+     "values": [
+      16.6395,
+      16.6065
+     ],
+     "median": 16.623,
+     "mean": 16.623,
+     "min": 16.6065,
+     "max": 16.6395,
+     "dispersion_pct": 0.199,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_p95": {
+     "values": [
+      19.4544,
+      19.3424
+     ],
+     "median": 19.3984,
+     "mean": 19.3984,
+     "min": 19.3424,
+     "max": 19.4544,
+     "dispersion_pct": 0.577,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_p99": {
+     "values": [
+      29.7736,
+      22.439
+     ],
+     "median": 26.1063,
+     "mean": 26.1063,
+     "min": 22.439,
+     "max": 29.7736,
+     "dispersion_pct": 28.095,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_mean": {
+     "values": [
+      16.856,
+      16.777
+     ],
+     "median": 16.8165,
+     "mean": 16.8165,
+     "min": 16.777,
+     "max": 16.856,
+     "dispersion_pct": 0.47,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "gpu_active_mean": {
+     "values": [
+      13.3791,
+      13.3526
+     ],
+     "median": 13.3659,
+     "mean": 13.3659,
+     "min": 13.3526,
+     "max": 13.3791,
+     "dispersion_pct": 0.198,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "gpu_active_p95": {
+     "values": [
+      14.3888,
+      14.4217
+     ],
+     "median": 14.4052,
+     "mean": 14.4052,
+     "min": 14.3888,
+     "max": 14.4217,
+     "dispersion_pct": 0.228,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "queue_p50": {
+     "values": [
+      2.6802,
+      2.7102
+     ],
+     "median": 2.6952,
+     "mean": 2.6952,
+     "min": 2.6802,
+     "max": 2.7102,
+     "dispersion_pct": 1.113,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "fps_mean": {
+     "values": [
+      59.326,
+      59.605
+     ],
+     "median": 59.4655,
+     "mean": 59.4655,
+     "min": 59.326,
+     "max": 59.605,
+     "dispersion_pct": 0.469,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "bw_median": {
+     "values": [
+      7400,
+      7350.0
+     ],
+     "median": 7375.0,
+     "mean": 7375.0,
+     "min": 7350.0,
+     "max": 7400,
+     "dispersion_pct": 0.678,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    }
+   }
+  },
+  "knob": {
+   "title": "knob",
+   "n_runs": 1,
+   "runs": [
+    "knob1"
+   ],
+   "metrics": {
+    "frame_p50": {
+     "values": [
+      16.633
+     ],
+     "median": 16.633,
+     "mean": 16.633,
+     "min": 16.633,
+     "max": 16.633,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_p95": {
+     "values": [
+      19.085
+     ],
+     "median": 19.085,
+     "mean": 19.085,
+     "min": 19.085,
+     "max": 19.085,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_p99": {
+     "values": [
+      27.8414
+     ],
+     "median": 27.8414,
+     "mean": 27.8414,
+     "min": 27.8414,
+     "max": 27.8414,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_mean": {
+     "values": [
+      16.8506
+     ],
+     "median": 16.8506,
+     "mean": 16.8506,
+     "min": 16.8506,
+     "max": 16.8506,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "gpu_active_mean": {
+     "values": [
+      13.4877
+     ],
+     "median": 13.4877,
+     "mean": 13.4877,
+     "min": 13.4877,
+     "max": 13.4877,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "gpu_active_p95": {
+     "values": [
+      14.423
+     ],
+     "median": 14.423,
+     "mean": 14.423,
+     "min": 14.423,
+     "max": 14.423,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "queue_p50": {
+     "values": [
+      2.8646
+     ],
+     "median": 2.8646,
+     "mean": 2.8646,
+     "min": 2.8646,
+     "max": 2.8646,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "fps_mean": {
+     "values": [
+      59.345
+     ],
+     "median": 59.345,
+     "mean": 59.345,
+     "min": 59.345,
+     "max": 59.345,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "bw_median": {
+     "values": [
+      7250.0
+     ],
+     "median": 7250.0,
+     "mean": 7250.0,
+     "min": 7250.0,
+     "max": 7250.0,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    }
+   }
+  }
+ },
+ "env_per_run": {
+  "knob1": {
+   "power_w_mean": 4.3545,
+   "power_w_median": 4.5757,
+   "power_now_w_mean": 353.7408,
+   "power_now_plausible": false,
+   "power_vi_w_mean": 4.3545,
+   "usb_input_w_mean": null,
+   "current_now_ua_mean": -1012000.0,
+   "voltage_now_uv_mean": 4303600.0,
+   "power_rail": "battery",
+   "battery_status": "Discharging",
+   "battery_charging": false,
+   "power_usable_reason": "放电态(已停充), 用 |V x I| (本机 power_now 单位有误, 不采用)",
+   "soc_temp_max_c": 59.0,
+   "soc_temp_mean_c": 54.195,
+   "n_samples": 20,
+   "fan_state": "fan_enable=1,fan_speed_level=5,fan_speed_pwm="
+  },
+  "ctrl1": {
+   "power_w_mean": 4.7067,
+   "power_w_median": 4.7036,
+   "power_now_w_mean": 426.385,
+   "power_now_plausible": false,
+   "power_vi_w_mean": 4.7067,
+   "usb_input_w_mean": null,
+   "current_now_ua_mean": -1095400.0,
+   "voltage_now_uv_mean": 4296800.0,
+   "power_rail": "battery",
+   "battery_status": "Discharging",
+   "battery_charging": false,
+   "power_usable_reason": "放电态(已停充), 用 |V x I| (本机 power_now 单位有误, 不采用)",
+   "soc_temp_max_c": 58.3,
+   "soc_temp_mean_c": 55.085,
+   "n_samples": 20,
+   "fan_state": "fan_enable=1,fan_speed_level=5,fan_speed_pwm="
+  },
+  "ctrl2": {
+   "power_w_mean": 4.673,
+   "power_w_median": 4.6746,
+   "power_now_w_mean": 380.1732,
+   "power_now_plausible": false,
+   "power_vi_w_mean": 4.673,
+   "usb_input_w_mean": null,
+   "current_now_ua_mean": -1088550.0,
+   "voltage_now_uv_mean": 4292900.0,
+   "power_rail": "battery",
+   "battery_status": "Discharging",
+   "battery_charging": false,
+   "power_usable_reason": "放电态(已停充), 用 |V x I| (本机 power_now 单位有误, 不采用)",
+   "soc_temp_max_c": 58.1,
+   "soc_temp_mean_c": 54.8,
+   "n_samples": 20,
+   "fan_state": "fan_enable=1,fan_speed_level=5,fan_speed_pwm="
+  }
+ },
+ "fan_state_uniform": true,
+ "comparisons": {},
+ "verdict": "ABORT",
+ "reason": "旋钮未全部生效"
+}

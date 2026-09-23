@@ -10,7 +10,7 @@
 
 | 档 | 能碰的东西 | 手段 | 现状 |
 |---|---|---|---|
-| **黑** | 系统级：DVFS / 总线频率 / 限帧 / 热策略 / 调度 / 刷新率 | sysfs / settings / 厂商接口（需 root） | 验过 1 条（DDR 总线下限，p95 −1.61%，p=0.0079），其余空白 |
+| **黑** | 系统级：DVFS / 总线频率 / 限帧 / 热策略 / 调度 / 刷新率 | sysfs / settings / 厂商接口（需 root） | 真机探出 11 项可写可生效的参数并接进全自动闭环（见下「3.1 现状」）；旧的 DDR 下限结论（p95 −1.61%，p=0.0079）基于 30fps 时代的原神，**已不可比** |
 | **灰** | **API 流：render pass、LoadOp、RT 格式与精度、分辨率、shader、VRS** | Vulkan/GLES layer 注入、资源包重打包、配置改写 | **几乎全空白**（只改过 PlayerPrefs 画质） |
 | 白 | 源码：管线、shader、资产 | 自己的工程（refbench） | refbench 已立 |
 
@@ -43,11 +43,55 @@
 
 | 旋钮 | 打路线图哪类 | 备注 |
 |---|---|---|
-| **厂商限帧策略 / 游戏空间性能模式** | E | **最要紧**：红魔上原神被封顶 @30fps，GPU 只用 64.5%，不解开它任何降 GPU 工作量的优化都换不出帧率，天花板是假的。系统级设置，动手前拿明确授权 |
+| **厂商限帧策略 / 游戏空间性能模式** | E | 立论前提（原神封顶 @30fps）已不成立——7.1.0 实测 60 fps，见 3.1 现状。系统级设置，动手前拿明确授权 |
 | CPU/GPU governor 与频率下限 | E | bench.rs 已有部分实现，抽出复用 |
 | 热策略 / 温控阈值 | E | 真 fps 是热稳态 fps；红魔另有风扇 sysfs（`/sys/kernel/fan/`，refbench 侧已用过） |
 | 大小核调度 / affinity | B（CPU 提交） | 本机 queue_p50=4.37ms，占 13.05% |
 | 刷新率 / 系统动态分辨率 | D | |
+
+### 3.1 现状（2026-09-23 真机实测，NX809J）
+
+编排与判定在 `phonefarm/loop_v1/auto/`（`autoloop.py`），本节只记「能改什么」的实测结论。
+证据：`phonefarm/loop_v1/runs_sysparam/`。
+
+**测试条件**：红魔 NX809J，Android 16 / Adreno 840v2，已 root；原神 7.1.0 大世界探索态；
+负载 `workload_spin_touch_v1.json`（触控拖拽转视角，画面变化 81.8% ≫ 20% 门槛）；
+内置主动散热风扇开启（`fan_enable=1, fan_speed_level=5`）；
+测量期间停充（`/sys/class/qcom-battery/charging_enabled 1→0`），全程放电态。
+
+**基线（重测，旧基线作废）**：`fps_mean` 59.1–59.8，`frame_p50` 16.65 ms，
+`frame_p95` 19.2–19.6 ms，整机功耗 4.76 W，SoC 结温 55.2 °C。
+**原神已不再被钉在 30fps** —— DESIGN 里所有基于「封顶 30fps、GPU 只用 64.5%」的论证都要重看。
+
+**探出来的白名单（11 项，全部通过「存在 + 可写 + 写了真生效」三关）**：
+
+| 参数 | 原值 | 档数 |
+|---|---|---|
+| `cpu.policy{0,6}.scaling_min_freq` / `_max_freq` | 787200/1785600、883200/1497600 | 28 / 27 |
+| `cpu.policy{0,6}.scaling_governor` | walt | 5（walt/conservative/powersave/performance/schedutil）|
+| `gpu.min_pwrlevel` / `gpu.max_pwrlevel` | 17 / 3 | 18 |
+| `bus.DDR.boost_freq` / `bus.LLCC.boost_freq` | 547000 / 282000 | 11 / 9 |
+| `setting.system.refresh_rate_mode` | 0 | 4（实测 1→60Hz、2→90Hz、3→120Hz、4→144Hz）|
+
+**几条只有上机才知道的**：
+
+- **厂商温控/性能管家会跟你抢**：游戏过程中它主动压 `cpu.policyN.scaling_max_freq`
+  与 `kgsl.max_pwrlevel`。实测一组候选只写了 DDR/LLCC，退出时 policy0 的
+  `scaling_max` 从 1785600 变成 1228800、policy6 从 1497600 变成 1382400、
+  `max_pwrlevel` 2→0。另一组把 policy6 的 min 写成 1497600，回读是 1382400。
+  所以**写得进不等于守得住**，探测要隔十几秒再回读一次，守不住的报 `contested` 不进白名单。
+- **切 governor 有副作用**：`scaling_governor` 切成 performance 再切回 walt，
+  `scaling_max_freq` 不会自己回来。旋钮回滚必须覆盖整组兄弟节点（governor → max → min）。
+- **AOSP 的 `peak_refresh_rate` / `min_refresh_rate` 在本机是 `null`**，走厂商的
+  `refresh_rate_mode`（取值表在 `system:all_refresh_rate`）。厂商键语义无文档，
+  只认「写进去后 SurfaceFlinger 活动模式 fps 真的变了」的那几档。
+- **GPU devfreq 不在 `$KGSL/devfreq`**，在 `/sys/class/devfreq/3d00000.qcom,kgsl-3d0`；
+  本机那几个节点读不到，所以 GPU 频率边界走 `min/max_pwrlevel`。
+- **温控保护永远不进白名单**（`thermal/trip_point/cooling/fan/tsens/bcl/throttl` 命中即拒，
+  主机端与设备端各拦一道）。风扇转速与停充节点同理：它们是测量前提，不是可调参数。
+
+**限帧解除**：本机原神已经不是 30fps，`black/knob_framecap.sh` 当初的立论前提消失，
+控制点仍未确认，保持空转骨架。
 
 `black/` 下每个旋钮一个脚本，接口同 `knob_ddr_boost.sh`。设备相关节点在**设备可用后**（refbench
 电池不占用设备时）逐个验证再落实现——现在是骨架，不写未经真机确认的 sysfs 路径。

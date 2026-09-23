@@ -18,6 +18,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 #include <sys/system_properties.h>
@@ -109,6 +110,13 @@ struct DevDisp {
     PFN_vkCreateImageView CreateImageView = nullptr;
     PFN_vkUpdateDescriptorSets UpdateDescriptorSets = nullptr;
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets = nullptr;
+    PFN_vkBeginCommandBuffer BeginCommandBuffer = nullptr;
+    PFN_vkCmdExecuteCommands CmdExecuteCommands = nullptr;
+    PFN_vkQueueSubmit QueueSubmit = nullptr;
+    PFN_vkFreeCommandBuffers FreeCommandBuffers = nullptr;
+    PFN_vkDestroyFramebuffer DestroyFramebuffer = nullptr;
+    PFN_vkDestroyImage DestroyImage = nullptr;
+    PFN_vkDestroyImageView DestroyImageView = nullptr;
 };
 
 static std::mutex g_mtx;
@@ -159,11 +167,17 @@ struct PassStat {                      // 按 (renderpass, 宽, 高) 聚合
     uint32_t w = 0, h = 0, n_att = 0;
     std::vector<uint32_t> fmt;
     uint64_t begins = 0, draws = 0;
+    // 这个 pass 在多少个**帧**里被真正提交执行过 (QueueSubmit 路径统计)。
+    // begins 数的是录制, 预录命令缓冲只录一次却每帧都跑 —— 过滤"每帧都在跑的 pass"
+    // 必须用 frames_seen, 用 begins 会把最想看的预录 pass 滤掉 (评审 #4)。
+    uint64_t frames_seen = 0;
 };
 static std::map<VkRenderPass, RpInfo> g_rp_info;
 static std::map<VkFramebuffer, FbInfo> g_fb_info;
 static std::map<uint64_t, PassStat> g_pass_stat;          // key = rp_seq<<32 | (w<<16|h) 的稳定散列
 static std::map<VkCommandBuffer, uint64_t> g_cb_cur;      // 命令缓冲当前在哪个 pass 里
+static std::map<VkCommandBuffer, std::vector<uint64_t>> g_cb_passes;  // 这条 cb 录制过哪些 pass (有序)
+static std::set<uint64_t> g_frame_seen;                 // 本帧被提交执行的 pass key 集合
 static std::map<VkRenderPass, uint64_t> g_rp_seq;         // VkRenderPass -> 创建序号(稳定可读)
 static std::vector<std::string> g_frame_seq;              // 采样帧内的有序 pass 序列
 static bool g_sampling = false;
@@ -249,33 +263,49 @@ static void write_marker() {
         + ",\"render_passes_created\":" + std::to_string(g_rp_created.load()) + "}";
 
     if (g_dump_passes) {
-        std::string tbl, seq;
+        std::string tbl, seq, swap, comp;
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             for (auto& kv : g_pass_stat) {
                 const PassStat& p = kv.second;
-                if (p.begins < 30) continue;          // 只留每帧都在跑的, 滤掉加载期的一次性 pass
+                // 只留"被执行过"的: frames_seen 按提交数, 预录命令缓冲也不会被误滤 (评审 #4)
+                if (p.frames_seen < 30 && p.begins < 30) continue;
                 char one[256];
                 snprintf(one, sizeof one,
-                         "%s{\"w\":%u,\"h\":%u,\"att\":%u,\"fmt0\":%u,\"begins\":%llu,\"draws\":%llu}",
+                         "%s{\"w\":%u,\"h\":%u,\"att\":%u,\"fmt0\":%u,\"begins\":%llu,\"frames\":%llu,\"draws\":%llu}",
                          tbl.empty() ? "" : ",", p.w, p.h, p.n_att,
                          p.fmt.empty() ? 0u : p.fmt[0],
-                         (unsigned long long)p.begins, (unsigned long long)p.draws);
+                         (unsigned long long)p.begins, (unsigned long long)p.frames_seen,
+                         (unsigned long long)p.draws);
                 tbl += one;
             }
             for (auto& e : g_frame_seq) { if (!seq.empty()) seq += ","; seq += e; }
+            // g_swap_* 与 g_composite_report 也在锁内读 (评审 #11: CreateSwapchainKHR 在别的线程写)
+            swap = ",\"swapchain\":{\"w\":" + std::to_string(g_swap_w)
+                 + ",\"h\":" + std::to_string(g_swap_h)
+                 + ",\"fmt\":" + std::to_string(g_swap_fmt) + "}";
+            comp = g_composite_report;
         }
-        json += ",\"swapchain\":{\"w\":" + std::to_string(g_swap_w)
-              + ",\"h\":" + std::to_string(g_swap_h)
-              + ",\"fmt\":" + std::to_string(g_swap_fmt) + "}";
-        json += ",\"composite_draw\":" + (g_composite_report.empty() ? std::string("null") : g_composite_report);
+        json += swap;
+        json += ",\"composite_draw\":" + (comp.empty() ? std::string("null") : comp);
         json += ",\"pass_table\":[" + tbl + "]";
+        // frame_seq 可能还没采 (采样窗在稳态后的某一帧): 显式标出来,
+        // 免得"空序列"和"还没采"在 harness 眼里长得一样 (评审 #5 的根因)
+        json += std::string(",\"frame_seq_ready\":") + (g_seq_done ? "true" : "false");
         json += ",\"frame_seq\":[" + seq + "]";
     }
     json += "}";
 
-    // 通道 1: logcat (root 可读, 不受目标应用存储沙箱影响)
-    RK_LOG("%s", json.c_str());
+    // 通道 1: logcat (root 可读, 不受目标应用存储沙箱影响)。
+    // 但 logcat 单条上限约 4KB, passdump 模式下光 frame_seq 就有约 20KB, 必被截断 (评审 #6):
+    // passdump 模式 logcat 只打摘要, 全文只走文件通道。
+    if (g_dump_passes) {
+        RK_LOG("marker 已写文件通道 (passdump 全文 %zu 字节超出 logcat 单条上限, 此处只打摘要): "
+               "frames=%llu rp_begins=%llu", json.size(),
+               (unsigned long long)g_frames.load(), (unsigned long long)g_rp.load());
+    } else {
+        RK_LOG("%s", json.c_str());
+    }
 
     // 通道 2: 文件。三个候选落点, 头一个写得进就停。
     const std::string cands[] = {
@@ -419,6 +449,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     d.CreateImageView = (PFN_vkCreateImageView)gdpa(*pDev, "vkCreateImageView");
     d.UpdateDescriptorSets = (PFN_vkUpdateDescriptorSets)gdpa(*pDev, "vkUpdateDescriptorSets");
     d.CmdBindDescriptorSets = (PFN_vkCmdBindDescriptorSets)gdpa(*pDev, "vkCmdBindDescriptorSets");
+    d.BeginCommandBuffer = (PFN_vkBeginCommandBuffer)gdpa(*pDev, "vkBeginCommandBuffer");
+    d.CmdExecuteCommands = (PFN_vkCmdExecuteCommands)gdpa(*pDev, "vkCmdExecuteCommands");
+    d.QueueSubmit = (PFN_vkQueueSubmit)gdpa(*pDev, "vkQueueSubmit");
+    d.FreeCommandBuffers = (PFN_vkFreeCommandBuffers)gdpa(*pDev, "vkFreeCommandBuffers");
+    d.DestroyFramebuffer = (PFN_vkDestroyFramebuffer)gdpa(*pDev, "vkDestroyFramebuffer");
+    d.DestroyImage = (PFN_vkDestroyImage)gdpa(*pDev, "vkDestroyImage");
+    d.DestroyImageView = (PFN_vkDestroyImageView)gdpa(*pDev, "vkDestroyImageView");
     { std::lock_guard<std::mutex> lk(g_mtx); g_dev[key(*pDev)] = d; }
     return r;
 }
@@ -520,8 +557,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     uint64_t idx = g_rp_created++;
-    if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0)
-        return d.CreateRenderPass2(dev, ci, a, out);
+    if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0) {
+        VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
+        if (r0 == VK_SUCCESS && g_dump_passes && ci) record_rp(*out, idx, ci->attachmentCount,
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; });
+        return r0;
+    }
 
     std::vector<VkAttachmentDescription2> atts(ci->pAttachments, ci->pAttachments + ci->attachmentCount);
     std::vector<Effective> hits;
@@ -530,7 +572,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
         atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         hits.push_back({idx, i, 0});
     }
-    if (hits.empty()) return d.CreateRenderPass2(dev, ci, a, out);
+    if (hits.empty()) {
+        VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
+        if (r0 == VK_SUCCESS && g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; });
+        return r0;
+    }
 
     VkRenderPassCreateInfo2 mod = *ci;
     mod.pAttachments = atts.data();
@@ -548,6 +596,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
             g_effective.push_back(h);
         }
     }
+    if (g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
+        [&](uint32_t i){ return (uint32_t)atts[i].format; },
+        [&](uint32_t i){ return (uint32_t)atts[i].loadOp; });
     RK_LOG("改写2 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
            (unsigned long long)idx, hits.size());
     return r;
@@ -576,7 +627,13 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyRenderPass(
         RK_LOG_ONCE("DestroyRenderPass: 查不到下层函数");
         return;
     }
-    { std::lock_guard<std::mutex> lk(g_mtx); g_rewritten.erase(rp); }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_rewritten.erase(rp);
+        // 句柄会复用: 这三张表不一起擦, 新建的 pass 拿到旧句柄值就继承死者的 seq/形状 (评审 #8)
+        g_rp_seq.erase(rp);
+        g_rp_info.erase(rp);
+    }
     d.DestroyRenderPass(dev, rp, a);
 }
 
@@ -666,9 +723,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateSwapchainKHR(
     }
     VkResult r = d.CreateSwapchainKHR(dev, ci, a, out);
     if (r == VK_SUCCESS && ci) {
-        g_swap_w = ci->imageExtent.width; g_swap_h = ci->imageExtent.height;
-        g_swap_fmt = (uint32_t)ci->imageFormat;
-        RK_LOG("swapchain %ux%u fmt=%u", g_swap_w, g_swap_h, g_swap_fmt);
+        {
+            // 读方 (write_marker / note_pass) 都持 g_mtx, 写方也必须持 (评审 #11: 否则是 UB
+            // 数据竞争, swapchain 重建期间还会读到新旧混合的尺寸, is_swap 判错)
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_swap_w = ci->imageExtent.width; g_swap_h = ci->imageExtent.height;
+            g_swap_fmt = (uint32_t)ci->imageFormat;
+        }
+        RK_LOG("swapchain %ux%u fmt=%u", ci->imageExtent.width, ci->imageExtent.height, (uint32_t)ci->imageFormat);
     }
     return r;
 }
@@ -699,6 +761,7 @@ static void note_draw(VkCommandBuffer cb, uint64_t n) {
             auto sv = g_set_views.find(set);
             if (sv == g_set_views.end()) continue;
             for (auto& bv : sv->second) {
+                uint32_t binding = bv.first >> 8;   // key = arrayElem + (binding << 8)
                 VkImageView view = bv.second;
                 auto vi = g_view.find(view);
                 if (vi == g_view.end()) continue;
@@ -709,15 +772,15 @@ static void note_draw(VkCommandBuffer cb, uint64_t n) {
                 for (auto p : prev) if (p == vi->second) is_prev = true;
                 if (is_prev) {
                     hit = true;
-                    char b[200];
-                    snprintf(b, sizeof b, "{\"w\":%u,\"h\":%u,\"fmt\":%u,\"usage\":%u}",
-                             im.w, im.h, im.fmt, im.usage);
+                    char b[220];
+                    snprintf(b, sizeof b, "{\"binding\":%u,\"w\":%u,\"h\":%u,\"fmt\":%u,\"usage\":%u}",
+                             binding, im.w, im.h, im.fmt, im.usage);
                     hit_desc = b;
                 }
                 if (printed < 12) {
-                    char b[220];
-                    snprintf(b, sizeof b, "%s{\"w\":%u,\"h\":%u,\"fmt\":%u,\"usage\":%u,\"is_prev_pass_output\":%s}",
-                             sampled.empty() ? "" : ",", im.w, im.h, im.fmt, im.usage, is_prev ? "true" : "false");
+                    char b[240];
+                    snprintf(b, sizeof b, "%s{\"binding\":%u,\"w\":%u,\"h\":%u,\"fmt\":%u,\"usage\":%u,\"is_prev_pass_output\":%s}",
+                             sampled.empty() ? "" : ",", binding, im.w, im.h, im.fmt, im.usage, is_prev ? "true" : "false");
                     sampled += b; printed++;
                 }
             }
@@ -784,6 +847,7 @@ static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi) {
     }
     st.begins++;
     g_cb_cur[cb] = k;
+    { auto& v = g_cb_passes[cb]; if (v.size() < 256) v.push_back(k); }   // 录制清单, 提交时折算成执行
     g_cb_draw_idx[cb] = 0;                       // 进新 pass, draw 序号归零
     g_cb_sets[cb].clear();                       // 只统计"在本 pass 内绑定"的描述符, 避免把上一个 pass 的算进来
     bool is_swap = (w == g_swap_w && h == g_swap_h);
@@ -826,6 +890,110 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass2(
     note_pass(cb, bi);          // 与 CmdBeginRenderPass 一致, 漏了它 RenderPass2 开的 pass 就不进表
     d.CmdBeginRenderPass2(cb, bi, si);
 }
+// 二级命令缓冲里的 draw 没有自己的 BeginRenderPass —— 当前 pass 从继承信息里拿 (评审 #9:
+// 不然录进 secondary 的 draw 在 g_cb_cur 里匹配不上, draws 系统性偏低, 按 draw 数找
+// "放大那一步"会选错 pass)。顺手在每次重录开始时清掉这条 cb 的旧状态 (评审 #10 的兜底:
+// cb 反复重录时这些 per-cb 表才不会只增不减)。
+static VKAPI_ATTR VkResult VKAPI_CALL rk_BeginCommandBuffer(VkCommandBuffer cb, const VkCommandBufferBeginInfo* bi) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.BeginCommandBuffer) {
+        RK_LOG_ONCE("BeginCommandBuffer: 无下层"); return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_cb_cur.erase(cb); g_cb_sets.erase(cb); g_cb_draw_idx.erase(cb);
+        g_cb_prev_att.erase(cb); g_cb_cur_is_swap.erase(cb); g_cb_passes.erase(cb);
+        if (bi && (bi->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) && bi->pInheritanceInfo) {
+            const VkCommandBufferInheritanceInfo* inh = bi->pInheritanceInfo;
+            uint32_t w = 0, h = 0;   // inheritance 的 framebuffer 允许是 VK_NULL_HANDLE, 那就只有 0x0
+            auto fi = g_fb_info.find(inh->framebuffer);
+            if (fi != g_fb_info.end()) { w = fi->second.w; h = fi->second.h; }
+            uint64_t k = pass_key(inh->renderPass, w, h);
+            auto& st = g_pass_stat[k];
+            if (!st.begins) {
+                st.w = w; st.h = h;
+                auto ri = g_rp_info.find(inh->renderPass);
+                if (ri != g_rp_info.end()) { st.n_att = ri->second.n_att; st.fmt = ri->second.fmt; }
+            }
+            st.begins++;
+            g_cb_cur[cb] = k;
+            g_cb_draw_idx[cb] = 0;
+            g_cb_cur_is_swap[cb] = false;
+            { auto& v = g_cb_passes[cb]; if (v.size() < 256) v.push_back(k); }
+        }
+    }
+    return d.BeginCommandBuffer(cb, bi);
+}
+
+// 二级缓冲被执行时, 它录的 pass 并入主缓冲的录制清单 —— 提交主缓冲时才算执行 (评审 #4/#9)
+static VKAPI_ATTR void VKAPI_CALL rk_CmdExecuteCommands(VkCommandBuffer cb, uint32_t n, const VkCommandBuffer* cbs) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.CmdExecuteCommands) { RK_LOG_ONCE("CmdExecuteCommands: 无下层"); return; }
+    if (g_dump_passes && cbs) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto& v = g_cb_passes[cb];
+        for (uint32_t i = 0; i < n; i++) {
+            auto it = g_cb_passes.find(cbs[i]);
+            if (it == g_cb_passes.end()) continue;
+            for (uint64_t k : it->second) { if (v.size() >= 256) break; v.push_back(k); }
+        }
+    }
+    d.CmdExecuteCommands(cb, n, cbs);
+}
+
+// begins 数的是录制, 不是执行; 真正的"这个 pass 每帧都在跑"要看提交 (评审 #4)。
+// 提交时把每条 cb 录过的 pass 记进本帧集合, present 时统一折算成 frames_seen。
+static VKAPI_ATTR VkResult VKAPI_CALL rk_QueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo* si, VkFence fence) {
+    DevDisp d;
+    if (!dev_of(key(q), &d) || !d.QueueSubmit) { RK_LOG_ONCE("QueueSubmit: 无下层"); return VK_ERROR_INITIALIZATION_FAILED; }
+    if (g_dump_passes && si) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (uint32_t i = 0; i < n; i++)
+            for (uint32_t j = 0; j < si[i].commandBufferCount; j++) {
+                auto it = g_cb_passes.find(si[i].pCommandBuffers[j]);
+                if (it != g_cb_passes.end())
+                    for (uint64_t k : it->second) g_frame_seen.insert(k);
+            }
+    }
+    return d.QueueSubmit(q, n, si, fence);
+}
+
+// cb 被释放时摘掉它的全部 per-cb 状态 (评审 #10: 这些 map 跑在游戏进程里, 只增不减会无限涨)
+static VKAPI_ATTR void VKAPI_CALL rk_FreeCommandBuffers(VkDevice dev, VkCommandPool pool, uint32_t n, const VkCommandBuffer* cbs) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.FreeCommandBuffers) { RK_LOG_ONCE("FreeCommandBuffers: 无下层"); return; }
+    if (g_dump_passes && cbs) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (uint32_t i = 0; i < n; i++) {
+            g_cb_cur.erase(cbs[i]); g_cb_sets.erase(cbs[i]); g_cb_draw_idx.erase(cbs[i]);
+            g_cb_prev_att.erase(cbs[i]); g_cb_cur_is_swap.erase(cbs[i]); g_cb_passes.erase(cbs[i]);
+        }
+    }
+    d.FreeCommandBuffers(dev, pool, n, cbs);
+}
+
+// 同理: image / view / framebuffer 销毁时摘表 (评审 #10)。
+// 注意 g_set_views 里可能还指着已销毁的 view —— 不级联清 (view 表先摘, 溯源时 g_view/g_img
+// 查不到自然跳过, 不会读到假数据)。
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyFramebuffer(VkDevice dev, VkFramebuffer fb, const VkAllocationCallbacks* a) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.DestroyFramebuffer) { RK_LOG_ONCE("DestroyFramebuffer: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_fb_info.erase(fb); g_fb_att.erase(fb); }
+    d.DestroyFramebuffer(dev, fb, a);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyImage(VkDevice dev, VkImage img, const VkAllocationCallbacks* a) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.DestroyImage) { RK_LOG_ONCE("DestroyImage: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_img.erase(img); }
+    d.DestroyImage(dev, img, a);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyImageView(VkDevice dev, VkImageView v, const VkAllocationCallbacks* a) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.DestroyImageView) { RK_LOG_ONCE("DestroyImageView: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_view.erase(v); }
+    d.DestroyImageView(dev, v, a);
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR* pi) {
     DevDisp d;
     if (!dev_of(key(q), &d) || !d.QueuePresentKHR) {
@@ -834,11 +1002,18 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
     }
     uint64_t f = ++g_frames;
     if (g_dump_passes) {
-        // 挑一帧记有序序列: 等画面进入稳态 (第 1200 帧) 再采, 避开加载期
-        // 采一帧的有序序列。1200 帧时常常还在加载/过场, 挪到 1800 更稳;
-        // 采完用 g_seq_done 锁住, 免得后面又被 clear 掉 (之前就是这么丢过一次)。
-        if (f == 1800 && !g_seq_done) { std::lock_guard<std::mutex> lk(g_mtx); g_frame_seq.clear(); g_sampling = true; }
-        else if (f == 1801 && !g_seq_done) { std::lock_guard<std::mutex> lk(g_mtx); g_sampling = false; g_seq_done = true; }
+        {
+            // 本帧提交执行了哪些 pass -> frames_seen。录制数 (begins) 代替不了它:
+            // 预录命令缓冲录一次跑几千帧 (评审 #4)。
+            std::lock_guard<std::mutex> lk(g_mtx);
+            for (uint64_t k : g_frame_seen) g_pass_stat[k].frames_seen++;
+            g_frame_seen.clear();
+        }
+        // 挑一帧记有序序列: 等画面进入稳态再采, 避开加载期。
+        // 1750 不是 300 的倍数 —— 采样帧与落盘帧撞在一起会让那次落盘的 frame_seq 必为空,
+        // 而 marker 看起来正常 (评审 #5: 之前采样窗开在 1800 就踩了这个)。
+        if (f == 1750 && !g_seq_done) { std::lock_guard<std::mutex> lk(g_mtx); g_frame_seq.clear(); g_sampling = true; }
+        else if (f == 1751 && !g_seq_done) { std::lock_guard<std::mutex> lk(g_mtx); g_sampling = false; g_seq_done = true; }
     }
     if ((f % 300) == 0) write_marker();  // 周期落盘, 无需等退出
     return d.QueuePresentKHR(q, pi);
@@ -877,6 +1052,13 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
         RK_HOOK("vkUpdateDescriptorSets", rk_UpdateDescriptorSets);
         RK_HOOK("vkCmdBindDescriptorSets", rk_CmdBindDescriptorSets);
         RK_HOOK("vkCreateFramebuffer", rk_CreateFramebuffer);
+        RK_HOOK("vkBeginCommandBuffer", rk_BeginCommandBuffer);
+        RK_HOOK("vkCmdExecuteCommands", rk_CmdExecuteCommands);
+        RK_HOOK("vkQueueSubmit", rk_QueueSubmit);
+        RK_HOOK("vkFreeCommandBuffers", rk_FreeCommandBuffers);
+        RK_HOOK("vkDestroyFramebuffer", rk_DestroyFramebuffer);
+        RK_HOOK("vkDestroyImage", rk_DestroyImage);
+        RK_HOOK("vkDestroyImageView", rk_DestroyImageView);
     }
     RK_HOOK("vkCreateRenderPass2", rk_CreateRenderPass2);
     RK_HOOK("vkCreateRenderPass2KHR", rk_CreateRenderPass2);
@@ -906,6 +1088,13 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_HOOK("vkUpdateDescriptorSets", rk_UpdateDescriptorSets);
         RK_HOOK("vkCmdBindDescriptorSets", rk_CmdBindDescriptorSets);
         RK_HOOK("vkCreateFramebuffer", rk_CreateFramebuffer);
+        RK_HOOK("vkBeginCommandBuffer", rk_BeginCommandBuffer);
+        RK_HOOK("vkCmdExecuteCommands", rk_CmdExecuteCommands);
+        RK_HOOK("vkQueueSubmit", rk_QueueSubmit);
+        RK_HOOK("vkFreeCommandBuffers", rk_FreeCommandBuffers);
+        RK_HOOK("vkDestroyFramebuffer", rk_DestroyFramebuffer);
+        RK_HOOK("vkDestroyImage", rk_DestroyImage);
+        RK_HOOK("vkDestroyImageView", rk_DestroyImageView);
     }
     if (dev == VK_NULL_HANDLE) return nullptr;
     DevDisp d;

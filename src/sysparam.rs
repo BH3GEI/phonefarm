@@ -43,7 +43,10 @@ pub const DENY_KEYWORDS: [&str; 7] = [
     "throttl",
 ];
 
-/// 生效判定: 只有这一种结论算「写了真生效」
+/// 生效判定: 只有这一种结论算「写了真生效且守得住」。
+///
+/// 注意 `contested` **不在**里面 —— 那是「写进去了, 但十几秒后被厂商管家改回去」。
+/// 守不住的节点当不了旋钮: 施加臂跑到一半参数就没了, 量到的不是那组参数。
 const EFFECT_OK: [&str; 1] = ["live"];
 /// 部分节点当前值已经是探测值, 无法做差异写测试 —— 可写 + 有合法取值表即可进,
 /// 每轮还有 snap_at_run.txt 复核实际生效, 所以不会放过假生效。
@@ -164,6 +167,10 @@ pub fn denied(path: &str) -> bool {
 }
 
 /// 可写 + (生效测试通过 或 这台机器上没有可供差异测试的第二个值)。
+///
+/// 差异写测试分两步看: 写进去 1 秒后回读 (写得进吗), 再等 10 秒回读 (守得住吗)。
+/// 守不住的报 `contested`, 不进白名单 —— 红魔的厂商温控/性能管家会在游戏过程中主动压
+/// `scaling_max_freq` 与 `kgsl.max_pwrlevel`, 只看 1 秒回读会把它们误判成可用。
 ///
 /// `probe_sysparam.sh` 对每个 sysfs 候选都会做差异写测试, 但有些节点在当前设备状态下
 /// 找不到合法的第二个值可试 (例如当前值已经是唯一能写的那个), 这时 `.effect` 缺失。
@@ -1030,6 +1037,16 @@ thermal.cpu-1-0=42000
     }
 
     /// 温控保护相关的东西, 哪怕探测报可写可生效也不准进白名单。
+    /// 厂商管家会在十几秒后把值改回去 —— 那种节点 (probe 报 contested) 不能当旋钮。
+    #[test]
+    fn contested_nodes_stay_out_of_the_whitelist() {
+        let contested = wl_of("cpu.policy0.scaling_max_freq.effect=contested(wrote=1000000 readback_1s=1000000 readback_10s=2000000)\n");
+        assert!(!has(&contested, "cpu.policy0.scaling_max_freq"));
+        // live 的照常进来 (PROBE 里 scaling_max_freq 没有 .effect, 属于未做差异测试那一档)
+        let live = wl_of("cpu.policy0.scaling_max_freq.effect=live\n");
+        assert!(has(&live, "cpu.policy0.scaling_max_freq"));
+    }
+
     #[test]
     fn thermal_nodes_can_never_enter() {
         let wl = wl_of("gpu.thermal_pwrlevel.writable=yes\ngpu.thermal_pwrlevel.effect=live\n");

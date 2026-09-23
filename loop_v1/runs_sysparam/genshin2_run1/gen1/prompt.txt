@@ -1,0 +1,27 @@
+# 设备与负载
+红魔 NX809J (骁龙 canoe / Adreno 840v2, Android 16, 已 root)。
+负载: 原神大世界定点匀速转视角 36 秒, 游戏被厂商限帧器钉在 30fps。
+
+# 判定口径 (已冻结, 你改不了)
+看三样: frame_p95 (帧时 95 分位, 越小越好)、fps_mean (越大越好)、
+power_w_mean (整机功耗, 越小越好)。每组参数跑 A/B 交替多轮, 精确置换检验。
+任一指标显著改善且无任何指标显著变差 = 保留, 否则淘汰。
+**目标不是单纯省电** —— 把帧时压下去同样算赢。
+
+# 可改参数白名单 (只能用这些)
+- bus.DDR.boost_freq (当前 547000) 可选: 547000 .. 5333000 (共 11 档: 547000, 1353000, 1555000, ...)
+- bus.LLCC.boost_freq (当前 282000) 可选: 282000 .. 1350000 (共 9 档: 282000, 350000, 533000, ...)
+- cpu.policy0.scaling_governor (当前 walt) 可选: walt, conservative, powersave, performance, schedutil
+- cpu.policy0.scaling_max_freq (当前 1785600) 可选: 384000 .. 3628800 (共 28 档: 384000, 537600, 691200, ...)
+- cpu.policy0.scaling_min_freq (当前 787200) 可选: 384000 .. 3628800 (共 28 档: 384000, 537600, 691200, ...)
+- cpu.policy6.scaling_governor (当前 walt) 可选: walt, conservative, powersave, performance, schedutil
+- cpu.policy6.scaling_max_freq (当前 1497600) 可选: 768000 .. 4396800 (共 27 档: 768000, 883200, 1017600, ...)
+- cpu.policy6.scaling_min_freq (当前 883200) 可选: 768000 .. 4396800 (共 27 档: 768000, 883200, 1017600, ...)
+- gpu.min_pwrlevel (当前 17) 可选: 0 .. 17 (共 18 档: 0, 1, 2, ...)
+- setting.system.refresh_rate_mode (当前 0) 可选: 0, 3, 4
+
+# 历史
+这是第一代, 还没有任何实测结果。
+已知线索: 之前手工验证过把 DDR 与 LLCC 的 boost_freq 钉到硬件上限, frame_p95 改善 1.61% (p=0.0079)。说明这台机器上访存下限确实吃紧。
+
+# 现在给我 3 组候选, 只输出 JSON 数组。
