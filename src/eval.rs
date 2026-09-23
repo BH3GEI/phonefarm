@@ -153,7 +153,12 @@ pub fn run_eval(args: &[String]) -> i32 {
         .out
         .clone()
         .unwrap_or_else(|| format!("eval_evidence/{}", req["candidate_id"].as_str().unwrap_or("x")));
-    let serial = a.serial.clone();
+    // serial: CLI --serial 优先, 否则请求体里的 (game_opt_loop 的驱动把 --serial
+    // 放进请求体而不是命令行)
+    let serial = a
+        .serial
+        .clone()
+        .or_else(|| req["serial"].as_str().map(String::from));
     let report = match kind {
         "shader" => return eval_shader_v2(&req, &a),
         "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence)),
@@ -374,6 +379,19 @@ fn adb_ok(out: &str) -> bool {
     out.ends_with("#adb_exit=0")
 }
 
+/// 调用方视角的路径解析: 绝对/相对 cwd 先试, 再试相对仓库根。
+fn resolve_path(p: &str) -> Option<PathBuf> {
+    let as_given = Path::new(p);
+    if as_given.exists() {
+        return Some(as_given.to_path_buf());
+    }
+    let under_root = repo_root().join(p);
+    if under_root.exists() {
+        return Some(under_root);
+    }
+    None
+}
+
 fn adb_path() -> String {
     device::locate_adb().unwrap_or_else(|| "adb".into())
 }
@@ -423,8 +441,27 @@ fn run_with_timeout(cmd: &mut Command, timeout: u64) -> String {
     format!("{}#adb_exit={code}", String::from_utf8_lossy(&out))
 }
 
-/// 找到 phonefarm 仓库根 (含 loop_v1/tools 的目录): 先从 cwd 向上找, 再退回编译期路径。
+/// 找到 phonefarm 仓库根 (含 loop_v1/tools 的目录)。
+/// 顺序: PF_REPO_ROOT > 二进制所在目录向上找 (装在仓库根的 ./phonefarm 一击即中)
+/// > cwd 向上找 > 编译期路径 (本机开发布局兜底)。eval 常被 game_opt_loop 以
+/// 相对路径 ``../phonefarm/phonefarm`` 调起, cwd 在别人家, 所以二进制位置最可靠。
 fn repo_root() -> PathBuf {
+    if let Ok(r) = std::env::var("PF_REPO_ROOT") {
+        if !r.is_empty() {
+            return PathBuf::from(r);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+        for _ in 0..8 {
+            if cur.join("loop_v1/tools").is_dir() {
+                return cur;
+            }
+            if !cur.pop() {
+                break;
+            }
+        }
+    }
     let mut cur = std::env::current_dir().unwrap_or_default();
     for _ in 0..6 {
         if cur.join("loop_v1/tools").is_dir() {
@@ -438,21 +475,21 @@ fn repo_root() -> PathBuf {
 }
 
 const DEV_TMP: &str = "/data/local/tmp";
-const DEV_SCRIPTS: [&str; 5] = [
+const DEV_SCRIPTS: [&str; 6] = [
     "device_snapshot.sh",
     "ftrace_capture.sh",
     "knob_sysparam.sh",
     "probe_sysparam.sh",
     "sample_env.sh",
+    "charge_suspend.sh",
 ];
 
 fn push_tools(serial: &str) -> Result<(), String> {
     let root = repo_root();
     for f in DEV_SCRIPTS {
-        let p = root.join("loop_v1").join(if f == "device_snapshot.sh" || f == "ftrace_capture.sh" {
-            PathBuf::from("tools").join(f)
-        } else {
-            PathBuf::from("auto").join(f)
+        let p = root.join("loop_v1").join(match f {
+            "device_snapshot.sh" | "ftrace_capture.sh" => PathBuf::from("tools").join(f),
+            _ => PathBuf::from("auto").join(f),
         });
         if !p.exists() {
             return Err(format!("设备端脚本不在: {}", p.display()));
@@ -753,6 +790,23 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     }
     push_tools(serial)?;
 
+    // 停充尝试: 请求要求且节点没指定时由接收端自己探 (charge_suspend.sh 内置节点表)。
+    // 失败不致命 —— 拿不到放电态就只是功耗不进判定, 帧时帧率照常测。
+    let want_suspend = req["conditions"]["charging_suspend"]["enabled"].as_bool().unwrap_or(false);
+    let mut suspended_via: Option<String> = None;
+    if want_suspend {
+        let out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
+        std::fs::write(evidence.join("charge_suspend.log"), &out).map_err(|e| e.to_string())?;
+        if adb_ok(&out) && out.contains("CHARGE_SUSPENDED") {
+            // 脚本自己回显用的哪个节点; 原样记进报告
+            suspended_via = out
+                .lines()
+                .find(|l| l.contains("node="))
+                .map(|l| l.trim().to_string())
+                .or_else(|| Some("/sys/class/qcom-battery/charging_enabled".into()));
+        }
+    }
+
     let plan_local = evidence.join("plan.txt");
     let push = adb(serial, &["push", &plan_local.to_string_lossy(), &format!("{DEV_TMP}/loop_v1_sysparam.plan")], 60);
     if !push.ends_with("#adb_exit=0") {
@@ -766,16 +820,22 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     // ── ABBA 交替跑测 ──
     let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(1).max(1) as u32;
     let seconds = req["workload"]["seconds"].as_i64().unwrap_or(30).max(1) as u64;
+    // workload 脚本: 请求给的是调用方视角的路径 (game_opt_loop 用 "../phonefarm/..."),
+    // 先按原样 (cwd 相对/绝对) 找, 找不到再按仓库根拼
     let wl_file = req["workload"]["script"]
         .as_str()
         .map(String::from)
         .unwrap_or_else(|| "loop_v1/scripts/workload_spin_touch_v1.json".into());
     let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen");
-    let workload_path = repo_root().join(&wl_file);
-    if !workload_path.exists() {
-        report["verdict"]["reason"] = json!(format!("负载脚本不在: {}", workload_path.display()));
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
+    let workload_path = match resolve_path(&wl_file) {
+        Some(p) => p,
+        None => {
+            report["verdict"]["reason"] = json!(format!(
+                "负载脚本不在: {wl_file} (按 cwd 与仓库根都找不到)"
+            ));
+            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+        }
+    };
 
     const BAD_APPLY_TOKENS: [&str; 4] = [
         "KNOB_FAIL",
@@ -853,6 +913,13 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     }
 
     // ── 还原 + 快照核对 ──
+    if suspended_via.is_some() {
+        let cr = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
+        std::fs::write(evidence.join("charge_restore.log"), &cr).map_err(|e| e.to_string())?;
+        if !adb_ok(&cr) {
+            restore_fail = Some(restore_fail.clone().unwrap_or_else(|| "停充还原失败".into()));
+        }
+    }
     let restore_log = restore(serial);
     if restore_log.contains("KNOB_RESTORE_FAIL") && restore_fail.is_none() {
         restore_fail = Some(restore_log);
@@ -877,12 +944,18 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     std::fs::write(evidence.join("apply_log.txt"), apply_logs.join("\n---\n")).ok();
 
     // ── 判定 ──
-    if let Some(reason) = abort_reason.or_else(|| restore_fail.map(|r| format!("旋钮还原失败: {r}"))) {
+    if let Some(reason) = abort_reason.clone().or_else(|| restore_fail.clone().map(|r| format!("旋钮还原失败: {r}"))) {
+        if suspended_via.is_some() {
+            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
+        }
         report["verdict"]["reason"] = json!(reason);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
     if !snapshot_identical {
         report["verdict"]["reason"] = json!("轮末设备快照与轮前不一致, 留痕");
+        if suspended_via.is_some() {
+            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
+        }
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
@@ -1019,7 +1092,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
         "battery_current_now_ua": env["current_now_ua_mean"].as_f64().map(|x| x as i64),
         "battery_capacity_pct": env["battery_capacity_pct"].as_str().and_then(|s| s.parse::<i64>().ok()),
         "on_battery": env["on_battery"],
-        "charging_suspended_via": Value::Null,
+        "charging_suspended_via": suspended_via.clone(),
     });
 
     report["status"] = json!(if keep { "PASS" } else { "REJECT" });
@@ -1108,11 +1181,17 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     // 测量与 sysparam 同一套 ABBA (负载必须触控版)
     let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(1).max(1) as u32;
     let seconds = req["workload"]["seconds"].as_i64().unwrap_or(30).max(1) as u64;
-    let workload_path = repo_root().join(
-        req["workload"]["script"]
-            .as_str()
-            .unwrap_or("loop_v1/scripts/workload_spin_touch_v1.json"),
-    );
+    let wl_file = req["workload"]["script"]
+        .as_str()
+        .unwrap_or("loop_v1/scripts/workload_spin_touch_v1.json");
+    let workload_path = match resolve_path(wl_file) {
+        Some(p) => p,
+        None => {
+            report["verdict"]["reason"] =
+                json!(format!("负载脚本不在: {wl_file} (按 cwd 与仓库根都找不到)"));
+            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+        }
+    };
     let mut knob_runs: Vec<Value> = Vec::new();
     let mut ctrl_runs: Vec<Value> = Vec::new();
     let mut abort_reason: Option<String> = None;
@@ -1433,5 +1512,37 @@ bus.DDR.boost_freq.effect=live\n";
         let v = to_serde(&p);
         assert_eq!(v["x"], json!(1.5));
         assert_eq!(v["inf"], Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    /// game_opt_loop 的 workload.script 是**调用方视角**的相对路径
+    /// ("../phonefarm/knobs/gray/workload_spin_touch_v1.json"): 在 game_opt_loop
+    /// 的 cwd 下按原样就要找得到。
+    #[test]
+    fn resolve_path_tries_cwd_then_repo_root() {
+        let repo = repo_root();
+        assert!(resolve_path("loop_v1/tools/run_once.sh").is_some());
+        let odd = repo.join("nonexistent_zzz.bin");
+        assert!(resolve_path(odd.to_string_lossy().as_ref()).is_none());
+        // 绝对路径原样
+        assert_eq!(
+            resolve_path(&repo.join("loop_v1").to_string_lossy()),
+            Some(repo.join("loop_v1"))
+        );
+    }
+
+    /// serial 的取值顺序: CLI --serial 压过请求体。
+    #[test]
+    fn serial_resolution_prefers_cli() {
+        let req = json!({"serial": "REQ_SERIAL", "candidate_id": "c"});
+        let cli: Option<String> = Some("CLI_SERIAL".into());
+        let serial = cli.clone().or_else(|| req["serial"].as_str().map(String::from));
+        assert_eq!(serial.as_deref(), Some("CLI_SERIAL"));
+        let serial = None::<String>.or_else(|| req["serial"].as_str().map(String::from));
+        assert_eq!(serial.as_deref(), Some("REQ_SERIAL"));
     }
 }
