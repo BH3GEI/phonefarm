@@ -63,6 +63,15 @@ pub struct EvalRequest {
     /// 哪怕候选确实比上一代冠军便宜一半。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incumbent_latency_ms: Option<f32>,
+    /// 画质真值的来源: 一张 PNG, 或一整个装着真机截帧的目录。
+    ///
+    /// 缺省 (None) 时退回 runner 内置的程序化图案 —— 那只是没有真实帧时的
+    /// 确定性替代品, 高频细节远少于真实游戏画面, 量出来的绝对 dB 偏高约 11 dB
+    /// (2026-09-22 实测同一算子: 程序化 42.826 dB vs 真机截帧 31.333 dB)。
+    ///
+    /// 命令行 `--reference` 优先于本字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_reference: Option<String>,
     pub protocol: EvalProtocol,
 }
 
@@ -109,6 +118,48 @@ pub struct EvalReport {
     /// 所以加它不会破坏已有的 eval_report 消费者。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<Artifacts>,
+    /// `psnr_db` 是对着哪张 (哪组) 参考图量出来的。
+    ///
+    /// 绝对 dB 不可跨参考图比较 (SPEC §4.1), 所以报告里不写清楚真值来源,
+    /// 那个数字就没法跟别的报告对齐 —— 拿程序化图案的 38.7 dB 去卡真机截帧的
+    /// 31.3 dB, 会把一个比基线好 2.19 dB 的算子判成 POOR_QUALITY。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_reference: Option<QualityReference>,
+}
+
+/// 画质真值的出处。跟着报告走, 让 dB 可回溯。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QualityReference {
+    /// `real_frames` = 真机截帧; `procedural` = runner 内置程序化图案。
+    pub kind: String,
+    /// 本地来源路径 (单张 PNG 或整个目录)。程序化图案时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// 参与平均的帧数。程序化图案记 1。
+    pub frames: u32,
+    /// 逐帧文件名 (不含目录), 按使用顺序。换了帧集一眼看得出来。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_files: Vec<String>,
+    /// 逐帧 PSNR (候选臂), 与 `frame_files` 同序。均值即 `metrics.psnr_db`。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_psnr_db: Vec<f64>,
+    /// 逐帧 PSNR (基线臂), 与 `frame_files` 同序。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub baseline_psnr_db: Vec<f64>,
+}
+
+impl QualityReference {
+    /// runner 内置程序化图案 —— 没有真实帧时的退路。
+    pub fn procedural() -> Self {
+        Self {
+            kind: "procedural".into(),
+            source: None,
+            frames: 1,
+            frame_files: Vec::new(),
+            candidate_psnr_db: Vec::new(),
+            baseline_psnr_db: Vec::new(),
+        }
+    }
 }
 
 /// 校验 eval_request 的必填项与取值范围。
@@ -691,7 +742,8 @@ pub struct GpuOpArgs {
 
 const USAGE: &str = "用法: phonefarm gpu-op --request <eval_request.json> [--serial S] [--json]\n\
 \x20                    [--runner <本地 runner 路径>] [--power-rail usb|battery]\n\
-\x20                    [--carrier headless|refbench] [--out 目录] [--reference <参考帧.png>]\n\
+\x20                    [--carrier headless|refbench] [--out 目录]\n\
+\x20                    [--reference <参考帧.png | 参考帧目录>]  画质真值; 目录则整组取均值\n\
 \x20                    [--intensity N] [--frames N] [--cool-timeout-s N] [--gpu-level N]\n\
 \x20                    [--no-quality-pass]  refbench 载体下跳过画质补测 (画质硬底线随之失守)\n\
 \x20      phonefarm gpu-op --serial S --unlock        回滚遗留的锁频态\n\
@@ -997,33 +1049,92 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     }
 
     // ---- 参考帧: 有就转成裸 RGBA8 推上去, 没有就用 runner 内置的程序化图案 ----
-    let mut remote_reference: Option<String> = None;
-    if let Some(png) = a.reference.as_ref() {
-        let raw = std::path::Path::new(&out_dir).join("reference.rgba");
-        match prepare_reference(png, 1920, 1080, &raw) {
-            Ok((w, h)) => {
-                let remote = format!("{REMOTE_DIR}/reference.rgba");
-                if !phone.push_file(&raw.to_string_lossy(), &remote) {
-                    eprintln!("推送参考帧失败");
-                    cleanup(&phone);
-                    return 2;
-                }
-                progress(&format!(
-                    "画质真值: {png} ({w}x{h} 中心裁剪到 1920x1080)"
-                ));
-                remote_reference = Some(remote);
-            }
+    //
+    // 来源优先级: 命令行 --reference > eval_request.quality_reference > 程序化图案。
+    // 命令行在前是因为它是人手动指定的一次性覆盖; 契约字段是上游的常设配置。
+    let ref_source = a
+        .reference
+        .clone()
+        .or_else(|| req.quality_reference.clone());
+    let mut remote_references: Vec<String> = Vec::new();
+    let mut quality_reference = QualityReference::procedural();
+    if let Some(src) = ref_source.as_ref() {
+        let mut frames = match resolve_reference_frames(src) {
+            Ok(f) => f,
             Err(e) => {
                 eprintln!("参考帧不可用: {e}");
                 cleanup(&phone);
                 return 2;
             }
+        };
+        // 只准备**会被读到**的那几张。每张要解码、裁剪、写 8.3 MB 裸 RGBA
+        // 再 adb push 上去; 推一批没人读的帧既慢又平白多出一堆失败面 ——
+        // 一次推送失败会为着没人看的帧把整轮作废。
+        //   headless: 画质走主测内联, 只读第一张;
+        //   refbench + 关了画质补测: 一张都不读 (refbench 自己不碰参考帧)。
+        let wanted = if a.carrier == Carrier::Headless {
+            1
+        } else if quality_pass {
+            frames.len()
+        } else {
+            0
+        };
+        if wanted < frames.len() {
+            progress(&format!(
+                "参考帧 {} 张, 本次载体只会读到 {} 张, 其余不推",
+                frames.len(),
+                wanted
+            ));
+            frames.truncate(wanted);
         }
+        let mut names = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            let raw = std::path::Path::new(&out_dir).join(format!("reference_{i:02}.rgba"));
+            let (w, h) = match prepare_reference(&frame.to_string_lossy(), 1920, 1080, &raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("参考帧不可用: {e}");
+                    cleanup(&phone);
+                    return 2;
+                }
+            };
+            let remote = format!("{REMOTE_DIR}/reference_{i:02}.rgba");
+            if !phone.push_file(&raw.to_string_lossy(), &remote) {
+                eprintln!("推送参考帧 {} 失败", frame.display());
+                cleanup(&phone);
+                return 2;
+            }
+            progress(&format!(
+                "画质真值 {}/{}: {} ({w}x{h} 中心裁剪到 1920x1080)",
+                i + 1,
+                frames.len(),
+                frame.display()
+            ));
+            names.push(
+                frame
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| frame.display().to_string()),
+            );
+            remote_references.push(remote);
+        }
+        quality_reference = QualityReference {
+            kind: "real_frames".into(),
+            source: Some(src.clone()),
+            frames: names.len() as u32,
+            frame_files: names,
+            candidate_psnr_db: Vec::new(),
+            baseline_psnr_db: Vec::new(),
+        };
     } else {
         progress(
-            "画质真值: runner 内置程序化图案 (非真实游戏帧;              绝对 PSNR 不可与换了参考图之后的数字比较)",
+            "画质真值: runner 内置程序化图案 (非真实游戏帧; 绝对 PSNR 不可与换了参考图之后的数字比较)",
         );
     }
+    // headless 主测循环内联量画质, 只用帧集的第一张: 那条循环跑的是 A/B/A/B,
+    // 每张参考帧都跑一遍等于把整轮真机时间乘以帧数, 而该载体的主指标是时延,
+    // 不是画质。帧集平均只在画质补测里做 —— 那一步本来就只跑两次。
+    let inline_reference = remote_references.first().cloned();
 
     // ---- 回滚上次异常退出遗留的锁态 ----
     let recovered = hwcond::recover_stale_lock("gpu-op", &phone, &state_path);
@@ -1142,7 +1253,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             continue;
         }
 
-        let (out, power) = run_one(&phone, *arm, &req, a.power_rail, remote_reference.as_deref());
+        let (out, power) = run_one(&phone, *arm, &req, a.power_rail, inline_reference.as_deref());
         let restored = lock.restore(&phone);
         if !restored {
             fatal = Some("锁频态回读与锁前不一致, 设备状态未能 100% 还原".into());
@@ -1205,7 +1316,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     // 放在 A/B 之后、cleanup 之前: 主测期间设备要么在等冷要么在锁频跑分,
     // 插进去会把热状态搅乱; 跑完了再补则完全不影响已经落袋的帧时与瓦数。
     if quality_pass && fatal.is_none() {
-        match run_quality_pass(&phone, &runner, &req, remote_reference.as_deref()) {
+        match run_quality_pass(&phone, &runner, &req, &remote_references) {
             Ok((qb, qc)) => {
                 if let Some(v) = qb.psnr_db { psnr_a.push(v); }
                 if let Some(v) = qb.hud_ghost_db { ghost_a.push(v); }
@@ -1213,8 +1324,11 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
                 if let Some(v) = qc.psnr_db { psnr_b.push(v); }
                 if let Some(v) = qc.hud_ghost_db { ghost_b.push(v); }
                 if let Some(v) = qc.stretch_pct { stretch_b.push(v); }
+                quality_reference.baseline_psnr_db = qb.psnr_per_frame.clone();
+                quality_reference.candidate_psnr_db = qc.psnr_per_frame.clone();
                 progress(&format!(
-                    "画质补测: 基线 {} | 候选 {}",
+                    "画质补测 ({} 张参考帧取均值): 基线 {} | 候选 {}",
+                    quality_reference.frames.max(1),
                     qb.psnr_db.map(|v| format!("{v:.3} dB")).unwrap_or_else(|| "未测到".into()),
                     qc.psnr_db.map(|v| format!("{v:.3} dB")).unwrap_or_else(|| "未测到".into()),
                 ));
@@ -1338,6 +1452,13 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         } else {
             None
         },
+        // 一个 dB 都没量到就别报真值出处: 参考帧摆在那儿没被用过
+        // (画质补测关了 / 跑崩了), 报出来会让人以为那些 null 是对着它得出的。
+        quality_reference: if psnr_a.is_empty() && psnr_b.is_empty() {
+            None
+        } else {
+            Some(quality_reference)
+        },
     };
 
     if a.as_json {
@@ -1350,6 +1471,90 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         Status::Pass => 0,
         _ => 1,
     }
+}
+
+/// 一次画质测量最多用多少张参考帧。
+///
+/// 每张都要转成 1920x1080 裸 RGBA (8.3 MB) 推上设备, 再让两个臂各跑一遍 ——
+/// 帧数直接乘在推送量与 runner 调用次数上。上限只是个安全阀:
+/// 画质是确定性量, 十几张不同内容的真实帧已经足够把"这个算子在真实高频细节上
+/// 表现如何"这件事量稳, 再多是线性烧真机时间。
+const MAX_REFERENCE_FRAMES: usize = 32;
+
+/// 解析 `--reference` / `quality_reference` 指向的东西, 得到一组参考帧。
+///
+/// 允许两种写法:
+///   - 一张图片 → 单帧帧集 (旧行为, 原样兼容);
+///   - 一个目录 → 目录里的图片**全部**参与, 按文件名排序 (排序而非目录序:
+///     目录序随文件系统变, 同一组帧换台机器跑就不是同一个顺序了, 逐帧 PSNR
+///     也就对不上号)。
+///
+/// 为什么要支持一组而不是一张: 单张真机截帧的 PSNR 强烈依赖那一帧拍到了什么 ——
+/// 对着天空拍的一帧几乎没有高频细节, 任何算子都能拿高分。一组覆盖不同内容的帧
+/// 取平均, 量的才是算子本身。
+pub fn resolve_reference_frames(path: &str) -> Result<Vec<std::path::PathBuf>, String> {
+    let p = std::path::Path::new(path);
+    if p.is_file() {
+        return Ok(vec![p.to_path_buf()]);
+    }
+    if !p.is_dir() {
+        return Err(format!("参考帧来源 {path} 既不是文件也不是目录"));
+    }
+    let is_image = |p: &std::path::Path| {
+        matches!(
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .as_deref(),
+            Some("png" | "jpg" | "jpeg")
+        )
+    };
+    let mut frames: Vec<std::path::PathBuf> = std::fs::read_dir(p)
+        .map_err(|e| format!("读不了参考帧目录 {path}: {e}"))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && is_image(p))
+        .collect();
+    if frames.is_empty() {
+        return Err(format!("参考帧目录 {path} 里没有 png/jpg 图片"));
+    }
+    frames.sort();
+    if frames.len() > MAX_REFERENCE_FRAMES {
+        let n = frames.len();
+        progress(&format!(
+            "参考帧目录有 {n} 张, 超过上限 {MAX_REFERENCE_FRAMES}, 按等间隔抽取"
+        ));
+        frames = even_subset(frames, MAX_REFERENCE_FRAMES);
+    }
+    Ok(frames)
+}
+
+/// 从有序帧列表里等间隔抽 `k` 张 (含首尾)。
+///
+/// 为什么不是直接取前 k 张: `capture` 的输出是按时间顺序连续编号的
+/// (`frame_00000.png`, `frame_00001.png`, ...), 取前 32 张等于把整组帧
+/// 压缩到巡航开头那一小段 —— 很可能全是同一个视角同一片场景。
+/// 那正好废掉了用帧集的理由: 要的是覆盖不同内容, 不是覆盖同一处的 32 个瞬间。
+pub fn even_subset<T>(items: Vec<T>, k: usize) -> Vec<T> {
+    let n = items.len();
+    if k == 0 {
+        return Vec::new();
+    }
+    if n <= k {
+        return items;
+    }
+    if k == 1 {
+        return items.into_iter().take(1).collect();
+    }
+    // i 从 0 到 k-1 均匀映射到 0..=n-1, 四舍五入。首尾一定取到。
+    let keep: std::collections::BTreeSet<usize> = (0..k)
+        .map(|i| (i * (n - 1) + (k - 1) / 2) / (k - 1))
+        .collect();
+    items
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| keep.contains(i))
+        .map(|(_, v)| v)
+        .collect()
 }
 
 /// 把参考帧转成 runner 吃的裸 RGBA8, 并推到设备。
@@ -1421,34 +1626,71 @@ fn deploy(
 /// 混进主测样本会污染 Welch 检验。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QualitySample {
+    /// 帧集上的均值 (单帧时即那一帧)。
     pub psnr_db: Option<f64>,
     pub hud_ghost_db: Option<f64>,
     pub stretch_pct: Option<f64>,
+    /// 逐帧 PSNR, 与参考帧**逐位对齐** (量不到的那张记 `NaN`, 序列化成 null)。
+    ///
+    /// 均值塌掉的信息在这里留着 —— 一组帧里某一张特别差, 均值看不出来。
+    /// 对齐必须靠留空位保持: 把量不到的那张直接删掉的话, 下标就跟
+    /// `frame_files` 错开了, 报告里"第 3 张最差"会指到另一张图上。
+    pub psnr_per_frame: Vec<f64>,
+}
+
+/// 把若干帧的逐帧读数合成一个样本。
+///
+/// PSNR 取**逐帧 dB 的算术平均**, 不是先平均 MSE 再转 dB: 前者是视频画质评测的
+/// 通行口径 (每帧一个分数再平均), 后者会让一张特别糟的帧几乎吃掉整组分数。
+/// 这里要回答的是"这个算子在一组真实画面上平均表现如何", 用前者。
+///
+/// 任何一项在所有帧上都没量到, 就如实留 `None` —— 不拿 0 顶上。
+pub fn fold_quality_frames(per_frame: &[QualitySample]) -> QualitySample {
+    let mean_of = |pick: fn(&QualitySample) -> Option<f64>| -> Option<f64> {
+        let v: Vec<f64> = per_frame.iter().filter_map(pick).collect();
+        if v.is_empty() {
+            None
+        } else {
+            Some(gpustat::mean(&v))
+        }
+    };
+    QualitySample {
+        psnr_db: mean_of(|s| s.psnr_db),
+        hud_ghost_db: mean_of(|s| s.hud_ghost_db),
+        stretch_pct: mean_of(|s| s.stretch_pct),
+        // NaN 占位而不是删掉: 下标必须跟 frame_files 对得上。
+        psnr_per_frame: per_frame
+            .iter()
+            .map(|s| s.psnr_db.unwrap_or(f64::NAN))
+            .collect(),
+    }
 }
 
 /// 补测迭代次数。画质是确定性的, 1 次就够;
 /// 取 3 次是为了让 runner 自己的 warmup/资源初始化走完再出数。
 const QUALITY_ITERS: u32 = 3;
 
-/// refbench 载体下的画质补测: headless runner 各跑一次基线与候选。
+/// refbench 载体下的画质补测: headless runner 对**每一张**参考帧各跑一次基线与候选。
 ///
-/// 两臂必须用**同一张**参考帧, 否则 dB 不可比 (实测: 同一算子在程序化图案上
+/// 两臂必须用**同一组**参考帧, 否则 dB 不可比 (实测: 同一算子在程序化图案上
 /// 42.83 dB, 换成真机截帧只剩 31.33 dB)。上游的画质地板也因此取本次基线臂的
 /// 实测值, 而不是契约里搬来的常数。
+///
+/// `references` 为空 = 没有真实帧, 退回 runner 内置的程序化图案跑一次。
+/// 那是退路不是缺省选择: 合成图案的高频细节远少于真实游戏画面, 绝对 dB 偏高。
 fn run_quality_pass(
     phone: &crate::device::Device,
     runner_local: &str,
     req: &EvalRequest,
-    reference: Option<&str>,
+    references: &[String],
 ) -> Result<(QualitySample, QualitySample), String> {
     deploy(phone, runner_local, req)?;
     // refbench 主测会把 REMOTE_SPV 下的候选换掉, 但 deploy 推的是 REMOTE_DIR
     // 下另一份, 两者互不影响。
-    let ref_arg = reference
-        .map(|r| format!(" --reference {r}"))
-        .unwrap_or_default();
-
-    let one = |spv: &str| -> Result<QualitySample, String> {
+    let one = |spv: &str, reference: Option<&String>| -> Result<QualitySample, String> {
+        let ref_arg = reference
+            .map(|r| format!(" --reference {r}"))
+            .unwrap_or_default();
         let cmd = format!(
             "cd {REMOTE_DIR} && ./vkop_runner --shader {spv} --track {} --iterations {QUALITY_ITERS}{ref_arg} --json 2>&1",
             req.track
@@ -1462,13 +1704,92 @@ fn run_quality_pass(
             psnr_db: r.psnr_db,
             hud_ghost_db: r.hud_ghost_db,
             stretch_pct: r.stretch_pct,
+            psnr_per_frame: r.psnr_db.into_iter().collect(),
         })
     };
 
+    // 没有真实帧时 `references` 为空, 这里退化成"跑一次, 不带 --reference"。
+    let slots: Vec<Option<&String>> = if references.is_empty() {
+        vec![None]
+    } else {
+        references.iter().map(Some).collect()
+    };
+
+    // 一张跑挂不作废整臂: 16 张里第 9 张碰上一次 adb 抖动, 不该把另外 15 张
+    // 真跑出来的 dB 一起扔掉 —— 那跟"补测失败不作废主测"是同一条道理。
+    // 挂掉的那张留 NaN 占位 (下标仍与 frame_files 对齐), 全挂才算这臂失败。
+    let arm = |spv: &str| -> Result<QualitySample, String> {
+        let mut per_frame = Vec::with_capacity(slots.len());
+        let mut failures: Vec<String> = Vec::new();
+        for (i, r) in slots.iter().enumerate() {
+            match one(spv, *r) {
+                Ok(s) => per_frame.push(s),
+                Err(e) => {
+                    // 报错带上帧序号: 一组帧里坏了哪一张, 日志里要看得出来。
+                    failures.push(format!("第 {} 张: {e}", i + 1));
+                    per_frame.push(QualitySample::default());
+                }
+            }
+        }
+        if failures.len() == slots.len() {
+            return Err(failures.join("; "));
+        }
+        if !failures.is_empty() {
+            progress(&format!(
+                "{spv} 画质补测有 {}/{} 张没跑出来 (该几张留空, 不参与均值): {}",
+                failures.len(),
+                slots.len(),
+                failures.join("; ")
+            ));
+        }
+        Ok(fold_quality_frames(&per_frame))
+    };
+
     // 基线先跑: 它跑不起来说明工装坏了, 候选的数字也就没有参照。
-    let base = one("baseline.spv").map_err(|e| format!("基线臂 {e}"))?;
-    let cand = one("candidate.spv").map_err(|e| format!("候选臂 {e}"))?;
-    Ok((base, cand))
+    let base = arm("baseline.spv").map_err(|e| format!("基线臂 {e}"))?;
+    let cand = arm("candidate.spv").map_err(|e| format!("候选臂 {e}"))?;
+    Ok(align_arms(base, cand))
+}
+
+/// 两臂的均值必须来自**同一批**帧。
+///
+/// 一臂在第 9 张挂了而另一臂没挂时, 两个均值就落在不同的帧子集上 —— 那时候
+/// "候选比基线高 2 dB" 可能只是因为候选少算了一张高频最狠的帧。画质地板取的
+/// 就是基线臂均值, 这个偏差会直接变成误判。
+///
+/// 所以只保留两臂都量到的那些帧参与均值; 被剔掉的位置照旧留 NaN 占位,
+/// 逐帧数组仍与 `frame_files` 对齐。
+pub fn align_arms(base: QualitySample, cand: QualitySample) -> (QualitySample, QualitySample) {
+    let n = base.psnr_per_frame.len().min(cand.psnr_per_frame.len());
+    if n == 0 {
+        return (base, cand);
+    }
+    let both = |v: &[f64], i: usize| v.get(i).copied().unwrap_or(f64::NAN);
+    let keep: Vec<bool> = (0..n)
+        .map(|i| both(&base.psnr_per_frame, i).is_finite() && both(&cand.psnr_per_frame, i).is_finite())
+        .collect();
+    if keep.iter().all(|k| *k) {
+        return (base, cand);
+    }
+    let mask = |mut s: QualitySample| -> QualitySample {
+        s.psnr_per_frame = (0..n)
+            .map(|i| {
+                if keep[i] {
+                    both(&s.psnr_per_frame, i)
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect();
+        let kept: Vec<f64> = s.psnr_per_frame.iter().copied().filter(|v| v.is_finite()).collect();
+        s.psnr_db = if kept.is_empty() {
+            None
+        } else {
+            Some(gpustat::mean(&kept))
+        };
+        s
+    };
+    (mask(base), mask(cand))
 }
 
 /// 设备上不留任何残留。
@@ -1680,7 +2001,16 @@ fn render_text(
     }
     s.push('\n');
     if r.metrics.psnr_db.is_finite() {
-        s.push_str(&format!("  画质 {:.3} dB\n", r.metrics.psnr_db));
+        s.push_str(&format!("  画质 {:.3} dB", r.metrics.psnr_db));
+        // 绝对 dB 不可跨参考图比较, 所以这个数字旁边必须写清楚真值是什么。
+        match r.quality_reference.as_ref() {
+            Some(q) if q.kind == "real_frames" => s.push_str(&format!(
+                " (真机参考帧 x{}: {})\n",
+                q.frames,
+                q.source.as_deref().unwrap_or("?")
+            )),
+            _ => s.push_str(" (runner 内置程序化图案, 非真实游戏帧)\n"),
+        }
     }
     if r.metrics.power_watt.is_finite() {
         s.push_str(&format!("  整机功耗 {:.3} W\n", r.metrics.power_watt));
@@ -1774,6 +2104,189 @@ mod tests {
         assert_eq!(b.reference.as_deref(), Some("frame.png"));
     }
 
+    // ---------- 参考帧集 ----------
+
+    /// 单张图原样当成一帧的帧集 —— 旧调用方不受影响。
+    #[test]
+    fn a_single_file_reference_is_a_one_frame_set() {
+        let dir = scratch("one");
+        let png = dir.join("a.png");
+        write_png(&png, 2688, 1216);
+        let got = resolve_reference_frames(&png.to_string_lossy()).unwrap();
+        assert_eq!(got, vec![png]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 目录 = 一整组参考帧, 且**按文件名排序**。
+    ///
+    /// 排序不是洁癖: 目录序随文件系统走, 同一组帧换台机器跑就换了顺序,
+    /// 报告里的逐帧 PSNR 也就对不上是哪一张。
+    #[test]
+    fn a_directory_reference_takes_every_image_in_name_order() {
+        let dir = scratch("dirset");
+        for name in ["frame_02.png", "frame_00.png", "frame_01.png"] {
+            write_png(&dir.join(name), 1920, 1080);
+        }
+        // 非图片不参与
+        std::fs::write(dir.join("manifest.jsonl"), b"{}").unwrap();
+        let got = resolve_reference_frames(&dir.to_string_lossy()).unwrap();
+        let names: Vec<String> = got
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["frame_00.png", "frame_01.png", "frame_02.png"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空目录 / 不存在的路径都要当场说清楚, 不能悄悄退回程序化图案 ——
+    /// 那会让一份"用了真机参考帧"的报告其实量的是合成图案。
+    #[test]
+    fn an_empty_or_missing_reference_source_is_an_error() {
+        let dir = scratch("empty");
+        let err = resolve_reference_frames(&dir.to_string_lossy()).unwrap_err();
+        assert!(err.contains("没有 png/jpg"), "{err}");
+        assert!(resolve_reference_frames("/nonexistent/dir").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 超过上限时**等间隔**抽, 不是取前 N 张。
+    ///
+    /// capture 的输出按时间连续编号, 取前 32 张等于把整组帧压缩到巡航开头
+    /// 那一小段 —— 很可能全是同一个视角。那正好废掉了用帧集的理由。
+    /// (resolve 只看文件名不解码, 所以这里用 8x8 小图就够, 不必烧时间编 1080p。)
+    #[test]
+    fn an_oversized_reference_directory_is_sampled_evenly() {
+        let dir = scratch("cap");
+        let n = MAX_REFERENCE_FRAMES * 3;
+        for i in 0..n {
+            write_png(&dir.join(format!("f_{i:03}.png")), 8, 8);
+        }
+        let got = resolve_reference_frames(&dir.to_string_lossy()).unwrap();
+        assert_eq!(got.len(), MAX_REFERENCE_FRAMES);
+        let name = |p: &std::path::Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name(&got[0]), "f_000.png", "首张必须取到");
+        assert_eq!(
+            name(got.last().unwrap()),
+            format!("f_{:03}.png", n - 1),
+            "末张必须取到 —— 否则整组还是偏在前半段"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn even_subset_spreads_across_the_whole_list() {
+        assert_eq!(even_subset((0..10).collect(), 4), vec![0, 3, 6, 9]);
+        // 要的比有的多 / 刚好一样多: 原样返回。
+        assert_eq!(even_subset(vec![1, 2, 3], 5), vec![1, 2, 3]);
+        assert_eq!(even_subset(vec![1, 2, 3], 3), vec![1, 2, 3]);
+        assert_eq!(even_subset(vec![1, 2, 3], 1), vec![1]);
+        assert!(even_subset(vec![1, 2, 3], 0).is_empty());
+    }
+
+    /// 帧集的 PSNR 取逐帧 dB 的算术平均, 逐帧值一并留着 ——
+    /// 均值看不出"一组帧里某一张特别差"。
+    #[test]
+    fn a_frame_set_folds_into_the_mean_of_per_frame_db() {
+        let s = |psnr: Option<f64>| QualitySample {
+            psnr_db: psnr,
+            psnr_per_frame: psnr.into_iter().collect(),
+            ..Default::default()
+        };
+        let got = fold_quality_frames(&[s(Some(30.0)), s(Some(40.0)), s(Some(35.0))]);
+        assert!((got.psnr_db.unwrap() - 35.0).abs() < 1e-9);
+        assert_eq!(got.psnr_per_frame, vec![30.0, 40.0, 35.0]);
+
+        // 中间那张量不到时留 NaN 占位, 不塌缩 —— 否则下标跟 frame_files 错开,
+        // "第 3 张最差" 会指到另一张图上。
+        let holey = fold_quality_frames(&[s(Some(30.0)), s(None), s(Some(40.0))]);
+        assert_eq!(holey.psnr_per_frame.len(), 3);
+        assert!(holey.psnr_per_frame[1].is_nan());
+        assert!((holey.psnr_db.unwrap() - 35.0).abs() < 1e-9, "均值不该把 NaN 算进去");
+    }
+
+    /// 两臂的均值必须来自同一批帧。一臂在某张上挂了, 另一臂那张也要剔掉 ——
+    /// 否则"候选比基线高 2 dB"可能只是因为候选少算了一张高频最狠的帧,
+    /// 而画质地板取的正是基线臂均值。
+    #[test]
+    fn the_two_arms_average_over_the_same_frames() {
+        let s = |v: Vec<f64>| QualitySample {
+            psnr_db: {
+                let k: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+                if k.is_empty() { None } else { Some(gpustat::mean(&k)) }
+            },
+            psnr_per_frame: v,
+            ..Default::default()
+        };
+        // 基线三张都有, 候选第 2 张挂了。
+        let (b, c) = align_arms(
+            s(vec![29.0, 20.0, 29.4]),
+            s(vec![31.0, f64::NAN, 31.4]),
+        );
+        // 剔掉第 2 张之后, 基线均值不该再被那张 20 dB 拉低。
+        assert!((b.psnr_db.unwrap() - 29.2).abs() < 1e-9, "{:?}", b.psnr_db);
+        assert!((c.psnr_db.unwrap() - 31.2).abs() < 1e-9, "{:?}", c.psnr_db);
+        // 位置留着, 仍与 frame_files 对齐。
+        assert_eq!(b.psnr_per_frame.len(), 3);
+        assert!(b.psnr_per_frame[1].is_nan());
+
+        // 两臂都齐时原样不动。
+        let (b2, c2) = align_arms(s(vec![29.0, 29.4]), s(vec![31.0, 31.4]));
+        assert_eq!(b2.psnr_per_frame, vec![29.0, 29.4]);
+        assert!((c2.psnr_db.unwrap() - 31.2).abs() < 1e-9);
+    }
+
+    /// 一项都没量到就如实留空, 不拿 0 顶上 —— 「没量」和「0 dB」是两回事。
+    #[test]
+    fn a_frame_set_with_nothing_measured_stays_empty() {
+        let got = fold_quality_frames(&[QualitySample::default(), QualitySample::default()]);
+        assert_eq!(got.psnr_db, None);
+        assert_eq!(got.hud_ghost_db, None);
+        // 逐帧位置仍在 (与 frame_files 对齐), 只是每个都是 NaN → 序列化成 null。
+        assert_eq!(got.psnr_per_frame.len(), 2);
+        assert!(got.psnr_per_frame.iter().all(|v| v.is_nan()));
+    }
+
+    /// 报告必须写清楚 dB 是对着什么量的: 绝对 dB 不可跨参考图比较,
+    /// 不写来源的话 31.3 dB 和 38.7 dB 会被当成同一把尺子上的数。
+    #[test]
+    fn the_report_states_where_the_quality_truth_came_from() {
+        let mut r = a_report();
+        r.metrics.psnr_db = 31.333;
+        r.quality_reference = Some(QualityReference {
+            kind: "real_frames".into(),
+            source: Some("tasks/genshin_refframes".into()),
+            frames: 12,
+            frame_files: vec!["frame_00000.png".into()],
+            candidate_psnr_db: vec![31.0, 31.6],
+            baseline_psnr_db: vec![29.0, 29.3],
+        });
+        let text = render_text(&r, None, None);
+        assert!(text.contains("真机参考帧 x12"), "{text}");
+        assert!(text.contains("tasks/genshin_refframes"), "{text}");
+
+        r.quality_reference = Some(QualityReference::procedural());
+        let text = render_text(&r, None, None);
+        assert!(text.contains("程序化图案"), "{text}");
+
+        // 契约字段名不能改: 上游按名字解析来源。
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["quality_reference"]["kind"], "procedural");
+    }
+
+    /// 上游用契约字段指定参考帧, 不必改命令行。
+    #[test]
+    fn the_request_can_carry_the_quality_reference() {
+        let mut r = a_request();
+        assert!(r.quality_reference.is_none(), "缺省不带 = 退回程序化图案");
+        r.quality_reference = Some("tasks/genshin_refframes".into());
+        let round: EvalRequest =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(
+            round.quality_reference.as_deref(),
+            Some("tasks/genshin_refframes")
+        );
+    }
+
     // ---------- 契约 ----------
 
     fn a_request() -> EvalRequest {
@@ -1789,6 +2302,7 @@ mod tests {
             budget_ms: 1.5,
             quality_baseline_db: 37.286,
             incumbent_latency_ms: None,
+            quality_reference: None,
             protocol: EvalProtocol {
                 cool_c: 32.0,
                 replay_seconds: 60,
@@ -1796,6 +2310,26 @@ mod tests {
                 alternating: true,
                 p_threshold: 0.01,
             },
+        }
+    }
+
+    fn a_report() -> EvalReport {
+        EvalReport {
+            candidate_id: "gen2_llm1".into(),
+            status: Status::Pass,
+            metrics: Metrics {
+                operator_latency_ms: 0.477,
+                fps_p95_ms: Some(7.358),
+                power_watt: 6.507,
+                psnr_db: f32::NAN,
+            },
+            verdict: Verdict {
+                is_pareto_improvement: false,
+                p_value: 0.005,
+            },
+            source: "phonefarm".into(),
+            artifacts: None,
+            quality_reference: None,
         }
     }
 
@@ -1874,6 +2408,7 @@ mod tests {
             },
             source: "phonefarm".into(),
             artifacts: None,
+            quality_reference: None,
         };
         let v = serde_json::to_value(&rep).unwrap();
         assert_eq!(v["status"], "POOR_QUALITY");

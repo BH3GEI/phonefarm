@@ -24,7 +24,7 @@
 ```
 phonefarm gpu-op --request <eval_request.json> [--serial S] [--json]
                  [--runner <本地 runner 路径>] [--power-rail usb|battery]
-                 [--carrier headless|refbench] [--reference <参考帧.png>]
+                 [--carrier headless|refbench] [--reference <参考帧.png | 参考帧目录>]
                  [--intensity N] [--frames N]
                  [--out 目录] [--cool-timeout-s N] [--gpu-level N]
                  [--no-quality-pass]
@@ -92,7 +92,7 @@ phonefarm gpu-op --serial S --unlock      # 回滚上次异常退出遗留的锁
 
 ## 4.1 画质地板必须与参考图同源
 
-`--reference <帧.png>` 指定画质真值。**中心裁剪**到目标分辨率, 不缩放:
+`--reference <帧.png | 帧目录>` 指定画质真值。**中心裁剪**到目标分辨率, 不缩放:
 缩放本身就引入一次重采样, 算子再去"重建"这张已被重采样的图, 量出来的 PSNR
 里混进了缩放器的特性, 不再只是算子画质。源图小于目标时直接报错, 不做放大 ——
 放大出来的"真值"是假的。
@@ -111,6 +111,49 @@ phonefarm gpu-op --serial S --unlock      # 回滚上次异常退出遗留的锁
 用 A 臂的画质当地板是自洽的; 拿别处搬来的常数当地板则会得出荒谬结论 ——
 上面那张表里, 用程序化图的地板 38.666 去判真机截帧的 31.333, 会把一个
 比基线好 2.19 dB 的算子判成 POOR_QUALITY。
+
+### 一张不够: 参考帧集
+
+`--reference` 也可以指一个**目录**, 目录里的 png/jpg 全部参与, 按文件名排序
+(排序而非目录序: 目录序随文件系统走, 换台机器跑就换了顺序, 报告里的逐帧 PSNR
+对不上是哪一张)。上限 32 张。
+
+为什么不是一张: 单张真机截帧的 PSNR 强烈依赖那一帧**拍到了什么**。
+对着天空的一帧几乎没有高频细节, 任何算子都能拿高分; 对着草地灌木的一帧
+高频拉满, 同一个算子掉好几个 dB。一组覆盖不同内容的帧取平均, 量的才是算子本身。
+
+`psnr_db` = **逐帧 dB 的算术平均**, 不是先平均 MSE 再转 dB。前者是视频画质评测
+的通行口径 (每帧一个分数再平均); 后者会让一张特别糟的帧几乎吃掉整组分数。
+逐帧值在报告的 `quality_reference.{baseline,candidate}_psnr_db` 里原样留着 ——
+均值看不出"一组帧里某一张特别差"。
+
+**帧集只在画质补测里展开。** headless 载体的主测循环 (A/B/A/B) 内联量画质,
+那里只用帧集的第一张: 每张都跑一遍等于把整轮真机时间乘以帧数, 而该载体的主指标
+是时延, 不是画质。
+
+### 报告要写清楚真值是什么
+
+`eval_report.quality_reference` 跟着报告走:
+
+```json
+"quality_reference": {
+  "kind": "real_frames",
+  "source": "../phonefarm/tasks/genshin_refframes",
+  "frames": 12,
+  "frame_files": ["frame_00000.png", "..."],
+  "candidate_psnr_db": [31.2, 30.8, "..."],
+  "baseline_psnr_db":  [29.1, 28.7, "..."]
+}
+```
+
+`kind` 只有两个值: `real_frames` (真机截帧) 与 `procedural` (runner 内置图案)。
+不写这一项的话, 31.3 dB 和 38.7 dB 会被当成同一把尺子上的数 —— 那正是上面那张表
+要防的事。
+
+参考帧来源的优先级: 命令行 `--reference` > `eval_request.quality_reference` >
+程序化图案。命令行在前是因为它是人手动指定的一次性覆盖, 契约字段是上游的常设配置。
+指定了却读不出帧 (目录空、路径不存在、源图比目标小) **当场报错退出**,
+不会悄悄退回程序化图案 —— 否则一份自称"用了真机参考帧"的报告其实量的是合成图案。
 
 ## 4.2 插帧赛道的伪影门禁
 
@@ -180,6 +223,7 @@ refbench 契约写死 `submits_per_frame: 1`, 所以提交间隔可直接当帧�
 
 refbench 是渲染靶场, 按边界约定不带任何测量逻辑, 给不出 PSNR。
 主测跑完之后, 用 headless runner 把基线与候选**各跑一次**, 只取画质。
+给了参考帧集时是**每臂每帧各跑一次** (帧集 N 张 = 2N 次 runner 调用), 取逐帧均值。
 
 **为什么不需要 A/B/A/B + t 检验**: 画质对 (着色器, 参考帧) 是**确定性**的,
 同一份输入跑一百遍是同一个 dB。等冷、锁频、交替、Welch 检验那一整套是用来
