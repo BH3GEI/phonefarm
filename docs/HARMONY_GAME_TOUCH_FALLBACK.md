@@ -29,7 +29,9 @@ hdc -t <connect-key> shell 'uinput -T -m 400 850 400 700 1300 650 1450 650 -k 30
 export PATH="/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/toolchains:$PATH"
 command -v hdc
 hdc list targets
-./phonefarm script \
+(cd src && cargo build --release)
+codesign --force --sign - src/target/release/phonefarm
+src/target/release/phonefarm script \
   --task harmony_genshin_multitouch_smoke \
   --serial hdc:<connect-key> \
   --settle-ms 300 \
