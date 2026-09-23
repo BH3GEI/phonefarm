@@ -168,7 +168,9 @@ case "${1:-}" in
     mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
   # 改写档: 与 probe 唯一的差别就是这个属性, A/B 两臂只切它一个
   loadop)
-    ashell "su -c 'setprop $LOADOP_PROP 1'"
+    # 必须显式把 passdump 关掉: 上一轮 passdump 留下的 1 会让 A/B 两臂都挂上观测钩子,
+    # 等于给对照组凭空加开销, 而自报里看不出来
+    ashell "su -c 'setprop $LOADOP_PROP 1; setprop $DUMP_PROP 0'"
     # 回读: 写不进就静默退化成只读档, 而自报里 knob 会变成 gray_readonly_probe、
     # unavailable_reason 还是 null, harness 根本看不出这一轮没开改写
     [ "$(ashell "getprop $LOADOP_PROP" | tr -d '\r')" = "1" ] \

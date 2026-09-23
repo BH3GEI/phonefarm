@@ -78,7 +78,9 @@ SYSTEM_PROMPT = (
     "2. 绝不提出任何与温控保护相关的改动 (关热保护、抬温控阈值), 提了会被直接拒绝。\n"
     "3. 每组 1-4 个参数。参数少一点容易归因, 别一次全改。\n"
     "4. 各组之间要有明显差异, 不要提交几乎一样的组。\n"
-    "5. 只输出 JSON, 不要解释、不要 markdown 代码块以外的任何文字。\n"
+    "5. 历史里标了「写不进去 (被内核夹回)」的值, 不要再提 —— 取值表列出的是"
+    "合法值, 但内核会按当下的热限/上下限把某些值夹回去, 那一组会整组作废。\n"
+    "6. 只输出 JSON, 不要解释、不要 markdown 代码块以外的任何文字。\n"
     "输出格式 (顶层是数组):\n"
     '[{"why":"一句话说明这组想验证什么","params":{"参数名":"值"}}, ...]'
 )
@@ -108,6 +110,8 @@ def build_prompt(whitelist_desc: str, history: list[dict], n: int,
         for h in history:
             lines.append(f"- 参数 {json.dumps(h.get('params', {}), ensure_ascii=False)}")
             lines.append(f"  判定 {h.get('verdict')} — {h.get('reason', '')}")
+            for c in (h.get("clamped") or []):
+                lines.append(f"  ⚠ 这个值写不进去 (被内核夹回): {c.strip()}")
             for m, d in (h.get("per_metric") or {}).items():
                 if isinstance(d, dict) and d.get("diff_pct") is not None:
                     lines.append(f"  {m}: {d.get('diff_pct')}% (p={d.get('p')}) {d.get('status')}")
@@ -191,6 +195,19 @@ def chat(prompt: str, keys: dict[str, str], log=print) -> tuple[str, str] | None
     return None
 
 
+def _is_ordinal(pid: str, spec: dict) -> bool:
+    """这个参数的取值大小有没有「更高 = 更激进」的物理含义?
+
+    频率 (Hz/kHz) 和 pwrlevel 档位有: 数字大小直接对应快慢。
+    厂商枚举没有 —— `refresh_rate_mode` 的 1 是 60Hz 而 0 是 120Hz auto,
+    按数值往上推会把「降刷新率」当成「更激进」。governor 是字符串, 更没有。
+    分不清就当没有: 等概率换一个别的值, 比装作知道方向要诚实。
+    """
+    if spec.get("kind") != "sysfs":
+        return False
+    return ("freq" in pid) or ("pwrlevel" in pid)
+
+
 def local_mutate(wl: dict, history: list[dict], n: int, seed: int) -> list[dict]:
     """本地降级变异器 —— LLM 全挂时闭环照常往下跑。
 
@@ -214,16 +231,19 @@ def local_mutate(wl: dict, history: list[dict], n: int, seed: int) -> list[dict]
             vals = wl[pid]["values"]
             cur = wl[pid]["current"]
             numeric = bool(vals) and all(v.lstrip("-").isdigit() for v in vals)
-            if numeric and cur.lstrip("-").isdigit():
+            if _is_ordinal(pid, wl[pid]) and numeric and cur.lstrip("-").isdigit():
                 # pwrlevel 语义反过来: 0 是最快档, 所以「更激进」= 往小走
                 if "pwrlevel" in pid:
                     cand = [v for v in vals if int(v) < int(cur)]
                 else:
                     cand = [v for v in vals if int(v) > int(cur)]
+                # 没有更激进的取值就跳过这一项, 不往回退 —— 往回退等于在试一个
+                # 与「探索更高性能」意图相反的方向, 那不是变异, 是噪声
             else:
+                # 取值是厂商枚举 (如 refresh_rate_mode 的 0/1/2/4) 或 governor 名字,
+                # 数值大小没有「更激进」的含义 —— 1 是 60Hz 而 0 是 120Hz auto。
+                # 这种只能等概率换一个别的值, 不许假装知道方向。
                 cand = [v for v in vals if v != cur]
-            # 没有更激进的取值就跳过这一项, 不往回退 —— 往回退等于在试一个
-            # 与「探索更高性能」意图相反的方向, 那不是变异, 是噪声
             if cand:
                 params[pid] = rng.choice(cand)
         if not params:

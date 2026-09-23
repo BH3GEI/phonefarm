@@ -28,3 +28,6 @@ loop_v1/runs_sysparam/**/trace.txt
 loop_v1/runs_sysparam/**/*.txt.gz
 loop_v1/auto/__pycache__/
 loop_v1/runs_graylayer/
+loop_v1/runs_sysparam/**/env.txt
+runs_sysparam/**/*.raw
+loop_v1/runs_sysparam/**/*.png

@@ -1,0 +1,3 @@
+# loop_v1 sysparam plan
+sysfs	/sys/devices/system/cpu/bus_dcvs/DDR/boost_freq	5333000
+sysfs	/sys/devices/system/cpu/bus_dcvs/LLCC/boost_freq	1350000

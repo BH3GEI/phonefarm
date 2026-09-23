@@ -76,6 +76,17 @@ def collect_comms(root: str) -> dict:
     return out
 
 
+def collect_fans(root: str) -> dict:
+    """每轮的风扇状态 —— 红魔的主动散热风扇自身耗电会进功耗读数, 且它不在 38 行快照里。
+    同一组对照的两臂必须是同一风扇状态, 否则"风扇开/关"会混进臂间差异。"""
+    out: dict[str, list[str]] = {}
+    for p in sorted(glob.glob(os.path.join(root, "*", "fan.json"))):
+        d = load_json(p)
+        key = f"enable={d.get('fan_enable')} level={d.get('fan_speed_level')}"
+        out.setdefault(key, []).append(os.path.basename(os.path.dirname(p)))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
@@ -104,6 +115,14 @@ def main() -> int:
         print(f"  {c}: {len(rounds)} 轮, 占比 {sorted({s for _, s in rounds})}")
     if len(comms) > 1:
         print("  ⚠ 两臂不是同一个提交线程, 对照不成立, 下面的数不要用")
+
+    fans = collect_fans(args.root)
+    if fans:
+        print(f"\n测试条件 · 主动散热风扇 (不在 38 行快照里, 单独存证):")
+        for state, rounds in fans.items():
+            print(f"  {state}: {len(rounds)} 轮")
+        if len(fans) > 1:
+            print("  ⚠ 各轮风扇状态不一致 —— 风扇自身耗电会进功耗读数, 这批数据不能跨状态比")
 
     a, b = an.get("arm_a", {}), an.get("arm_b", {})
     print(f"\n样本: A={a.get('n_runs')} 轮  B={b.get('n_runs')} 轮")

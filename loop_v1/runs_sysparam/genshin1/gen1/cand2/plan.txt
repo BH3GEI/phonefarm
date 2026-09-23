@@ -1,0 +1,2 @@
+# loop_v1 sysparam plan
+sysfs	/sys/class/kgsl/kgsl-3d0/min_pwrlevel	0
