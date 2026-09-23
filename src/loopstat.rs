@@ -755,12 +755,15 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
             &s("power_note")),
         "env_stats" => sysparam::env_stats(&s("text")),
         // ── 模型侧 (src/llm.rs) ──
-        "load_keys" => PyVal::Obj(
-            llm::load_keys(&arr("paths").iter().map(|p| p.py_str()).collect::<Vec<_>>())
-                .into_iter().map(|(k, v)| (k, PyVal::Str(v))).collect()),
-        "parse_secrets" => PyVal::Obj(
-            llm::parse_secrets(&s("text")).into_iter()
-                .map(|(k, v)| (k, PyVal::Str(v))).collect()),
+        "load_keys" => {
+            match llm::load_keys(&arr("paths").iter().map(|p| p.py_str()).collect::<Vec<_>>()) {
+                Ok(kv) => PyVal::Obj(kv.into_iter().map(|(k, v)| (k, PyVal::Str(v))).collect()),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            }
+        }
         "build_prompt" => PyVal::Str(llm::build_prompt(
             &s("whitelist_desc"),
             match req.get("history") { Some(PyVal::List(h)) => h, _ => &[] },
@@ -793,8 +796,6 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
                 "log" => log,
             }
         }
-        "deny_keywords" => PyVal::List(
-            sysparam::DENY_KEYWORDS.iter().map(|k| PyVal::Str(k.to_string())).collect()),
         // 画面动没动: 裸帧走文件路径, 不塞进 JSON (13MB 一张, base64 过桥不划算)
         // 读不到裸帧也按"没在转"回一个带 error 的结论, 而不是非零退出 ——
         // 上游 autoloop 靠这个 dict 落证据再退出 3, 抛异常会把那条路绕掉。

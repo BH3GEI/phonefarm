@@ -114,12 +114,6 @@ def rule_doc(temp_cap_c: float, pairs: int, power_available: bool,
                   "power_available": power_available, "power_note": power_note})
 
 
-def deny_keywords() -> tuple:
-    """温控保护关键词表。**不在这里写死** —— 抄一份就会有两份口径, 迟早只改一边。
-    真正的拦截在 src/sysparam.rs 里做, 这个函数只是把那张表取回来给调用方自检。"""
-    return tuple(_call({"op": "deny_keywords"}))
-
-
 def spin_verdict(frame_a: str, frame_b: str) -> dict:
     """两张裸帧 → 「视角是否在转」。传路径而不是字节: 一张 13MB, base64 过桥不划算。"""
     return _call({"op": "spin_verdict", "frame_a": frame_a, "frame_b": frame_b})
@@ -138,10 +132,6 @@ def decide(comparisons: dict, *, temp_max_c, temp_cap_c: float, apply_ok: bool,
 
 
 # ── 模型侧 (src/llm.rs) ──
-
-def parse_secrets(text: str) -> dict:
-    return _call({"op": "parse_secrets", "text": text})
-
 
 def build_prompt(whitelist_desc: str, history: list, n: int, goal_note: str = "") -> str:
     return _call({"op": "build_prompt", "whitelist_desc": whitelist_desc,

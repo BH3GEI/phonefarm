@@ -112,17 +112,19 @@ pub fn parse_secrets(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// 第一个存在的文件就用它, 读不到就空表。
-pub fn load_keys(paths: &[String]) -> Vec<(String, String)> {
+/// 第一个**存在**的文件就用它。
+///
+/// 存在但读不出来是错, 不是"当它不存在": 悄悄跳过的后果是整局只靠本地变异器跑,
+/// 而日志里只有一句"没有密钥", 查半天才发现是文件权限。Python 那边 open() 直接抛。
+pub fn load_keys(paths: &[String]) -> Result<Vec<(String, String)>, String> {
     for p in paths {
-        if p.is_empty() {
+        if p.is_empty() || !std::path::Path::new(p).exists() {
             continue;
         }
-        if let Ok(t) = std::fs::read_to_string(p) {
-            return parse_secrets(&t);
-        }
+        let t = std::fs::read_to_string(p).map_err(|e| format!("{p} 读不出来: {e}"))?;
+        return Ok(parse_secrets(&t));
     }
-    Vec::new()
+    Ok(Vec::new())
 }
 
 fn key_of(keys: &[(String, String)], env: &str) -> Option<String> {
@@ -318,29 +320,42 @@ pub fn chat(
                 ));
             }
         }
-        // 请求体过文件, 不进命令行 —— 命令行会出现在 ps 输出里
-        let bp = format!("{tmp_dir}/_llm_req.json");
-        if std::fs::create_dir_all(tmp_dir).is_err()
-            || std::fs::write(&bp, dumps_compact(&body)).is_err()
-        {
-            log("[llm] 写不了请求体临时文件");
+        // 密钥与请求体都**不进命令行**: argv 在 ps 输出里人人可见, 而
+        // Authorization 头就在里面。curl 的 -K 配置文件同时解决这两件事。
+        //
+        // 目录每次调用独占且带进程号与序号: 固定文件名的话, 两个并发调用会互相
+        // POST 对方的 prompt (于是归档的 prompt.txt 与模型实际答的不是一份),
+        // 或者互相删掉请求体; 在 /tmp 这种公共目录上还能被预先放好的符号链接
+        // 变成"往任意文件写"。
+        let dir = match private_tmp_dir(tmp_dir) {
+            Ok(d) => d,
+            Err(e) => {
+                log(&format!("[llm] 建不了临时目录: {e}"));
+                return None;
+            }
+        };
+        let cfg = dir.join("curl.cfg");
+        let bp = dir.join("req.json");
+        let cfg_text = format!(
+            "url = {}\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\ndata = @{}\nmax-time = {}\nsilent\n",
+            p.url,
+            key,
+            bp.display(),
+            p.timeout_s
+        );
+        let wrote = std::fs::write(&bp, dumps_compact(&body))
+            .and_then(|_| write_private(&cfg, &cfg_text));
+        if let Err(e) = wrote {
+            log(&format!("[llm] 写不了请求体临时文件: {e}"));
+            let _ = std::fs::remove_dir_all(&dir);
             return None;
         }
         let out = std::process::Command::new("curl")
-            .args([
-                "-s",
-                "--max-time",
-                &p.timeout_s.to_string(),
-                p.url,
-                "-H",
-                &format!("Authorization: Bearer {key}"),
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                &format!("@{bp}"),
-            ])
+            .arg("-K")
+            .arg(&cfg)
             .output();
-        let _ = std::fs::remove_file(&bp);
+        // 配置文件里有密钥, 无论成败都立刻删掉整个目录
+        let _ = std::fs::remove_dir_all(&dir);
         let out = match out {
             Ok(o) => o,
             Err(e) => {
@@ -374,6 +389,51 @@ pub fn chat(
 
 fn clip(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+/// 本次调用独占的临时目录, 0700。
+fn private_tmp_dir(base: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let base = if base.is_empty() {
+        std::env::temp_dir()
+    } else {
+        std::path::PathBuf::from(base)
+    };
+    let d = base.join(format!(
+        "phonefarm-llm-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    // 已存在就是有人抢在前面, 换一个名字重来而不是往里写
+    if d.exists() {
+        std::fs::remove_dir_all(&d)?;
+    }
+    std::fs::create_dir_all(&d)?;
+    set_private(&d)?;
+    Ok(d)
+}
+
+#[cfg(unix)]
+fn set_private(p: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private(_p: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// 写一个只有自己读得了的文件 (里面有密钥)。
+fn write_private(p: &std::path::Path, text: &str) -> std::io::Result<()> {
+    std::fs::write(p, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 // ══════════════ 本地降级变异器 ══════════════

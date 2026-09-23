@@ -13,8 +13,9 @@ auto/ 下的判定口径已经全部搬进 Rust, 对应的用例也跟着搬过�
 | 模型回包解析、密钥解析、局部变异、序数启发 | `cargo test llm` |
 | CPython random 的逐位复刻 (局部变异靠它才可复现) | `cargo test pyrandom` |
 
-这里剩下的是 `autoloop.py` 自己的东西: 快照差异分类、温度上限常量, 以及
-`knob_sysparam.sh` 的回滚波及面 (那是设备端 shell, 直接抠出来在真 sh 里跑)。
+这里剩下的是 `autoloop.py` 自己的东西: 快照差异分类 (留痕判据)、温度上限常量,
+以及 `knob_sysparam.sh` 的回滚波及面 (那是设备端 shell, 直接抠出来在真 sh 里跑)。
+白名单只是拿来造一份测试用的表, 经 pybridge 转调二进制。
 
 涉及设备的部分不在这里测 —— 那部分由真机跑出来的 report.json 作证。
 """
@@ -26,6 +27,45 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "tools"))
+
+import pybridge as WL           # noqa: E402  (白名单已搬进 src/sysparam.rs, 这里只为造一份测试用的表)
+
+
+PROBE = """# probe_sysparam v1
+cpu.policies=0,3
+cpu.policy0.avail_freqs=300000 1000000 2000000
+cpu.policy0.avail_governors=schedutil performance
+cpu.policy0.scaling_min_freq.cur=300000
+cpu.policy0.scaling_max_freq.cur=2000000
+cpu.policy0.scaling_governor.cur=schedutil
+cpu.policy0.scaling_min_freq.writable=yes
+cpu.policy0.scaling_min_freq.effect=live
+cpu.policy0.scaling_max_freq.writable=yes
+cpu.policy0.scaling_governor.writable=yes
+cpu.policy3.avail_freqs=500000 3000000
+cpu.policy3.scaling_min_freq.cur=500000
+cpu.policy3.scaling_min_freq.writable=yes
+cpu.policy3.scaling_min_freq.effect=rejected(wrote=3000000 readback=500000)
+gpu.num_pwrlevels=4
+gpu.min_pwrlevel.cur=3
+gpu.max_pwrlevel.cur=0
+gpu.min_pwrlevel.writable=yes
+gpu.min_pwrlevel.effect=live
+gpu.max_pwrlevel.writable=yes
+gpu.devfreq.avail_freqs=220000000 1000000000
+gpu.devfreq.min_freq.cur=220000000
+gpu.devfreq.min_freq.writable=no
+bus.DDR.boost_freq.cur=0
+bus.DDR.hw_min_freq=200000
+bus.DDR.hw_max_freq=5333000
+bus.DDR.avail_freqs=200000 3200000 5333000
+bus.DDR.boost_freq.writable=yes
+bus.DDR.boost_freq.effect=live
+setting.system.peak_refresh_rate.cur=120
+setting.system.min_refresh_rate.cur=60
+display.modes=fps=60,fps=120
+thermal.cpu-1-0=42000
+"""
 
 
 class TestSnapshotDiffClassification(unittest.TestCase):

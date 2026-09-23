@@ -217,6 +217,14 @@ fn parse_value(b: &[u8], i: &mut usize, depth: usize) -> Result<PyVal, String> {
         Some(b'n') => expect(b, i, "null").map(|_| PyVal::Null),
         Some(b't') => expect(b, i, "true").map(|_| PyVal::Bool(true)),
         Some(b'f') => expect(b, i, "false").map(|_| PyVal::Bool(false)),
+        // 本模块的 dumps 会写 NaN / Infinity (Python 照写), 所以 loads 也得认得 ——
+        // 不认的话, 一份含 inf 的 summary.json 会被 load_runs 静静丢掉。
+        // json.loads 默认也认这三个字面量。
+        Some(b'N') => expect(b, i, "NaN").map(|_| PyVal::Float(f64::NAN)),
+        Some(b'I') => expect(b, i, "Infinity").map(|_| PyVal::Float(f64::INFINITY)),
+        Some(b'-') if b[*i..].starts_with(b"-Infinity") => {
+            expect(b, i, "-Infinity").map(|_| PyVal::Float(f64::NEG_INFINITY))
+        }
         Some(b'"') => parse_string(b, i).map(PyVal::Str),
         Some(b'[') => {
             *i += 1;
@@ -329,6 +337,8 @@ fn parse_string(b: &[u8], i: &mut usize) -> Result<String, String> {
                     other => return Err(format!("不认识的转义 \\{}", other as char)),
                 }
             }
+            // 裸控制字符在 JSON 字符串里非法 (json.loads 抛), 必须写成 \\u00XX
+            c if c < 0x20 => return Err(format!("字符串里有裸控制字符 0x{c:02x}")),
             _ => {
                 // 多字节 UTF-8 原样搬过去
                 let start = *i - 1;
@@ -359,27 +369,55 @@ fn hex4(b: &[u8], i: &mut usize) -> Result<u32, String> {
     u32::from_str_radix(s, 16).map_err(|_| "\\u 后不是十六进制".into())
 }
 
+/// 按 JSON 语法收一个数字。
+///
+/// 刻意**严格**: `+5`、`01`、`5.`、`.5` 都是非法 JSON, `json.loads` 会抛。宽松放过
+/// 的后果是一份畸形的模型回包不再整份作废, 而是漏一组候选到设备上。
 fn parse_number(b: &[u8], i: &mut usize) -> Result<PyVal, String> {
     let start = *i;
-    if b.get(*i) == Some(&b'-') || b.get(*i) == Some(&b'+') {
+    let bad = |i: usize| Err(format!("第 {i} 字节处不是一个合法数字"));
+    if b.get(*i) == Some(&b'-') {
         *i += 1;
     }
-    let mut is_float = false;
-    while let Some(c) = b.get(*i) {
-        match c {
-            b'0'..=b'9' => *i += 1,
-            b'.' | b'e' | b'E' => {
-                is_float = true;
+    // 整数部分: 单个 0, 或非 0 开头的一串
+    match b.get(*i) {
+        Some(b'0') => *i += 1,
+        Some(c) if c.is_ascii_digit() => {
+            while b.get(*i).is_some_and(|c| c.is_ascii_digit()) {
                 *i += 1;
             }
-            b'-' | b'+' if matches!(b[*i - 1], b'e' | b'E') => *i += 1,
-            _ => break,
         }
+        _ => return bad(start),
+    }
+    // 前导零后面不许再跟数字 (01 非法)
+    if b.get(*i).is_some_and(|c| c.is_ascii_digit()) {
+        return bad(start);
+    }
+    let mut is_float = false;
+    if b.get(*i) == Some(&b'.') {
+        *i += 1;
+        if !b.get(*i).is_some_and(|c| c.is_ascii_digit()) {
+            return bad(start);
+        }
+        while b.get(*i).is_some_and(|c| c.is_ascii_digit()) {
+            *i += 1;
+        }
+        is_float = true;
+    }
+    if matches!(b.get(*i), Some(b'e') | Some(b'E')) {
+        *i += 1;
+        if matches!(b.get(*i), Some(b'+') | Some(b'-')) {
+            *i += 1;
+        }
+        if !b.get(*i).is_some_and(|c| c.is_ascii_digit()) {
+            return bad(start);
+        }
+        while b.get(*i).is_some_and(|c| c.is_ascii_digit()) {
+            *i += 1;
+        }
+        is_float = true;
     }
     let s = std::str::from_utf8(&b[start..*i]).map_err(|_| "数字不是 ASCII")?;
-    if s.is_empty() {
-        return Err(format!("第 {start} 字节处不是一个值"));
-    }
     if !is_float {
         if let Ok(n) = s.parse::<i64>() {
             return Ok(PyVal::Int(n));
@@ -731,6 +769,35 @@ mod tests {
             let via_serde: f64 = serde_json::from_str::<f64>(s).unwrap();
             assert_ne!(py_repr_f64(via_serde), s, "{s} 上 serde_json 居然对了?");
         }
+    }
+
+    /// 严格到与 `json.loads` 同一条线上: 这几种都是非法 JSON, 放过去的后果是
+    /// 一份畸形的模型回包不再整份作废, 而是漏一组候选到设备上。
+    #[test]
+    fn loads_is_as_strict_as_json_loads() {
+        for bad in [
+            "+5", "01", "5.", ".5", "-", "1e", "1e+", "--1", "0x10", "1.2.3",
+            "\"raw\u{1}ctl\"",
+        ] {
+            assert!(loads(bad).is_err(), "{bad:?} 居然收了");
+        }
+        // 这些是合法的
+        for ok in ["-0", "0", "0.5", "1e10", "1E-3", "-1.5e+2", "10", "1.0"] {
+            assert!(loads(ok).is_ok(), "{ok:?} 居然拒了");
+        }
+    }
+
+    /// dumps 会写 NaN / Infinity, loads 就得认得回来 —— 不然含 inf 的 summary.json
+    /// 会被 load_runs 静静丢掉。
+    #[test]
+    fn loads_round_trips_non_finite_like_python() {
+        assert!(matches!(loads("NaN"), Ok(PyVal::Float(f)) if f.is_nan()));
+        assert_eq!(loads("Infinity"), Ok(PyVal::Float(f64::INFINITY)));
+        assert_eq!(loads("-Infinity"), Ok(PyVal::Float(f64::NEG_INFINITY)));
+        let v = pyobj! { "a" => f64::INFINITY, "b" => f64::NEG_INFINITY };
+        assert_eq!(loads(&dumps(&v)).unwrap(), v);
+        // 负号后面不是 Infinity 时照旧按数字走
+        assert_eq!(loads("-5"), Ok(PyVal::Int(-5)));
     }
 
     /// 畸形输入要回错误, 不能 panic 或把栈撑爆。
