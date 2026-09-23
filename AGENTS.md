@@ -110,7 +110,6 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 设备条件化与功耗遥测在 `src/hwcond.rs`（与 `bench` 共享），统计在 `src/gpustat.rs`。
 设备侧 `vkop_runner` 已构建（`tools/vkop/android_aarch64_vkop_runner`，源码与 `build.sh` 同目录）。
 画质补测支持真机参考帧集，回包里 `quality_reference` 记清真值出处。
-`SPEC_GPU_OP.md` §7 还写着「vkop_runner 尚未构建」，那一段已过时，待一并修订。
 
 **性能优化闭环**（零 Token，需 root）
 
