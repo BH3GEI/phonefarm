@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::device::Device;
+use crate::gpdaemon;
 use crate::gpustat;
 use crate::hwcond::{self, PowerRail, PowerSample};
 use crate::smartperf::{self, SpFlags, SpSample};
@@ -32,6 +33,9 @@ use crate::smartperf::{self, SpFlags, SpSample};
 /// 来源标识。进 JSON, 让上层一眼看出这份数字是哪条通路量的。
 pub const SRC_ANDROID_SYSFS: &str = "android_sysfs";
 pub const SRC_HARMONY_SMARTPERF: &str = "harmony_smartperf";
+/// 安卓侧的 HiSmartPerf 通路 (设备端 `GamePerfToolCollector`, 见 `gpdaemon`)。
+/// 与 `harmony_smartperf` 同名不同物: 那边是 `SP_daemon` 落盘 CSV, 这边是 socket 实时流。
+pub const SRC_ANDROID_SMARTPERF: &str = "android_smartperf";
 
 /// `unavailable` 里的特殊字段名: 不是某一个字段缺了, 是**整条采集通路不可用**
 /// (设备端没有 SP_daemon、不是鸿蒙设备等)。调用方据此把退出码与「设备在、但这轮没采到」区分开。
@@ -165,6 +169,227 @@ impl PerfSource for AndroidSysfs {
             }
         }
         summarize_android(&samples, self.rail)
+    }
+}
+
+// ══════════════ 安卓: HiSmartPerf (设备端 GamePerfToolCollector) ══════════════
+
+/// 安卓侧的 HiSmartPerf 来源: 推设备端采集器 `GamePerfToolCollector`, 走 `adb forward`
+/// 的 socket 实时流。命令与线格式的出处逐条见 `gpdaemon` 的模块注释。
+pub struct AndroidSmartPerf {
+    /// 目标应用包名。设备端按包名找前台图层取帧率, **不给就没有帧率** ——
+    /// 整机口径在这条通路上不成立 (`dumpsys SurfaceFlinger --latency` 要一个图层名)。
+    pub pkg: Option<String>,
+    /// 采集项掩码。默认帧率 + GPU + 温度 + 功耗。
+    pub mask: u32,
+    /// 本机 HiSmartPerf-Editor 的插件目录 (采集器就是从这儿推上设备的)。
+    pub plugin_dir: String,
+}
+
+impl Default for AndroidSmartPerf {
+    fn default() -> Self {
+        AndroidSmartPerf {
+            pkg: None,
+            mask: gpdaemon::DEFAULT_MASK,
+            plugin_dir: gpdaemon::PLUGIN_DIR.to_string(),
+        }
+    }
+}
+
+/// 纯函数: 一组设备端实时样本 → 归一化快照。
+///
+/// **这条通路给不出逐帧 p95**: 实时流里每秒只有一个整数 `fps`, 没有鸿蒙侧的 `fpsJitters`。
+/// 由每秒 fps 反推的 `1000/fps` 是「这一秒的平均帧时」, 把它的 p95 填进 `fps_p95_ms`
+/// 就是拿秒级口径冒充逐帧口径 —— 一次 200 ms 的卡顿摊进那一秒的 30 帧里几乎看不见,
+/// 而 `fps_p95_ms` 正是用来抓这种卡顿的。故这里 `fps_p95_ms` 恒为 `null` 并写明原因,
+/// 逐帧 p95 只认 ftrace/Vulkan 时间戳那条路。
+/// `battery_status` 是 `/sys/class/power_supply/battery/status` 的原值。
+///
+/// **为什么必须带**: 可信区间 (`POWER_MIN_W..POWER_MAX_W`) 只拦得住充电时那种几千瓦的
+/// 毛刺; 拦不住「充电电流与系统耗电正好抵消」的情形 —— 2026-09-23 实测这台红魔插着 USB 时
+/// 电池轨读出 `0.213 W`, 稳稳落在窗口里, 看着像一个正常的低功耗读数, 其实整机正在吃好几瓦,
+/// 只不过那几瓦是从 USB 来的、没走电池轨。一个「看起来合理」的错数比一个越界的错数危险得多:
+/// 越界的会被拦下, 合理的会被下游当成实测功耗拿去做 A/B 裁决。
+/// 所以充电态一律作废功耗, 不看数值大小。
+pub fn summarize_android_smartperf(
+    samples: &[gpdaemon::GpSample],
+    battery_status: Option<&str>,
+) -> PerfSnapshot {
+    let mut snap = summarize_android_smartperf_inner(samples);
+    // 放电态之外 (Charging / Full / Not charging) 电池轨量的都不是整机功耗
+    if let Some(st) = battery_status {
+        if !st.eq_ignore_ascii_case("Discharging") && snap.power_watt.is_some() {
+            let w = snap.power_watt.take().unwrap();
+            snap.miss(
+                "power_watt",
+                format!(
+                    "电池轨此刻量不了整机功耗: 电池状态是 {st}, 不是 Discharging。\
+读数 {w:.3} W 落在可信区间内, 但那只是充电电流与系统耗电相抵之后的余量, \
+不是整机在吃的功率 —— 要量整机功耗必须让设备处于放电态 (拔掉充电或停充)"
+                ),
+            );
+        }
+    }
+    snap
+}
+
+fn summarize_android_smartperf_inner(samples: &[gpdaemon::GpSample]) -> PerfSnapshot {
+    let mut snap = PerfSnapshot::empty(SRC_ANDROID_SMARTPERF);
+    snap.sample_count = samples.len();
+    if samples.is_empty() {
+        for f in [
+            "fps",
+            "frame_time_mean_ms",
+            "fps_p95_ms",
+            "power_watt",
+            "soc_temp_c",
+            "gpu_temp_c",
+            "battery_temp_c",
+        ] {
+            snap.miss(f, "设备端采集器没给出任何实时样本");
+        }
+        return snap;
+    }
+
+    // ── 帧率 ──
+    // 0 不是「零帧」, 是这一秒没拿到图层 (应用切后台、图层名变了)。
+    let fps: Vec<f64> =
+        samples.iter().filter_map(|s| s.get("fps")).filter(|v| *v > 0).map(|v| v as f64).collect();
+    if fps.is_empty() {
+        snap.miss("fps", "设备端未上报 fps (未开 FPS 位, 或目标应用不在前台/取不到图层)");
+        snap.miss("frame_time_mean_ms", "没有帧率就反推不出帧时");
+    } else {
+        let mean = gpustat::mean(&fps);
+        snap.fps = Some(mean);
+        // 秒级平均帧时: 由每秒帧率反推, 不是逐帧测量值
+        if mean > 0.0 {
+            snap.frame_time_mean_ms = Some(1000.0 / mean);
+        }
+    }
+    snap.miss(
+        "fps_p95_ms",
+        "安卓侧 HiSmartPerf 的实时流每秒只有一个整数 fps, 没有逐帧间隔; \
+由它反推的秒级帧时算出来的 p95 会把卡顿摊平, 不能冒充逐帧 p95 —— 逐帧口径走 ftrace/Vulkan 时间戳",
+    );
+
+    // ── 功耗 ──
+    // 逐条判, 不是判均值: 一条充电毛刺就能把整组均值拖进看似可信的区间。
+    let watts: Vec<f64> = samples.iter().filter_map(gpdaemon::sample_watt).collect();
+    if watts.is_empty() {
+        snap.miss("power_watt", "设备端未上报 current/voltage (未开功耗位, 或该机型读不到电池轨)");
+    } else if let Some(bad) = watts.iter().find(|w| !(POWER_MIN_W..=POWER_MAX_W).contains(w)) {
+        snap.miss(
+            "power_watt",
+            format!(
+                "{} / {} 条功率读数不在可信区间 {POWER_MIN_W}..{POWER_MAX_W} W (越界样本如 {bad:.3} W): \
+设备多半正插着 USB 充电, 这段窗口的供电状态变过, 拿它做 A/B 对比本来就不成立",
+                watts.iter().filter(|w| !(POWER_MIN_W..=POWER_MAX_W).contains(w)).count(),
+                watts.len()
+            ),
+        );
+    } else {
+        snap.power_watt = Some(gpustat::mean(&watts));
+    }
+
+    // ── 热区 ──
+    for (field, key) in [
+        ("soc_temp_c", gpdaemon::TEMP_SOC),
+        ("gpu_temp_c", gpdaemon::TEMP_GPU),
+        ("battery_temp_c", gpdaemon::TEMP_BATTERY),
+    ] {
+        let vals: Vec<f64> = samples.iter().filter_map(|s| gpdaemon::temp_c(s, key)).collect();
+        if vals.is_empty() {
+            snap.miss(field, "设备端未上报该热区 (未开温度位, 或该机型没有这个传感器)");
+            continue;
+        }
+        let mean = gpustat::mean(&vals);
+        match field {
+            "soc_temp_c" => snap.soc_temp_c = Some(mean),
+            "gpu_temp_c" => snap.gpu_temp_c = Some(mean),
+            _ => snap.battery_temp_c = Some(mean),
+        }
+    }
+
+    snap
+}
+
+/// 功率可信区间。三条通路共用 `hwcond` 那一把尺子 —— 同一个物理量在不同通路上
+/// 用不同判据, 迟早会出现「同一台机器 A 通路说可信、B 通路说不可信」的分裂。
+pub use crate::hwcond::{POWER_MAX_W, POWER_MIN_W};
+
+impl PerfSource for AndroidSmartPerf {
+    fn id(&self) -> &'static str {
+        SRC_ANDROID_SMARTPERF
+    }
+
+    fn collect(&self, phone: &Device, rounds: u32) -> PerfSnapshot {
+        let Some(pkg) = self.pkg.clone().or_else(|| {
+            let fg = phone.foreground_pkg();
+            if fg.trim().is_empty() { None } else { Some(fg.trim().to_string()) }
+        }) else {
+            let mut snap = PerfSnapshot::empty(SRC_ANDROID_SMARTPERF);
+            snap.miss(
+                FIELD_PIPELINE,
+                "这条通路必须有包名: 设备端按前台图层取帧率, 没有包名就没有图层。\
+用 --app <包名> 指定, 或把目标应用切到前台",
+            );
+            return snap;
+        };
+
+        let mut sess = match gpdaemon::Session::open(phone, &self.plugin_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                let mut snap = PerfSnapshot::empty(SRC_ANDROID_SMARTPERF);
+                snap.miss(FIELD_PIPELINE, e);
+                return snap;
+            }
+        };
+
+        let mut meta = BTreeMap::from([("pkg".to_string(), pkg.clone())]);
+        if let Some(v) = &sess.version {
+            meta.insert("collector_version".to_string(), v.clone());
+        }
+        meta.insert("item_mask".to_string(), self.mask.to_string());
+        // 设备端按 pid 过滤; 拿不到 pid 就只给包名, 设备端自己找前台进程
+        let pid = phone
+            .shell(&format!("pidof {pkg}"), 8_000)
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<i64>().ok());
+        if let Some(p) = pid {
+            meta.insert("pid".to_string(), p.to_string());
+        }
+        for (k, v) in sess.device_info() {
+            meta.insert(format!("dev_{k}"), v);
+        }
+
+        // 电池状态决定功耗读数算不算数 —— 充电态下电池轨量的不是整机功耗
+        let status = phone
+            .shell("cat /sys/class/power_supply/battery/status", 8_000)
+            .trim()
+            .to_string();
+        if !status.is_empty() {
+            meta.insert("battery_status".to_string(), status.clone());
+        }
+
+        let want = rounds.max(1) as usize;
+        // 设备端约每秒一条: 给足 want 秒再加一截握手/启动的余量, 否则总是差最后一两条
+        let timeout = (want as u64 + 5) * 1_000;
+        let samples = match sess.collect(self.mask, &pkg, pid, want, timeout) {
+            Ok(s) => s,
+            Err(e) => {
+                let mut snap = PerfSnapshot::empty(SRC_ANDROID_SMARTPERF);
+                snap.meta = Some(meta);
+                snap.miss(FIELD_PIPELINE, e);
+                return snap;
+            }
+        };
+        let mut snap = summarize_android_smartperf(
+            &samples,
+            if status.is_empty() { None } else { Some(status.as_str()) },
+        );
+        snap.meta = Some(meta);
+        snap
     }
 }
 
@@ -409,7 +634,19 @@ pub fn snapshot_from_csv_file(path: &std::path::Path) -> Result<PerfSnapshot, St
 
 // ══════════════ 按设备后端选来源 ══════════════
 
+/// 安卓侧可选的采集通路。鸿蒙侧只有一条, 不需要这个开关。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AndroidSource {
+    /// 默认: 直读 `/sys/class/power_supply` 电源轨 (`hwcond`)。
+    Sysfs,
+    /// HiSmartPerf 安卓通路: 设备端 `GamePerfToolCollector` + socket 实时流 (`gpdaemon`)。
+    SmartPerf,
+}
+
 /// 设备后端 → 采集源。`hdc:` 前缀的设备走鸿蒙, 其余走安卓, 与 `Device::new` 同一判据。
+///
+/// 安卓默认仍是 sysfs —— 纪律三「不改安卓侧既有行为」: HiSmartPerf 通路要往设备上推
+/// 一个常驻采集器, 是有副作用的写操作, 不能因为多了一条通路就让所有既有调用悄悄改道。
 pub fn for_device(phone: &Device, a: &PerfArgs) -> Box<dyn PerfSource> {
     match phone.backend_name() {
         "hdc" => Box::new(HarmonySmartPerf {
@@ -417,7 +654,12 @@ pub fn for_device(phone: &Device, a: &PerfArgs) -> Box<dyn PerfSource> {
             xpower_out: a.xpower_out.as_ref().map(std::path::PathBuf::from),
             ..Default::default()
         }),
-        _ => Box::new(AndroidSysfs { rail: a.rail }),
+        _ => match a.android_source {
+            AndroidSource::Sysfs => Box::new(AndroidSysfs { rail: a.rail }),
+            AndroidSource::SmartPerf => {
+                Box::new(AndroidSmartPerf { pkg: a.pkg.clone(), ..Default::default() })
+            }
+        },
     }
 }
 
@@ -434,6 +676,8 @@ pub struct PerfArgs {
     pub from_csv: Option<String>,
     /// 额外把 Xpower 的 `dubai.db` 刷盘并拉到这个目录 (鸿蒙侧专用, 有副作用, 默认不做)
     pub xpower_out: Option<String>,
+    /// 安卓侧走哪条通路 (鸿蒙侧忽略此项)
+    pub android_source: AndroidSource,
 }
 
 /// 参数解析是纯函数, 由单测钉死 —— 免得「换个参数顺序就采错轨」这种事只能上真机才发现。
@@ -446,6 +690,7 @@ pub fn parse_perf_args(args: &[String]) -> Result<PerfArgs, String> {
         json: false,
         from_csv: None,
         xpower_out: None,
+        android_source: AndroidSource::Sysfs,
     };
     let mut it = args.iter().peekable();
     // 取一个值: 后面跟的若是另一个开关, 说明这个参数的值漏了 —— 报错, 别把 `--json` 当包名吞掉
@@ -471,6 +716,16 @@ pub fn parse_perf_args(args: &[String]) -> Result<PerfArgs, String> {
                     "usb" => PowerRail::Usb,
                     "battery" => PowerRail::Battery,
                     other => return Err(format!("--power-rail 只能是 usb 或 battery, 给的是 {other}")),
+                }
+            }
+            "--source" => {
+                let v = val!("--source");
+                a.android_source = match v.as_str() {
+                    "sysfs" => AndroidSource::Sysfs,
+                    "smartperf" => AndroidSource::SmartPerf,
+                    other => {
+                        return Err(format!("--source 只能是 sysfs 或 smartperf, 给的是 {other}"))
+                    }
                 }
             }
             "--from-csv" => a.from_csv = Some(val!("--from-csv")),
@@ -594,9 +849,96 @@ mod tests {
             PowerRail::Usb,
         );
         let h = summarize_harmony(&parse_sp_csv(SP_CSV));
+        let g = summarize_android_smartperf(&gp_samples(), None);
         assert_eq!(keys_of(&a), keys_of(&h), "两种来源的 JSON 字段集合必须逐字相同");
+        assert_eq!(keys_of(&a), keys_of(&g), "第三条通路也必须是同一份字段");
         assert_eq!(a.source, SRC_ANDROID_SYSFS);
         assert_eq!(h.source, SRC_HARMONY_SMARTPERF);
+        assert_eq!(g.source, SRC_ANDROID_SMARTPERF);
+    }
+
+    /// 安卓 HiSmartPerf 通路的样本夹具。线格式与字段名取自 `GamePerfToolCollector`
+    /// 二进制里的格式串; **数值是构造的, 不是实测抓取**, 只用来钉住归一化行为本身。
+    /// (实测的原始线格式在 `gpdaemon` 的 `real_sample` 夹具里, 逐字节照抄。)
+    fn gp_samples() -> Vec<gpdaemon::GpSample> {
+        // 裸 {…}, 无 value= 前缀无 ;end; 帧尾; 电流/电压是 sysfs 原值 (μA/μV), 温度是毫摄氏度
+        let wire = "{fps:59;refresh:120;gpuUsage:71;current:-1420000;voltage:4108000;\
+soc:53000;gpuTemp:50000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}\
+{fps:60;refresh:120;gpuUsage:74;current:-1502000;voltage:4103000;\
+soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
+        let (s, rest) = gpdaemon::parse_stream(wire);
+        assert!(rest.is_empty());
+        s
+    }
+
+    #[test]
+    fn android_smartperf_never_reports_a_per_frame_p95() {
+        // 实时流每秒只有一个整数 fps。由它反推的秒级帧时算 p95, 会把 200 ms 的卡顿
+        // 摊进那一秒的几十帧里 —— 而 fps_p95_ms 正是用来抓这种卡顿的。
+        let g = summarize_android_smartperf(&gp_samples(), None);
+        assert!(g.fps.is_some());
+        assert!(g.frame_time_mean_ms.is_some());
+        assert_eq!(g.fps_p95_ms, None, "秒级口径不能冒充逐帧 p95");
+        assert!(g
+            .unavailable
+            .iter()
+            .any(|u| u.field == "fps_p95_ms" && u.reason.contains("逐帧")));
+    }
+
+    #[test]
+    fn android_smartperf_summarises_the_real_device_numbers() {
+        let g = summarize_android_smartperf(&gp_samples(), None);
+        assert_eq!(g.sample_count, 2);
+        assert!((g.fps.unwrap() - 59.5).abs() < 1e-9);
+        // 1420 mA x 4.108 V 与 1502 mA x 4.103 V 的均值
+        let w = g.power_watt.unwrap();
+        assert!((w - 5.998_033).abs() < 1e-6, "实得 {w}");
+        assert!((g.soc_temp_c.unwrap() - 53.5).abs() < 1e-9);
+        assert!((g.gpu_temp_c.unwrap() - 50.5).abs() < 1e-9);
+        assert!((g.battery_temp_c.unwrap() - 39.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn android_smartperf_charging_spike_invalidates_the_window() {
+        // 插着充电时电流是几十万 mA 的垃圾值; 一条越界就整组作废, 不能报均值
+        // 第二条是充电态的垃圾值 (2026-09-18 实测量级): 724.8 A x 4.212 V = 3052 W
+        let wire = "{fps:60;current:-1420000;voltage:4108000;}\
+{fps:60;current:-724805000;voltage:4212000;}";
+        let (s, _) = gpdaemon::parse_stream(wire);
+        let g = summarize_android_smartperf(&s, None);
+        assert_eq!(g.power_watt, None);
+        assert!(g.unavailable.iter().any(|u| u.field == "power_watt" && u.reason.contains("充电")));
+    }
+
+    #[test]
+    fn charging_invalidates_power_even_when_the_reading_looks_plausible() {
+        // 2026-09-23 实测: 插着 USB 时电池轨读出 0.213 W, 稳稳落在 0.05..30 W 窗口里。
+        // 可信区间拦不住它 —— 只有电池状态拦得住。
+        let wire = "{fps:30;current:-66000;voltage:4207000;}{fps:30;current:-87000;voltage:4206000;}";
+        let (s, _) = gpdaemon::parse_stream(wire);
+        // 不带状态: 读数落在窗口内, 照常报出来
+        let free = summarize_android_smartperf(&s, None);
+        assert!(free.power_watt.is_some(), "这个量级本来就在可信区间里, 区间拦不住");
+        assert!(free.power_watt.unwrap() < 0.5);
+        // 带上充电状态: 作废
+        let charging = summarize_android_smartperf(&s, Some("Charging"));
+        assert_eq!(charging.power_watt, None);
+        assert!(charging
+            .unavailable
+            .iter()
+            .any(|u| u.field == "power_watt" && u.reason.contains("Discharging")));
+        // 放电态才算数
+        let ok = summarize_android_smartperf(&s, Some("Discharging"));
+        assert_eq!(ok.power_watt, free.power_watt);
+    }
+
+    #[test]
+    fn source_flag_picks_the_android_pipeline() {
+        let a = parse_perf_args(&["--source".into(), "smartperf".into()]).unwrap();
+        assert_eq!(a.android_source, AndroidSource::SmartPerf);
+        // 默认必须还是 sysfs —— HiSmartPerf 通路要往设备推常驻进程, 不能悄悄改道
+        assert_eq!(parse_perf_args(&[]).unwrap().android_source, AndroidSource::Sysfs);
+        assert!(parse_perf_args(&["--source".into(), "ftrace".into()]).is_err());
     }
 
     #[test]

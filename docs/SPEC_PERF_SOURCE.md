@@ -1,9 +1,14 @@
-# SPEC_PERF_SOURCE —— 性能数据来源抽象（Android sysfs / OpenHarmony HiSmartPerf）
+# SPEC_PERF_SOURCE —— 性能数据来源抽象（Android sysfs / Android HiSmartPerf / OpenHarmony HiSmartPerf）
 
-> **验证状态：鸿蒙侧未上真机验证。** 本机既没有鸿蒙真机，也没有装 `hdc`。命令口径全部取自
-> 本机 HiSmartPerf-Editor 1.42 的实现与 SmartPerf-Device 官方参数表，解析器由真实采集
-> 产物钉死（见「测试夹具的来路」），但**整条设备通路（hdc → SP_daemon → data.csv）
-> 一次也没有在真机上跑过**。上真机前，不要把鸿蒙侧读数当成已验证的实测值。
+> **验证状态**
+>
+> - **安卓 sysfs 电源轨**：已验证（一直在用）。本轮交叉对比查出并修掉两个功耗口径错，见第 7 节。
+> - **安卓 HiSmartPerf**：**2026-09-23 已上真机验证**（红魔 NX809J / Android 16 / 原神 +
+>   refbench），与自家 ftrace/sysfs 通路做过同窗口并排对比，见第 7 节。
+> - **鸿蒙 HiSmartPerf**：**仍未上真机验证**。本机既没有鸿蒙真机，也没有装 `hdc`。
+>   命令口径取自 HiSmartPerf-Editor 的实现与 SmartPerf-Device 官方参数表，解析器由真实采集
+>   产物钉死（见「测试夹具的来路」），但**整条设备通路（hdc → SP_daemon → data.csv）
+>   一次也没有在真机上跑过**。不要把鸿蒙侧读数当成已验证的实测值。
 
 ## 1. 为什么要这层
 
@@ -185,7 +190,10 @@ src/hwcond.rs      安卓侧: 电源轨采样与可信度判断（既有代码�
 对应夹具在单测里以内联字符串出现并显式标注「构造样本，非真机抓取」，
 只用来钉住解析行为本身，不冒充实测。
 
-## 6. 上真机后要补的验证
+## 6. 鸿蒙侧上真机后要补的验证
+
+> 下面五条**全部只关鸿蒙侧**（`hdc` / `SP_daemon` / `dubai.db`）。本机没有鸿蒙真机，
+> 一条都验不了，状态维持「未验证」。安卓侧的验证结果在第 7 节。
 
 1. `hdc -t <k> shell "SP_daemon --version"` 能否拿到版本号（`version_looks_present` 的判据是否够）；
 2. `SP_daemon -N 10 -PKG <包名> -c -g -f -t -p` 落盘的 `data.csv` 表头**实际列名**
@@ -194,3 +202,129 @@ src/hwcond.rs      安卓侧: 电源轨采样与可信度判断（既有代码�
 4. 拔掉充电、切 Wi-Fi 后 `currentNow`/`voltageNow` 是否落回可信区间；
 5. Xpower `dubai.db` 里比 `SP_daemon -p` 更细的**分器件能耗**（CPU/GPU/display 各吃多少瓦）
    —— 那是 SQLite，本轮没有解析，需要时再定是否引依赖。
+
+## 7. 安卓侧的 HiSmartPerf 通路（2026-09-23 真机验证）
+
+### 7.1 它跟鸿蒙侧不是一条路
+
+安卓侧的 HiSmartPerf **不用 `SP_daemon`**。HiSmartPerf-Editor 5.1.0.47 在安卓上的做法是：
+
+```
+adb shell "pidof GamePerfToolCollector"                       # 清残留 → kill -9
+adb shell "LD_LIBRARY_PATH=/data/local/tmp/ \
+           /data/local/tmp/GamePerfToolCollector -version"    # 比版本, 不一致才重推
+adb shell getprop ro.product.cpu.abi                          # 选 plugins/Device/Android/<abi>/
+adb push <abi>/{GamePerfToolCollector,libQProfilerInterface.so} /data/local/tmp/
+adb shell chmod 777 /data/local/tmp/GamePerfToolCollector
+adb shell "LD_LIBRARY_PATH=/data/local/tmp/ \
+           /data/local/tmp/GamePerfToolCollector -authorize"  # 常驻, 不返回
+adb forward tcp:<本地> tcp:<设备端>                            # 两条: 控制 + 实时数据
+```
+
+即：**往手机推一个 native 采集器常驻，再用 `adb forward` 的 socket 实时流拉样本**。
+出处逐条在 `app.asar` 的 `dist/electron.js`（推送与启动）与 `dist/umi.js`（socket 与命令）。
+
+设备端采集器读的是 `/sys/class/power_supply/battery/{current_now,voltage_now}`、
+`/sys/class/thermal`、kgsl/devfreq，帧率走 `dumpsys SurfaceFlinger --latency`
+——**与 `hwcond` 读的是同一批节点**，所以功耗/温度两边本该对得上。
+
+### 7.2 线协议（实测钉死，与照文档推的不一样）
+
+| | 控制通道 | 实时数据通道 |
+| :--- | :--- | :--- |
+| 设备端口 | 20100..20102 | 20103..20105（**另开一条连接**） |
+| 握手 | `0012\|authorize:0;` + `cmd=getVersion;end;` | 同左 |
+| 应答分帧 | 按 `;end;` | **无帧尾**，裸 `{…}` |
+| 内容 | `value=v1.267;end;` / `ret=0;end;` / `ret=0;info=version:v1.0;gpuType:0;end;` | `{fps:30;refresh:0;…;batTemp:44000;}` |
+
+照 `app.asar` 推出来的第一版有三处是错的，全是上真机才暴露的：
+
+1. **样本只从第二条 socket 出来。** 只连控制通道时 `startCollect` 照样回 `ret=0`，
+   然后一条样本都收不到 —— 症状与「目标应用没在前台」一模一样。
+2. **握手要读两次。** 第一条应答是裸的 `1.26\0`（协议版本，无 `value=` 无帧尾），
+   第二条才是 `value=<采集器版本>;end;`。只读一次就判协议，会把正常握手判成「应答不是这个协议」；
+   两条挤在同一次 read 里到达时，`value=` 也不在帧首，只认开头就会把版本号整条漏掉。
+3. **两条控制命令不能连发。** 连发会挤进同一个 TCP 段，设备端只解析第一条，
+   后一条被整条丢掉**且不报错**：`selectPid` 回 `ret=0`，紧跟着的 `startCollect` 石沉大海，
+   数据通道 0 字节。故每条命令都要把回执读干净再发下一条。
+   （不传 pid 时只发一条命令反而是对的，所以这个 bug **只在拿得到 pid 时触发**。）
+
+### 7.3 单位（与 sysfs 同刻比对得出）
+
+| 字段 | 采集器 | 同刻 sysfs | 结论 |
+| :--- | :--- | :--- | :--- |
+| `voltage` | `4207000` | `voltage_now` `4207000` | **逐字透传**，μV |
+| `current` | `-87000` | `current_now` `-66000`（充电态在抖） | **逐字透传**同一节点原值 |
+| `batTemp` | `44000` | `thermal_zone` `battery` `44000` | **毫摄氏度** |
+| `gpuTemp` | `49200..51200` | `thermal_zone` `gpuss-*` `52300..54300` | **毫摄氏度** |
+
+注意 `batTemp` **不是** `/sys/class/power_supply/battery/temp`（那个是 `440`，0.1 °C 制）；
+按它折算会把 44 °C 算成 4400 °C。
+
+这台红魔的 `soc` / `cpuTemp` / `shellFrame` / `npuTemp` **恒为 0** —— 它没有采集器要找的
+那几个热区名（只有 `gpuss-*` / `skin-msm-therm` / `battery`）。`0` 不是 0 摄氏度，一律 `null`。
+
+### 7.4 同窗口并排对比
+
+`loop_v1/tools/crosscheck_perfsrc.sh` 在**同一个 30 秒窗口**里并排跑两条通路
+（先后跑的话，差值里会混进「这两分钟机器变热了」）。
+负载 refbench `sr_pipeline`；风扇手动档开启（`fan_state_of_manual=2`）；电池 `Charging`。
+
+| 指标 | HiSmartPerf | 我们的 | 相对差 | 为什么 |
+| :--- | ---: | ---: | ---: | :--- |
+| 帧率 | 113.867 fps | 122.054 fps（ftrace） | −6.7 % | 口径不同，见下 |
+| 帧时均值 | 8.782 ms | 8.191 ms（ftrace） | +7.2 % | 同上（HiSmartPerf 侧是 `1000/每秒fps` 反推） |
+| 帧时 p95 | **给不出** | 9.251 ms（ftrace） | — | 实时流没有逐帧间隔 |
+| GPU 温度 | 49.347 °C | 50.000 °C（`gpuss-0` 直读） | −1.3 % | 采样时刻不同 |
+| 电池温度 | 40.000 °C | 40.000 °C（`thermal_zone battery`） | **0.0 %** | 同一个节点，逐字一致 |
+| 整机功耗 | **作废**（电池 `Charging`） | **作废**（读数越界） | — | 见 7.5 |
+
+**帧率那 6.7 % 从哪来**（两条都不算错，是口径差）：
+
+- HiSmartPerf 每秒吐一个**整数** `fps`，窗口首尾那两个**不完整的秒**照样各算一条样本，
+  把均值系统性往下拉；
+- ftrace 侧数的是 kgsl `adreno_cmdbatch_submitted`，要先自检「每帧几次提交」
+  （本轮自检出 **3**，而 refbench 契约里写的是 1 —— 契约那条对这个场景是过时的）。
+  两条通路互相印证了这个自检值：若按契约的 1 算，ftrace 会得出 366 fps，与 HiSmartPerf
+  差三倍；按自检的 3 算才落在 122 fps，与 HiSmartPerf 的 113.9 差 6.7 %。
+
+**温度对得上**（电池温度逐字一致，GPU 温度差 1.3 % 且方向随采样时刻），
+这正是「两边读同一批 sysfs 节点」该有的样子 —— 也说明单位折算没错。
+
+### 7.5 交叉对比查出的两个自家口径错
+
+对比表里功耗那一格两边都是「未测到」，但**原因不同**，这个不同就是线索：
+HiSmartPerf 算出 3.086 W，我们算出 777 W。同一段窗口、同一块电池，差了 250 倍。
+
+1. **`hwcond::watt()` 原本优先信 `battery/power_now`。**
+   本机这个节点读出 `992195296`，按 μW 折算 992 W，而同刻 `voltage_now × current_now`
+   只有 0.185 W —— 这个节点在这台机器上给的根本不是 μW。整段窗口 150 条采样**全部**越界。
+   HiSmartPerf 的采集器压根不碰 `power_now`，只读 `current_now`/`voltage_now`。
+   **口径已改为优先 V × I**，`power_now` 只在电压或电流缺失时兜底。
+   `power_now` 是可选节点、各家内核填法不一；而 `voltage_now`(μV)/`current_now`(μA)
+   在 power_supply class 里有明确约定。
+2. **`power_usable` 原本只查「大于 0」，没有上界。**
+   于是 777 W 当成一次正常实测报给上层，`gpu-op` 的功耗门禁拿它做 A/B 裁决 ——
+   一个物理上不可能的数字，却因为「大于 0」通过了唯一一道检查。
+   已补上**逐条**上界（29 条 5 W 混进一条 300 W，均值 14.8 W 正好落在窗口内，判均值救不了），
+   三条通路共用 `hwcond::{POWER_MIN_W, POWER_MAX_W}` 这一把尺子。
+
+另外：**充电态下电池轨读数会落在可信区间内**（实测 0.213 W / 3.086 W），
+可信区间拦不住它 —— 它不是整机功耗，只是充电电流与系统耗电相抵之后的余量。
+只有电池状态拦得住，故安卓 HiSmartPerf 通路把 `/sys/class/power_supply/battery/status`
+一并读进来，非 `Discharging` 一律作废功耗并写明原因。
+
+> **要量真功耗，必须让设备处于放电态。** 本轮设备全程 USB 供电（adb 走 USB），
+> 两条通路的功耗都作废了 —— 这是对的行为，不是采集失败。
+
+### 7.6 安卓侧还没验的
+
+1. **放电态下两条通路的功耗数值对比** —— 要拔掉 USB 走 Wi-Fi adb，本轮没做；
+   目前只验到「两边都正确地拒绝给数」，没验到「两边给的数一致」。
+2. **原神固定场景下的对比** —— 本轮用的是 refbench（场景确定、口径无歧义）。
+   原神那条只跑到单点验证（`fps: 54.375`，进大世界前的登录页），没跑固定场景全窗口。
+3. **`dumpsys SurfaceFlinger --latency` 在 Android 16 上已失效**（`loop_v1/README.md`
+   记过：只回一行 vsync 周期）。但采集器照样给得出 fps，且与 ftrace 对得上 ——
+   说明它的帧率另有来路（二进制里同时有 `dumpsys SurfaceFlinger | grep <层名>` 与
+   `GetRefresh`/`allSurfaceFlingerCmd` 几条路径），**具体走哪条没有查实**。
+4. **`refresh` / `gpuFreq` / `ddrFreq` 恒为 0** —— 未开对应采集位，还是该机型读不到，没有分辨。
