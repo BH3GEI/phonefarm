@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """refbench_report.py — refbench M0 六条判据汇总 (纯函数, 字节可复现)
 
-与 phonefarm report 同一纪律: 不带时间戳、不带绝对路径、无随机数,
+与 loop_v1/tools/report.py 同一纪律: 不带时间戳、不带绝对路径、无随机数,
 同样的输入每次产出逐字节相同的 report.json。回放自检直接 cmp 本文件的输出。
 
 判定规则先于数据冻结: RULES 与本文件自身的 sha256 一并写进报告 —— 事后改规则
@@ -11,7 +11,7 @@
   declared=bandwidth → 主因「GPU 计算受限」且 bus vote 显著高 (≥ frag 的 3 倍)
   declared=fragment  → 主因「GPU 计算受限」且 bus vote 显著低 (上式另一端)
   declared=none      → 主因「限帧器封顶 @面板刷新率」(vsync, 不得无中生有)
-带宽维在归因 (phonefarm attribute) 里是正交维不是主因 —— 访存停顿在 kgsl active 里同样计忙,
+带宽维在 attribute.py 里是正交维不是主因 —— 访存停顿在 kgsl active 里同样计忙,
 所以 bandwidth 与 fragment 靠 bus vote 分离, 不靠主因字符串。
 """
 from __future__ import annotations
@@ -24,8 +24,8 @@ import sys
 
 _TOOLS = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
 sys.path.insert(0, _TOOLS)
-# 统计口径已搬进 phonefarm 二进制, 经 pybridge 转调 —— 不在 Python 侧留第二份实现
-from pybridge import dispersion, drift, mean, compare, snapshot_diff  # noqa: E402
+from analyze import dispersion, drift, mean, compare  # noqa: E402
+from report import snapshot_diff                       # noqa: E402
 from statistics import median                          # noqa: E402
 
 RULES = {
