@@ -1,9 +1,9 @@
 ---
 name: phonefarm
-description: Drive the phonefarm device automation and measurement infrastructure (Rust core, adb + hdc backends). Use when operating Android emulators or OpenHarmony devices through the phonefarm binary — VLM-driven UI traversal (run/benchmark/parallel/quest), zero-token deterministic scripts and replay (script), conformance-test batches and result extraction (test-batch/cts-fetch), on-device model latency benchmarking (bench), frame capture (capture), device farm keep-alive (keepalive/devices/probe), the hypothesis-experiment-evidence loop (hyp/pred/caps/tools/experiment/export), inspecting results via the read-only CLI (last/runs/show/cat/stats/schema), the MCP tool service (serve), or working on the Rust codebase. Covers both Android (adb) and OpenHarmony (hdc) backends, telemetry, and the house rules for spending model tokens and pushing changes.
+description: Drive the phonefarm device automation and measurement infrastructure (Rust core, adb + hdc backends). Use when operating Android emulators or OpenHarmony devices through the phonefarm binary — VLM-driven UI traversal (run/benchmark/parallel/quest), zero-token deterministic scripts and replay (script), conformance-test batches and result extraction (test-batch/cts-fetch), on-device model latency benchmarking (bench), frame capture (capture), device farm keep-alive (keepalive/devices/probe), the hypothesis-experiment-evidence loop (hyp/pred/caps/tools/experiment/export), inspecting results via the read-only CLI (last/runs/show/cat/stats/schema), the MCP tool service (serve), or working on the Rust codebase. Covers both Android (adb) and OpenHarmony (hdc) backends, telemetry, and the house rules for spending model tokens and pushing changes. For the task "optimize this game on this phone" use the game_opt_loop skill instead — it orchestrates the decisions and calls into phonefarm for every device write, measurement and verdict.
 license: MIT
 metadata:
-  version: 3.0
+  version: 3.1
   source-repo: github.com/BH3GEI/phonefarm
 ---
 
@@ -26,6 +26,39 @@ are all enforced by deterministic Rust code in the host process.
 This skill is self-contained: everything an agent needs to install, build,
 run, and inspect phonefarm is in this file and the `references/` folder.
 
+## Wrong skill? "Optimize this game on this phone"
+
+If the task is **"make this game run faster / smoother / cooler on this
+device"**, that is the `game_opt_loop` skill, not this one.
+`game_opt_loop optimize --game <name>` surveys what the device actually allows,
+opens whichever change surfaces are available (system parameters / render-flow
+rewrites / image operators), has a model propose candidates for each, and then
+calls **into phonefarm** for every write, measurement, statistical verdict and
+rollback.
+
+```
+game_opt_loop   decides what to try            ← that skill
+     │          (proposes, orchestrates, archives, reports)
+     ▼
+phonefarm       applies · measures · judges · restores   ← this skill
+```
+
+- Skill: `game_opt_loop/skills/game_opt_loop/SKILL.md`
+- Repo: `github.com/HGamey/game_opt_loop` — **private, needs HGamey org
+  membership.** A "Repository not found" on clone is an access problem, not a
+  typo.
+- Layout: the two repos (plus the optional white-box target `refbench`) sit as
+  **siblings** — `~/projects/{game_opt_loop,phonefarm,refbench}`. Default paths
+  assume it.
+- Interface: `game_opt_loop/contracts/eval_{request,report}.schema.json`, driven
+  through `phonefarm eval --request <json> --json`. Three change surfaces, one
+  envelope (`kind = shader | sysparam | gray`).
+
+Use **this** skill directly when the job is "drive this device" rather than
+"optimize this game" — everything below stands on its own and needs no part of
+`game_opt_loop`: deterministic replay, conformance batches, model latency
+benchmarking, frame capture, farm keep-alive, read-only inspection, MCP service.
+
 ## Capability map
 
 | Path | Commands | Tokens |
@@ -44,6 +77,8 @@ run, and inspect phonefarm is in this file and the `references/` folder.
 ## When to use this skill
 
 - Running any of the paths above against a device
+- **Not** for "optimize this game on this device" — that is `game_opt_loop`
+  (see above); it calls back into these paths
 - Inspecting results (`last` / `runs` / `show` / `cat` / `stats`) or reading the
   ledger schema (`schema`)
 - Modifying the Rust kernel (`runtime` / `device` / `cli` / `telemetry` / `cts`)
