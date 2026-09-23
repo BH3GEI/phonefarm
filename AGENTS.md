@@ -183,6 +183,7 @@ src/                   Rust 内核源码
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
   hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测
+  perfsrc.rs smartperf.rs  性能数据来源抽象：安卓 sysfs 与鸿蒙 HiSmartPerf(SP_daemon/Xpower) 同一份 JSON
   hypo.rs caps.rs mtools.rs experiment.rs   假设—实验—证据闭环
   keepalive.rs serve.rs script.rs parallel.rs telemetry.rs device.rs
 phonefarm.toml         控制参数、规则阈值及模型 Provider 回退链配置

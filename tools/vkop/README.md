@@ -31,6 +31,9 @@ adb shell "cd /data/local/tmp && ./android_aarch64_vkop_runner \
   缺省参考图是程序化生成的确定性图案 (斜边 / 同心高频环 / 平滑渐变),
   `--reference <rgba8 raw>` 可换成 `phonefarm capture` 抓的真实游戏帧 —— 那才是
   最终该用的真值, 程序化图案只是没有真值时的确定性替代。
+  runner 一次只吃**一张**参考图; 「一组帧取均值」是宿主侧的事
+  (`phonefarm gpu-op --reference <目录>` 逐帧调一次 runner 再折叠, 见
+  `docs/SPEC_GPU_OP.md` §4.1)。
 - **`--seconds N`**: 按墙上时间持续跑。功耗要在稳定负载下才量得准, 跑两百次
   dispatch 就收工的话, 采样器读到的基本是空闲功耗。
 

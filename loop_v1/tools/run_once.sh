@@ -13,12 +13,14 @@ LABEL="${1:?用法: run_once.sh <标签> <输出目录> [旋钮脚本]}"
 OUTDIR="${2:?缺输出目录}"
 KNOB="${3:-}"
 
-SERIAL=91253241019A
-PKG=com.miHoYo.Yuanshen
-ROOT=/Users/mac/projects/phonefarm
-WL="$ROOT/loop_v1/scripts/workload_spin_v1.json"
-LEAD=6          # 负载起跑后等几秒再开采 (让转镜头进入稳态)
-CAPDUR=30       # 采集时长, 必须 < 负载剩余时长
+# 下面五项都可由环境变量覆盖, 缺省值即原先的硬编码值 —— 这样 auto/autoloop.py
+# 能在 git worktree 里复用同一个脚本, 不必复制一份。
+SERIAL="${SERIAL:-91253241019A}"
+PKG="${PKG:-com.miHoYo.Yuanshen}"
+ROOT="${ROOT:-/Users/mac/projects/phonefarm}"
+WL="${WL:-$ROOT/loop_v1/scripts/workload_spin_v1.json}"
+LEAD="${LEAD:-6}"       # 负载起跑后等几秒再开采 (让转镜头进入稳态)
+CAPDUR="${CAPDUR:-30}"  # 采集时长, 必须 < 负载剩余时长
 export PATH="$PATH:/Users/mac/Library/Android/sdk/platform-tools"
 
 mkdir -p "$OUTDIR"

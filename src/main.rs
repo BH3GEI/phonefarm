@@ -21,6 +21,8 @@ mod gamepad;
 mod hypo;
 mod mtools;
 mod caps;
+mod perfsrc;
+mod smartperf;
 mod plugins;
 mod runtime;
 mod script;
@@ -168,6 +170,11 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
        (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
+性能:  perf [--serial S] [--app 包名] [--rounds 10] [--power-rail usb|battery] [--xpower-out 目录] [--json]
+       perf --from-csv <本地 data.csv> [--json]   (离线解析已拉回的 SP_daemon 产物,不碰设备)
+       (归一化性能快照: 安卓读 sysfs 电源轨, 鸿蒙读 HiSmartPerf SP_daemon, 同一份字段;
+        采不到的字段是 null 并附原因, 不填 0。退出码 0=采到/1=没采到/2=通路不可用。
+        --xpower-out 才会刷 Xpower 落盘并拉回 dubai.db(有副作用,默认不做)。鸿蒙侧尚未上真机验证)
 采集:  capture --serial <S> [--out 目录] [--frames 200] [--max-steps N] [--settle-ms 800] [--mode auto] [--no-shutdown] [--json]
        (原神无 UI 自动巡航原始帧采集: 只留大世界探索态帧 + manifest 路线分段, SPEC_SR_LOOP Gate 2)
 后台:  run/benchmark/script 加 --detach 立即回报局ID后台跑;phonefarm status [<局ID>|--task T] 查 运行中/已结束/中断
@@ -634,6 +641,11 @@ fn main() {
             // Compute Shader 算子的真机标尺与 A/B 裁决: 等冷 + 锁频 + A/B/A/B 交替 +
             // Welch t 检验, 契约对齐 game_opt_loop/contracts。纯增量子命令。
             std::process::exit(gpuop::run_gpu_op(&args[1..]));
+        }
+        Some("perf") => {
+            // 归一化性能快照: 安卓走 sysfs 电源轨, 鸿蒙走 HiSmartPerf(SP_daemon + Xpower),
+            // 上层拿到的 JSON 字段完全一致。零 Token, 只读设备。纯增量子命令。
+            std::process::exit(perfsrc::run_perf(&args[1..]));
         }
         Some("capture") => {
             // 原神无 UI 自动巡航截图(SPEC_SR_LOOP Gate 2): 复用 genshin 插件生命周期与单步, 只抓原始帧, 纯增量子命令

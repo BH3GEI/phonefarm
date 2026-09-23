@@ -1,4 +1,4 @@
-# build_megacity.ps1
+﻿# build_megacity.ps1
 #
 # 在构建机 (magicbook) 上零交互出 arm64 / Vulkan / IL2CPP 的 APK。
 #

@@ -1,4 +1,4 @@
-# setup_on_magicbook.ps1
+﻿# setup_on_magicbook.ps1
 #
 # 在构建机 (magicbook) 上准备 megacity 载体的工程: 克隆上游 → 注入胶水 → 自检。
 # 只做准备, 不出包; 出包走 build_megacity.ps1。
