@@ -1,0 +1,27 @@
+09-23 20:34:02.325 14662 14662 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:34:02.329 14680 14680 V GraphicsEnvironment: Currently set values for:
+09-23 20:34:02.329 14680 14680 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:34:02.329 14680 14680 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:34:02.329 14680 14680 V GraphicsEnvironment: io.github.hgamey.refbench is not listed in per-application setting
+09-23 20:34:02.329 14680 14680 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:34:02.329 14680 14680 V GraphicsEnvironment: io.github.hgamey.refbench is not listed in ANGLE allowlist or settings, returning default
+09-23 20:34:02.329 14680 14680 V GraphicsEnvironment: App is not on the allowlist for updatable production driver.
+09-23 20:34:02.346 14680 14701 D vulkan  : searching for layers in '/data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64'
+09-23 20:34:02.346 14662 14662 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:34:02.347 14680 14701 D vulkan  : added global layer 'VK_LAYER_refknobs_readonly' from library '/data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so'
+09-23 20:34:02.347 14680 14701 D vulkan  : searching for layers in '/data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/base.apk!/lib/arm64-v8a'
+09-23 20:34:02.348 14680 14701 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+09-23 20:34:02.348 14680 14701 I refknobs: rk_CreateInstance entered (pkg=io.github.hgamey.refbench)
+09-23 20:34:02.348 14680 14701 I refknobs: no LOADER_INSTANCE_CREATE_INFO in pNext chain
+09-23 20:34:02.381 14672 14672 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:34:02.383 14680 14711 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+09-23 20:34:02.383 14680 14711 I refknobs: rk_CreateInstance entered (pkg=io.github.hgamey.refbench)
+09-23 20:34:02.383 14680 14711 I refknobs: no LOADER_INSTANCE_CREATE_INFO in pNext chain
+09-23 20:34:02.398 14672 14672 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:34:04.131 14759 14759 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:34:04.149 14759 14759 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:34:07.238 14780 14780 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:34:07.256 14780 14780 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:34:10.354 14805 14805 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:34:10.371 14805 14805 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:34:13.460 14827 14827 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so

@@ -1,0 +1,75 @@
+### 复测 (review 修复后的层 + 重写的脚本)  2026-09-23 06:24:59
+### commit: 9d54aaa
+
+--- build (含导出符号自检 + DT_NEEDED 自检) ---
+layer: /Users/mac/projects/knobs/gray/build/out/libVkLayer_refknobs.so (2933760 B)
+  export: 00000000000216b4 T vkEnumerateDeviceExtensionProperties
+  export: 0000000000021664 T vkEnumerateDeviceLayerProperties
+  export: 0000000000021624 T vkEnumerateInstanceExtensionProperties
+  export: 00000000000215d0 T vkEnumerateInstanceLayerProperties
+  export: 0000000000021afc T vkGetDeviceProcAddr
+  export: 0000000000021af8 T vkGetInstanceProcAddr
+  export: 00000000000216fc T vkNegotiateLoaderLayerInterfaceVersion
+  needed: liblog.so libm.so libdl.so libc.so 
+
+--- enable_layer.sh probe (应自动启动 refbench 并在层加载后立刻清全局属性) ---
+/Users/mac/projects/knobs/gray/build/out/libVkLayer_refknobs.so: 1 file pushed, 0 skipped. 217.1 MB/s (2933760 bytes in 0.013s)
+-rwxr-xr-x 1 system system u:object_r:apk_data_file:s0  2933760 2026-09-23 21:25 /data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so
+已挂层于 io.github.hgamey.refbench
+  .so:  /data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so
+  prop: debug.vulkan.layers = VK_LAYER_refknobs_readonly
+  正在启动 io.github.hgamey.refbench; 一旦检测到层加载成功就自动清掉全局属性, 收窄误伤窗口。
+  层已加载, 全局属性已清 (属性暴露窗口约 4 秒)
+  marker: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"io.github.hgamey.refbench","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":0,"render_pass_begins":0}}
+查证据:
+  adb -s 91253241019A shell su -c 'cat /storage/emulated/0/Android/data/io.github.hgamey.refbench/files/knobs_layer_out.json'
+  adb -s 91253241019A shell su -c 'logcat -b main -d' | grep refknobs
+
+--- 层的最终计数 ---
+{"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"io.github.hgamey.refbench","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":3300,"render_pass_begins":29700}}
+--- refbench 自报 (交叉校验 + 回归检查) ---
+ "swapchain": {"present_mode": "MAILBOX", "format": "R8G8B8A8_UNORM", "width": 2688, "height": 1216, "image_count": 5, "pre_transform": "0x2"},
+  {"name": "present_blit", "target": "swapchain", "load_op": "DONT_CARE", "store_op": "STORE", "width": 2688, "height": 1216, "format": "R8G8B8A8_UNORM"}
+ "frames_submitted": 3339,
+ "clean_exit": false
+--- 属性应已是空 (auto-narrow 生效) ---
+debug.vulkan.layers = []
+--- 层有无自报错误 (空指针分支应一条都没触发) ---
+09-23 21:25:00.921  2140  2166 D vulkan  : added global layer 'VK_LAYER_refknobs_readonly' from library '/data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so'
+09-23 21:25:00.922  2140  2166 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+09-23 21:25:00.952  2140  2182 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+(以上为空 = 没有触发任何失败分支)
+
+=== 复测 2: 修掉 monkey 启动后重跑 probe  2026-09-23 06:29:23 ===
+/Users/mac/projects/knobs/gray/build/out/libVkLayer_refknobs.so: 1 file pushed, 0 skipped. 344.2 MB/s (2933760 bytes in 0.008s)
+-rwxr-xr-x 1 system system u:object_r:apk_data_file:s0  2933760 2026-09-23 21:29 /data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so
+已挂层于 io.github.hgamey.refbench
+  .so:  /data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so
+  prop: debug.vulkan.layers = VK_LAYER_refknobs_readonly
+  正在启动 io.github.hgamey.refbench; 一旦检测到层加载成功就自动清掉全局属性, 收窄误伤窗口。
+  层已加载, 全局属性已清 (属性暴露窗口约 4 秒)
+  marker: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"io.github.hgamey.refbench","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":0,"render_pass_begins":0}}
+查证据:
+  adb -s 91253241019A shell su -c 'cat /storage/emulated/0/Android/data/io.github.hgamey.refbench/files/knobs_layer_out.json'
+  adb -s 91253241019A shell su -c 'logcat -b main -d' | grep refknobs
+--- 层最终计数 ---
+{"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"io.github.hgamey.refbench","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":3600,"render_pass_begins":32400}}
+--- refbench 自报 (交叉校验) ---
+ "swapchain": {"present_mode": "MAILBOX", "format": "R8G8B8A8_UNORM", "width": 2688, "height": 1216, "image_count": 5, "pre_transform": "0x2"},
+  {"name": "present_blit", "target": "swapchain", "load_op": "DONT_CARE", "store_op": "STORE", "width": 2688, "height": 1216, "format": "R8G8B8A8_UNORM"}
+ "frames_submitted": 3600,
+ "clean_exit": true
+
+--- 还原 2026-09-23 06:30:09 ---
+已删除 /data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so
+已清理残留 /data/local/tmp/libVkLayer_refknobs.so
+已摘层。回读:
+  debug.vulkan.layers = []
+  state               = []
+  enable_gpu_debug_layers = null
+  gpu_debug_app        = null
+  gpu_debug_layer_app  = null
+  gpu_debug_layers     = null
+ro.debuggable = 0
+全盘搜 .so / state (应为空):
+--- 以上无输出 = 已还原 ---

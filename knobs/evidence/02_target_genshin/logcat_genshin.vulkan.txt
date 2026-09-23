@@ -1,0 +1,1162 @@
+09-23 20:41:41.196 20384 20384 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:41.214 20384 20384 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:41.258 20393 20393 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:41.275 20393 20393 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:41.384 20406 20406 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:41.384 20414 20414 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:41.401 20414 20414 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:41.401 20406 20406 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:41.475 20447 20447 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:41.475 20447 20447 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:41.475 20447 20447 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:41.475 20447 20447 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in per-application setting
+09-23 20:41:41.475 20447 20447 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:41.476 20447 20447 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:41.476 20447 20447 V GraphicsEnvironment: App is not on the allowlist for updatable production driver.
+09-23 20:41:41.583 20484 20484 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:41.583 20484 20484 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:41.583 20484 20484 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:41.583 20484 20484 V GraphicsEnvironment: com.zte.onemorething is not listed in per-application setting
+09-23 20:41:41.583 20484 20484 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:41.583 20484 20484 V GraphicsEnvironment: com.zte.onemorething is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:41.870 20555 20555 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:41.870 20555 20555 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:41.870 20555 20555 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:41.870 20555 20555 V GraphicsEnvironment: cn.nubia.neostore is not listed in per-application setting
+09-23 20:41:41.870 20555 20555 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:41.870 20555 20555 V GraphicsEnvironment: cn.nubia.neostore is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:42.579 20710 20710 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:42.579 20710 20710 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:42.579 20710 20710 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:42.579 20710 20710 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:41:42.579 20710 20710 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:42.579 20710 20710 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:42.718 20447 20509 D vulkan  : searching for layers in '/data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/lib/arm64'
+09-23 20:41:42.718 20447 20509 D vulkan  : added global layer 'VK_LAYER_refknobs_readonly' from library '/data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/lib/arm64/libVkLayer_refknobs.so'
+09-23 20:41:42.718 20447 20509 D vulkan  : searching for layers in '/data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/base.apk!/lib/arm64-v8a'
+09-23 20:41:42.718 20447 20509 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+09-23 20:41:42.718 20447 20509 I refknobs: rk_CreateInstance entered (pkg=com.miHoYo.Yuanshen)
+09-23 20:41:42.719 20447 20509 I AdrenoVK-0: Driver Path             : /vendor/lib64/hw/vulkan.adreno.so
+09-23 20:41:42.719 20447 20509 I refknobs: next vkCreateInstance -> 0
+09-23 20:41:42.719 20447 20509 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":0,"render_pass_begins":0}}
+09-23 20:41:42.720 20447 20509 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+09-23 20:41:42.720 20447 20509 I refknobs: rk_CreateInstance entered (pkg=com.miHoYo.Yuanshen)
+09-23 20:41:42.721 20447 20509 I AdrenoVK-0: Driver Path             : /vendor/lib64/hw/vulkan.adreno.so
+09-23 20:41:42.721 20447 20509 I refknobs: next vkCreateInstance -> 0
+09-23 20:41:42.721 20447 20509 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":0,"render_pass_begins":0}}
+09-23 20:41:43.662 20710 20805 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:41:43.663 20710 20805 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:41:43.663 20710 20805 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:41:43.685 20806 20806 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:43.685 20806 20806 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:43.686 20806 20806 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:43.686 20806 20806 V GraphicsEnvironment: cn.nubia.gamelab is not listed in per-application setting
+09-23 20:41:43.686 20806 20806 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:43.686 20806 20806 V GraphicsEnvironment: cn.nubia.gamelab is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:43.695 20806 20806 D vulkan  : searching for layers in '/system/app/NubiaGameLab_RedMagic/lib/arm64'
+09-23 20:41:43.695 20806 20806 D vulkan  : searching for layers in '/system/app/NubiaGameLab_RedMagic/NubiaGameLab_RedMagic.apk!/lib/arm64-v8a'
+09-23 20:41:43.695 20806 20806 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:41:43.695 20806 20806 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:41:44.312 20876 20876 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:44.333 20876 20876 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:44.368 20894 20894 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:44.368 20894 20894 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:44.368 20894 20894 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:44.368 20894 20894 V GraphicsEnvironment: com.topjohnwu.magisk is not listed in per-application setting
+09-23 20:41:44.368 20894 20894 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:44.368 20894 20894 V GraphicsEnvironment: com.topjohnwu.magisk is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:44.368 20894 20894 V GraphicsEnvironment: App is not on the allowlist for updatable production driver.
+09-23 20:41:44.533 20922 20922 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:44.596 20922 20922 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:44.599 21003 21003 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:44.599 21003 21003 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:44.599 21003 21003 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:44.599 21003 21003 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:41:44.599 21003 21003 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:44.599 21003 21003 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:44.603 20922 20922 D nativeloader: InitDefaultPublicLibraries for_preload=0: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libclang_rt.hwasan-aarch64-android.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:45.679 21003 21100 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:41:45.680 21003 21100 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:41:45.680 21003 21100 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:41:46.747 21140 21140 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:46.747 21140 21140 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:46.747 21140 21140 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:46.747 21140 21140 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:41:46.747 21140 21140 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:46.747 21140 21140 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:47.389 21211 21211 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:47.403 21211 21211 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:47.841 21140 21235 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:41:47.841 21140 21235 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:41:47.841 21140 21235 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:41:48.783 21292 21292 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:48.783 21292 21292 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:48.783 21292 21292 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:48.783 21292 21292 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:41:48.783 21292 21292 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:48.783 21292 21292 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:49.911 21292 21368 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:41:49.912 21292 21368 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:41:49.912 21292 21368 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:41:50.600 21417 21417 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:50.632 21417 21417 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:50.969 21438 21438 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:50.969 21438 21438 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:50.969 21438 21438 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:50.969 21438 21438 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:41:50.969 21438 21438 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:50.969 21438 21438 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:52.060 21438 21505 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:41:52.060 21438 21505 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:41:52.060 21438 21505 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:41:53.005 21567 21567 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:53.005 21567 21567 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:53.005 21567 21567 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:53.005 21567 21567 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:41:53.005 21567 21567 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:53.005 21567 21567 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:53.079 20447 21615 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+09-23 20:41:53.080 20447 21615 I refknobs: rk_CreateInstance entered (pkg=com.miHoYo.Yuanshen)
+09-23 20:41:53.083 20447 21615 I AdrenoVK-0: Driver Path             : /vendor/lib64/hw/vulkan.adreno.so
+09-23 20:41:53.083 20447 21615 I refknobs: next vkCreateInstance -> 0
+09-23 20:41:53.083 20447 21615 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":273,"render_pass_begins":1126}}
+09-23 20:41:53.679 21640 21640 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:53.699 21640 21640 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:54.118 21567 21663 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:41:54.118 21567 21663 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:41:54.119 21567 21663 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:41:55.163 21730 21730 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:55.163 21730 21730 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:55.164 21730 21730 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:55.164 21730 21730 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:41:55.164 21730 21730 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:55.164 21730 21730 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:56.275 21730 21826 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:41:56.275 21730 21826 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:41:56.276 21730 21826 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:41:56.680 21865 21865 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:56.708 21865 21865 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:41:57.331 21884 21884 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:57.331 21884 21884 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:57.331 21884 21884 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:57.331 21884 21884 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:41:57.331 21884 21884 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:57.331 21884 21884 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:58.461 21884 21973 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:41:58.462 21884 21973 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:41:58.462 21884 21973 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:41:59.512 22008 22008 V GraphicsEnvironment: Currently set values for:
+09-23 20:41:59.512 22008 22008 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:41:59.512 22008 22008 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:41:59.512 22008 22008 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:41:59.512 22008 22008 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:41:59.512 22008 22008 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:41:59.758 22072 22072 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:41:59.778 22072 22072 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:00.646 22008 22099 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:00.646 22008 22099 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:00.646 22008 22099 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:01.700 22137 22137 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:01.700 22137 22137 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:01.700 22137 22137 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:01.700 22137 22137 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:01.700 22137 22137 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:01.700 22137 22137 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:02.818 22137 22209 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:02.818 22137 22209 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:02.819 22137 22209 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:02.944 22223 22223 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:02.965 22223 22223 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:03.821 22265 22265 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:03.821 22265 22265 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:03.821 22265 22265 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:03.821 22265 22265 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:03.821 22265 22265 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:03.821 22265 22265 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:04.941 22265 22331 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:04.941 22265 22331 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:04.942 22265 22331 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:05.969 22366 22366 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:05.969 22366 22366 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:05.969 22366 22366 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:05.970 22366 22366 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:05.970 22366 22366 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:05.970 22366 22366 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:06.074 22370 22370 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:06.089 22370 22370 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:07.071 22366 22459 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:07.072 22366 22459 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:07.072 22366 22459 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:08.114 22497 22497 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:08.114 22497 22497 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:08.114 22497 22497 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:08.114 22497 22497 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:08.115 22497 22497 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:08.115 22497 22497 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:09.178 22588 22588 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:09.199 22588 22588 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:09.222 22497 22622 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:09.222 22497 22622 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:09.222 22497 22622 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:10.258 22679 22679 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:10.258 22679 22679 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:10.258 22679 22679 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:10.258 22679 22679 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:10.259 22679 22679 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:10.259 22679 22679 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:11.383 22679 22746 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:11.383 22679 22746 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:11.384 22679 22746 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:12.377 22791 22791 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:12.377 22791 22791 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:12.377 22791 22791 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:12.377 22791 22791 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:12.377 22791 22791 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:12.377 22791 22791 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:12.383 22787 22787 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:12.419 22787 22787 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:13.476 22791 22865 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:13.477 22791 22865 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:13.477 22791 22865 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:14.535 22899 22899 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:14.535 22899 22899 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:14.535 22899 22899 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:14.535 22899 22899 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:14.535 22899 22899 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:14.535 22899 22899 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:15.463 22966 22966 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:15.482 22966 22966 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:15.664 22899 22984 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:15.664 22899 22984 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:15.664 22899 22984 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:16.679 23019 23019 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:16.679 23019 23019 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:16.679 23019 23019 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:16.679 23019 23019 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:16.679 23019 23019 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:16.679 23019 23019 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:17.780 23019 23083 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:17.781 23019 23083 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:17.781 23019 23083 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:18.471 23121 23121 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:18.493 23121 23121 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:18.513 23132 23132 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:18.533 23132 23132 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:18.811 23158 23158 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:18.811 23158 23158 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:18.811 23158 23158 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:18.811 23158 23158 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:18.811 23158 23158 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:18.811 23158 23158 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:19.934 23158 23226 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:19.935 23158 23226 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:19.935 23158 23226 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:20.981 23262 23262 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:20.981 23262 23262 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:20.981 23262 23262 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:20.981 23262 23262 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:20.981 23262 23262 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:20.981 23262 23262 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:21.655 23327 23327 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:21.672 23327 23327 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:22.118 23262 23346 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:22.118 23262 23346 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:22.119 23262 23346 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:23.153 23380 23380 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:23.153 23380 23380 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:23.153 23380 23380 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:23.153 23380 23380 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:23.153 23380 23380 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:23.153 23380 23380 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:24.287 23380 23448 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:24.287 23380 23448 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:24.288 23380 23448 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:24.926 23485 23485 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:24.954 23485 23485 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:25.347 23500 23500 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:25.347 23500 23500 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:25.347 23500 23500 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:25.347 23500 23500 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:25.348 23500 23500 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:25.348 23500 23500 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:26.476 23500 23566 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:26.477 23500 23566 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:26.477 23500 23566 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:27.543 23602 23602 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:27.543 23602 23602 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:27.543 23602 23602 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:27.543 23602 23602 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:27.543 23602 23602 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:27.543 23602 23602 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:28.080 23664 23664 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:28.100 23664 23664 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:28.670 23602 23688 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:28.670 23602 23688 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:28.671 23602 23688 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:29.703 23724 23724 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:29.703 23724 23724 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:29.703 23724 23724 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:29.703 23724 23724 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:29.703 23724 23724 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:29.703 23724 23724 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:30.815 23724 23791 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:30.815 23724 23791 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:30.816 23724 23791 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:31.114 23814 23814 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:31.128 23814 23814 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:31.879 23845 23845 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:31.879 23845 23845 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:31.879 23845 23845 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:31.879 23845 23845 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:31.879 23845 23845 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:31.879 23845 23845 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:33.001 23845 23912 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:33.002 23845 23912 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:33.002 23845 23912 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:33.651 20447 20795 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":300,"render_pass_begins":1887}}
+09-23 20:42:34.038 23962 23962 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:34.038 23962 23962 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:34.038 23962 23962 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:34.038 23962 23962 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:34.038 23962 23962 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:34.038 23962 23962 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:34.192 24009 24009 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:34.213 24009 24009 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:34.232 20447 20509 I Unity   : [2026-09-23 20:42:34.232] set vulkan allow: False
+09-23 20:42:35.035 24143 24143 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:35.035 24143 24143 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:35.035 24143 24143 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:35.035 24143 24143 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in per-application setting
+09-23 20:42:35.035 24143 24143 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:35.035 24143 24143 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:35.035 24143 24143 V GraphicsEnvironment: App is not on the allowlist for updatable production driver.
+09-23 20:42:35.045 24154 24154 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:35.045 24154 24154 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:35.045 24154 24154 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:35.045 24154 24154 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in per-application setting
+09-23 20:42:35.045 24154 24154 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:35.045 24154 24154 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:35.045 24154 24154 V GraphicsEnvironment: App is not on the allowlist for updatable production driver.
+09-23 20:42:35.158 23962 24252 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:35.158 23962 24252 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:35.158 23962 24252 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:36.149 24333 24333 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:36.149 24333 24333 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:36.149 24333 24333 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:36.149 24333 24333 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:36.149 24333 24333 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:36.149 24333 24333 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:37.255 24333 24441 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:37.256 24333 24441 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:37.256 24333 24441 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:37.350 24437 24437 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:37.364 24437 24437 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:37.694 20447 20447 D nativeloader: InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libavf.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-aarch64-android.so:libclang_rt.hwasan-aarch64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+09-23 20:42:38.287 24564 24564 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:38.287 24564 24564 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:38.287 24564 24564 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:38.287 24564 24564 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:38.287 24564 24564 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:38.287 24564 24564 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:39.402 24564 24645 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:39.403 24564 24645 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:39.403 24564 24645 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:39.917 20447 20795 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":600,"render_pass_begins":10377}}
+09-23 20:42:40.403 24715 24715 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:40.403 24715 24715 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:40.403 24715 24715 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:40.403 24715 24715 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:40.403 24715 24715 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:40.403 24715 24715 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:40.436 24711 24711 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:40.459 24711 24711 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:41.247 24792 24792 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:41.247 24792 24792 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:41.247 24792 24792 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:41.247 24792 24792 V GraphicsEnvironment: cn.nubia.browser is not listed in per-application setting
+09-23 20:42:41.247 24792 24792 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:41.247 24792 24792 V GraphicsEnvironment: cn.nubia.browser is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:41.266 24792 24792 D nativeloader: InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libavf.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-aarch64-android.so:libclang_rt.hwasan-aarch64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+09-23 20:42:41.299 24819 24819 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:41.299 24819 24819 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:41.299 24819 24819 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:41.299 24819 24819 V GraphicsEnvironment: cn.nubia.browser is not listed in per-application setting
+09-23 20:42:41.299 24819 24819 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:41.299 24819 24819 V GraphicsEnvironment: cn.nubia.browser is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:41.484 24715 24882 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:41.484 24715 24882 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:41.484 24715 24882 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:41.610 24792 24905 D vulkan  : searching for layers in '/system/app/NBBrowser/lib/arm64'
+09-23 20:42:41.610 24792 24905 D vulkan  : searching for layers in '/system/app/NBBrowser/NBBrowser.apk!/lib/arm64-v8a'
+09-23 20:42:41.620 24792 24905 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:41.620 24792 24905 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:42.537 24994 24994 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:42.537 24994 24994 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:42.537 24994 24994 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:42.537 24994 24994 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:42.537 24994 24994 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:42.537 24994 24994 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:43.515 25059 25059 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:43.532 25059 25059 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:46.658 25107 25107 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:46.676 25107 25107 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:49.710 25144 25144 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:49.725 25144 25144 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:52.886 25166 25166 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:52.901 25166 25166 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:53.769 25185 25185 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:53.769 25185 25185 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:53.769 25185 25185 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:53.769 25185 25185 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in per-application setting
+09-23 20:42:53.769 25185 25185 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:53.769 25185 25185 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:53.769 25185 25185 V GraphicsEnvironment: App is not on the allowlist for updatable production driver.
+09-23 20:42:53.877 25218 25218 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:53.877 25218 25218 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:53.877 25218 25218 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:53.877 25218 25218 V GraphicsEnvironment: com.zte.onemorething is not listed in per-application setting
+09-23 20:42:53.877 25218 25218 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:53.877 25218 25218 V GraphicsEnvironment: com.zte.onemorething is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:53.881 24994 25245 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:53.881 24994 25245 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:53.881 24994 25245 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:54.663 25185 25238 D vulkan  : searching for layers in '/data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/lib/arm64'
+09-23 20:42:54.664 25185 25238 D vulkan  : added global layer 'VK_LAYER_refknobs_readonly' from library '/data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/lib/arm64/libVkLayer_refknobs.so'
+09-23 20:42:54.664 25185 25238 D vulkan  : searching for layers in '/data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/base.apk!/lib/arm64-v8a'
+09-23 20:42:54.664 25185 25238 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+09-23 20:42:54.664 25185 25238 I refknobs: rk_CreateInstance entered (pkg=com.miHoYo.Yuanshen)
+09-23 20:42:54.665 25185 25238 I AdrenoVK-0: Driver Path             : /vendor/lib64/hw/vulkan.adreno.so
+09-23 20:42:54.665 25185 25238 I refknobs: next vkCreateInstance -> 0
+09-23 20:42:54.665 25185 25238 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":0,"render_pass_begins":0}}
+09-23 20:42:54.666 25185 25238 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+09-23 20:42:54.666 25185 25238 I refknobs: rk_CreateInstance entered (pkg=com.miHoYo.Yuanshen)
+09-23 20:42:54.667 25185 25238 I AdrenoVK-0: Driver Path             : /vendor/lib64/hw/vulkan.adreno.so
+09-23 20:42:54.667 25185 25238 I refknobs: next vkCreateInstance -> 0
+09-23 20:42:54.667 25185 25238 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":0,"render_pass_begins":0}}
+09-23 20:42:54.847 25326 25326 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:54.847 25326 25326 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:54.847 25326 25326 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:54.847 25326 25326 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:54.847 25326 25326 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:54.847 25326 25326 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:55.908 25326 25428 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:55.908 25326 25428 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:55.908 25326 25428 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:55.934 25433 25433 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:55.934 25433 25433 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:55.934 25433 25433 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:55.934 25433 25433 V GraphicsEnvironment: cn.nubia.gamelab is not listed in per-application setting
+09-23 20:42:55.934 25433 25433 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:55.934 25433 25433 V GraphicsEnvironment: cn.nubia.gamelab is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:55.942 25433 25433 D vulkan  : searching for layers in '/system/app/NubiaGameLab_RedMagic/lib/arm64'
+09-23 20:42:55.942 25433 25433 D vulkan  : searching for layers in '/system/app/NubiaGameLab_RedMagic/NubiaGameLab_RedMagic.apk!/lib/arm64-v8a'
+09-23 20:42:55.942 25433 25433 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:55.943 25433 25433 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:55.961 25421 25421 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:55.975 25421 25421 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:56.006 25470 25470 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:56.006 25470 25470 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:56.006 25470 25470 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:56.006 25470 25470 V GraphicsEnvironment: com.topjohnwu.magisk is not listed in per-application setting
+09-23 20:42:56.006 25470 25470 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:56.006 25470 25470 V GraphicsEnvironment: com.topjohnwu.magisk is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:56.006 25470 25470 V GraphicsEnvironment: App is not on the allowlist for updatable production driver.
+09-23 20:42:56.119 25504 25504 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:56.170 25504 25504 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:56.174 25504 25504 D nativeloader: InitDefaultPublicLibraries for_preload=0: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libclang_rt.hwasan-aarch64-android.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:56.891 25626 25626 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:56.891 25626 25626 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:56.891 25626 25626 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:56.891 25626 25626 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:56.892 25626 25626 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:56.892 25626 25626 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:42:58.013 25626 25693 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:42:58.013 25626 25693 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:42:58.013 25626 25693 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:42:58.970 25734 25734 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:42:58.983 25734 25734 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:42:58.992 25738 25738 V GraphicsEnvironment: Currently set values for:
+09-23 20:42:58.992 25738 25738 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:42:58.992 25738 25738 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:42:58.992 25738 25738 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:42:58.993 25738 25738 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:42:58.993 25738 25738 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:00.053 25738 25822 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:00.053 25738 25822 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:00.053 25738 25822 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:01.031 25860 25860 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:01.031 25860 25860 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:01.031 25860 25860 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:01.031 25860 25860 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:01.032 25860 25860 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:01.032 25860 25860 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:02.130 25930 25930 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:02.132 25860 25934 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:02.132 25860 25934 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:02.132 25860 25934 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:02.148 25930 25930 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:03.147 25977 25977 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:03.147 25977 25977 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:03.147 25977 25977 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:03.147 25977 25977 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:03.147 25977 25977 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:03.147 25977 25977 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:04.071 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":300,"render_pass_begins":910}}
+09-23 20:43:04.239 25185 25238 I Unity   : [2026-09-23 20:43:04.239] set vulkan allow: False
+09-23 20:43:04.279 25977 26065 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:04.280 25977 26065 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:04.280 25977 26065 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:05.061 26180 26180 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:05.061 26180 26180 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:05.061 26180 26180 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:05.061 26180 26180 V GraphicsEnvironment: cn.nubia.neostore is not listed in per-application setting
+09-23 20:43:05.061 26180 26180 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:05.061 26180 26180 V GraphicsEnvironment: cn.nubia.neostore is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:05.080 25185 26213 I vulkan  : Loaded layer VK_LAYER_refknobs_readonly
+09-23 20:43:05.080 25185 26213 I refknobs: rk_CreateInstance entered (pkg=com.miHoYo.Yuanshen)
+09-23 20:43:05.083 25185 26213 I AdrenoVK-0: Driver Path             : /vendor/lib64/hw/vulkan.adreno.so
+09-23 20:43:05.083 25185 26213 I refknobs: next vkCreateInstance -> 0
+09-23 20:43:05.083 25185 26213 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":351,"render_pass_begins":2338}}
+09-23 20:43:05.128 26224 26224 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:05.128 26224 26224 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:05.128 26224 26224 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:05.128 26224 26224 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in per-application setting
+09-23 20:43:05.128 26224 26224 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:05.128 26224 26224 V GraphicsEnvironment: com.miHoYo.Yuanshen is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:05.128 26224 26224 V GraphicsEnvironment: App is not on the allowlist for updatable production driver.
+09-23 20:43:05.184 26200 26200 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:05.203 26200 26200 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:05.615 26341 26341 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:05.615 26341 26341 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:05.615 26341 26341 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:05.615 26341 26341 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:05.615 26341 26341 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:05.615 26341 26341 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:06.734 26341 26436 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:06.734 26341 26436 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:06.735 26341 26436 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:07.716 26544 26544 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:07.716 26544 26544 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:07.716 26544 26544 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:07.716 26544 26544 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:07.716 26544 26544 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:07.716 26544 26544 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:07.739 25185 25185 D nativeloader: InitLlndkLibrariesProduct: libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libRS.so:libandroid_net.so:libapexsupport.so:libavf.so:libbinder_ndk.so:libc.so:libcgrouprc.so:libclang_rt.asan-aarch64-android.so:libclang_rt.hwasan-aarch64-android.so:libcom.android.tethering.connectivity_native.so:libdl.so:libft2.so:liblog.so:libm.so:libmediandk.so:libnativewindow.so:libneuralnetworks.so:libselinux.so:libsync.so:libvendorsupport.so:libvndksupport.so:libvulkan.so
+09-23 20:43:08.294 26774 26774 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:08.314 26774 26774 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:08.830 26544 26800 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:08.834 26544 26800 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:08.835 26544 26800 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:09.871 26834 26834 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:09.871 26834 26834 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:09.871 26834 26834 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:09.871 26834 26834 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:09.871 26834 26834 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:09.871 26834 26834 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:10.452 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":600,"render_pass_begins":9396}}
+09-23 20:43:10.991 26834 26906 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:10.991 26834 26906 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:10.991 26834 26906 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:11.345 26948 26948 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:11.364 26948 26948 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:12.006 26967 26967 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:12.006 26967 26967 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:12.006 26967 26967 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:12.006 26967 26967 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:12.006 26967 26967 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:12.006 26967 26967 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:13.137 26967 27039 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:13.138 26967 27039 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:13.138 26967 27039 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:14.213 27076 27076 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:14.213 27076 27076 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:14.213 27076 27076 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:14.213 27076 27076 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:14.214 27076 27076 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:14.214 27076 27076 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:14.444 27128 27128 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:14.476 27128 27128 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:15.359 27076 27166 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:15.360 27076 27166 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:15.360 27076 27166 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:16.438 27199 27199 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:16.438 27199 27199 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:16.438 27199 27199 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:16.438 27199 27199 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:16.438 27199 27199 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:16.438 27199 27199 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:16.606 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":900,"render_pass_begins":17796}}
+09-23 20:43:17.527 27199 27275 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:17.527 27199 27275 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:17.528 27199 27275 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:17.583 27269 27269 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:17.614 27269 27269 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:17.688 25185 26213 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":932,"render_pass_begins":18692}}
+09-23 20:43:18.563 27320 27320 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:18.563 27320 27320 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:18.563 27320 27320 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:18.563 27320 27320 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:18.563 27320 27320 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:18.563 27320 27320 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:19.678 27320 27385 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:19.678 27320 27385 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:19.679 27320 27385 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:20.698 27427 27427 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:20.698 27427 27427 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:20.698 27427 27427 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:20.698 27427 27427 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:20.698 27427 27427 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:20.698 27427 27427 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:20.719 27423 27423 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:20.753 27423 27423 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:21.835 27427 27513 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:21.835 27427 27513 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:21.836 27427 27513 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:22.904 27546 27546 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:22.904 27546 27546 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:22.904 27546 27546 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:22.904 27546 27546 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:22.904 27546 27546 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:22.904 27546 27546 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:23.788 27614 27614 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:23.819 27614 27614 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:24.027 27546 27633 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:24.027 27546 27633 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:24.028 27546 27633 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:24.196 27649 27649 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:24.225 27649 27649 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:25.066 27683 27683 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:25.066 27683 27683 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:25.066 27683 27683 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:25.066 27683 27683 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:25.066 27683 27683 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:25.066 27683 27683 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:26.192 27683 27754 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:26.192 27683 27754 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:26.192 27683 27754 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:26.633 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":1200,"render_pass_begins":26196}}
+09-23 20:43:26.909 27793 27793 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:26.944 27793 27793 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:27.234 27814 27814 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:27.234 27814 27814 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:27.234 27814 27814 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:27.234 27814 27814 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:27.235 27814 27814 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:27.235 27814 27814 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:28.366 27814 27878 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:28.366 27814 27878 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:28.366 27814 27878 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:29.423 27913 27913 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:29.423 27913 27913 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:29.423 27913 27913 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:29.423 27913 27913 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:29.423 27913 27913 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:29.423 27913 27913 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:29.977 27975 27975 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:30.008 27975 27975 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:30.539 27913 27996 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:30.539 27913 27996 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:30.539 27913 27996 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:31.600 28030 28030 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:31.600 28030 28030 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:31.600 28030 28030 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:31.600 28030 28030 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:31.600 28030 28030 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:31.600 28030 28030 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:32.733 28030 28102 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:32.733 28030 28102 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:32.733 28030 28102 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:33.031 28125 28125 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:33.066 28125 28125 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:33.800 28155 28155 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:33.800 28155 28155 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:33.800 28155 28155 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:33.800 28155 28155 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:33.800 28155 28155 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:33.800 28155 28155 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:34.909 28155 28221 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:34.910 28155 28221 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:34.910 28155 28221 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:35.949 28257 28257 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:35.949 28257 28257 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:35.949 28257 28257 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:35.949 28257 28257 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:35.949 28257 28257 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:35.949 28257 28257 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:36.122 28298 28298 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:36.139 28298 28298 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:36.664 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":1500,"render_pass_begins":34596}}
+09-23 20:43:37.060 28257 28343 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:37.060 28257 28343 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:37.061 28257 28343 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:38.107 28377 28377 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:38.107 28377 28377 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:38.107 28377 28377 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:38.107 28377 28377 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:38.107 28377 28377 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:38.107 28377 28377 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:39.236 28377 28462 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:39.236 28377 28462 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:39.237 28377 28462 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:39.255 28446 28446 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:39.285 28446 28446 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:39.310 28459 28459 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:39.339 28459 28459 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:40.281 28515 28515 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:40.281 28515 28515 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:40.281 28515 28515 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:40.281 28515 28515 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:40.282 28515 28515 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:40.282 28515 28515 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:41.411 28515 28580 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:41.412 28515 28580 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:41.412 28515 28580 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:42.366 28619 28619 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:42.396 28619 28619 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:42.426 28633 28633 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:42.426 28633 28633 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:42.426 28633 28633 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:42.426 28633 28633 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:42.426 28633 28633 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:42.426 28633 28633 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:43.530 28633 28705 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:43.530 28633 28705 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:43.530 28633 28705 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:44.598 28739 28739 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:44.598 28739 28739 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:44.598 28739 28739 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:44.598 28739 28739 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:44.598 28739 28739 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:44.598 28739 28739 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:45.482 28806 28806 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:45.511 28806 28806 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:45.714 28739 28824 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:45.714 28739 28824 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:45.715 28739 28824 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:46.688 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":1800,"render_pass_begins":42996}}
+09-23 20:43:46.738 28857 28857 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:46.738 28857 28857 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:46.738 28857 28857 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:46.738 28857 28857 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:46.738 28857 28857 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:46.738 28857 28857 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:47.848 28857 28924 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:47.848 28857 28924 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:47.849 28857 28924 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:48.627 28960 28960 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:48.665 28960 28960 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:48.906 28975 28975 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:48.906 28975 28975 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:48.906 28975 28975 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:48.906 28975 28975 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:48.906 28975 28975 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:48.906 28975 28975 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:50.040 28975 29046 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:50.041 28975 29046 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:50.042 28975 29046 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:51.102 29082 29082 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:51.102 29082 29082 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:51.102 29082 29082 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:51.102 29082 29082 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:51.102 29082 29082 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:51.102 29082 29082 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:51.698 29143 29143 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:51.725 29143 29143 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:52.224 29082 29167 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:52.224 29082 29167 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:52.225 29082 29167 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:53.281 29200 29200 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:53.281 29200 29200 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:53.281 29200 29200 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:53.281 29200 29200 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:53.281 29200 29200 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:53.281 29200 29200 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:54.397 29200 29277 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:54.398 29200 29277 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:54.398 29200 29277 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:54.484 29274 29274 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:54.512 29274 29274 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:54.761 29308 29308 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:54.805 29308 29308 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:55.412 29337 29337 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:55.412 29337 29337 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:55.413 29337 29337 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:55.413 29337 29337 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:55.413 29337 29337 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:55.413 29337 29337 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:56.519 29337 29404 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:56.520 29337 29404 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:56.520 29337 29404 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:56.699 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":2100,"render_pass_begins":51396}}
+09-23 20:43:57.581 29439 29439 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:57.581 29439 29439 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:57.581 29439 29439 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:57.581 29439 29439 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:57.581 29439 29439 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:57.581 29439 29439 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:43:57.825 29502 29502 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:43:57.854 29502 29502 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:43:58.698 29439 29523 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:43:58.699 29439 29523 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:43:58.699 29439 29523 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:43:59.764 29557 29557 V GraphicsEnvironment: Currently set values for:
+09-23 20:43:59.764 29557 29557 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:43:59.764 29557 29557 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:43:59.764 29557 29557 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:43:59.764 29557 29557 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:43:59.764 29557 29557 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:00.874 29557 29636 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:00.874 29557 29636 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:00.875 29557 29636 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:00.947 29632 29632 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:00.974 29632 29632 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:01.909 29682 29682 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:01.909 29682 29682 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:01.909 29682 29682 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:01.909 29682 29682 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:01.909 29682 29682 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:01.909 29682 29682 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:03.012 29682 29748 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:03.012 29682 29748 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:03.013 29682 29748 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:04.029 29792 29792 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:04.029 29792 29792 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:04.029 29792 29792 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:04.029 29792 29792 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:04.029 29792 29792 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:04.029 29792 29792 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:04.075 29788 29788 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:04.107 29788 29788 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:05.147 29792 29867 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:05.147 29792 29867 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:05.148 29792 29867 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:06.216 29900 29900 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:06.216 29900 29900 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:06.216 29900 29900 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:06.216 29900 29900 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:06.216 29900 29900 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:06.216 29900 29900 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:06.728 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":2400,"render_pass_begins":59796}}
+09-23 20:44:07.183 29967 29967 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:07.212 29967 29967 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:07.354 29900 29983 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:07.355 29900 29983 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:07.355 29900 29983 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:08.420 30018 30018 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:08.420 30018 30018 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:08.420 30018 30018 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:08.420 30018 30018 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:08.420 30018 30018 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:08.420 30018 30018 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:09.538 30018 30090 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:09.538 30018 30090 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:09.538 30018 30090 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:09.682 30100 30100 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:09.710 30100 30100 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:10.298 30145 30145 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:10.328 30145 30145 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:10.570 30161 30161 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:10.570 30161 30161 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:10.570 30161 30161 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:10.570 30161 30161 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:10.570 30161 30161 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:10.570 30161 30161 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:11.695 30161 30225 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:11.695 30161 30225 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:11.696 30161 30225 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:12.763 30258 30258 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:12.763 30258 30258 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:12.763 30258 30258 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:12.763 30258 30258 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:12.763 30258 30258 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:12.763 30258 30258 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:13.390 30324 30324 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:13.418 30324 30324 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:13.872 30258 30343 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:13.872 30258 30343 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:13.873 30258 30343 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:14.905 30377 30377 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:14.905 30377 30377 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:14.905 30377 30377 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:14.905 30377 30377 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:14.905 30377 30377 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:14.905 30377 30377 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:16.017 30377 30443 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:16.017 30377 30443 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:16.018 30377 30443 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:16.451 30465 30465 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:16.502 30465 30465 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:16.753 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":2700,"render_pass_begins":68196}}
+09-23 20:44:17.095 30496 30496 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:17.095 30496 30496 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:17.095 30496 30496 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:17.095 30496 30496 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:17.095 30496 30496 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:17.095 30496 30496 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:18.222 30496 30562 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:18.222 30496 30562 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:18.223 30496 30562 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:19.286 30595 30595 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:19.286 30595 30595 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:19.286 30595 30595 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:19.286 30595 30595 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:19.286 30595 30595 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:19.286 30595 30595 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:19.487 30645 30645 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:19.505 30645 30645 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:20.422 30595 30679 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:20.423 30595 30679 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:20.423 30595 30679 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:21.474 30716 30716 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:21.475 30716 30716 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:21.475 30716 30716 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:21.475 30716 30716 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:21.475 30716 30716 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:21.475 30716 30716 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:22.581 30716 30791 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:22.581 30716 30791 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:22.581 30716 30791 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:22.644 30787 30787 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:22.671 30787 30787 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:23.634 30837 30837 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:23.634 30837 30837 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:23.634 30837 30837 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:23.634 30837 30837 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:23.634 30837 30837 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:23.634 30837 30837 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:24.750 30837 30913 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:24.750 30837 30913 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:24.750 30837 30913 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:24.857 30910 30910 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:24.886 30910 30910 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:25.743 30965 30965 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:25.743 30965 30965 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:25.743 30965 30965 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:25.743 30965 30965 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:25.743 30965 30965 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:25.743 30965 30965 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:25.744 30961 30961 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:26.779 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":3000,"render_pass_begins":76596}}
+09-23 20:44:26.848 30965 31039 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:26.849 30965 31039 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:26.849 30965 31039 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:27.889 31072 31072 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:27.889 31072 31072 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:27.889 31072 31072 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:27.890 31072 31072 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:27.890 31072 31072 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:27.890 31072 31072 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:28.839 31140 31140 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:28.868 31140 31140 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:29.031 31072 31157 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:29.032 31072 31157 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:29.032 31072 31157 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:30.112 31191 31191 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:30.112 31191 31191 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:30.112 31191 31191 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:30.113 31191 31191 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:30.113 31191 31191 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:30.113 31191 31191 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:31.223 31191 31255 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:31.223 31191 31255 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:31.224 31191 31255 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:31.994 31292 31292 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:32.031 31292 31292 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:32.270 31307 31307 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:32.270 31307 31307 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:32.270 31307 31307 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:32.270 31307 31307 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:32.270 31307 31307 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:32.270 31307 31307 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:33.389 31307 31374 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:33.390 31307 31374 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:33.390 31307 31374 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:34.459 31408 31408 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:34.459 31408 31408 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:34.459 31408 31408 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:34.459 31408 31408 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:34.459 31408 31408 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:34.459 31408 31408 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:35.035 31476 31476 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:35.064 31476 31476 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:35.582 31408 31495 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:35.583 31408 31495 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:35.583 31408 31495 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:36.644 31529 31529 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:36.644 31529 31529 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:36.644 31529 31529 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:36.644 31529 31529 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:36.644 31529 31529 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:36.644 31529 31529 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:36.799 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":3300,"render_pass_begins":84996}}
+09-23 20:44:37.776 31529 31595 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:37.777 31529 31595 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:37.777 31529 31595 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:38.088 31618 31618 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:38.113 31618 31618 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:38.826 31648 31648 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:38.826 31648 31648 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:38.826 31648 31648 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:38.826 31648 31648 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:38.826 31648 31648 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:38.826 31648 31648 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:39.933 31648 31723 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:39.933 31648 31723 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:39.933 31648 31723 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:40.055 31720 31720 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:40.083 31720 31720 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:40.931 31771 31771 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:40.931 31771 31771 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:40.931 31771 31771 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:40.931 31771 31771 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:40.931 31771 31771 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:40.931 31771 31771 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:41.122 31833 31833 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:41.138 31833 31833 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:42.035 31771 31857 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:42.036 31771 31857 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:42.036 31771 31857 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:43.096 31891 31891 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:43.096 31891 31891 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:43.096 31891 31891 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:43.096 31891 31891 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:43.096 31891 31891 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:43.096 31891 31891 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:44.229 31891 31965 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:44.229 31891 31965 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:44.229 31891 31965 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:44.304 31961 31961 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:44.333 31961 31961 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:45.285 32010 32010 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:45.285 32010 32010 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:45.285 32010 32010 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:45.285 32010 32010 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:45.285 32010 32010 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:45.285 32010 32010 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:46.399 32010 32076 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:46.399 32010 32076 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:46.400 32010 32076 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:46.827 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":3600,"render_pass_begins":93396}}
+09-23 20:44:47.414 32117 32117 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:47.422 32121 32121 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:47.422 32121 32121 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:47.422 32121 32121 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:47.422 32121 32121 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:47.422 32121 32121 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:47.422 32121 32121 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:47.446 32117 32117 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:48.532 32121 32195 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:48.533 32121 32195 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:48.533 32121 32195 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:49.604 32231 32231 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:49.604 32231 32231 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:49.604 32231 32231 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:49.604 32231 32231 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:49.605 32231 32231 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:49.605 32231 32231 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:50.528 32298 32298 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:50.557 32298 32298 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:50.731 32231 32317 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:50.731 32231 32317 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:50.732 32231 32317 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:51.806 32351 32351 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:51.806 32351 32351 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:51.806 32351 32351 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:51.806 32351 32351 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:51.807 32351 32351 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:51.807 32351 32351 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:52.927 32351 32417 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:52.927 32351 32417 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:52.927 32351 32417 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:53.696 32463 32463 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:53.731 32463 32463 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:54.002 32482 32482 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:54.002 32482 32482 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:54.002 32482 32482 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:54.002 32482 32482 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:54.002 32482 32482 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:54.002 32482 32482 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:55.130 32482 32559 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:55.130 32482 32559 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:55.131 32482 32559 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:56.182 32595 32595 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:56.182 32595 32595 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:56.182 32595 32595 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:56.182 32595 32595 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:56.182 32595 32595 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:56.182 32595 32595 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:56.774 32660 32660 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:56.803 32660 32660 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:44:56.854 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":3900,"render_pass_begins":101796}}
+09-23 20:44:57.312 32595 32681 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:57.313 32595 32681 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:57.313 32595 32681 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:58.361 32714 32714 V GraphicsEnvironment: Currently set values for:
+09-23 20:44:58.361 32714 32714 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:44:58.361 32714 32714 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:44:58.361 32714 32714 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:44:58.361 32714 32714 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:44:58.361 32714 32714 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:44:59.501 32714   314 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:44:59.502 32714   314 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:44:59.502 32714   314 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:44:59.833   339   339 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:44:59.869   339   339 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:45:00.565   383   383 V GraphicsEnvironment: Currently set values for:
+09-23 20:45:00.565   383   383 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:45:00.565   383   383 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:45:00.565   383   383 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:45:00.565   383   383 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:45:00.565   383   383 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:45:01.678   383   464 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:45:01.679   383   464 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:45:01.679   383   464 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:45:02.726   498   498 V GraphicsEnvironment: Currently set values for:
+09-23 20:45:02.726   498   498 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:45:02.726   498   498 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:45:02.726   498   498 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:45:02.726   498   498 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:45:02.727   498   498 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:45:02.914   547   547 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:45:02.931   547   547 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:45:03.872   498   602 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:45:03.872   498   602 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:45:03.872   498   602 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:45:04.919   636   636 V GraphicsEnvironment: Currently set values for:
+09-23 20:45:04.919   636   636 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:45:04.920   636   636 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:45:04.920   636   636 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:45:04.920   636   636 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:45:04.920   636   636 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:45:06.028   636   717 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:45:06.028   636   717 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:45:06.028   636   717 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:45:06.069   713   713 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:45:06.097   713   713 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:45:06.880 25185 25382 I refknobs: {"knob":"gray_readonly_probe","layer_loaded":true,"pkg":"com.miHoYo.Yuanshen","effective":[],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":4200,"render_pass_begins":110196}}
+09-23 20:45:07.065   769   769 V GraphicsEnvironment: Currently set values for:
+09-23 20:45:07.065   769   769 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:45:07.065   769   769 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:45:07.065   769   769 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:45:07.065   769   769 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:45:07.065   769   769 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:45:08.189   769   857 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:45:08.189   769   857 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:45:08.190   769   857 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:45:09.203   909   909 V GraphicsEnvironment: Currently set values for:
+09-23 20:45:09.203   909   909 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:45:09.203   909   909 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:45:09.203   909   909 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:45:09.203   909   909 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:45:09.203   909   909 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
+09-23 20:45:09.203   903   903 D nativeloader: InitDefaultPublicLibraries for_preload=1: libandroid.so:libaaudio.so:libamidi.so:libbinder_ndk.so:libc.so:libcamera2ndk.so:libdl.so:libEGL.so:libGLESv1_CM.so:libGLESv2.so:libGLESv3.so:libicu.so:libicui18n.so:libicuuc.so:libjnigraphics.so:liblog.so:libmediandk.so:libm.so:libnativehelper.so:libnativewindow.so:libOpenMAXAL.so:libOpenSLES.so:libRS.so:libstdc++.so:libsync.so:libvulkan.so:libwebviewchromium_plat_support.so:libz.so
+09-23 20:45:09.241   903   903 I AconfigPackage: com.android.graphics.libvulkan.flags is mapped to system
+09-23 20:45:10.321   909  1043 D vulkan  : searching for layers in '/system/app/GameAssist/GameAssist.apk!/lib/arm64-v8a'
+09-23 20:45:10.322   909  1043 D vulkan  : searching for layers in '/system/lib64'
+09-23 20:45:10.322   909  1043 D vulkan  : searching for layers in '/system_ext/lib64'
+09-23 20:45:11.386  1196  1196 V GraphicsEnvironment: Currently set values for:
+09-23 20:45:11.386  1196  1196 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+09-23 20:45:11.386  1196  1196 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+09-23 20:45:11.386  1196  1196 V GraphicsEnvironment: cn.nubia.gameassist is not listed in per-application setting
+09-23 20:45:11.386  1196  1196 V GraphicsEnvironment: ANGLE allowlist from config: com.dreamgames.royalmatch com.dts.freefiremax com.dxx.firenow com.gramgames.mergedragons com.ludo.king com.mojang.minecraftpe com.my.defense com.nintendo.zaka com.os.airforce com.playrix.fishdomdd.gplay io.teslatech.callbreak jp.konami.prospia net.peakgames.toonblast
+09-23 20:45:11.386  1196  1196 V GraphicsEnvironment: cn.nubia.gameassist is not listed in ANGLE allowlist or settings, returning default
