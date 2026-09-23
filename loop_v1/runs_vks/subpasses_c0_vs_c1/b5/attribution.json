@@ -1,0 +1,23 @@
+{
+ "verdict": "GPU 计算受限",
+ "evidence": "GPU 活跃 7.86ms 占帧周期 8.64ms 的 90.9% (>90%)",
+ "actionable": "减少每帧 GPU 工作量 (分辨率/着色/overdraw) 才有收益",
+ "measures": {
+  "frame_p50_ms": 8.645,
+  "frame_p95_ms": 17.1302,
+  "jitter_p95_minus_p50_ms": 8.4852,
+  "gpu_active_mean_ms": 7.8581,
+  "gpu_share_pct": 90.9,
+  "queue_p50_ms": 5.8066,
+  "queue_share_pct": 67.17,
+  "n_thermal_events": 0,
+  "detected_fps_cap": null
+ },
+ "bandwidth": {
+  "ddr_cur_khz": 547000.0,
+  "ddr_boost_khz": 547000.0,
+  "gpu_bus_vote_median": 2300.0,
+  "gpu_bus_vote_max": 5350,
+  "bus_vote_headroom_pct": 57.01
+ }
+}

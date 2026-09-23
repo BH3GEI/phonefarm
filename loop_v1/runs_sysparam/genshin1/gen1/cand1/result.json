@@ -1,0 +1,224 @@
+{
+ "params": {
+  "bus.DDR.boost_freq": "5333000",
+  "bus.LLCC.boost_freq": "1350000"
+ },
+ "why": "复现并确认已知的访存上限收益，把 DDR 与 LLCC 同时钉到上限做归因基线",
+ "plan": "# loop_v1 sysparam plan\nsysfs\t/sys/devices/system/cpu/bus_dcvs/DDR/boost_freq\t5333000\nsysfs\t/sys/devices/system/cpu/bus_dcvs/LLCC/boost_freq\t1350000\n",
+ "pairs_completed": 0,
+ "apply_ok": true,
+ "apply_log": [
+  "KNOB_APPLIED /sys/devices/system/cpu/bus_dcvs/DDR/boost_freq: 547000 -> 5333000\nKNOB_APPLIED /sys/devices/system/cpu/bus_dcvs/LLCC/boost_freq: 282000 -> 1350000\n"
+ ],
+ "restore_ok": true,
+ "restore_fail": null,
+ "restore_log": [
+  "KNOB_NOT_APPLIED (无 /data/local/tmp/loop_v1_sysparam.state, 无需回滚)"
+ ],
+ "knob_state_after": [
+  "state: 未施加"
+ ],
+ "cooldown": {
+  "ok": true,
+  "zone": "cpu-0-2-1",
+  "c": 46.1,
+  "waited_s": 61.4
+ },
+ "charge_suspend_log": [
+  "CHARGE_SUSPENDED /sys/class/qcom-battery/charging_enabled: 1 -> 0",
+  "CHARGE_STATE status=Discharging current_now=-1000 capacity=100 on_battery=yes"
+ ],
+ "charge_restore_log": [
+  "CHARGE_RESTORED /sys/class/qcom-battery/charging_enabled: -> 1",
+  "CHARGE_STATE status=Charging current_now=-1407000 capacity=100 on_battery=no"
+ ],
+ "on_battery_uniform": true,
+ "snapshot_check": {
+  "checked": true,
+  "n_lines": 39,
+  "strict_identical": false,
+  "strict_n_diff": 1,
+  "ours_identical": false,
+  "ours_diffs": [
+   {
+    "line": 29,
+    "before": "cpu.policy0.scaling_max=1785600",
+    "after": "cpu.policy0.scaling_max=1440000"
+   }
+  ],
+  "driver_owned_diffs": []
+ },
+ "temp_max_c": 58.7,
+ "temp_cap_c": 58.2,
+ "arms": {
+  "ctrl": null,
+  "knob": {
+   "title": "knob",
+   "n_runs": 1,
+   "runs": [
+    "knob1"
+   ],
+   "metrics": {
+    "frame_p50": {
+     "values": [
+      16.653
+     ],
+     "median": 16.653,
+     "mean": 16.653,
+     "min": 16.653,
+     "max": 16.653,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_p95": {
+     "values": [
+      18.5396
+     ],
+     "median": 18.5396,
+     "mean": 18.5396,
+     "min": 18.5396,
+     "max": 18.5396,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_p99": {
+     "values": [
+      26.1546
+     ],
+     "median": 26.1546,
+     "mean": 26.1546,
+     "min": 26.1546,
+     "max": 26.1546,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_mean": {
+     "values": [
+      16.8166
+     ],
+     "median": 16.8166,
+     "mean": 16.8166,
+     "min": 16.8166,
+     "max": 16.8166,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "gpu_active_mean": {
+     "values": [
+      13.3315
+     ],
+     "median": 13.3315,
+     "mean": 13.3315,
+     "min": 13.3315,
+     "max": 13.3315,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "gpu_active_p95": {
+     "values": [
+      13.9884
+     ],
+     "median": 13.9884,
+     "mean": 13.9884,
+     "min": 13.9884,
+     "max": 13.9884,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "queue_p50": {
+     "values": [
+      1.7201
+     ],
+     "median": 1.7201,
+     "mean": 1.7201,
+     "min": 1.7201,
+     "max": 1.7201,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "fps_mean": {
+     "values": [
+      59.457
+     ],
+     "median": 59.457,
+     "mean": 59.457,
+     "min": 59.457,
+     "max": 59.457,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "bw_median": {
+     "values": [
+      7150.0
+     ],
+     "median": 7150.0,
+     "mean": 7150.0,
+     "min": 7150.0,
+     "max": 7150.0,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    }
+   }
+  }
+ },
+ "env_per_run": {
+  "knob1": {
+   "power_w_mean": 5.098,
+   "power_w_median": 5.6498,
+   "power_now_w_mean": 887.9198,
+   "power_now_plausible": false,
+   "power_vi_w_mean": 5.098,
+   "usb_input_w_mean": null,
+   "current_now_ua_mean": -1174700.0,
+   "voltage_now_uv_mean": 4343450.0,
+   "power_rail": "battery",
+   "battery_status": "Discharging",
+   "battery_charging": false,
+   "power_usable_reason": "放电态(已停充), 用 |V x I| (本机 power_now 单位有误, 不采用)",
+   "soc_temp_max_c": 58.7,
+   "soc_temp_mean_c": 54.25,
+   "n_samples": 20,
+   "fan_state": "fan_enable=1,fan_speed_level=5,fan_speed_pwm="
+  }
+ },
+ "fan_state_uniform": true,
+ "comparisons": {},
+ "verdict": "ABORT",
+ "reason": "knob 臂第 1 轮 SoC 结温 58.7C 超过上限 58.2C"
+}

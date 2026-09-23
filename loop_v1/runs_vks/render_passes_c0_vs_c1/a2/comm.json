@@ -1,0 +1,10 @@
+{
+  "comm": "binder:9284_4",
+  "share": 0.9823,
+  "dist": {
+    "binder:9284_4": 722,
+    "RenderThread": 9,
+    "RenderEngine": 4
+  },
+  "total": 735
+}

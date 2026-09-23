@@ -16,6 +16,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import sys
 
 # ── 开关语义: 逐条来自 Vulkan-Samples 上游源码, 不是推测 ──
@@ -66,13 +67,76 @@ def load_json(path: str):
         return json.load(fh)
 
 
+# Adreno 驱动发提交的那个线程叫 binder:<pid>_<槽位>: pid 每次启动都不一样, 槽位是
+# binder 线程池里恰好轮到哪一个, 两者都不携带口径信息。比较时必须先归一化, 否则
+# "每轮线程名都不同"会永远误报成"两臂口径不一致"。真正要拦的是**类别**变了 ——
+# 比如从应用自己的提交线程变成了 kgsl_hwsched 或 SurfaceFlinger 的 RenderEngine。
+BINDER_RE = re.compile(r"^binder:\d+_\d+$")
+
+
+def normalize_comm(comm: str | None) -> str:
+    if not comm:
+        return "<none>"
+    return "binder:<应用提交线程>" if BINDER_RE.match(comm) else comm
+
+
 def collect_comms(root: str) -> dict:
-    """每轮认出来的提交线程名 —— 两臂必须是同一个, 否则对照不成立。"""
+    """每轮认出来的提交线程名(已抹掉 pid) —— 两臂必须是同一类线程, 否则对照不成立。"""
     out: dict[str, list] = {}
     for p in sorted(glob.glob(os.path.join(root, "*", "comm.json"))):
         d = load_json(p)
-        out.setdefault(d.get("comm") or "<none>", []).append(
+        out.setdefault(normalize_comm(d.get("comm")), []).append(
             (os.path.basename(os.path.dirname(p)), d.get("share")))
+    return out
+
+
+def collect_fans(root: str) -> dict:
+    """每轮的风扇状态 —— 红魔的主动散热风扇自身耗电会进功耗读数, 且它不在 38 行快照里。
+    同一组对照的两臂必须是同一风扇状态, 否则"风扇开/关"会混进臂间差异。"""
+    out: dict[str, list[str]] = {}
+    for p in sorted(glob.glob(os.path.join(root, "*", "fan.json"))):
+        d = load_json(p)
+        key = f"enable={d.get('fan_enable')} level={d.get('fan_speed_level')}"
+        out.setdefault(key, []).append(os.path.basename(os.path.dirname(p)))
+    return out
+
+
+def collect_run_conditions(root: str) -> dict:
+    """每轮的两个**会悄悄污染逐帧指标**的条件, 逐轮列出来而不是藏在 summary 里。
+
+    · submits_per_frame: parse-trace 自检出的"每帧几次提交"。所有逐帧指标
+      (frame_p50/p95、gpu_active_mean、fps_mean) 都是按它分组算出来的, 它一变,
+      这些数的口径就变了。2026-09-23 实测同一个负载的 10 轮里它取过 1 和 6 ——
+      取 6 的那轮 fps 被算成 9.9、frame_p50 算成 99.9ms, 其实应用一直稳在 60fps。
+    · log_fps_median: 应用自报帧率。开 vsync 时它等于面板刷新率, 而本机面板是
+      自适应刷新的, 实测同一批里出现过 60 / 99.5 / 120 三档 —— 帧预算不一样,
+      逐帧指标自然没有可比性。
+    带宽 bw_median 不经过这两层, 是 kgsl_buslevel 的直接观测量, 不受影响。
+    """
+    out = []
+    for p in sorted(glob.glob(os.path.join(root, "*", "summary.json"))):
+        d = os.path.dirname(p)
+        s = load_json(p)
+        cc_path = os.path.join(d, "crosscheck.json")
+        cc = load_json(cc_path) if os.path.exists(cc_path) else {}
+        out.append({
+            "round": os.path.basename(d),
+            "spf": s.get("submits_per_frame"),
+            "log_fps": cc.get("log_fps_median"),
+            "bw_median": s.get("bw_median"),
+        })
+    return {"rounds": out,
+            "spf_set": sorted({r["spf"] for r in out if r["spf"] is not None}),
+            "log_fps_set": sorted({round(r["log_fps"]) for r in out if r["log_fps"]})}
+
+
+def collect_displays(root: str) -> dict:
+    """每轮的面板刷新率设置 —— 开着 vsync 时应用帧率就是它, 各轮不一致则逐帧指标不可比。"""
+    out: dict[str, list[str]] = {}
+    for p in sorted(glob.glob(os.path.join(root, "*", "display.json"))):
+        d = load_json(p)
+        key = f"min={d.get('min_refresh_rate')} peak={d.get('peak_refresh_rate')}"
+        out.setdefault(key, []).append(os.path.basename(os.path.dirname(p)))
     return out
 
 
@@ -101,9 +165,40 @@ def main() -> int:
     comms = collect_comms(args.root)
     print(f"\n提交线程 (由 pick_comm.py 从 trace 里认出, 非写死):")
     for c, rounds in comms.items():
-        print(f"  {c}: {len(rounds)} 轮, 占比 {sorted({s for _, s in rounds})}")
+        shares = sorted(s for _, s in rounds if s is not None)
+        print(f"  {c}: {len(rounds)} 轮, 占比 {min(shares):.3f}~{max(shares):.3f}" if shares
+              else f"  {c}: {len(rounds)} 轮")
     if len(comms) > 1:
         print("  ⚠ 两臂不是同一个提交线程, 对照不成立, 下面的数不要用")
+
+    fans = collect_fans(args.root)
+    if fans:
+        print(f"\n测试条件 · 主动散热风扇 (不在 38 行快照里, 单独存证):")
+        for state, rounds in fans.items():
+            print(f"  {state}: {len(rounds)} 轮")
+        if len(fans) > 1:
+            print("  ⚠ 各轮风扇状态不一致 —— 风扇自身耗电会进功耗读数, 这批数据不能跨状态比")
+
+    disp = collect_displays(args.root)
+    if disp:
+        print(f"\n测试条件 · 面板刷新率 (开着 vsync 时它就是应用帧率):")
+        for state, rounds in disp.items():
+            print(f"  {state}: {len(rounds)} 轮")
+        if len(disp) > 1:
+            print("  ⚠ 各轮刷新率设置不一致 —— 帧预算不同, 逐帧指标不可比")
+
+    cond = collect_run_conditions(args.root)
+    if cond["rounds"]:
+        print("\n逐轮条件 (这两项一变, 所有逐帧指标的口径就变了):")
+        print("  " + "  ".join(f"{r['round']}:spf={r['spf']},app_fps={round(r['log_fps'], 1) if r['log_fps'] else None}" for r in cond["rounds"]))
+        if len(cond["spf_set"]) > 1:
+            print(f"  ⚠ submits_per_frame 在同一批里取了 {cond['spf_set']} —— 逐帧指标 "
+                  f"(frame_p50/p95, gpu_active_mean, fps_mean) 是按它分组算的, 口径不一致, 不可比。")
+        if len(cond["log_fps_set"]) > 1:
+            print(f"  ⚠ 应用帧率在同一批里取了 {cond['log_fps_set']} —— 开着 vsync 时它就是面板刷新率, "
+                  f"本机面板自适应刷新, 各轮帧预算不同, 逐帧指标没有可比性。")
+        if len(cond["spf_set"]) > 1 or len(cond["log_fps_set"]) > 1:
+            print("  → 这一批里只有 bw_median 可用: 它是 kgsl_buslevel 的直接观测量, 不经过分帧。")
 
     a, b = an.get("arm_a", {}), an.get("arm_b", {})
     print(f"\n样本: A={a.get('n_runs')} 轮  B={b.get('n_runs')} 轮")

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -38,21 +39,52 @@ from pybridge import compare, describe, snapshot_diff       # noqa: E402
 import whitelist as WL                                      # noqa: E402
 import verdict as V                                         # noqa: E402
 import llm as LLM                                           # noqa: E402
+import spin_check as SPIN                                   # noqa: E402
 
 SERIAL = os.environ.get("SERIAL", "91253241019A")
-ADB = os.environ.get("ADB", "/Users/mac/Library/Android/sdk/platform-tools/adb")
+# 原神 7.1.0 之后手柄注入失效 (且失效是安静的: 脚本跑完、有帧时序, 但视角不转),
+# 所以默认负载换成触控拖拽版。旧的手柄版留在 scripts/ 里只供回溯历史证据。
+WORKLOAD = os.environ.get(
+    "WL", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "scripts", "workload_spin_touch_v1.json"))
+
+
+def _find_adb() -> str:
+    """adb 的位置因装法而异 (homebrew / Android SDK), 别写死一条路径。"""
+    env = os.environ.get("ADB")
+    if env:
+        return env
+    found = shutil.which("adb")
+    if found:
+        return found
+    return "/Users/mac/Library/Android/sdk/platform-tools/adb"
+
+
+ADB = _find_adb()
 DEV_TMP = "/data/local/tmp"
 DEV_SCRIPTS = ["device_snapshot.sh", "ftrace_capture.sh"]
-AUTO_SCRIPTS = ["probe_sysparam.sh", "knob_sysparam.sh", "sample_env.sh"]
+AUTO_SCRIPTS = ["probe_sysparam.sh", "knob_sysparam.sh", "sample_env.sh",
+                "charge_suspend.sh"]
 
 # 等冷门槛的下界。真正的门槛在基线之后定 (见 main): 目标是「回到基线是在什么
 # 热态下量的」, 而不是一个拍脑袋的绝对温度 —— 连跑几十轮游戏之后设备根本降不到
 # 40C, 用绝对值当门槛会把每一组候选都卡死在等冷超时上。
 COOL_C_FLOOR = 40.0
 COOL_TIMEOUT_S = 420
-# 温度上限的下界。真正的上限 = max(这个值, 基线实测最高温 + 余量), 在看候选数据前冻结。
-TEMP_CAP_FLOOR_C = 45.0
-TEMP_CAP_MARGIN_C = 3.0
+# 温度上限是**安全上限** —— 它的职责是「别把机器烤坏」, 不是「保证两臂热态一样」。
+# 热态的可比性由组内 ABBA 交替 + 等冷目标负责, 不靠温度上限。
+#
+# 第一版把上限定成 max(45C, 基线最高温+3C), 是把这两件事混为一谈了, 结果:
+# 本机原神 60fps + 风扇全开时基线就有 55.2C, 上限算出来 58.2C, 第一组候选
+# 第一轮量到 58.7C —— 超了 0.5C, 一组数据直接作废。0.5C 是同一场连跑里
+# 再正常不过的热漂移, 拿它当安全事故是荒谬的。
+#
+# 现在按安全含义定: 骁龙的结温保护在 95C 上下开始降频, 70C 留足余量;
+# 再加一条 +10C 的失控护栏 (真出热失控时它才会触发, 正常漂移不会)。
+# 注: 任务书原话建议 "比如 SoC 45C" —— 那个数在这台机器上跑原神根本达不到
+# (基线就 55C), 照搬只会让每一组都作废。
+TEMP_CAP_FLOOR_C = 70.0
+TEMP_CAP_MARGIN_C = 10.0
 
 
 def log(msg: str) -> None:
@@ -141,7 +173,9 @@ def wait_cool(cool_c: float = COOL_C_FLOOR, timeout_s: int = COOL_TIMEOUT_S) -> 
 # 会把「跑完比跑前热」误判成没还原干净, 一整组 5 对实验就白跑了。
 # 所以分两层报: strict 是原样的逐行 diff (什么都不藏), ours 只看
 # 「我们写过的那类项」—— 判定用 ours, 证据里两份都留。
-DRIVER_OWNED_PREFIXES = ("kgsl.thermal_pwrlevel",)
+# kgsl.max_gpuclk 是 thermal_pwrlevel 对应的那个频率, 同样由驱动按温度自己改:
+# 实测探测前后 6 -> 4 / 646MHz -> 826MHz, 只是设备凉了一点, 不是我们留的痕。
+DRIVER_OWNED_PREFIXES = ("kgsl.thermal_pwrlevel", "kgsl.max_gpuclk")
 
 
 def classify_diff(sd: dict) -> dict:
@@ -161,13 +195,71 @@ def classify_diff(sd: dict) -> dict:
     }
 
 
+# ── 负载自检: 视角到底转没转 ──
+
+def screencap_raw(timeout: int = 30) -> bytes:
+    r = subprocess.run([ADB, "-s", SERIAL, "exec-out", "screencap"],
+                       capture_output=True, timeout=timeout)
+    return r.stdout
+
+
+def check_spin(outdir: str) -> dict:
+    """跑一次拖拽, 中途抓两帧, 确认画面真的在动。
+
+    这一步不是可选的保险, 是必需的: 原神 7.1.0 之后手柄注入安静失效 ——
+    脚本照常跑完、ftrace 照样有帧时序, 只是采到的是静止画面。那种数据看起来
+    完全正常, 混进 A/B 比较里没有任何一处会报错。
+    """
+    os.makedirs(outdir, exist_ok=True)
+    # 拖 12 秒 (与负载同一条命令), 后台跑; 期间抓两帧
+    drag = subprocess.Popen(
+        [ADB, "-s", SERIAL, "shell", "input swipe 900 400 2000 400 12000"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(3)
+    a = screencap_raw()
+    time.sleep(5)
+    b = screencap_raw()
+    try:
+        drag.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        drag.kill()
+    for name, buf in (("spin_a.raw", a), ("spin_b.raw", b)):
+        with open(os.path.join(outdir, name), "wb") as f:
+            f.write(buf)
+    v = SPIN.verdict(a, b)
+    with open(os.path.join(outdir, "spin_check.json"), "w") as f:
+        json.dump(v, f, ensure_ascii=False, indent=1)
+    return v
+
+
+# ── 停充 (测功耗的前提) ──
+
+def charge_suspend() -> str:
+    """测功耗期间停充, 让整机真由电池供电。实现与判据照搬 hwcond.rs, 见脚本注释。
+
+    失败不致命: 拿不到放电态就只是功耗这一项不进判定 (env_stats 会如实报原因),
+    帧时与帧率照常测。绝不因为量不了功耗就不跑实验。
+    """
+    out = su(f"sh {DEV_TMP}/charge_suspend.sh suspend", timeout=90, want_status=True)
+    log("停充: " + " | ".join(out.strip().splitlines()[-2:]))
+    return out
+
+
+def charge_restore() -> str:
+    out = su(f"sh {DEV_TMP}/charge_suspend.sh restore", timeout=60, want_status=True)
+    if "CHARGE_RESTORE_FAIL" in out:
+        log(f"警告: 充电未能恢复, 保留 state 文件以便人工回滚:\n{out}")
+    return out
+
+
 # ── 单轮 ──
 
 def run_one(label: str, outdir: str, lead: int = 6, capdur: int = 30) -> dict:
     """跑一轮负载 + ftrace 采集 + 功耗温度采样, 返回合并后的指标。"""
     os.makedirs(outdir, exist_ok=True)
     env = dict(os.environ)
-    env.update({"SERIAL": SERIAL, "ROOT": ROOT, "LEAD": str(lead), "CAPDUR": str(capdur)})
+    env.update({"SERIAL": SERIAL, "ROOT": ROOT, "LEAD": str(lead), "CAPDUR": str(capdur),
+                "WL": WORKLOAD})
     env["PATH"] = env.get("PATH", "") + ":" + os.path.dirname(ADB)
 
     # 功耗/温度采样与 ftrace 并行: 覆盖整段负载, 间隔 2s
@@ -250,6 +342,8 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
     if not cool.get("ok"):
         log(f"等冷未达标 ({cool.get('reason')}), 仍按 ABBA 交替继续, 已记进证据")
 
+    charge_log = charge_suspend()
+
     knob_runs, ctrl_runs = [], []
     apply_logs: list[str] = []
     apply_ok = True
@@ -309,8 +403,9 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
         aborted = f"实验过程异常, 已强制还原: {type(e).__name__}: {e}"
         log(aborted)
 
-    # 无论如何先还原, 再核快照
+    # 无论如何先还原 (旋钮 + 充电), 再核快照
     restore_log = restore()
+    charge_restore_log = charge_restore()
     status_log = su(f"sh {DEV_TMP}/knob_sysparam.sh status")
     snap_after = snapshot()
     with open(os.path.join(outdir, "snap_after.txt"), "w") as f:
@@ -354,6 +449,9 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
         "restore_log": restore_log.strip().splitlines(),
         "knob_state_after": status_log.strip().splitlines(),
         "cooldown": cool,
+        "charge_suspend_log": charge_log.strip().splitlines(),
+        "charge_restore_log": charge_restore_log.strip().splitlines(),
+        "on_battery_uniform": len({m.get("on_battery") for _, m in knob_runs + ctrl_runs}) <= 1,
         "snapshot_check": sd,
         "temp_max_c": temp_max,
         "temp_cap_c": temp_cap_c,
@@ -362,9 +460,16 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
             "knob": describe(knob_runs, "knob") if knob_runs else None,
         },
         "env_per_run": {name: {k: m.get(k) for k in
-                               ("power_w_mean", "power_w_median", "soc_temp_max_c",
-                                "soc_temp_mean_c", "n_samples", "battery_charging")}
+                               ("power_w_mean", "power_w_median", "power_now_w_mean",
+                                "power_now_plausible", "power_vi_w_mean",
+                                "usb_input_w_mean", "current_now_ua_mean",
+                                "voltage_now_uv_mean", "power_rail", "battery_status",
+                                "battery_charging", "power_usable_reason",
+                                "soc_temp_max_c", "soc_temp_mean_c", "n_samples",
+                                "fan_state")}
                         for name, m in knob_runs + ctrl_runs},
+        # 两臂的风扇状态必须一致, 否则功耗那一项比的是风扇不是参数
+        "fan_state_uniform": len({m.get("fan_state") for _, m in knob_runs + ctrl_runs}) <= 1,
         "comparisons": cmps,
         **dec,
     }
@@ -393,6 +498,12 @@ def main() -> int:
     ap.add_argument("--probe-only", action="store_true", help="只探白名单, 不跑实验")
     ap.add_argument("--baseline-runs", type=int, default=2,
                     help="冻结温度上限用的基线轮数")
+    ap.add_argument("--power-in-verdict", choices=("auto", "on", "off"), default="auto",
+                    help="把整机功耗计入判定。**缺省关闭**: 本机插着 USB 时 USB 输入"
+                         "help 见 README。auto (缺省): 基线轮真的拿到放电态 "
+                         "(停充成功) 才计入; on: 强制计入; off: 强制不计入。"
+                         "插着 USB 充电时测到的不是整机功耗 —— USB 输入里约 46%% 是在给"
+                         "电池充电, 且充电电流随电量单调衰减。功耗数据无论如何照常逐轮记录。")
     a = ap.parse_args()
 
     out = os.path.abspath(a.out)
@@ -431,9 +542,11 @@ def main() -> int:
     snap_after_probe = snapshot()
     with open(os.path.join(out, "snap_after_probe.txt"), "w") as f:
         f.write(snap_after_probe)
-    probe_sd = snapshot_diff(os.path.join(out, "snap_before.txt"),
-                             os.path.join(out, "snap_after_probe.txt"))
-    log(f"探测后快照一致: {probe_sd.get('identical')} (差异 {probe_sd.get('n_diff')} 行)")
+    probe_sd = classify_diff(snapshot_diff(os.path.join(out, "snap_before.txt"),
+                                           os.path.join(out, "snap_after_probe.txt")))
+    log(f"探测后快照一致 (我们写过的项): {probe_sd.get('ours_identical')}; "
+        f"严格逐行一致: {probe_sd.get('strict_identical')} "
+        f"(驱动自己动的 {len(probe_sd.get('driver_owned_diffs') or [])} 行)")
 
     if a.probe_only:
         with open(os.path.join(out, "report.json"), "w") as f:
@@ -441,30 +554,66 @@ def main() -> int:
                       ensure_ascii=False, indent=1)
         return 0
 
-    # 3) 基线: 量基准温度与功耗可用性, 用来冻结温度上限
+    # 3) 负载自检: 视角真的在转才继续 —— 不做这一步就可能采一堆静止画面的数
+    spin = check_spin(os.path.join(out, "spin_check"))
+    log(f"负载自检: 画面变化 {spin.get('moved_fraction')} (门槛 {spin.get('gate')}) "
+        f"→ {'转起来了' if spin.get('spinning') else '没在转'}")
+    if not spin.get("spinning"):
+        log(f"负载没生效, 不采任何数据: {spin.get('note') or spin.get('error')}")
+        with open(os.path.join(out, "report.json"), "w") as f:
+            json.dump({"whitelist": wl, "probe_residue": probe_sd,
+                       "spin_check": spin,
+                       "aborted": "负载自检未通过: 视角没在转, 采到的会是静止画面"},
+                      f, ensure_ascii=False, indent=1)
+        return 3
+
+    # 4) 基线: 量基准温度与功耗可用性, 用来冻结温度上限
     log(f"跑 {a.baseline_runs} 轮基线 (不加任何参数), 用于冻结温度上限与确认功耗可测 ...")
     cool = wait_cool()
     log(f"基线前等冷: {cool}")
     base_start_c = cool.get("c")
+    base_charge_log = charge_suspend()
     base_runs = []
     for i in range(1, a.baseline_runs + 1):
         m = run_one(f"sp_base{i}", os.path.join(out, "baseline", f"base{i}"))
         base_runs.append((f"base{i}", m))
         log(f"  base{i}: p95={m.get('frame_p95')}ms fps={m.get('fps_mean')} "
-            f"power={m.get('power_w_mean')}W temp={m.get('soc_temp_max_c')}C")
+            f"power={m.get('power_w_mean')}W ({m.get('power_source')}) "
+            f"temp={m.get('soc_temp_max_c')}C")
+    base_charge_restore_log = charge_restore()
     base_temps = [m.get("soc_temp_max_c") for _, m in base_runs
                   if m.get("soc_temp_max_c") is not None]
     temp_cap = max(TEMP_CAP_FLOOR_C,
                    round(max(base_temps) + TEMP_CAP_MARGIN_C, 1)) if base_temps \
         else TEMP_CAP_FLOOR_C
-    power_available = any(m.get("power_w_mean") is not None for _, m in base_runs)
+    power_measurable = any(m.get("power_w_mean") is not None for _, m in base_runs)
+    power_reasons = sorted({m.get("power_usable_reason") or "" for _, m in base_runs})
+    # 功耗进不进判定是个**显式开关**, 不是"能测到就用"。充电态下测到的数看起来
+    # 很正常, 但它不是整机功耗 —— 悄悄拿它判保留/淘汰, 比不测还糟。
+    on_battery_all = all(m.get("on_battery") for _, m in base_runs) if base_runs else False
+    if a.power_in_verdict == "on":
+        power_available = True
+    elif a.power_in_verdict == "off":
+        power_available = False
+    else:   # auto: 只有基线轮**每一轮**都真的在放电态才算数
+        power_available = bool(power_measurable and on_battery_all)
+    power_note = (
+        f"功耗计入判定 (基线轮全程放电态; 停充: {base_charge_log.strip().splitlines()[0] if base_charge_log.strip() else '?'})"
+        if power_available else
+        "功耗**不计入判定**, 仅记录供参考。" + " / ".join(r for r in power_reasons if r))
     # 每组候选的等冷目标 = 「回到基线是在什么热态下量的」, 而不是一个绝对温度。
     # 取基线起跑温度 + 1C, 下界 40C, 上界比温度上限低 2C —— 也在看候选数据前冻结。
     cool_target = min(max(COOL_C_FLOOR, round((base_start_c or COOL_C_FLOOR) + 1.0, 1)),
                       temp_cap - 2.0)
 
-    # 4) **在看到任何候选数据之前**冻结判定规则
-    rule = V.rule_doc(temp_cap, a.pairs, power_available)
+    # 5) **在看到任何候选数据之前**冻结判定规则
+    rule = V.rule_doc(temp_cap, a.pairs, power_available, power_note)
+    rule["power_measurable"] = power_measurable
+    rule["power_in_verdict_mode"] = a.power_in_verdict
+    rule["baseline_on_battery"] = on_battery_all
+    rule["charge_suspend_log"] = base_charge_log.strip().splitlines()
+    rule["charge_restore_log"] = base_charge_restore_log.strip().splitlines()
+    rule["power_reasons"] = [r for r in power_reasons if r]
     rule["temp_cap_derivation"] = {
         "floor_c": TEMP_CAP_FLOOR_C, "margin_c": TEMP_CAP_MARGIN_C,
         "baseline_max_c": max(base_temps) if base_temps else None,
@@ -482,7 +631,7 @@ def main() -> int:
     log(f"判定规则已冻结: 温度上限 {temp_cap}C, 等冷目标 {cool_target}C, 指标 {rule['n_metrics']} 个, "
         f"alpha_win={rule['alpha_win_bonferroni']}, "
         f"{a.pairs}v{a.pairs} 最小可达 p={rule['min_reachable_p']}, "
-        f"可达={rule['reachable']}, 功耗可测={power_available}")
+        f"可达={rule['reachable']}; {power_note}")
     if not rule["reachable"]:
         log("警告: 轮数不足以达到 Bonferroni 收紧后的显著性门槛, 本次任何候选都不可能判保留")
 
@@ -497,7 +646,7 @@ def main() -> int:
         gdir = os.path.join(out, f"gen{gen}")
         os.makedirs(gdir, exist_ok=True)
 
-        # 5) 大模型挑参数 (失败降级到本地变异器)
+        # 6) 大模型挑参数 (失败降级到本地变异器)
         cands: list[dict] = []
         source = "local_mutate"
         if keys:
@@ -529,7 +678,7 @@ def main() -> int:
         with open(os.path.join(gdir, "candidates.json"), "w") as f:
             json.dump({"source": source, "candidates": valid}, f, ensure_ascii=False, indent=1)
 
-        # 6) 逐组上真机
+        # 7) 逐组上真机
         for ci, cand in enumerate(valid, 1):
             cdir = os.path.join(gdir, f"cand{ci}")
             log(f"[gen{gen}/cand{ci}] {json.dumps(cand['params'], ensure_ascii=False)}")
@@ -537,12 +686,19 @@ def main() -> int:
                                 cool_c=cool_target)
             res["gen"], res["cand"] = gen, ci
             all_results.append(res)
+            # 把 KNOB_FAIL 原文喂回模型: 实测 gpu.min_pwrlevel 写 0 会被内核夹到 2
+            # (热限档位)。探测只验过一个试写值, 不代表每个合法值都写得进去 ——
+            # 不把这条反馈回去, 模型下一代还会再提一次同样写不进的值。
+            clamped = [l for lg in res.get("apply_log", []) for l in lg.splitlines()
+                       if "KNOB_FAIL" in l or "KNOB_REFUSE" in l]
             history.append({"params": cand["params"], "verdict": res["verdict"],
                             "reason": res.get("reason", ""),
+                            "clamped": clamped,
                             "per_metric": res.get("per_metric", {})})
             log(f"[gen{gen}/cand{ci}] 判定 {res['verdict']}: {res.get('reason')}")
 
-    # 7) 收尾: 强制还原 + 全局快照比对
+    # 8) 收尾: 强制还原 (旋钮 + 充电) + 全局快照比对
+    charge_restore()
     fin_restore = su(f"sh {DEV_TMP}/knob_sysparam.sh restore", want_status=True)
     if "KNOB_RESTORE_FAIL" in fin_restore or "#adb_exit=" in fin_restore:
         # state 文件是「还原不成功时唯一的回滚依据」, 这时候删它等于把现场毁了
@@ -561,8 +717,27 @@ def main() -> int:
                                            os.path.join(out, "snap_final.txt")))
 
     kept = [r for r in all_results if r["verdict"] == "KEEP"]
+    fan_states = sorted({m.get("fan_state") for _, m in base_runs if m.get("fan_state")})
     report = {
         "goal": "系统参数全自动闭环 (原神实测)",
+        "workload": os.path.basename(WORKLOAD),
+        "spin_check": spin,
+        # 测试条件: 主动散热风扇自己耗电, 会进功耗读数。风扇开关前后的数据不能混着比,
+        # 所以把当次的风扇状态原样记进报告 —— 它不是被调的参数, 是本次实验的前提条件。
+        "test_conditions": {
+            "device": SERIAL,
+            "fan_state_at_baseline": fan_states,
+            "battery_status_at_baseline": sorted({m.get("battery_status")
+                                                  for _, m in base_runs if m.get("battery_status")}),
+            "power_in_verdict": power_available,
+            "power_caveat": power_note,
+            "power_source_at_baseline": sorted({m.get("power_source")
+                                                for _, m in base_runs if m.get("power_source")}),
+            "charge_suspended_during_measurement": "CHARGE_SUSPENDED" in base_charge_log,
+            "fan_is_a_knob": False,
+            "fan_note": "风扇转速是系统参数的一种, 但不进自动调参白名单 (DENY_KEYWORDS 含 fan)",
+            "power_rail": "battery",
+        },
         "rule": rule,
         "whitelist": sorted(wl),
         "whitelist_detail": wl,

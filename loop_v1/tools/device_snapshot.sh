@@ -72,5 +72,8 @@ printf 'wm.size=%s\n'    "$(wm size 2>/dev/null | tr '\n' ';' | sed 's/;$//')"
 printf 'wm.density=%s\n' "$(wm density 2>/dev/null | tr '\n' ';' | sed 's/;$//')"
 printf 'settings.peak_refresh_rate=%s\n' "$(settings get system peak_refresh_rate 2>/dev/null)"
 printf 'settings.min_refresh_rate=%s\n'  "$(settings get system min_refresh_rate 2>/dev/null)"
+# 厂商刷新率键。probe_sysparam.sh 会逐档写它再还原, knob 也会写它 —— 凡是本闭环
+# 写过的键都必须进快照, 否则还原失败在判据 4 里根本看不见。
+printf 'settings.refresh_rate_mode=%s\n' "$(settings get system refresh_rate_mode 2>/dev/null)"
 
 echo "# end"
