@@ -33,7 +33,7 @@ phonefarm vks-report --root <outdir> --sample S --config-a A --config-b B
 运行日志里会留一行 `sample_config: applied configuration index N to "<sample>"`，
 **这一行就是「这一轮确实跑在哪一档」的证据**，每轮都收进 `run.log`。
 
-各样例的档位语义(逐行读自上游源码，冻结在 `rules_frozen.py` + `src/vksreport.rs` 的 `KNOBS` 里)：
+各样例的档位语义(逐行读自上游源码，冻结在 `rules.json`——报告头里的判读哈希就是它的 sha256；切换点之前的归档哈希对应 `rules_frozen.py`，见 `src/refbenchreport.rs` 模块注释)：
 
 | sample | config 0 | config 1 | 2 / 3 |
 |---|---|---|---|

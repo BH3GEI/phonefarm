@@ -9,10 +9,13 @@
 //!
 //! 哈希钉的是哪份文本
 //! ------------------
-//! 旧版哈希的是它**自己的 .py 文件**; 搬进 Rust 后原样保不住, 所以把生成过现存
-//! 证据的那份源码 (ffbf828 版) 原封不动冻在 `loop_v1/refbench/rules_frozen.py`
-//! (`include_str!` 编译期嵌进来), 哈希对象换成它。已归档的 report.json 因此照旧
-//! 可重放 (哈希值不变), 而且语义没降: 要改判定规则就得改那份冻结文本, 哈希跟着变。
+//! 判定规则抽成了 `loop_v1/refbench/rules.json` (数据, 不是代码), 报告里的
+//! rules_sha256 就是**这份文件的 sha256** —— 改任何一个阈值, 新报告的哈希跟着变。
+//!
+//! **口径切换点**: 生成过现存归档证据的旧源码 (ffbf828 版) 原封留在
+//! `rules_frozen.py`, 归档 report.json 里的哈希 (eb4b235f…) 对应**它**而不对应
+//! rules.json —— 切换点之前的归档在 replay 时会恰好差 rules_sha256 一行, 这是
+//! 记录在案的口径切换, 不是回放坏了; 切换点之后新产的证据哈希互相一致。
 //!
 //! 判据 4 的归因映射 (标准答案在 refbench 的 DESIGN.md §4):
 //!   declared=bandwidth → 主因「GPU 计算受限」且 bus vote 显著高 (≥ frag 的 3 倍)
@@ -31,34 +34,23 @@ use std::path::{Path, PathBuf};
 /// 一轮: (标签, summary, refbench_out, attribution)
 type Round = (String, PyVal, PyVal, PyVal);
 
-/// 判定规则。顺序即输出顺序 (Python dict 保序)。
-fn rules() -> PyVal {
-    pyobj! {
-        "primary_metric" => "frame_p95",
-        "dispersion_gate_pct" => 0.5,     // 判据 1: (max-min)/median, 阈值不动 (同原神对照口径)
-        "repeatability_metric" => "frame_p50",  // 判据 1 门限指标: 中位帧时 = 负载"可重复性"的本征信号
-        // 为什么不是 frame_p95: p95 是尾分位, 混入平台 DVFS/访存尾抖动 —— 那不是负载的确定性。
-        // 漂移判定用斜率 (原神黄昏是 slope≈+1%/轮 + mono=1.0 的单向漂移; refbench slope≈0.01%/轮)。
-        "drift_slope_gate_pct" => 0.15,   // 判据 1: 最小二乘斜率 (每轮 %) 超此即疑似系统性漂移
-        "drift_monotonic_gate" => 0.9,    // 判据 1: 相邻递增比例超此 (且斜率显著) 才判漂移
-        "intensity_min_step_pct" => 10.0, // 判据 2: 阶梯相邻档最小涨幅
-        "alpha" => 0.05,                  // 判据 3: 精确置换检验
-        "bw_separation_x" => 3.0,         // 判据 4: bandwidth/fragment 的 bus vote 分离倍数
-        "expected_declared" => pyobj!{
-            "bw_pingpong" => "bandwidth", "frag_alu" => "fragment", "idle_cap" => "none",
-        },
-        "verdict_gpu" => "GPU 计算受限",
-        "verdict_cap_prefix" => "限帧器封顶",
-    }
-}
-
-/// 生成过现存证据的那份判读规则文本, 原封冻着 (见模块注释)。
-const RULES_TEXT: &str = include_str!("../loop_v1/refbench/rules_frozen.py");
+/// 判定规则冻结在 `loop_v1/refbench/rules.json` (数据, 不是代码)。
+/// 报告里的 rules_sha256 就是**这份文件的 sha256**: 改任何一个阈值, 新报告的
+/// 哈希跟着变。键序即报告输出顺序, 不要重排。
+const RULES_TEXT: &str = include_str!("../loop_v1/refbench/rules.json");
 
 fn rules_sha256() -> String {
     let mut h = Sha256::new();
     h.update(RULES_TEXT.as_bytes());
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 判定规则。顺序即输出顺序 (JSON 文件里的键序, loads 保序)。
+fn rules() -> PyVal {
+    match crate::pyjson::loads(RULES_TEXT) {
+        Ok(v) => v.get("rules").cloned().unwrap_or(PyVal::Null),
+        Err(_) => PyVal::Null,
+    }
 }
 
 /// 旧版对 `json.dumps(x, sort_keys=True)` 的用法: 同一组旋钮出同一串。
@@ -407,10 +399,18 @@ mod tests {
             .expect("仓库根")
     }
 
-    /// 冻结的规则文本就是生成过现存证据的那份 —— 哈希必须逐字节复现旧版的自证。
+    /// rules_sha256 = 冻结的 rules.json 文件本身的哈希 (口径切换点之后的自证对象)。
     #[test]
-    fn frozen_rules_hash_matches_the_archived_attestation() {
-        assert_eq!(
+    fn rules_hash_is_the_rules_file() {
+        let want: String = Sha256::new()
+            .chain_update(include_str!("../loop_v1/refbench/rules.json"))
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(rules_sha256(), want);
+        // 与切换点前归档的哈希 (对应 rules_frozen.py) 刻意不同
+        assert_ne!(
             rules_sha256(),
             "eb4b235f959c54b06e1a86f5cf146cd2da46068bc791a308add7b9234223e91b"
         );
@@ -427,9 +427,17 @@ mod tests {
             eprintln!("跳过: 归档证据不在 {} (异机/新 clone 属正常)", want.display());
             return;
         }
+        // 口径切换点: 归档哈希对应切换前源码, 新报告哈希对应 rules.json ——
+        // 除 rules_sha256 一行外必须逐字节一致
+        let mask = |t: &str| -> String {
+            t.lines()
+                .filter(|l| !l.contains("rules_sha256"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         assert_eq!(
-            report(&root),
-            std::fs::read_to_string(&want).unwrap().trim_end_matches('\n')
+            mask(&report(&root)),
+            mask(std::fs::read_to_string(&want).unwrap().trim_end_matches('\n'))
         );
     }
 }
