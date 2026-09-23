@@ -27,3 +27,4 @@ loop_v1/runs_refbench/
 loop_v1/runs_sysparam/**/trace.txt
 loop_v1/runs_sysparam/**/*.txt.gz
 loop_v1/auto/__pycache__/
+loop_v1/runs_graylayer/
