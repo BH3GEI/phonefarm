@@ -17,6 +17,20 @@ U=/sys/class/power_supply/usb
 
 echo "#sample_env v1 dur=$DUR interval=$IVL"
 echo "#battery_status=$(cat $B/status 2>/dev/null)"
+echo "#battery_capacity=$(cat $B/capacity 2>/dev/null)"
+echo "#charge_suspended=$( [ -f /data/local/tmp/loop_v1_charge.state ] && echo yes || echo no)"
+# 主动散热风扇状态: 风扇自身耗电会进功耗读数, 所以每一轮都留一行证据, 好复核
+# 「同一组对照的两臂是同一风扇状态」。只读, 从不写。
+# 只取**设定档**类节点 (enable / level / pwm), 不取转速读数 (fan_speed_count、
+# hwmon 的 fan1_input 都是实时转速): 转速每轮都在抖, 把它拼进这行的话, 主机端
+# 那个「两臂风扇状态是否一致」的字符串相等比较会永远为假, 等于白记。
+fan_line=""
+for f in /sys/kernel/fan/*enable* /sys/kernel/fan/*level* /sys/kernel/fan/*pwm* \
+         /sys/class/hwmon/hwmon*/pwm1; do
+  [ -f "$f" ] || continue
+  fan_line="$fan_line$(basename "$f")=$(cat "$f" 2>/dev/null),"
+done
+echo "#fan_state=$(echo "$fan_line" | sed 's/,$//')"
 
 n=0
 while [ "$n" -lt "$DUR" ]; do
