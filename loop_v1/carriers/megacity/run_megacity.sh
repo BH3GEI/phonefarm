@@ -7,7 +7,12 @@
 # 退出码: 0=有效轮  2=硬失败  3=无效轮 (采集窗内有热事件或非干净退出, 证据保留)
 # 时序全部用存活/状态轮询, 无时长盲等。
 #
-# !! 状态: 未实跑验证 !! APK 还没出 (magicbook 未装 Unity), 本脚本尚未跑过一次。
+# !! 状态: 未实跑验证 !! APK 已经有了, 但本脚本还没跑过一次。
+#
+# 测试条件(影响可比性, 别混批):
+#   - 红魔内置风扇全程开启
+#   - 设备共享, 外面套 devlock:
+#       /private/tmp/claude-501/devlock run wb-megacity -- bash run_megacity.sh ...
 set -euo pipefail
 
 LABEL="${1:?用法: run_megacity.sh <label> <outdir> <scene> <route> <frames> [capdur]}"
