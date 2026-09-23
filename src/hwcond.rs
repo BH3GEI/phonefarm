@@ -337,6 +337,40 @@ pub const POWER_MIN_W: f64 = 0.05;
 pub const POWER_MAX_W: f64 = 30.0;
 
 pub fn power_usable(rail: PowerRail, samples: &[PowerSample]) -> Result<(), String> {
+    power_usable_with_battery(rail, samples, None)
+}
+
+/// 同上, 但带上这一轮的电池状态。**有电池状态就必须传** —— 这是唯一拦得住
+/// 「充电态下读数看起来完全合理」的那道闸。
+///
+/// 为什么可信区间不够: 2026-09-23 实测, 插着 USB 时
+///   - 电池轨读出 `0.213 W` / `3.086 W` —— 稳稳落在 0.05..30 W 窗口里;
+///   - USB 轨读出 `7.20 W`, 而同刻电池正以 `3.33 W` 在充电 ——
+///     也就是说这 7.2 W 里有 46% 是灌进电池的, 根本不是整机在吃的功率。
+/// 两个数字都"合理", 区间一个都拦不住。而一个看起来合理的错数比一个越界的错数
+/// 危险得多: 越界的会被拦下, 合理的会被下游当成实测功耗拿去做 A/B 裁决。
+///
+/// 更要命的是充电电流会随电量上升自己衰减 (CC→CV), 是一条**单调漂移** ——
+/// 跨时间比较的两个候选之间会凭空多出一个"功耗改善"。
+/// (game_opt_loop 的 M1 演化 6.26W→5.94W 就是这么来的, 已撤回。)
+pub fn power_usable_with_battery(
+    rail: PowerRail,
+    samples: &[PowerSample],
+    battery: Option<&BatteryState>,
+) -> Result<(), String> {
+    if let Some(b) = battery {
+        if !b.on_battery() {
+            return Err(format!(
+                "{}: {}。要量整机功耗必须让设备处于放电态 —— 拔掉 USB, 或用 `--suspend-charging` 在测量期间停充 (测完自动恢复)",
+                match rail {
+                    PowerRail::Battery => "电池轨此刻量不了整机功耗",
+                    PowerRail::Usb =>
+                        "USB 输入轨此刻量的不是整机功耗 (输入功率里含着给电池充电的那一份)",
+                },
+                b.why_not_on_battery()
+            ));
+        }
+    }
     let Some((mean, _, _, _)) = power_stats(samples) else {
         return Err("没有取到任何功率采样".into());
     };
@@ -372,6 +406,299 @@ pub fn power_usable(rail: PowerRail, samples: &[PowerSample]) -> Result<(), Stri
         });
     }
     Ok(())
+}
+
+// ══════════════ 电池状态与停充 ══════════════
+
+/// 电池侧的一次状态读数。功耗读数算不算数, 全看这个。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BatteryState {
+    /// `/sys/class/power_supply/battery/status`: Charging / Discharging / Full / Not charging
+    pub status: String,
+    /// `current_now` (μA)。本机约定: **正 = 在往电池里充, 负 = 电池在放电**。
+    pub current_ua: Option<i64>,
+    /// `capacity` (%)
+    pub capacity_pct: Option<i64>,
+}
+
+impl BatteryState {
+    /// 这一刻整机是不是真由电池供电。
+    ///
+    /// 两个判据都要看, 因为两个都会单独骗人: `status` 在停充之后有的内核仍写
+    /// `Not charging` 而不是 `Discharging`; 而 `current_now` 在充放平衡的瞬间会过零。
+    /// 只有「没在充电」且「电流确实是放电方向」才算数。
+    pub fn on_battery(&self) -> bool {
+        if self.status.eq_ignore_ascii_case("Charging") {
+            return false;
+        }
+        matches!(self.current_ua, Some(c) if c < 0)
+    }
+
+    /// 人能读的一句话, 进 `unavailable` 的原因里。
+    pub fn why_not_on_battery(&self) -> String {
+        match self.current_ua {
+            Some(c) if c > 0 => format!(
+                "电池状态 {} 且 current_now={c} μA (正=正在充电): 此刻整机由 USB 供电, \
+电池轨量到的只是充电电流与系统耗电相抵之后的余量, 不是整机在吃的功率",
+                self.status
+            ),
+            Some(0) | None => format!(
+                "电池状态 {}, current_now={}: 判不出是不是放电态",
+                self.status,
+                self.current_ua.map(|c| c.to_string()).unwrap_or_else(|| "读不到".into())
+            ),
+            Some(c) => format!("电池状态 {} (current_now={c} μA)", self.status),
+        }
+    }
+}
+
+/// 一次 su 往返把电池状态读齐。
+pub fn battery_state_cmd() -> String {
+    let p = "/sys/class/power_supply/battery";
+    format!(
+        "su -c 'echo BAT $(cat {p}/status 2>/dev/null || echo ?) \
+$(cat {p}/current_now 2>/dev/null || echo NA) \
+$(cat {p}/capacity 2>/dev/null || echo NA)'"
+    )
+}
+
+/// 解析 `BAT <status> <current_ua|NA> <capacity|NA>`。
+pub fn parse_battery_state(text: &str) -> Option<BatteryState> {
+    text.lines().find_map(|l| {
+        let c: Vec<&str> = l.split_whitespace().collect();
+        if c.first().copied() != Some("BAT") || c.len() < 2 {
+            return None;
+        }
+        Some(BatteryState {
+            status: c[1].to_string(),
+            current_ua: c.get(2).and_then(|v| v.parse().ok()),
+            capacity_pct: c.get(3).and_then(|v| v.parse().ok()),
+        })
+    })
+}
+
+pub fn read_battery_state(phone: &crate::device::Device) -> BatteryState {
+    parse_battery_state(&phone.shell(&battery_state_cmd(), 8_000)).unwrap_or_default()
+}
+
+/// 电量低于这个百分比就不许停充。
+///
+/// 停充期间整机纯靠电池，跑一轮标尺就是几分钟的满载放电; 电量本来就低的时候再抽一把,
+/// 轻则测到一半关机 (这一轮白跑), 重则把电池拖进过放。30% 是留给「一轮测完还能撑到恢复充电」的余量。
+pub const MIN_CAPACITY_FOR_SUSPEND_PCT: i64 = 30;
+
+/// 停充等设备真的转成放电态的上限。
+pub const SUSPEND_SETTLE_MS: u64 = 2_500;
+
+/// 停充用哪个 sysfs 节点 —— 不同内核给的不一样, 所以是**探出来的**, 不是写死的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuspendHow {
+    /// 写 `1` 挂起输入 (老 qpnp-smb 的 `input_suspend`)
+    WriteOne,
+    /// 写 `0` 关掉充电 (`charging_enabled` / `input_current_limit`)
+    WriteZero,
+    /// 把充电上限百分比压到**当前电量以下** (新 pmic-glink 的
+    /// `charge_control_end_threshold`; 标准 Linux 电池 ABI)
+    CapBelowCapacity,
+}
+
+/// 一个候选停充节点。顺序即探测顺序: 语义越明确的排越前。
+pub struct ChargeCtlNode {
+    pub path: &'static str,
+    pub how: SuspendHow,
+}
+
+pub const CHARGE_CTL_CANDIDATES: &[ChargeCtlNode] = &[
+    // 老 Qualcomm qpnp-smb: 语义最直接, 就是「挂起输入」
+    ChargeCtlNode { path: "/sys/class/power_supply/battery/input_suspend", how: SuspendHow::WriteOne },
+    ChargeCtlNode { path: "/sys/class/power_supply/usb/input_suspend", how: SuspendHow::WriteOne },
+    // 各家自定义的开关
+    ChargeCtlNode { path: "/sys/class/power_supply/battery/charging_enabled", how: SuspendHow::WriteZero },
+    ChargeCtlNode { path: "/sys/class/power_supply/battery/battery_charging_enabled", how: SuspendHow::WriteZero },
+    // 新 pmic-glink (本机红魔 NX809J 就是这一类): 标准电池养护 ABI
+    ChargeCtlNode { path: "/sys/class/power_supply/battery/charge_control_end_threshold", how: SuspendHow::CapBelowCapacity },
+    // 兜底: 把 USB 输入电流限到 0。放最后 —— 它动的是输入侧, 影响面最大
+    ChargeCtlNode { path: "/sys/class/power_supply/usb/input_current_limit", how: SuspendHow::WriteZero },
+];
+
+/// 停充守卫。**进出快照一致**是它唯一的职责。
+///
+/// 纪律与锁频那套完全一致 (`Lock`):
+///   1. 先把「改了哪个节点、原值是什么」落到本机状态文件, **再**动设备 ——
+///      进程中途被杀也能由下次启动回滚 (`recover_stale_charge_ctl`);
+///   2. 写完必须**回读确认停充真的生效** (电流转负), 没生效就地还原并换下一个候选;
+///   3. `Drop` 里无条件还原 —— 不指望调用方记得调 `restore`。
+pub struct ChargeSuspend {
+    path: String,
+    saved: String,
+    state_path: std::path::PathBuf,
+    restored: bool,
+}
+
+/// 状态文件的格式: 第一行节点路径, 第二行原值。两行都在才算一份有效的遗留状态。
+pub fn charge_ctl_state_text(path: &str, saved: &str) -> String {
+    format!("{path}\n{saved}\n")
+}
+
+pub fn parse_charge_ctl_state(text: &str) -> Option<(String, String)> {
+    let mut it = text.lines();
+    let path = it.next()?.trim();
+    let saved = it.next()?.trim();
+    if path.is_empty() || saved.is_empty() || !path.starts_with("/sys/") {
+        return None;
+    }
+    Some((path.to_string(), saved.to_string()))
+}
+
+/// 给一个候选节点算「写什么值表示停充」。
+///
+/// `CapBelowCapacity` 要当前电量: 把上限压到**当前电量以下**才会停充;
+/// 压到电量以上等于没压 —— 本机出厂就是 `end_threshold=80` 而电量 91% 照充不误,
+/// 正是这个道理。
+pub fn suspend_value(how: SuspendHow, capacity_pct: Option<i64>) -> Option<String> {
+    match how {
+        SuspendHow::WriteOne => Some("1".into()),
+        SuspendHow::WriteZero => Some("0".into()),
+        SuspendHow::CapBelowCapacity => {
+            let cap = capacity_pct?;
+            // 压到电量以下但不低于 1: 留一格避免某些内核把 0 当成「没设上限」
+            Some(((cap - 5).clamp(1, 99)).to_string())
+        }
+    }
+}
+
+impl ChargeSuspend {
+    /// 停充。返回守卫; 失败时设备状态与调用前一致。
+    ///
+    /// `state_path` 用 `lock_state_path("charge", serial)`, 与锁频的状态文件分开放 ——
+    /// 两者互不相干, 混在一份文件里会互相覆盖。
+    pub fn apply(
+        phone: &crate::device::Device,
+        state_path: &std::path::Path,
+    ) -> Result<ChargeSuspend, String> {
+        let bat = read_battery_state(phone);
+        if let Some(cap) = bat.capacity_pct {
+            if cap < MIN_CAPACITY_FOR_SUSPEND_PCT {
+                return Err(format!(
+                    "电量只有 {cap}%, 低于停充下限 {MIN_CAPACITY_FOR_SUSPEND_PCT}%: 不停充。\
+停充期间整机纯靠电池, 电量本来就低时再满载抽几分钟, 轻则测到一半关机, 重则过放"
+                ));
+            }
+        } else {
+            return Err("读不到电池电量, 不敢停充".into());
+        }
+        if bat.on_battery() {
+            return Err("设备本来就在放电态, 不需要停充".into());
+        }
+
+        let mut tried: Vec<String> = Vec::new();
+        for node in CHARGE_CTL_CANDIDATES {
+            let saved = phone.shell(&format!("su -c 'cat {} 2>/dev/null'", node.path), 8_000);
+            let saved = saved.trim().to_string();
+            if saved.is_empty() {
+                continue; // 这台机器没有这个节点
+            }
+            let Some(want) = suspend_value(node.how, bat.capacity_pct) else { continue };
+
+            // 先落状态文件再动设备: 中途被杀也能回滚
+            std::fs::write(state_path, charge_ctl_state_text(node.path, &saved))
+                .map_err(|e| format!("写不了停充状态文件 {}: {e}", state_path.display()))?;
+
+            phone.shell(&format!("su -c 'echo {want} > {}'", node.path), 8_000);
+
+            // 回读确认**停充真的生效** —— 写进去不代表内核认。
+            // 本机 charge_control_end_threshold 出厂就是 80 而电量 91% 照充不误, 就是活例。
+            let ok = (0..(SUSPEND_SETTLE_MS / 500).max(1)).any(|_| {
+                std::thread::sleep(Duration::from_millis(500));
+                read_battery_state(phone).on_battery()
+            });
+            if ok {
+                progress("charge", &format!("已停充: {} {saved} → {want}", node.path));
+                return Ok(ChargeSuspend {
+                    path: node.path.to_string(),
+                    saved,
+                    state_path: state_path.to_path_buf(),
+                    restored: false,
+                });
+            }
+            // 没生效: 就地还原, 试下一个
+            phone.shell(&format!("su -c 'echo {saved} > {}'", node.path), 8_000);
+            let _ = std::fs::remove_file(state_path);
+            tried.push(format!("{} (写 {want} 无效)", node.path));
+        }
+        Err(if tried.is_empty() {
+            "这台机器没有任何已知的停充节点".into()
+        } else {
+            format!("试过的停充节点都没让设备转成放电态: {}", tried.join("; "))
+        })
+    }
+
+    /// 改的是哪个节点 (进报告, 让「这轮到底动过什么」可回溯)。
+    pub fn node(&self) -> &str {
+        &self.path
+    }
+
+    /// 恢复充电并清掉状态文件; 返回是否确认恢复。
+    pub fn restore(&mut self, phone: &crate::device::Device) -> bool {
+        if self.restored {
+            return true;
+        }
+        self.restored = true;
+        phone.shell(&format!("su -c 'echo {} > {}'", self.saved, self.path), 8_000);
+        let back = phone.shell(&format!("su -c 'cat {} 2>/dev/null'", self.path), 8_000);
+        let ok = back.trim() == self.saved;
+        if ok {
+            let _ = std::fs::remove_file(&self.state_path);
+        } else {
+            progress(
+                "charge",
+                &format!(
+                    "恢复充电后回读不符: {} 期望 {} 实得 {}; 状态文件留着, 下次启动会再回滚一次",
+                    self.path,
+                    self.saved,
+                    back.trim()
+                ),
+            );
+        }
+        ok
+    }
+}
+
+impl Drop for ChargeSuspend {
+    fn drop(&mut self) {
+        // Drop 里拿不到 phone。真正的还原在 restore(); 这里只负责让「忘了调 restore」
+        // 这件事不会无声无息 —— 状态文件还在, 下次启动 recover_stale_charge_ctl 会兜底。
+        if !self.restored {
+            progress(
+                "charge",
+                &format!(
+                    "停充守卫被丢弃时还没还原 ({}): 状态文件 {} 留着, 下次启动会回滚",
+                    self.path,
+                    self.state_path.display()
+                ),
+            );
+        }
+    }
+}
+
+/// 回滚上次遗留的停充状态 (进程被杀没来得及还原)。返回 `None` 表示没有遗留。
+pub fn recover_stale_charge_ctl(
+    phone: &crate::device::Device,
+    state_path: &std::path::Path,
+) -> Option<bool> {
+    let text = std::fs::read_to_string(state_path).ok()?;
+    let Some((path, saved)) = parse_charge_ctl_state(&text) else {
+        let _ = std::fs::remove_file(state_path);
+        return None;
+    };
+    progress("charge", &format!("发现上次遗留的停充状态 {path}, 先恢复充电"));
+    phone.shell(&format!("su -c 'echo {saved} > {path}'", ), 8_000);
+    let back = phone.shell(&format!("su -c 'cat {path} 2>/dev/null'"), 8_000);
+    let ok = back.trim() == saved;
+    if ok {
+        let _ = std::fs::remove_file(state_path);
+    }
+    Some(ok)
 }
 
 // ══════════════ 设备操作 ══════════════
@@ -604,6 +931,117 @@ impl Lock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── 电池状态: 功耗读数算不算数全看它 ──
+
+    fn bat(status: &str, cur: i64, cap: i64) -> BatteryState {
+        BatteryState { status: status.into(), current_ua: Some(cur), capacity_pct: Some(cap) }
+    }
+
+    #[test]
+    fn on_battery_needs_both_not_charging_and_a_discharge_current() {
+        // 两个判据都会单独骗人, 所以都要看
+        assert!(bat("Discharging", -44_000, 91).on_battery());
+        // status 说 Charging 就一票否决, 哪怕电流方向看着像放电
+        assert!(!bat("Charging", -1, 91).on_battery());
+        // 停充之后有的内核写 Not charging 而不是 Discharging —— 电流方向说了算
+        assert!(bat("Not charging", -120_000, 80).on_battery());
+        // 电流是正的 = 在往电池里充
+        assert!(!bat("Not charging", 771_000, 80).on_battery());
+        // 充放平衡过零的瞬间判不出来, 一律不算放电态
+        assert!(!bat("Not charging", 0, 80).on_battery());
+        assert!(!BatteryState::default().on_battery());
+    }
+
+    #[test]
+    fn charging_invalidates_power_even_when_the_reading_looks_perfectly_normal() {
+        // 2026-09-23 实测: 插着 USB 时电池轨 0.213 W / USB 轨 7.20 W, 两个都落在
+        // 0.05..30 W 窗口里 —— 区间一个都拦不住, 只有电池状态拦得住。
+        let s = PowerSample { volt_uv: 4_207_000, curr_ua: -66_000, power_uw: None };
+        assert!((POWER_MIN_W..=POWER_MAX_W).contains(&s.watt()), "这个量级本来就合理");
+        // 不带电池状态: 照常放行 (旧行为)
+        assert!(power_usable(PowerRail::Battery, &[s]).is_ok());
+        // 带上充电态: 作废
+        let e = power_usable_with_battery(PowerRail::Battery, &[s], Some(&bat("Charging", 771_000, 91)))
+            .unwrap_err();
+        assert!(e.contains("放电态"), "{e}");
+        // USB 轨同理, 而且理由不一样 (输入功率含着充电那一份)
+        let e = power_usable_with_battery(PowerRail::Usb, &[s], Some(&bat("Charging", 771_000, 91)))
+            .unwrap_err();
+        assert!(e.contains("充电"), "{e}");
+        // 放电态才算数
+        assert!(power_usable_with_battery(
+            PowerRail::Battery,
+            &[s],
+            Some(&bat("Discharging", -66_000, 91))
+        )
+        .is_ok());
+    }
+
+    // ── 停充 ──
+
+    #[test]
+    fn suspend_value_depends_on_the_node_semantics() {
+        assert_eq!(suspend_value(SuspendHow::WriteOne, Some(91)).as_deref(), Some("1"));
+        assert_eq!(suspend_value(SuspendHow::WriteZero, Some(91)).as_deref(), Some("0"));
+        // 上限型节点必须压到**当前电量以下** —— 压到电量以上等于没压。
+        // 本机出厂 end_threshold=80 而电量 91% 照充不误, 就是这个道理。
+        assert_eq!(suspend_value(SuspendHow::CapBelowCapacity, Some(91)).as_deref(), Some("86"));
+        assert_eq!(suspend_value(SuspendHow::CapBelowCapacity, Some(31)).as_deref(), Some("26"));
+        // 电量未知时给不出上限值, 只能跳过这个候选
+        assert_eq!(suspend_value(SuspendHow::CapBelowCapacity, None), None);
+    }
+
+    #[test]
+    fn suspend_value_never_goes_out_of_percent_range() {
+        for cap in 0..=100 {
+            let v: i64 = suspend_value(SuspendHow::CapBelowCapacity, Some(cap)).unwrap().parse().unwrap();
+            assert!((1..=99).contains(&v), "电量 {cap}% 算出上限 {v}");
+            // 除非本来就贴着下限, 否则必须严格低于当前电量, 不然不会停充
+            if cap > 1 {
+                assert!(v < cap, "电量 {cap}% 算出的上限 {v} 没低于电量, 不会停充");
+            }
+        }
+    }
+
+    #[test]
+    fn battery_state_parses_and_survives_missing_nodes() {
+        let s = parse_battery_state("BAT Charging 771000 91").unwrap();
+        assert_eq!((s.status.as_str(), s.current_ua, s.capacity_pct), ("Charging", Some(771_000), Some(91)));
+        // 节点缺失时命令回 NA, 不能解析成 0 —— 0 会被当成「充放平衡」
+        let s = parse_battery_state("BAT Discharging NA NA").unwrap();
+        assert_eq!((s.current_ua, s.capacity_pct), (None, None));
+        assert!(!s.on_battery(), "电流读不到就判不出放电态");
+        assert_eq!(parse_battery_state("没有这一行"), None);
+    }
+
+    #[test]
+    fn charge_ctl_state_file_roundtrips_and_rejects_garbage() {
+        let t = charge_ctl_state_text("/sys/class/power_supply/battery/input_suspend", "0");
+        let (p, v) = parse_charge_ctl_state(&t).unwrap();
+        assert_eq!((p.as_str(), v.as_str()), ("/sys/class/power_supply/battery/input_suspend", "0"));
+        // 只有一行 / 空值 / 不是 sysfs 路径的, 一律不认 ——
+        // 认了就会拿半份状态去写设备, 比不回滚更糟
+        assert_eq!(parse_charge_ctl_state("/sys/class/power_supply/battery/x"), None);
+        assert_eq!(parse_charge_ctl_state(""), None);
+        assert_eq!(parse_charge_ctl_state("rm -rf /\n0"), None);
+    }
+
+    #[test]
+    fn every_charge_ctl_candidate_is_a_sysfs_path() {
+        // 状态文件回滚时会把这些路径原样拼进 su -c 'echo ... > <path>';
+        // 非 sysfs 路径混进来就是往任意位置写
+        for n in CHARGE_CTL_CANDIDATES {
+            assert!(n.path.starts_with("/sys/"), "{}", n.path);
+            assert!(!n.path.contains(' '), "{}", n.path);
+        }
+    }
+
+    #[test]
+    fn low_battery_blocks_suspending_the_charger() {
+        // 门槛本身钉死: 停充期间整机纯靠电池, 电量低时再满载抽几分钟会测到一半关机
+        assert_eq!(MIN_CAPACITY_FOR_SUSPEND_PCT, 30);
+    }
 
     #[test]
     fn a_garbage_power_now_node_is_rejected_not_reported() {
