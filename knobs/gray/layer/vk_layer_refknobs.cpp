@@ -1138,6 +1138,7 @@ static bool copyprobe_ensure(VkDevice dev, const DevDisp& d, uint32_t w, uint32_
 // 合成 pass 开始时 (转发 BeginRenderPass 之前) 注入拷贝。调用方必须持 g_mtx。
 static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPass prev_rp,
                                const std::vector<VkImageView>& prev_att) {
+    (void)prev_rp;   // 布局判断改走"游戏自己已 transition"论证, 见下; 参数留着备用
     if (g_cp.disabled || prev_att.empty()) return;
     // 源图 = 上一个渲染分辨率 pass 的颜色附件
     auto vi = g_view.find(prev_att[0]);
@@ -1147,14 +1148,14 @@ static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPas
     if (ii == g_img.end()) return;
     const ImgInfo& im = ii->second;
     if (!(im.usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { RK_LOG_ONCE("copyprobe 停用: src 不可采样"); g_cp.disabled = true; return; }
-    // src pass 结束后是什么布局 —— 采样必须用这个布局, 写死会立刻花屏/校验层报错
+    // 布局: 游戏在 pass 50 里用普通采样描述符读 src, 而 src 又不是 pass 50 framebuffer
+    // 的附件 (fb 2141x969 vs src 2140x968 尺寸不符, 挂不上) —— 所以游戏必定在 pass 49
+    // 结束之后、pass 50 开始之前自己插了 transition barrier 把它转成可采样布局,
+    // 否则游戏自己就是非法采样。我们注入的位置在 pass 50 begin 处, 排在游戏那道
+    // barrier 之后, src 已经是 SHADER_READ_ONLY_OPTIMAL, 我们只做执行依赖不动布局。
+    // (上一版拿 pass 49 的 finalLayout=COLOR_ATTACHMENT_OPTIMAL 当注入时布局, 错了:
+    //  那是渲染 pass 结束时的布局, 不是合成 pass 开始时的布局。2026-09-23 实测。)
     uint32_t src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    auto ri = g_rp_info.find(prev_rp);
-    if (ri != g_rp_info.end() && !ri->second.final_layout.empty()) src_layout = ri->second.final_layout[0];
-    if (src_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && src_layout != VK_IMAGE_LAYOUT_GENERAL) {
-        RK_LOG_ONCE("copyprobe 停用: src finalLayout=%u 不可采样", src_layout);
-        g_cp.disabled = true; return;
-    }
     if (!copyprobe_ensure(d.dev, d, im.w, im.h, im.fmt)) return;
 
     // compute set 绑上本帧的 src: view 直接用 pass 49 颜色附件的 view, sampler 从
@@ -1184,7 +1185,7 @@ static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPas
     // 注入: 三条命令全走下层直调, 不再回本层钩子 (避免递归/重复计数)
     VkImageMemoryBarrier b[2]{};
     b[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    b[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
     b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     b[0].oldLayout = (VkImageLayout)src_layout; b[0].newLayout = (VkImageLayout)src_layout;
     b[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1194,7 +1195,7 @@ static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPas
     b[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
     b[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b[1].image = g_cp.dst; b[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
     d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pipe);
     d.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pl, 0, 1, &g_cp.cset, 0, nullptr);

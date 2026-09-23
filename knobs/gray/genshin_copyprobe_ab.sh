@@ -39,24 +39,33 @@ in_world_by_layer() {
   [ $((dr / df)) -ge 25 ]
 }
 
-# 无层臂: 截帧亮度方差判 (登录页/门接近纯白, 大世界纹理方差大)
-in_world_by_pixels() {
-  adb -s "$SERIAL" exec-out screencap 2>/dev/null | python3 -c '
+# 无层臂: 与"门"页面截帧做像素差, 差异 >40% = 已离开登录页 (进加载/大世界),
+# 再固等加载完成。第一轮按亮度方差判, 实测登录页方差也有 9 万+, 阈值不可靠。
+GATE_REF=""
+left_gate() {
+  [ -n "$GATE_REF" ] || return 1
+  # 先落临时文件再比对: 管道与 heredoc 都抢 stdin, 合在一起会让 python 读到空程序
+  local cur="$GATE_REF.cur"
+  adb -s "$SERIAL" exec-out screencap > "$cur" 2>/dev/null || return 1
+  python3 - "$GATE_REF" "$cur" <<'GATE_PY'
 import sys, struct
-d = sys.stdin.buffer.read()
-if len(d) < 16: sys.exit(1)
-w, h, fmt = struct.unpack("<III", d[:12])
-if fmt != 1 or len(d) < 12 + w*h*4: sys.exit(1)
-px = d[12:12+w*h*4]
-# 隔 97 像素采样亮度, 算方差
-vals = []
-for i in range(0, w*h, 97):
+def load(p):
+    d = open(p, "rb").read()
+    w, h, fmt = struct.unpack("<III", d[:12]); return w, h, d[12:12+w*h*4]
+try:
+    w, h, a = load(sys.argv[1]); w2, h2, b = load(sys.argv[2])
+except Exception:
+    sys.exit(1)
+if (w, h) != (w2, h2) or not a or not b: sys.exit(1)
+diff = tot = 0
+for i in range(0, w*h, 61):
     o = i*4
-    vals.append(px[o]*2 + px[o+1]*3 + px[o+2])   # 近似 luma, 省浮点
-m = sum(vals)/len(vals)
-var = sum((v-m)**2 for v in vals)/len(vals)
-print(f"    截帧亮度方差={var:.0f} (>=200000 判为大世界)", file=sys.stderr)
-sys.exit(0 if var >= 200000 else 1)'
+    if abs(a[o]-b[o])>16 or abs(a[o+1]-b[o+1])>16 or abs(a[o+2]-b[o+2])>16: diff += 1
+    tot += 1
+r = diff/tot
+print(f"    与门页面差异={r*100:.1f}% (>40 判为已离开)", file=sys.stderr)
+sys.exit(0 if r > 0.40 else 1)
+GATE_PY
 }
 
 launch_to_world() {  # $1 = layered(0|1)
@@ -69,12 +78,22 @@ launch_to_world() {  # $1 = layered(0|1)
     sleep 25   # 等渲染起稳
   fi
   sleep 30
+  if [ "$layered" = "0" ]; then
+    GATE_REF="$OUT/gate_ref_$label.raw"
+    adb -s "$SERIAL" exec-out screencap > "$GATE_REF" 2>/dev/null
+  fi
   ashell "input tap $GATE_X $GATE_Y"
   echo "    已点门, 等进大世界..." >&2
-  for i in $(seq 1 24); do
-    if [ "$layered" = "1" ]; then in_world_by_layer && { echo "    已进大世界" >&2; return 0; }
-    else in_world_by_pixels && { echo "    已进大世界(像素判)" >&2; return 0; }; fi
-  done
+  if [ "$layered" = "1" ]; then
+    for i in $(seq 1 24); do
+      in_world_by_layer && { echo "    已进大世界" >&2; return 0; }
+    done
+  else
+    for i in $(seq 1 24); do
+      left_gate && { echo "    已离开登录页, 固等 60s 进大世界" >&2; sleep 60; return 0; }
+      sleep 5
+    done
+  fi
   echo "  等不到大世界, 本臂作废" >&2; return 1
 }
 
@@ -98,7 +117,10 @@ arm() { # $1=标签 $2=probe(0|1)
     bash "$HERE/enable_layer.sh" copyprobe "$PKG" >/dev/null 2>&1 || { echo "  挂层失败"; return 1; }
     launch_to_world 1 || return 1
   else
-    launch_to_world 0 || return 1   # 无层: 不推 .so, 干净基线
+    # 无层: 不推 .so, 干净基线。游戏要自己拉起 (有层臂是 mount_layer 负责启动的)
+    act=$(ashell "cmd package resolve-activity --brief $PKG" | tail -1 | tr -d '\r')
+    ashell "am start -n $act" >/dev/null 2>&1
+    launch_to_world 0 || return 1
   fi
   WL="${WL:-$HERE/workload_spin_touch_v1.json}" \
     bash "$ROOT/loop_v1/tools/run_once.sh" "$label" "$dir" 2>&1 | tail -2
