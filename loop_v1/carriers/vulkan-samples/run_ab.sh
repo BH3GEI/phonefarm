@@ -18,7 +18,10 @@ ROUNDS="${4:-5}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"          # loop_v1/
 OUT="${5:-$ROOT/runs_vks/${SAMPLE}_c${CFG_A}_vs_c${CFG_B}}"
-FRAMES="${6:-3000}"
+# 缺省 30000 帧不是随手拍的: 本机真实渲染约 340fps, 而每轮要跨过 README §3(b) 的
+# 空跑段(约 20000 帧) 再留出 settle + 12s 采集窗。给少了应用会在采集开始前就跑完自退,
+# 采到的全是空窗 —— 这正是 2026-09-23 头几轮全判无效的原因。
+FRAMES="${6:-30000}"
 CAPDUR="${7:-12}"
 
 SERIAL="${VKS_SERIAL:-91253241019A}"
@@ -40,19 +43,28 @@ restore_fan() {
   ashell "su -c 'echo ${FAN_EN:-0} > /sys/kernel/fan/fan_enable; echo ${FAN_LV:-4} > /sys/kernel/fan/fan_speed_level'" >/dev/null 2>&1 || true
 }
 trap restore_fan EXIT
-ashell "su -c 'echo 1 > /sys/kernel/fan/fan_enable; echo 5 > /sys/kernel/fan/fan_speed_level'" >/dev/null 2>&1 || true
+# 风扇已经开着就原样不动(用户可能是手动开的, 挡位是他选的); 只有关着时才由我们打开。
+# 要的是"整批对照期间风扇状态恒定", 不是某个特定挡位 —— 风扇自身耗电会进功耗读数,
+# 两臂只要同状态就不会污染臂间差异。每轮的实际状态由 run_vks.sh 存进 fan.json。
+if [ "${FAN_EN:-0}" = "1" ]; then
+  echo "  风扇已开 (enable=$FAN_EN level=$FAN_LV), 保持原状"
+else
+  echo "  风扇原为关闭, 本批对照期间打开 (level 5), 结束还原"
+  ashell "su -c 'echo 1 > /sys/kernel/fan/fan_enable; echo 5 > /sys/kernel/fan/fan_speed_level'" >/dev/null 2>&1 || true
+fi
 
 one() {   # one <label> <config>
-  local label="$1" cfg="$2" try
+  local label="$1" cfg="$2" try rc
   for try in 1 2 3; do
     rm -rf "$OUT/$label"
-    if bash "$HERE/run_vks.sh" "$label" "$OUT/$label" "$SAMPLE" "$cfg" "$FRAMES" "$CAPDUR"; then
-      return 0
-    fi
-    local rc=$?
+    # 状态要当场接住。不能写成 `if run_vks.sh; then ...; fi` 再取 $? ——
+    # 条件为假且没有 else 时, `fi` 之后的 $? 按 POSIX 是 0, 硬失败会被误当成无效轮反复重试。
+    rc=0
+    bash "$HERE/run_vks.sh" "$label" "$OUT/$label" "$SAMPLE" "$cfg" "$FRAMES" "$CAPDUR" || rc=$?
+    [ $rc -eq 0 ] && return 0
     [ $rc -eq 2 ] && { echo "  [$label] 硬失败"; return 2; }
     mv "$OUT/$label" "$OUT/${label}_invalid$try" 2>/dev/null || true
-    echo "  [$label] 无效轮, 重试 $try/2"
+    echo "  [$label] 第 $try 次无效, 还剩 $((3-try)) 次重试"
   done
   echo "  [$label] 三次都无效, 放弃该轮"
   return 3

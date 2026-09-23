@@ -14,3 +14,9 @@ runs/*.txt
 # Python 字节码
 __pycache__/
 *.pyc
+
+# vulkan-samples 载体: 同样的纪律 —— 原始 ftrace 是证据但不进 git,
+# 归档在 U 盘 /Volumes/USB/phonefarm-vks-traces/, 解析产物留在版本里。
+runs_vks/*/*/trace.txt
+runs_vks/*/*/run.log
+runs_vks/*/*/run_pre.log
