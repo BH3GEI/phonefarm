@@ -16,7 +16,7 @@
 | 1 | 不侵入任何游戏进程, 设备上零常驻、零残留 | runner 推到 `/data/local/tmp/phonefarm_gpuop`, 跑完 `rm -rf`; 采样循环有界, adb 断开自行到头 |
 | 2 | sysfs 写入退出前全部恢复, 回读一致才算这轮成立 | `hwcond::Lock`; 回读不符即整轮作废并报错 |
 | 3 | 判定规则在看到数据之前冻结 | `FrozenRules` 由 `eval_request.protocol` 带入, 代码中无任何事后可调的阈值 |
-| 4 | 量不到的指标如实留空, 绝不用默认值填补 | 取不到的记 `NaN`; 功耗轨不可用时当场报错退出, 不报 `0 W` |
+| 4 | 量不到的指标如实留空, 绝不用默认值填补 | 取不到的回 `null` (契约里声明成可空, 见 §6); 功耗轨不可用时当场报错退出, 不报 `0 W` |
 | 5 | 严禁人工评分 | 时延来自 runner 的 `VkQueryPool` 时间戳; 功耗来自 `power_supply` sysfs; p 值由 Welch 检验算出 |
 
 ## 1. 命令契约
@@ -344,26 +344,21 @@ USB 轨待机读数 5.127V x 0.144A = 0.738 W, 随负载变化。
 - 解析从**最前面**的 `{` 往后找第一个带 `ok` 或 `timing_us` 的对象。
   从尾部倒着找是错的: 嵌套的 `timing_us` 对象自己也是合法 JSON, 会先命中它。
 
-## 7. 当前阻塞
+## 7. 当前状态
 
-`vkop_runner` **尚未构建**。工具链是齐的 ——
-NDK r28 (`/opt/homebrew/share/android-commandlinetools/ndk/28.2.13676358`),
-clang 19, Vulkan 头文件与 `libvulkan.so` stub 均在位;
-同级 `../refbench/build/build.sh` 与本仓库 `knobs/gray/build/build_layer.sh`
-已有零交互直编 arm64-v8a 的成例, 照搬即可。
+整条通路已打通。`vkop_runner` 已构建, 产物在
+`tools/vkop/android_aarch64_vkop_runner`, 源码与零交互的 `build.sh` 同目录
+(出包与单独跑法见 `tools/vkop/README.md`)。2026-09-22 在 NX809J 上首次实测,
+2026-09-23 接上真机参考帧集。
 
-在此之前 `phonefarm gpu-op` 会走完「读契约 → 预检 SPIR-V → root 检查 → 找 runner」
-然后如实报错退出 (退出码 2), 不产出任何假数字。
+其余部分 (契约、设备条件化、A/B 调度、功耗遥测、Welch 检验、冻结判定、报告渲染)
+已完成并有单测覆盖。上游 `game_opt_loop` 的演化闭环走的是 refbench 载体,
+两条载体的取舍见 §4.3。
 
-本通路其余部分 (契约、设备条件化、A/B 调度、功耗遥测、Welch 检验、冻结判定、
-报告渲染) 已完成并有单测覆盖。
+找不到 runner、SPIR-V 预检不过或缺 root 时, `phonefarm gpu-op` 仍会走完
+「读契约 → 预检 SPIR-V → root 检查 → 找 runner」然后如实报错退出 (退出码 2),
+不产出任何假数字。
 
-### 一个待上游确认的口径问题
-
-本标尺是 **headless 算子标尺**: 它量的是算子自身的 GPU 耗时与重建画质,
-量不到 `fps_p95_ms` (帧时 p95 需要真实渲染上下文)。该字段现记 `NaN`。
-
-若上游需要真实帧时与在场景中的整机功耗, 被测物用同级的第一方白盒靶场
-`../refbench` (纯 Vulkan 原生应用, 自带 720p 渲染管线): 把算子挂进它的后处理队列,
-即可同时拿到真实帧时、USB 轨瓦数波动与确定的画质真值。
-不碰任何第三方黑盒游戏的反作弊与注入。
+留一条容易记错的: headless 载体量不到 `fps_p95_ms` (帧时 p95 需要真实渲染上下文),
+该字段回 `null` —— 不是 `0` 也不是 `NaN`。契约两边都声明成可空, 判定侧 `null`
+不参与比较, 对应单测在 `src/gpuop.rs`。
