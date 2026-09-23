@@ -108,7 +108,8 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 **Compute Shader 算子标尺**（零 Token，需 root）
 
 ```bash
-./phonefarm gpu-op --request <eval_request.json> --serial S --json   # 等冷+锁频+A/B/A/B+Welch t 检验
+./phonefarm eval --request <eval_request.json> --serial S --json      # 评测唯一入口: v1 转交 gpu-op; v2 按 kind 路由 shader/sysparam/gray
+./phonefarm gpu-op --request <eval_request.json> --serial S --json   # shader 通路的实现本体 (等冷+锁频+A/B/A/B+Welch t 检验)
 ./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
 ```
 

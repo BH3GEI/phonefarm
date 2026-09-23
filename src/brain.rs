@@ -1,6 +1,7 @@
 //! 唯一模型调用函数。多 provider 按序 failover;HTTP 走 curl 子进程(绕 WAF 指纹问题)。
 //! 本层只做 消息→原文回复;JSON 解析由调用方按记录契约执行。
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
@@ -49,7 +50,7 @@ fn clip(s: &str, n: usize) -> String {
 
 fn b64(data: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
@@ -155,21 +156,52 @@ impl Brain {
         Err("所有可用 provider 都失败".into())
     }
 
+    /// 本次进程内的请求序号: 独占临时目录的名字之一, 并发不撞名。
+    fn req_seq() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn post(&self, p: &ProviderCfg, key: &str, body: &serde_json::Value)
         -> Result<(String, u64), String>
     {
-        let bp = format!("{}/_req.json", self.tmp);
+        // 密钥绝不进 argv: argv 在 ps 输出里人人可见, 而 Authorization 头就在里面。
+        // 走 curl -K 配置文件 (url/头/数据/超时全在里面), 目录带进程号独占, 0700/0600,
+        // 无论成败立刻连目录一起删 —— 与 src/llm.rs 同一套纪律。
+        let dir = Path::new(&self.tmp).join(format!("brain-{}-{}", std::process::id(), Self::req_seq()));
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let bp = dir.join("req.json");
         std::fs::write(&bp, serde_json::to_string(body).unwrap()).map_err(|e| e.to_string())?;
         let timeout = p.timeout_s.unwrap_or(30).to_string();
-        let mut cmd = Command::new("curl");
-        cmd.args(["-s", "--max-time", &timeout, "-w", "\n%{http_code}", &p.url,
-                  "-H", &format!("Authorization: Bearer {key}"),
-                  "-H", "Content-Type: application/json",
-                  "-d", &format!("@{bp}")]);
+        let mut cfg_text = format!(
+            "url = {}\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\ndata = @{}\nmax-time = {}\nsilent\nwrite-out = \\n%{{http_code}}\n",
+            p.url, key, bp.display(), timeout
+        );
         if p.direct {
-            cmd.arg("--noproxy").arg("*");
+            cfg_text.push_str("noproxy = \"*\"\n");
         }
-        let out = cmd.output().map_err(|e| e.to_string())?;
+        let cfg = dir.join("curl.cfg");
+        std::fs::write(&cfg, &cfg_text).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600));
+        }
+        let mut cmd = Command::new("curl");
+        cmd.arg("-K").arg(&cfg);
+        let out = cmd.output();
+        // 配置文件里有密钥: 先删干净再处理结果
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = out.map_err(|e| e.to_string())?;
         // 末行是 -w 追加的 HTTP 状态码
         let raw = String::from_utf8_lossy(&out.stdout).to_string();
         let (resp_text, code) = match raw.rfind('\n') {
