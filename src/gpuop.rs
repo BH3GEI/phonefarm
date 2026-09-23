@@ -1115,6 +1115,13 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     // 每张参考帧都跑一遍等于把整轮真机时间乘以帧数, 而该载体的主指标是时延,
     // 不是画质。帧集平均只在画质补测里做 —— 那一步本来就只跑两次。
     let inline_reference = remote_references.first().cloned();
+    // 出处要写**实际用了哪几张**, 不是手上有哪几张 —— 否则报告会声称
+    // 一个 12 张帧集的均值, 而那个 dB 其实只来自第一张。
+    if a.carrier == Carrier::Headless && quality_reference.frames > 1 {
+        quality_reference.frames = 1;
+        quality_reference.frame_files.truncate(1);
+        progress("headless 载体: 画质内联量, 只用帧集第一张 (帧集平均只在画质补测里做)");
+    }
 
     // ---- 回滚上次异常退出遗留的锁态 ----
     let recovered = hwcond::recover_stale_lock("gpu-op", &phone, &state_path);
@@ -1432,7 +1439,13 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         } else {
             None
         },
-        quality_reference: Some(quality_reference),
+        // 一个 dB 都没量到就别报真值出处: 参考帧摆在那儿没被用过
+        // (画质补测关了 / 跑崩了), 报出来会让人以为那些 null 是对着它得出的。
+        quality_reference: if psnr_a.is_empty() && psnr_b.is_empty() {
+            None
+        } else {
+            Some(quality_reference)
+        },
     };
 
     if a.as_json {
