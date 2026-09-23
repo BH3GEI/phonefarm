@@ -36,9 +36,11 @@ def pf_bin() -> str:
 
 
 def _call(req: dict):
+    # 显式 utf-8: 结果里有中文 ("样本不足" / "<缺行>"), text=True 会跟着 locale 走,
+    # LC_ALL=C 下就是 UnicodeDecodeError
     out = subprocess.run([pf_bin(), "loopstat"],
                          input=json.dumps(req, ensure_ascii=False),
-                         capture_output=True, text=True, check=True)
+                         capture_output=True, text=True, encoding="utf-8", check=True)
     return json.loads(out.stdout)
 
 

@@ -160,7 +160,7 @@ for i in 1 2 3 4 5; do
 done
 
 # 出报告 + 回放自检
-./phonefarm report --baseline 'runs/ctrl*' --knob 'runs/knob*' \
+../phonefarm report --baseline 'runs/ctrl*' --knob 'runs/knob*' \
     --snap-before runs/snap_before.txt --snap-after runs/snap_final.txt > runs/report.json
 bash tools/replay_test.sh runs
 ```

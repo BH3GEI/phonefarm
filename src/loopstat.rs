@@ -23,7 +23,7 @@
 //! 同一个字段两臂一个是 `"median": 3250` 一个是 `"median": 3300.0` —— 这个差别直接
 //! 落在字节上, 所以这一层的算术全走 [`Num`], 不能一律当 f64。
 
-use crate::pyjson::{dumps, py_round, PyVal};
+use crate::pyjson::{dumps, py_round, py_sum, PyVal};
 use crate::pyobj;
 use std::path::Path;
 
@@ -131,12 +131,70 @@ fn max_of(xs: &[Num]) -> Option<Num> {
 
 // ══════════════ 基础统计 ══════════════
 
-/// `sum(xs)/len(xs)` —— 真除法, 结果必为 float。
+/// CPython 内置 `sum()` 的逐位复刻。
 ///
-/// Python 对纯 int 列表会用精确整数求和再除; 这里按 f64 累加。两者在部分和不超过
-/// 2^53 时逐位相同, 而这些指标 (帧时间 ms、带宽投票 MB/s) 离那个量级差着十几个数量级。
+/// 它有三段, 缺一段就会在末位差 1 ulp, 而 `round(x, 4)` 会把这 1 ulp 放大成
+/// 不同的字节:
+///   1. 开头全是 int → 精确整数累加 (不落 double);
+///   2. 碰上第一个 float → 把整数部分转成 double 后**朴素相加**一次, 补偿量清零;
+///   3. 之后 → Neumaier 补偿求和 (int 也先转 double 再进这条路)。
+///
+/// 第 2 段最容易漏。实测 `sum([5230, 3335.9446, 4504.6, 598.3])` 是
+/// 13668.844599999999 而不是全程补偿的 13668.8446 —— 差别就出在开头那个 int 上。
+#[derive(Default)]
+pub struct PySum {
+    ints: i128,
+    float_started: bool,
+    f: f64,
+    c: f64,
+}
+
+impl PySum {
+    pub fn push(&mut self, x: Num) {
+        if !self.float_started {
+            match x {
+                Num::Int(v) => {
+                    self.ints += v as i128;
+                    return;
+                }
+                Num::Float(v) => {
+                    // 第二段: 朴素相加一次, 补偿从这里才起算
+                    self.float_started = true;
+                    self.f = self.ints as f64 + v;
+                    return;
+                }
+            }
+        }
+        let v = x.f();
+        let t = self.f + v;
+        self.c += if self.f.abs() >= v.abs() {
+            (self.f - t) + v
+        } else {
+            (v - t) + self.f
+        };
+        self.f = t;
+    }
+    pub fn total(&self) -> f64 {
+        if self.float_started {
+            self.f + self.c
+        } else {
+            self.ints as f64
+        }
+    }
+}
+
+/// CPython `sum()` 的一次性版本。
+pub fn sum_nums(xs: &[Num]) -> f64 {
+    let mut s = PySum::default();
+    for x in xs {
+        s.push(*x);
+    }
+    s.total()
+}
+
+/// `sum(xs)/len(xs)` —— 真除法, 结果必为 float。
 pub fn mean(xs: &[Num]) -> f64 {
-    xs.iter().map(|x| x.f()).sum::<f64>() / xs.len() as f64
+    sum_nums(xs) / xs.len() as f64
 }
 
 /// (max-min)/median, 返回比例 (0.05 = 5%)。中位数为 0 或样本不足时返回 None。
@@ -169,11 +227,11 @@ pub fn drift(xs: &[Num]) -> PyVal {
             "monotonic_frac" => PyVal::Null,
         };
     }
-    let mx = (0..n).map(|i| i as f64).sum::<f64>() / n as f64;
+    let mx = py_sum((0..n).map(|i| i as f64)) / n as f64;
     let my = mean(xs);
-    let den: f64 = (0..n).map(|i| (i as f64 - mx).powi(2)).sum();
+    let den: f64 = py_sum((0..n).map(|i| (i as f64 - mx).powi(2)));
     let slope = if den != 0.0 {
-        (0..n).map(|i| (i as f64 - mx) * (xs[i].f() - my)).sum::<f64>() / den
+        py_sum((0..n).map(|i| (i as f64 - mx) * (xs[i].f() - my))) / den
     } else {
         0.0
     };
@@ -190,7 +248,7 @@ fn var(xs: &[Num]) -> f64 {
         return 0.0;
     }
     let m = mean(xs);
-    xs.iter().map(|x| (x.f() - m).powi(2)).sum::<f64>() / (xs.len() - 1) as f64
+    py_sum(xs.iter().map(|x| (x.f() - m).powi(2))) / (xs.len() - 1) as f64
 }
 
 /// (mean_b - mean_a) / 合并标准差。合并标准差为 0 时无定义。
@@ -251,12 +309,12 @@ fn for_each_combination(n: usize, k: usize, mut f: impl FnMut(&[usize])) {
 ///
 /// 把 a+b 合并后穷举所有"取 len(a) 个作为 A 组"的分法, 统计 |均值差| 不小于
 /// 实测值的比例。返回 (p, 枚举总数)。
-pub fn perm_p_two_sided(a: &[f64], b: &[f64]) -> (f64, usize) {
-    let mut pool: Vec<f64> = Vec::with_capacity(a.len() + b.len());
+pub fn perm_p_two_sided(a: &[Num], b: &[Num]) -> (f64, usize) {
+    let mut pool: Vec<Num> = Vec::with_capacity(a.len() + b.len());
     pool.extend_from_slice(a);
     pool.extend_from_slice(b);
     let na = a.len();
-    let obs = (mean_f(b) - mean_f(a)).abs();
+    let obs = (mean(b) - mean(a)).abs();
     let n = pool.len();
     let mut total = 0usize;
     let mut hit = 0usize;
@@ -266,20 +324,21 @@ pub fn perm_p_two_sided(a: &[f64], b: &[f64]) -> (f64, usize) {
         for &i in combo {
             in_a[i] = true;
         }
-        let mut sa = 0.0;
-        let mut sb = 0.0;
+        // 两组各自按池内升序累加 —— 与 Python 里
+        // `mean([pool[i] for i in idx if i in cs])` 的元素顺序、类型提升都一致
+        let (mut sa, mut sb) = (PySum::default(), PySum::default());
         let mut nb = 0usize;
         for (i, &v) in pool.iter().enumerate() {
             if in_a[i] {
-                sa += v;
+                sa.push(v);
             } else {
-                sb += v;
+                sb.push(v);
                 nb += 1;
             }
         }
         total += 1;
         // 浮点容差: 等于观测值的那些分法应当计入 (置换检验惯例)
-        let d = (sb / nb as f64 - sa / na as f64).abs();
+        let d = (sb.total() / nb as f64 - sa.total() / na as f64).abs();
         if d >= obs - 1e-12 {
             hit += 1;
         }
@@ -287,29 +346,27 @@ pub fn perm_p_two_sided(a: &[f64], b: &[f64]) -> (f64, usize) {
     (hit as f64 / total as f64, total)
 }
 
-fn mean_f(xs: &[f64]) -> f64 {
-    xs.iter().sum::<f64>() / xs.len() as f64
-}
-
 /// 置换检验反演求 (mean_b - mean_a) 的 (1-alpha) 置信区间。
 ///
 /// 对候选位移 δ, 检验 "b - δ 与 a 同分布"; 所有不被拒绝的 δ 构成 CI。
 /// 在一个足够宽的网格上扫描 (覆盖观测差的 ±4 倍全距), 取首尾。
 /// 网格是固定的等分点, 因此结果确定, 不含随机。
-pub fn perm_ci(a: &[f64], b: &[f64], alpha: f64, steps: usize) -> Option<(f64, f64)> {
-    let obs = mean_f(b) - mean_f(a);
-    let all: Vec<f64> = a.iter().chain(b.iter()).copied().collect();
-    let hi = all.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let lo = all.iter().copied().fold(f64::INFINITY, f64::min);
+pub fn perm_ci(a: &[Num], b: &[Num], alpha: f64, steps: usize) -> Option<(f64, f64)> {
+    let obs = mean(b) - mean(a);
+    let all: Vec<Num> = a.iter().chain(b.iter()).copied().collect();
+    let hi = max_of(&all)?.f();
+    let lo = min_of(&all)?.f();
+    // Python 的 `(max - min) or 1.0`: 全距为 0 时退回 1.0
     let spread = if hi - lo == 0.0 { 1.0 } else { hi - lo };
     let (lo_bound, hi_bound) = (obs - 4.0 * spread, obs + 4.0 * spread);
     let mut accepted: Vec<f64> = Vec::new();
-    let mut shifted = vec![0.0; b.len()];
+    // `y - d` 里 d 一定是 float, 所以位移后的 B 臂整列都是 float
+    let mut shifted = vec![Num::Float(0.0); b.len()];
     for i in 0..=steps {
         // 与 Python 的 `lo + (hi-lo)*i/steps` 同一个运算顺序
         let d = lo_bound + (hi_bound - lo_bound) * i as f64 / steps as f64;
         for (s, y) in shifted.iter_mut().zip(b) {
-            *s = y - d;
+            *s = Num::Float(y.f() - d);
         }
         if perm_p_two_sided(a, &shifted).0 > alpha {
             accepted.push(d);
@@ -493,10 +550,8 @@ pub fn compare(a_runs: &[Run], b_runs: &[Run], metric: &str) -> PyVal {
     if a.len() < 2 || b.len() < 2 {
         return pyobj! { "metric" => metric, "error" => "样本不足" };
     }
-    let (af, bf): (Vec<f64>, Vec<f64>) =
-        (a.iter().map(|x| x.f()).collect(), b.iter().map(|x| x.f()).collect());
-    let (p, total) = perm_p_two_sided(&af, &bf);
-    let ci = perm_ci(&af, &bf, 0.05, 400);
+    let (p, total) = perm_p_two_sided(&a, &b);
+    let ci = perm_ci(&a, &b, 0.05, 400);
     let (ma, mb) = (mean(&a), mean(&b));
     pyobj! {
         "metric" => metric,
@@ -645,7 +700,7 @@ mod tests {
     /// 5v5 精确置换检验就是 C(10,5)=252 种分法, 一种不多一种不少。
     #[test]
     fn permutation_enumerates_every_split() {
-        let (p, total) = perm_p_two_sided(&[1.0, 2.0, 3.0, 4.0, 5.0], &[6.0, 7.0, 8.0, 9.0, 10.0]);
+        let (p, total) = perm_p_two_sided(&n(&[1.0, 2.0, 3.0, 4.0, 5.0]), &n(&[6.0, 7.0, 8.0, 9.0, 10.0]));
         assert_eq!(total, 252);
         assert_eq!(py_round(p, 6), 0.007937);
     }
@@ -690,6 +745,21 @@ mod tests {
         assert_eq!(dumps(&PyVal::from(hodges_lehmann(&a, &b).unwrap())), "50.0");
         let both_int = vec![Num::Int(1), Num::Int(2), Num::Int(3)];
         assert_eq!(hodges_lehmann(&both_int, &both_int).unwrap(), Num::Int(0));
+    }
+
+    /// CPython `sum()` 的三段式: 整数精确段 → 第一个 float 朴素相加 → 此后补偿。
+    /// 三个对照值都是本机 python3 的实际输出。
+    #[test]
+    fn sum_matches_cpython_promotion() {
+        // 开头是 int: 那一步不补偿, 结果比全程补偿多出末位误差
+        let xs = vec![Num::Int(5230), Num::Float(3335.9446), Num::Float(4504.6), Num::Float(598.3)];
+        assert_eq!(sum_nums(&xs), 13668.844599999999);
+        // 全是 float: 全程补偿
+        let ys = vec![Num::Float(1667.8111), Num::Float(3130.61), Num::Float(657.0251), Num::Float(414.0)];
+        assert_eq!(sum_nums(&ys), 5869.4462);
+        assert_ne!(sum_nums(&ys), 1667.8111 + 3130.61 + 657.0251 + 414.0);
+        // 纯 int: 精确整数求和
+        assert_eq!(sum_nums(&[Num::Int(3150), Num::Int(3250), Num::Int(3250), Num::Int(3300), Num::Int(3200)]), 16150.0);
     }
 
     #[test]

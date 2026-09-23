@@ -169,15 +169,21 @@ pub fn run_report(args: &[String]) -> i32 {
     let mut snap_after = None;
     let mut replay_result = None;
     let mut primary = "frame_p95".to_string();
+    // argparse 既吃 `--k v` 也吃 `--k=v`, 两种都收
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        match a.as_str() {
-            "--baseline" => baseline = it.next().cloned(),
-            "--knob" => knob = it.next().cloned(),
-            "--snap-before" => snap_before = it.next().cloned(),
-            "--snap-after" => snap_after = it.next().cloned(),
-            "--replay-result" => replay_result = it.next().cloned(),
-            "--primary" => primary = it.next().cloned().unwrap_or(primary),
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) => (f, Some(v.to_string())),
+            None => (a.as_str(), None),
+        };
+        let mut take = || inline.clone().or_else(|| it.next().cloned());
+        match flag {
+            "--baseline" => baseline = take(),
+            "--knob" => knob = take(),
+            "--snap-before" => snap_before = take(),
+            "--snap-after" => snap_after = take(),
+            "--replay-result" => replay_result = take(),
+            "--primary" => primary = take().unwrap_or(primary),
             other => {
                 eprintln!("不认识的参数 {other}\n{USAGE}");
                 return 2;
@@ -222,17 +228,18 @@ pub fn run_report(args: &[String]) -> i32 {
                 .iter()
                 .map(|m| (m.to_string(), compare(&base_runs, &knob_runs, m)))
                 .collect();
-            let primary_cmp = cmps
-                .iter()
-                .find(|(k, _)| *k == primary)
-                .map(|(_, v)| v.clone());
+            let primary_cmp = cmps.iter().find(|(k, _)| *k == primary).map(|(_, v)| v.clone());
+            let Some(pc) = primary_cmp else {
+                // 少一条判据的报告比没有报告更危险 —— summary 会显示 criteria_evaluated: 2
+                // 却仍然退出 0。旧版在这里是 KeyError 崩掉, 这里照样不出报告。
+                eprintln!("主指标 {primary} 不在对比指标里 (只能是 {})", COMPARE_METRICS.join(" / "));
+                return 1;
+            };
             out.push(("comparison".into(), PyVal::Obj(cmps)));
-            if let Some(pc) = primary_cmp {
-                out.push((
-                    "criterion_3_statistically_significant".into(),
-                    criterion_3(&pc),
-                ));
-            }
+            out.push((
+                "criterion_3_statistically_significant".into(),
+                criterion_3(&pc),
+            ));
         }
     }
 

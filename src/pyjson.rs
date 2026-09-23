@@ -254,6 +254,31 @@ pub fn dumps(v: &PyVal) -> String {
 
 // ══════════════ Python 语义的统计小件 ══════════════
 
+/// CPython (>=3.12) 内置 `sum()` 对浮点走的 Neumaier 补偿求和。
+///
+/// 这**不是**"更准一点"的可选优化, 而是对齐字节的必需品: 朴素累加与补偿累加在末位
+/// 会差 1 ulp, 落到 `round(x, 4)` 上就可能进位到不同的数。实测
+/// `sum([1667.8111, 3130.61, 657.0251, 414.0])` 补偿版是 5869.4462, 朴素版是
+/// 5869.446199999999 —— 除以 4 之后两者的 repr 就不一样了。
+///
+/// 注意只有 Python 的 `sum(...)` 走这条路; 手写的 `acc += x` 循环没有补偿, 那种地方
+/// 要照旧朴素累加 (parse 里逐帧累积 gpu_active 就是这种)。
+pub fn py_sum(xs: impl IntoIterator<Item = f64>) -> f64 {
+    let mut s = 0.0f64;
+    let mut c = 0.0f64;
+    for x in xs {
+        let t = s + x;
+        // 大的那个做被减数, 免得低位被直接抹掉
+        c += if s.abs() >= x.abs() {
+            (s - t) + x
+        } else {
+            (x - t) + s
+        };
+        s = t;
+    }
+    s + c
+}
+
 /// `statistics.median` 的 int 版: 奇数个返回**整数**, 偶数个返回两中位数的**浮点**均值。
 /// 这个 int/float 之分会原样落到 JSON 字节上, 所以必须保住。
 pub fn median_ints(xs: &[i64]) -> Option<PyVal> {

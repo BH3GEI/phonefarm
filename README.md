@@ -302,7 +302,7 @@ for i in 1 2 3 4 5; do
   bash tools/run_once.sh ctrl$i runs/ctrl$i
 done
 
-./phonefarm report --baseline 'runs/ctrl*' --knob 'runs/knob*' \
+../phonefarm report --baseline 'runs/ctrl*' --knob 'runs/knob*' \
     --snap-before runs/snap_before.txt --snap-after runs/snap_final.txt > runs/report.json
 bash tools/replay_test.sh runs      # 离线回放自检
 ```
