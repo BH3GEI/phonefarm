@@ -1,0 +1,100 @@
+{
+  "contract_version": 1,
+  "carrier": "megacity",
+  "upstream": {
+    "repo": "https://github.com/Unity-Technologies/megacity-metro",
+    "ref": "master",
+    "unity_editor": "6000.1.0f1",
+    "license": "Unity Companion License",
+    "note": "第三方工程不进本仓库, 克隆到构建机的 thirdparty/ 下"
+  },
+  "package": "com.unity.megacity.metro",
+  "activity": "com.unity.megacity.MegacityMetro",
+  "activity_note": "上游 Assets/Plugins/Android/AndroidManifest.xml 里声明的自定义 Activity (extends UnityPlayerActivity), android:exported=true, 所以 am start 可直接拉起。applicationId 与 java 包名不同是正常的。",
+  "launch_template": "am start -W -n com.unity.megacity.metro/com.unity.megacity.MegacityMetro --es scene {scene} --es run_id {run_id} --es frames {frames} --es route {route} --es warmup {warmup} --es resscale {resscale} --es vsync {vsync}",
+  "extras_are_all_string": true,
+  "no_extras_behavior": "不带 scene extra 启动时 harness 完全不激活, APK 就是原版游戏。测试与正常游玩共用同一个包。",
+
+  "extras": {
+    "scene": {
+      "required": true,
+      "enum": [
+        "city_flythrough",
+        "city_static"
+      ],
+      "semantics": {
+        "city_flythrough": "相机沿固定路线穿城飞行, 主负载场景",
+        "city_static": "相机钉在路线起点不动, 同一批 subscene 已流式加载完毕; 作几何/流式开销的对照臂"
+      }
+    },
+    "run_id": {
+      "required": false,
+      "default": "unset",
+      "note": "原样回写进输出 json, 构成证据链"
+    },
+    "frames": {
+      "required": false,
+      "default": "3600",
+      "parsed_as": "int",
+      "range": [60, 100000],
+      "note": "被测窗口的帧数。相机路线按帧序号推进, 所以 frames 变了路线采样密度就变了 —— 跨轮比较必须锁死同一个 frames。"
+    },
+    "route": {
+      "required": false,
+      "default": "route_a",
+      "note": "StreamingAssets/refbench_routes/<route>.json 的文件名 (不含扩展名)。路线文件的 sha256 会写进输出 json, 用于证明两臂走的是同一条路线。"
+    },
+    "warmup": {
+      "required": false,
+      "default": "600",
+      "parsed_as": "int",
+      "range": [0, 100000],
+      "note": "预热帧数。相机钉在路线起点渲染这么多帧, 等 subscene 流式加载与 shader warmup 落定, 之后才落 started 标记并进被测窗口。预热帧不计入 frames。"
+    },
+    "resscale": {
+      "required": false,
+      "default": "1.0",
+      "parsed_as": "float",
+      "range": [0.25, 2.0],
+      "note": "URP render scale。写死而非跟随设备自适应, 否则不同轮的像素量不同。"
+    },
+    "vsync": {
+      "required": false,
+      "default": "off",
+      "enum": ["on", "off"],
+      "note": "off = QualitySettings.vSyncCount=0 且 targetFrameRate=-1, 让帧率跑满以便分位数统计拿到足够帧 (与 refbench 偏好 MAILBOX/IMMEDIATE 同理)。实际生效值回写进输出 json。"
+    }
+  },
+
+  "fail_loud": {
+    "policy": "路线文件缺失 / 解析失败 / 航点少于 2 个 / 资源未在预热窗口内加载完 —— 一律写 clean_exit=false 并退出, 绝不静默退回默认路线或默认相机。",
+    "reason": "与 refbench 的 knob.postfx 同一条原则: 静默降级会让 A/B 两臂悄悄变成 A 和 A, 而上层还以为在对照。"
+  },
+
+  "process": {
+    "self_terminates": true,
+    "liveness_probe": "adb shell pidof com.unity.megacity.metro",
+    "exit_code_is_contract": false,
+    "exit_code_note": "与 refbench 不同: 这是 Unity Activity 不是 NativeActivity, 退出码经 am start 不可观测。轮的有效性一律以输出 json 的 clean_exit 字段为准。"
+  },
+
+  "output": {
+    "device_path": "/storage/emulated/0/Android/data/com.unity.megacity.metro/files/megacity_out.json",
+    "written": "FileStream.Flush(true) 落盘后才退出进程",
+    "schema": "output.schema.json"
+  },
+
+  "started_marker": {
+    "device_path": "/storage/emulated/0/Android/data/com.unity.megacity.metro/files/megacity_started",
+    "written": "预热结束、进入被测渲染窗口前一帧写入; content = '<scene> <run_id>'",
+    "note": "与 refbench 同样刻意不走 logcat —— 本机 logcat 会整个哑掉"
+  },
+
+  "trace": {
+    "comm_filter": "UnityGfxDeviceW",
+    "comm_filter_status": "UNVERIFIED",
+    "comm_filter_note": "Unity 的 Vulkan 提交来自图形设备工作线程, 默认 comm 名为 UnityGfxDeviceW。refbench 能自己 rename /proc/self/task/<tid>/comm, 这里不改上游引擎线程名, 所以这个值必须在首轮实跑时用 `adb shell ls /proc/<pid>/task/*/comm` 核对后再固化。parse_trace.py 的 --comm 参数照此传。",
+    "submits_per_frame": "auto",
+    "submits_per_frame_note": "不写死。URP 单帧提交次数随 render pass 配置变化, 交给 loop_v1 的 detect_submits_per_frame 自相关自检 (原神 2 次/帧就是这么测出来的)。"
+  }
+}
