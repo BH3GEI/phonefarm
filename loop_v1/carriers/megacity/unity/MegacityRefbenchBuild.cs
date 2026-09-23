@@ -9,7 +9,7 @@
 // 原则与 refbench 一致: 设置对不上就让构建失败, 绝不"尽力而为"出一个悄悄退回
 // GLES3 或 armv7 的包 —— 那种包测出来的数跟我们以为在测的东西没关系。
 //
-// !! 状态: 未编译验证 !!  见 MegacityRefbenchHarness.cs 顶部说明。
+// 状态: 已实跑出包成功 —— 构建后自检四项(arm64 / Vulkan / IL2CPP / apk)全通过。
 
 #if UNITY_EDITOR
 using System;

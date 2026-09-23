@@ -5,9 +5,21 @@ loop_v1 到目前为止的负载有两类: 原神(真游戏, 但闭源、只能�
 这个载体想补中间那一格: **有源码的真游戏** —— 场景复杂度、shader 数量、
 subscene 流式加载都是真的, 同时源码在手, 相机和帧序可以钉死。
 
-> **状态: 全部未验证。** 本目录下的代码一行都没编译过, 脚本一次都没跑过,
-> APK 还不存在。原因是本机装不下 Unity(见下), 构建机也还没装。
-> 这是一份"等 Unity 到位就能立刻开工"的初稿, 不是能跑的东西。
+> **状态: APK 已出, 但一帧都还没在设备上跑过。**
+>
+> 已验证: 三个 `.cs` 在 Unity 6000.1.0f1 下编译通过(`errors=0`); 构建脚本零交互出包成功;
+> 构建后自检通过 —— **arm64 / Vulkan / IL2CPP / apk** 四项都对。
+>
+> | | |
+> |---|---|
+> | APK | 207.4 MB |
+> | sha256 | `6806eff9289116db04765ee405be9edd5dd534a13f06d55e14bbbd3b4362534e` |
+> | 上游 commit | `07652ee` |
+> | Unity | 6000.1.0f1 (Personal, magicbook) |
+> | 构建场景表 | `Menu.unity`, `Main.unity` |
+>
+> 还没验证的: 设备上能不能正常起来、相机路线看到的到底是不是那座城、
+> `render_thread_comm` 实测是什么、以及基线离散度。清单在文末。
 
 ---
 
@@ -190,6 +202,22 @@ sha256 就没有意义了。上游场景结构变到解析不出 66 个 Point �
 
 ### 3. 采集(采集机)
 
+**测试条件(每轮证据里都要记上)**:
+
+- **红魔内置风扇: 开**, 且全程保持开启。这会抬高稳态帧率、压低热事件触发率,
+  所以它不是"无关的环境细节" —— 风扇开/关的两批数据不能混在一起比。
+- 设备是共享的。用 `/private/tmp/claude-501/devlock` 抢锁, 本载体的 label 是
+  **`wb-megacity`**:
+
+  ```bash
+  /private/tmp/claude-501/devlock run wb-megacity -- \
+    bash run_megacity.sh base1 runs/mc_base1 city_flythrough route_a 3600
+  ```
+
+  `run` 会拿锁 → 后台每 60 秒自动续期 → 跑完自动释放。被别人占着时直接返回 1,
+  不要绕过去硬跑 —— 两个任务同时压一台手机, 两边的数都废。
+
+
 ```bash
 adb install -r megacity.apk
 bash run_megacity.sh base1 runs/mc_base1 city_flythrough route_a 3600
@@ -222,10 +250,12 @@ run_megacity.sh        采集机: 跑一轮并收证据
 
 ## 还没做的
 
-- [ ] 用户在 magicbook 登录 Unity 激活许可证 **(人工, 卡在这)**
-- [ ] 装 Unity 6000.1.0f1 + Android 模块
-- [ ] 让三个 .cs 过编译 —— 现在一行都没编译过
+- [x] ~~用户在 magicbook 登录 Unity 激活许可证~~ 已完成, 构建日志实证 `UnityPersXXXX`
+- [x] ~~装 Unity 6000.1.0f1 + Android 模块~~ 已装齐(NDK/SDK/OpenJDK)
+- [x] ~~让三个 .cs 过编译~~ 通过, `errors=0`
 - [x] ~~标定 `route_a.json`~~ 已改为从上游场景推导, 见「路线」一节
-- [ ] 出第一个 APK, 核对图形 API 真的落在 Vulkan
+- [x] ~~出第一个 APK, 核对图形 API 真的落在 Vulkan~~ 构建后自检通过: arm64 / Vulkan / IL2CPP
+- [ ] **装到红魔跑通第一轮** —— 还没跑过, 下面两条都压在这上面
+- [ ] 目视确认相机路线看到的是城市而不是一片天空
 - [ ] 实测 `render_thread_comm` 到底是不是 `UnityGfxDeviceW`, 固化进 contract
 - [ ] 3 轮基线, 报 frame_p95 离散度, 与 refbench 的 0.45% / 原神的 1.37% 对齐着看
