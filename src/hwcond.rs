@@ -247,17 +247,35 @@ pub struct PowerSample {
 }
 
 impl PowerSample {
-    /// 瓦特。优先用设备直报的 power_now, 否则 V x I 折算。
+    /// 瓦特。**优先 V x I**, 只有电压或电流缺失时才退回设备直报的 `power_now`。
     ///
     /// 取绝对值: 放电电流在不同内核里有正有负 (有的用负数表示放电),
     /// 功率的**大小**才是我们要的量。
+    ///
+    /// 为什么不信 `power_now`
+    /// ----------------------
+    /// 它曾经是首选。2026-09-23 在红魔 NX809J 上与 HiSmartPerf 通路做交叉对比时发现:
+    /// 同一时刻 `battery/power_now` 读出 `992195296` (按 μW 折算 992 W),
+    /// 而 `voltage_now x current_now` 只有 0.185 W。整段 30 秒窗口里 150 条采样**全部**
+    /// 越界, 最大 777 W —— 这个节点在这台机器上给的根本不是 μW。
+    ///
+    /// 两条通路因此对同一段窗口给出了完全不同的功耗: 我们报 777 W, HiSmartPerf 报 3.09 W。
+    /// 差异的唯一来源就是这里 —— HiSmartPerf 的设备端采集器只读
+    /// `current_now` / `voltage_now`, 压根不碰 `power_now`。
+    ///
+    /// `power_now` 是可选节点, 各家内核填得五花八门 (有的 μW, 有的 nW, 有的干脆没初始化);
+    /// 而 `voltage_now`(μV) / `current_now`(μA) 的单位在 power_supply class 里是有明确约定的。
+    /// 所以口径改成: **能算 V x I 就算 V x I**, 两条通路从此量的是同一个东西。
     pub fn watt(&self) -> f64 {
+        if self.volt_uv != 0 && self.curr_ua != 0 {
+            return (self.volt_uv as f64 / 1.0e6).abs() * (self.curr_ua as f64 / 1.0e6).abs();
+        }
         if let Some(uw) = self.power_uw {
             if uw != 0 {
                 return (uw.abs() as f64) / 1.0e6;
             }
         }
-        (self.volt_uv as f64 / 1.0e6) * (self.curr_ua as f64 / 1.0e6).abs()
+        0.0
     }
 }
 
@@ -309,10 +327,40 @@ pub fn power_stats(samples: &[PowerSample]) -> Option<(f64, f64, f64, f64)> {
 ///
 /// 这层判断是必需的: 插着 USB 充电时电池轨恒为 0, 一个 0.000 W 的"实测功耗"
 /// 看起来像个数字, 其实是「这条轨此刻量不了」。不做这层, 报告就会拿 0 当结论。
+/// 一台手机的整机功率可信区间 (瓦)。
+///
+/// 这不是"调参", 是物理边界: 手游满载的整机功率在个位数瓦到十几瓦, 上不了 30 W;
+/// 低于 50 mW 则意味着这条轨此刻根本没在量东西。**三条采集通路共用这一把尺子** ——
+/// 同一个物理量在不同通路上用不同的判据, 迟早会出现"同一台机器 A 通路说可信、
+/// B 通路说不可信"的分裂。
+pub const POWER_MIN_W: f64 = 0.05;
+pub const POWER_MAX_W: f64 = 30.0;
+
 pub fn power_usable(rail: PowerRail, samples: &[PowerSample]) -> Result<(), String> {
     let Some((mean, _, _, _)) = power_stats(samples) else {
         return Err("没有取到任何功率采样".into());
     };
+    // 上界必须查, 而且要逐条查。
+    //
+    // 2026-09-23 实测这台红魔: `/sys/class/power_supply/battery/power_now` 读出
+    // `992195296`, 按 μW 折算就是 992 W —— 而同一时刻 current_now x voltage_now 只有
+    // 0.185 W。这个节点在这台机器上给的根本不是 μW (多半压根没初始化)。
+    // 在加上界之前, 这条通路会把 1268 W 当成一次正常的功耗实测报给上层,
+    // 而 `gpu-op` 的功耗门禁拿它去做 A/B 裁决 —— 一个物理上不可能的数字,
+    // 却因为"大于 0"就通过了唯一的一道检查。
+    //
+    // 逐条而不是判均值: 29 条 5 W 里混进一条 300 W, 均值 14.8 W 正好落在窗口内,
+    // 判均值就会把一个假数字当实测发出去。
+    if let Some(bad) = samples.iter().map(|s| s.watt()).find(|w| !(POWER_MIN_W..=POWER_MAX_W).contains(w)) {
+        let n = samples.iter().map(|s| s.watt()).filter(|w| !(POWER_MIN_W..=POWER_MAX_W).contains(w)).count();
+        return Err(format!(
+            "{n} / {} 条功率读数不在可信区间 {POWER_MIN_W}..{POWER_MAX_W} W (越界样本如 {bad:.3} W): \
+要么设备此刻正插着 USB 充电 (供电状态变过, 拿这段窗口做 A/B 对比本来就不成立), \
+要么这条轨的 power_now 节点给的不是 μW (本机 battery/power_now 就是这种情况)。\
+不确定就不给数 —— 一个物理上不可能的瓦数比没有数字危险得多",
+            samples.len()
+        ));
+    }
     if mean <= 0.0 {
         return Err(match rail {
             PowerRail::Battery => "电池轨功率恒为 0: 设备正插着 USB 充电。\
@@ -557,6 +605,39 @@ impl Lock {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_garbage_power_now_node_is_rejected_not_reported() {
+        // 2026-09-23 红魔 NX809J 实测: battery/power_now 读出 992195296。
+        // 按 μW 折算就是 992 W, 而同一时刻 current_now x voltage_now 只有 0.185 W ——
+        // 这个节点在这台机器上给的根本不是 μW。加上界之前, 它会当成一次正常实测报上去。
+        let s = PowerSample { volt_uv: 4_208_000, curr_ua: -44_000, power_uw: Some(992_195_296) };
+        // 改了口径之后, 同一条采样算出的是 V x I 的 0.185 W, 而不再是 992 W
+        assert!((s.watt() - 0.185_152).abs() < 1e-6, "实得 {}", s.watt());
+        // 万一哪天 V x I 也算不出来, 退回 power_now 时上界必须仍然拦得住它
+        let only_pn = PowerSample { volt_uv: 0, curr_ua: 0, power_uw: Some(992_195_296) };
+        assert!(only_pn.watt() > 900.0);
+        let e = power_usable(PowerRail::Battery, &[only_pn]).unwrap_err();
+        assert!(e.contains("可信区间"), "{e}");
+    }
+
+    #[test]
+    fn one_out_of_range_sample_invalidates_the_whole_window() {
+        // 逐条判, 不是判均值: 29 条 5 W 混进一条 300 W, 均值 14.8 W 正好落在窗口内
+        let ok = PowerSample { volt_uv: 4_200_000, curr_ua: -1_190_000, power_uw: None };
+        let mut v = vec![ok; 29];
+        v.push(PowerSample { volt_uv: 4_200_000, curr_ua: -71_400_000, power_uw: None });
+        let (mean, _, _, _) = power_stats(&v).unwrap();
+        assert!((POWER_MIN_W..=POWER_MAX_W).contains(&mean), "均值 {mean} 本来就落在窗口内");
+        assert!(power_usable(PowerRail::Battery, &v).is_err(), "但整组必须作废");
+    }
+
+    #[test]
+    fn an_ordinary_load_reading_still_passes() {
+        // 别把正常读数也拦了: 1.19 A x 4.2 V = 5.0 W
+        let s = PowerSample { volt_uv: 4_200_000, curr_ua: -1_190_000, power_uw: None };
+        assert!(power_usable(PowerRail::Battery, &[s]).is_ok());
+    }
+
     // ---------- 快照与热区 (口径由 bench 迁入, 行为必须逐字不变) ----------
 
     #[test]
@@ -631,14 +712,26 @@ mod tests {
     // ---------- 功耗遥测 ----------
 
     #[test]
-    fn power_prefers_the_device_reported_wattage() {
+    fn power_prefers_volts_times_amps_over_the_device_reported_wattage() {
         let s = PowerSample {
             volt_uv: 4_400_000,
             curr_ua: 1_000_000,
             power_uw: Some(3_900_000),
         };
-        // 有 power_now 就用它, 不去乘 V x I
+        // 口径 2026-09-23 反转过: 能算 V x I 就算 V x I, 不信 power_now。
+        // 原因见 watt() 的注释 —— 本机 power_now 给的不是 μW, 会算出几百瓦。
+        assert!((s.watt() - 4.4).abs() < 1e-9, "实得 {}", s.watt());
+    }
+
+    #[test]
+    fn power_now_is_only_a_fallback_when_v_or_i_is_missing() {
+        // 电流读不到 (节点缺失/恒 0) 时才退回 power_now
+        let s = PowerSample { volt_uv: 4_400_000, curr_ua: 0, power_uw: Some(3_900_000) };
         assert!((s.watt() - 3.9).abs() < 1e-9);
+        // 三样都没有就是 0 —— 调用方靠 power_usable 把它判成「量不了」, 不会当成实测
+        let none = PowerSample { volt_uv: 0, curr_ua: 0, power_uw: None };
+        assert_eq!(none.watt(), 0.0);
+        assert!(power_usable(PowerRail::Battery, &[none]).is_err());
     }
 
     #[test]

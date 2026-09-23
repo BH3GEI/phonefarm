@@ -92,6 +92,13 @@ def main() -> int:
 
     L = []
     L.append("═══ 两通路并排 ═══")
+    cond = os.path.join(d, "test_conditions.txt")
+    if os.path.exists(cond):
+        L.append("  测试条件 (两条通路共享同一套, 因为是同一窗口并排采的):")
+        with open(cond, errors="replace") as fh:
+            for line in fh:
+                if line.strip():
+                    L.append(f"    {line.rstrip()}")
     L.append(f"  HiSmartPerf 采样点 {sp.get('sample_count', 0)} 条 (每秒一条)")
     L.append(f"  sysfs 电源轨采样点 {sysfs.get('sample_count', 0)} 条 (每 200ms 一条)")
     L.append(f"  ftrace 帧数 {ft.get('n_frames', '—')} 帧")

@@ -204,6 +204,40 @@ impl Default for AndroidSmartPerf {
 /// 而 `fps_p95_ms` 正是用来抓这种卡顿的。故这里 `fps_p95_ms` 恒为 `null` 并写明原因,
 /// 逐帧 p95 只认 ftrace/Vulkan 时间戳那条路。
 pub fn summarize_android_smartperf(samples: &[gpdaemon::GpSample]) -> PerfSnapshot {
+    summarize_android_smartperf_with(samples, None)
+}
+
+/// 同上, 但额外带上 `/sys/class/power_supply/battery/status`。
+///
+/// **为什么必须带**: 可信区间 (`POWER_MIN_W..POWER_MAX_W`) 只拦得住充电时那种几千瓦的
+/// 毛刺; 拦不住「充电电流与系统耗电正好抵消」的情形 —— 2026-09-23 实测这台红魔插着 USB 时
+/// 电池轨读出 `0.213 W`, 稳稳落在窗口里, 看着像一个正常的低功耗读数, 其实整机正在吃好几瓦,
+/// 只不过那几瓦是从 USB 来的、没走电池轨。一个「看起来合理」的错数比一个越界的错数危险得多:
+/// 越界的会被拦下, 合理的会被下游当成实测功耗拿去做 A/B 裁决。
+/// 所以充电态一律作废功耗, 不看数值大小。
+pub fn summarize_android_smartperf_with(
+    samples: &[gpdaemon::GpSample],
+    battery_status: Option<&str>,
+) -> PerfSnapshot {
+    let mut snap = summarize_android_smartperf_inner(samples);
+    // 放电态之外 (Charging / Full / Not charging) 电池轨量的都不是整机功耗
+    if let Some(st) = battery_status {
+        if !st.eq_ignore_ascii_case("Discharging") && snap.power_watt.is_some() {
+            let w = snap.power_watt.take().unwrap();
+            snap.miss(
+                "power_watt",
+                format!(
+                    "电池轨此刻量不了整机功耗: 电池状态是 {st}, 不是 Discharging。\
+读数 {w:.3} W 落在可信区间内, 但那只是充电电流与系统耗电相抵之后的余量, \
+不是整机在吃的功率 —— 要量整机功耗必须让设备处于放电态 (拔掉充电或停充)"
+                ),
+            );
+        }
+    }
+    snap
+}
+
+fn summarize_android_smartperf_inner(samples: &[gpdaemon::GpSample]) -> PerfSnapshot {
     let mut snap = PerfSnapshot::empty(SRC_ANDROID_SMARTPERF);
     snap.sample_count = samples.len();
     if samples.is_empty() {
@@ -283,10 +317,9 @@ pub fn summarize_android_smartperf(samples: &[gpdaemon::GpSample]) -> PerfSnapsh
     snap
 }
 
-/// 功率可信区间。与鸿蒙侧同一把尺子 —— 两条通路读的都是电池轨, 越界的原因也一样
-/// (插着 USB 充电)。
-pub const POWER_MIN_W: f64 = 0.05;
-pub const POWER_MAX_W: f64 = 30.0;
+/// 功率可信区间。三条通路共用 `hwcond` 那一把尺子 —— 同一个物理量在不同通路上
+/// 用不同判据, 迟早会出现「同一台机器 A 通路说可信、B 通路说不可信」的分裂。
+pub use crate::hwcond::{POWER_MAX_W, POWER_MIN_W};
 
 impl PerfSource for AndroidSmartPerf {
     fn id(&self) -> &'static str {
@@ -334,6 +367,15 @@ impl PerfSource for AndroidSmartPerf {
             meta.insert(format!("dev_{k}"), v);
         }
 
+        // 电池状态决定功耗读数算不算数 —— 充电态下电池轨量的不是整机功耗
+        let status = phone
+            .shell("cat /sys/class/power_supply/battery/status", 8_000)
+            .trim()
+            .to_string();
+        if !status.is_empty() {
+            meta.insert("battery_status".to_string(), status.clone());
+        }
+
         let want = rounds.max(1) as usize;
         // 设备端约每秒一条: 给足 want 秒再加一截握手/启动的余量, 否则总是差最后一两条
         let timeout = (want as u64 + 5) * 1_000;
@@ -346,7 +388,10 @@ impl PerfSource for AndroidSmartPerf {
                 return snap;
             }
         };
-        let mut snap = summarize_android_smartperf(&samples);
+        let mut snap = summarize_android_smartperf_with(
+            &samples,
+            if status.is_empty() { None } else { Some(status.as_str()) },
+        );
         snap.meta = Some(meta);
         snap
     }
@@ -820,10 +865,11 @@ mod tests {
     /// 二进制里的格式串; **数值是构造的, 不是实测抓取**, 只用来钉住归一化行为本身。
     /// 真机实测的线格式样本见 `src/testdata/gp_realtime.txt`。
     fn gp_samples() -> Vec<gpdaemon::GpSample> {
-        let wire = "value={fps:59;refresh:120;gpuUsage:71;current:-1420;voltage:4108000;\
-soc:53;gpuTemp:50;batTemp:39;npuTemp:0;gpuType:qualcomm;};end;\
-value={fps:60;refresh:120;gpuUsage:74;current:-1502;voltage:4103000;\
-soc:54;gpuTemp:51;batTemp:39;npuTemp:0;gpuType:qualcomm;};end;";
+        // 裸 {…}, 无 value= 前缀无 ;end; 帧尾; 电流/电压是 sysfs 原值 (μA/μV), 温度是毫摄氏度
+        let wire = "{fps:59;refresh:120;gpuUsage:71;current:-1420000;voltage:4108000;\
+soc:53000;gpuTemp:50000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}\
+{fps:60;refresh:120;gpuUsage:74;current:-1502000;voltage:4103000;\
+soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
         let (s, rest) = gpdaemon::parse_stream(wire);
         assert!(rest.is_empty());
         s
@@ -859,12 +905,35 @@ soc:54;gpuTemp:51;batTemp:39;npuTemp:0;gpuType:qualcomm;};end;";
     #[test]
     fn android_smartperf_charging_spike_invalidates_the_window() {
         // 插着充电时电流是几十万 mA 的垃圾值; 一条越界就整组作废, 不能报均值
-        let wire = "value={fps:60;current:-1420;voltage:4108000;};end;\
-value={fps:60;current:-724805;voltage:4212000;};end;";
+        // 第二条是充电态的垃圾值 (2026-09-18 实测量级): 724.8 A x 4.212 V = 3052 W
+        let wire = "{fps:60;current:-1420000;voltage:4108000;}\
+{fps:60;current:-724805000;voltage:4212000;}";
         let (s, _) = gpdaemon::parse_stream(wire);
         let g = summarize_android_smartperf(&s);
         assert_eq!(g.power_watt, None);
         assert!(g.unavailable.iter().any(|u| u.field == "power_watt" && u.reason.contains("充电")));
+    }
+
+    #[test]
+    fn charging_invalidates_power_even_when_the_reading_looks_plausible() {
+        // 2026-09-23 实测: 插着 USB 时电池轨读出 0.213 W, 稳稳落在 0.05..30 W 窗口里。
+        // 可信区间拦不住它 —— 只有电池状态拦得住。
+        let wire = "{fps:30;current:-66000;voltage:4207000;}{fps:30;current:-87000;voltage:4206000;}";
+        let (s, _) = gpdaemon::parse_stream(wire);
+        // 不带状态: 读数落在窗口内, 照常报出来
+        let free = summarize_android_smartperf(&s);
+        assert!(free.power_watt.is_some(), "这个量级本来就在可信区间里, 区间拦不住");
+        assert!(free.power_watt.unwrap() < 0.5);
+        // 带上充电状态: 作废
+        let charging = summarize_android_smartperf_with(&s, Some("Charging"));
+        assert_eq!(charging.power_watt, None);
+        assert!(charging
+            .unavailable
+            .iter()
+            .any(|u| u.field == "power_watt" && u.reason.contains("Discharging")));
+        // 放电态才算数
+        let ok = summarize_android_smartperf_with(&s, Some("Discharging"));
+        assert_eq!(ok.power_watt, free.power_watt);
     }
 
     #[test]
