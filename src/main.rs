@@ -39,6 +39,7 @@ mod runtime;
 mod script;
 mod serve;
 mod telemetry;
+mod vks;
 mod tree;
 pub mod universal;
 
@@ -185,6 +186,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        analyze <A臂glob> [B臂glob] [--metric M]           (离散度 + 漂移 + 精确置换检验 + 置换反演 CI)
        frames-moving <raw1> <raw2>                        (两张 screencap 裸帧的平均逐像素差 %, 判画面动没动)
        crosscheck-report <轮目录>                         (两条采集通路并排对照表, 纯离线)
+载体:  vks-pick-comm <trace.txt> | vks-ready <run.log> | vks-crosscheck <run.log> <summary.json> [window.json]
+       (Vulkan-Samples 的三道闸: 挑提交线程 / 判渲染就绪 / 内核侧与应用侧对账, 全部纯离线)
        report --baseline <glob> [--knob <glob>] [--snap-before F] [--snap-after F]
               [--replay-result F] [--primary M]          (五条判据汇总成可字节复现的 report.json)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
@@ -673,6 +676,18 @@ fn main() {
         Some("parse-trace") => {
             // ftrace 文本 → 帧时序 + GPU 归因指标。纯离线, 不碰设备, 同一份 trace 逐字节可复现。
             std::process::exit(looptrace::run_parse_trace(&args[1..]));
+        }
+        Some("vks-pick-comm") => {
+            // 从 ftrace 里数出发 GPU 提交的线程名 (Vulkan-Samples 的线程名不是稳定契约)
+            std::process::exit(vks::run_pick_comm(&args[1..]));
+        }
+        Some("vks-ready") => {
+            // 样例是否已进入真实渲染稳态 (看帧率序列的阶跃, 不看秒数)。0=就绪 1=还没
+            std::process::exit(vks::run_ready(&args[1..]));
+        }
+        Some("vks-crosscheck") => {
+            // 内核侧提交速率与应用侧自报帧率的对账
+            std::process::exit(vks::run_crosscheck(&args[1..]));
         }
         Some("crosscheck-report") => {
             // 同一窗口两条采集通路的产物并排成一张表。纯离线, 只读目录里已有的产物。

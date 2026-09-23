@@ -61,7 +61,7 @@ am start -n com.khronos.vulkan_samples/.SampleLauncherActivity --es cmd \
   (`components/android/src/context.cpp`)，所以 `scenes/ textures/ fonts/ shaders/`
   由 `install_vks.sh` 用 adb 推过去。**`shaders/` 也必须推**，样例运行时从那里读 `.spv`。
 - trace 过滤**不写死线程名**：Adreno 驱动在应用进程内部线程发 kgsl 提交，而那个线程的
-  名字形如 `binder:<pid>_5`(每轮都不一样)。`pick_comm.py` 采完当场按
+  名字形如 `binder:<pid>_5`(每轮都不一样)。`phonefarm vks-pick-comm` 采完当场按
   `adreno_cmdbatch_submitted` 的分布认第一名，占比低于 80% 直接判无效
   (说明这轮提交是多线程发的，对照口径不成立)。
 
@@ -79,8 +79,8 @@ am start -n com.khronos.vulkan_samples/.SampleLauncherActivity --es cmd \
 **一条 GPU 提交都没有**。实测这个状态还会在一次运行中**反复出现**
 (实测一轮里见过 真实 15s → 空跑 9s → 真实 7s → 空跑)。
 只看应用自报的 FPS 完全看不出来，只看日志会以为跑得飞快。
-→ 两道闸：`ready.py` 等帧率序列里那一级阶跃下降才开采；采完再用
-`crosscheck.py` 把**内核侧提交节奏**和**应用侧自报帧率**对账，差过 35% 当场判无效。
+→ 两道闸：`phonefarm vks-ready` 等帧率序列里那一级阶跃下降才开采；采完再用
+`phonefarm vks-crosscheck` 把**内核侧提交节奏**和**应用侧自报帧率**对账，差过 35% 当场判无效。
 这道对账不依赖任何时长常数，换机器换系统也不会悄悄失效。
 
 **(c) `pidof` 不能当结束信号。** Android 在所有 activity 结束后会把进程留成
