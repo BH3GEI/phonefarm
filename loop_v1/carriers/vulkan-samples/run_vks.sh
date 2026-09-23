@@ -86,6 +86,19 @@ for _ in $(seq 1 "$SETTLE"); do
 done
 echo "[$LABEL] 进入稳态: ready=$READY"
 
+# 4c) 风扇状态存证。红魔的主动散热风扇自身耗电会进功耗读数, 而它**不在** device_snapshot.sh
+#     的 38 行快照里, 所以单独采一份。同一组对照里两臂必须是同一风扇状态 ——
+#     vks_report.py 会跨轮比对, 不一致就报警, 避免把"风扇开/关"混进臂间差异。
+python3 - "$(ashell "su -c 'cat /sys/kernel/fan/fan_enable'" 2>/dev/null | tr -d '\r')" \
+         "$(ashell "su -c 'cat /sys/kernel/fan/fan_speed_level'" 2>/dev/null | tr -d '\r')" \
+         > "$OUTDIR/fan.json" <<'PYFAN'
+import json, sys
+en = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != "" else None
+lv = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != "" else None
+json.dump({"fan_enable": en, "fan_speed_level": lv}, sys.stdout)
+PYFAN
+echo "[$LABEL] 风扇: $(cat "$OUTDIR/fan.json")"
+
 # 5) 稳态窗口内采集 (ftrace_capture.sh 自带四项状态存档还原)
 ashell "su -c 'sh /data/local/tmp/ftrace_capture.sh $CAPDUR /data/local/tmp/vks_$LABEL.txt'" > "$OUTDIR/capture.log" 2>&1
 adb -s "$SERIAL" pull "/data/local/tmp/vks_$LABEL.txt" "$OUTDIR/trace.txt" >/dev/null
