@@ -13,6 +13,8 @@
 //!     实时流每秒只有一个整数 fps, 根本没有逐帧间隔。
 
 use crate::pyjson::{loads, PyVal};
+#[cfg(test)]
+use crate::pyobj;
 use std::path::Path;
 
 /// 手机上物理上说得通的温度区间 (摄氏度)。超出这个范围的不是温度。
@@ -26,12 +28,47 @@ fn load(path: &Path) -> PyVal {
         .unwrap_or(PyVal::Obj(vec![]))
 }
 
+/// Python 的真值判断: None / 空容器 / 0 / False / 空串都是假。
+/// `crosscheck_report.py` 里 `sp = sp or {}` 加 `if not snap` 连起来就是这一条。
+fn falsy(v: &PyVal) -> bool {
+    match v {
+        PyVal::Null => true,
+        PyVal::Bool(b) => !b,
+        PyVal::Int(i) => *i == 0,
+        PyVal::Float(f) => *f == 0.0,
+        PyVal::Str(s) => s.is_empty(),
+        PyVal::List(xs) => xs.is_empty(),
+        PyVal::Obj(kvs) => kvs.is_empty(),
+    }
+}
+
+/// Python 的 `f"{x:.{nd}f}"`: 非有限值印小写 `nan` / `inf`, Rust 印 `NaN` / `inf`。
+fn ffmt(x: f64, nd: usize, sign: bool) -> String {
+    if x.is_nan() {
+        // Python 对 nan 一律印正号, 不看符号位
+        return if sign { "+nan".into() } else { "nan".into() };
+    }
+    if x.is_infinite() {
+        let s = if x > 0.0 {
+            if sign { "+inf" } else { "inf" }
+        } else {
+            "-inf"
+        };
+        return s.to_string();
+    }
+    if sign {
+        format!("{x:+.*}", nd)
+    } else {
+        format!("{x:.*}", nd)
+    }
+}
+
 /// Python `f"{v:.{nd}f}{unit}"`; None 印成「未测到」, 非数字原样 str()。
 fn fmt(v: Option<&PyVal>, unit: &str, nd: usize) -> String {
     match v {
         None | Some(PyVal::Null) => "未测到".to_string(),
-        Some(PyVal::Int(i)) => format!("{:.*}{unit}", nd, *i as f64),
-        Some(PyVal::Float(f)) => format!("{:.*}{unit}", nd, f),
+        Some(PyVal::Int(i)) => format!("{}{unit}", ffmt(*i as f64, nd, false)),
+        Some(PyVal::Float(f)) => format!("{}{unit}", ffmt(*f, nd, false)),
         Some(other) => other.py_str(),
     }
 }
@@ -43,9 +80,9 @@ fn delta(a: Option<&PyVal>, b: Option<&PyVal>) -> (String, String) {
     };
     let d = a - b;
     if b == 0.0 {
-        return (format!("{d:+.3}"), "—".into());
+        return (ffmt(d, 3, true), "—".into());
     }
-    (format!("{d:+.3}"), format!("{:+.1}%", 100.0 * d / b))
+    (ffmt(d, 3, true), format!("{}%", ffmt(100.0 * d / b, 1, true)))
 }
 
 /// 窗口中点直读的 `/sys/class/thermal` → [(类型, 摄氏度)], 按出现顺序去重。
@@ -81,7 +118,7 @@ pub fn thermal_zones(path: &Path) -> Vec<(String, f64)> {
         if ["vbat", "volt", "vph"].iter().any(|k| low.contains(k)) {
             continue;
         }
-        let c = if v.abs() > 1000 {
+        let c = if v.unsigned_abs() > 1000 {
             v as f64 / 1000.0
         } else {
             v as f64
@@ -101,8 +138,7 @@ pub fn thermal_zones(path: &Path) -> Vec<(String, f64)> {
 type Row = (String, Option<PyVal>, Option<PyVal>, &'static str, &'static str);
 
 fn unavailable_lines(snap: &PyVal, tag: &str) -> Vec<String> {
-    let empty = matches!(snap, PyVal::Obj(o) if o.is_empty());
-    if empty {
+    if falsy(snap) {
         return vec![format!("  {tag}: 这条通路整份产物都没读到")];
     }
     match snap.get("unavailable") {
@@ -264,7 +300,8 @@ pub fn report(dir: &Path) -> String {
                 fps.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ")
             ));
             let body: &[i64] = if fps.len() > 2 { &fps[1..fps.len() - 1] } else { &fps };
-            let mean = |xs: &[i64]| xs.iter().sum::<i64>() as f64 / xs.len() as f64;
+            // 用 i128 累加: thermal/gp_realtime 都是 `2>&1` 重定向出来的, 内容可以是任何东西
+            let mean = |xs: &[i64]| xs.iter().map(|v| *v as i128).sum::<i128>() as f64 / xs.len() as f64;
             l.push(format!(
                 "  首尾两秒是不完整的秒, 照样各算一条样本 —— 去掉之后均值 {:.3} (全量 {:.3})",
                 mean(body),
@@ -353,6 +390,58 @@ cpu-1-0 42000\nsoc_thermal 99000\nbad line here\nnotanumber x\n",
         assert_eq!(fmt(Some(&PyVal::Null), "W", 3), "未测到");
         assert_eq!(fmt(Some(&PyVal::Float(1.25)), "W", 3), "1.250W");
         assert_eq!(fmt(Some(&PyVal::Int(3)), "", 3), "3.000");
+    }
+
+    /// Python 的 `if not snap` 连 null / [] / 0 / "" 一起算「整份没读到」。
+    #[test]
+    fn falsy_snapshot_still_says_the_path_died() {
+        for v in [
+            PyVal::Null,
+            PyVal::Obj(vec![]),
+            PyVal::List(vec![]),
+            PyVal::Int(0),
+            PyVal::Bool(false),
+            PyVal::Str(String::new()),
+        ] {
+            assert_eq!(
+                unavailable_lines(&v, "X"),
+                vec!["  X: 这条通路整份产物都没读到".to_string()],
+                "{v:?}"
+            );
+        }
+        // 非空但没有 unavailable 字段: 不是"整份没读到", 只是没有要说明的
+        assert!(unavailable_lines(&pyobj! { "a" => 1i64 }, "X").is_empty());
+    }
+
+    /// Python 印小写 nan / inf, 且 nan 一律带正号。
+    #[test]
+    fn non_finite_formats_like_python() {
+        assert_eq!(ffmt(f64::NAN, 3, false), "nan");
+        assert_eq!(ffmt(f64::NAN, 3, true), "+nan");
+        assert_eq!(ffmt(-f64::NAN, 3, true), "+nan");
+        assert_eq!(ffmt(f64::INFINITY, 3, false), "inf");
+        assert_eq!(ffmt(f64::INFINITY, 3, true), "+inf");
+        assert_eq!(ffmt(f64::NEG_INFINITY, 1, true), "-inf");
+        assert_eq!(fmt(Some(&PyVal::Float(f64::NAN)), "W", 3), "nanW");
+        let (d, p) = delta(Some(&PyVal::Float(f64::NAN)), Some(&PyVal::Float(1.0)));
+        assert_eq!((d.as_str(), p.as_str()), ("+nan", "+nan%"));
+    }
+
+    /// i64::MIN 上 abs() 会 panic —— thermal_mid.txt 是 `2>&1` 重定向出来的,
+    /// 内容可以是任何东西, 不能让一行垃圾把进程打掉。
+    #[test]
+    fn extreme_integers_do_not_panic() {
+        let d = tmp("extreme");
+        std::fs::write(
+            d.join("t.txt"),
+            format!("a {}
+b {}
+c 45600
+", i64::MIN, i64::MAX),
+        )
+        .unwrap();
+        assert_eq!(thermal_zones(&d.join("t.txt")), vec![("c".to_string(), 45.6)]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// 对照源: 旧 Python 版在同一份合成产物上的输出 (fixtures/crosscheck/)。
