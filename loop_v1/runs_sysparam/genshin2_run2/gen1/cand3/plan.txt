@@ -1,0 +1,5 @@
+# loop_v1 sysparam plan
+sysfs	/sys/devices/system/cpu/cpufreq/policy0/scaling_governor	performance
+sysfs	/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq	1785600
+sysfs	/sys/devices/system/cpu/cpufreq/policy6/scaling_governor	performance
+sysfs	/sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq	1382400

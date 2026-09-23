@@ -1,0 +1,42 @@
+{
+ "span_s": 30.0098,
+ "n_frames": 1773,
+ "n_submits": 3547,
+ "submits_per_frame": 2,
+ "spf_scores": {
+  "acf": {
+   "1": -0.71924,
+   "2": 0.71413,
+   "3": -0.6519,
+   "4": 0.68158,
+   "5": -0.62772,
+   "6": 0.6677
+  },
+  "cv_norm": {
+   "1": 0.44506,
+   "2": 0.23475,
+   "3": 0.31584,
+   "4": 0.24876,
+   "5": 0.29239,
+   "6": 0.26069
+  }
+ },
+ "fps_mean": 59.081,
+ "frame_p50": 16.612,
+ "frame_p95": 19.742,
+ "frame_p99": 29.9878,
+ "frame_mean": 16.926,
+ "gpu_active_p50": 12.4131,
+ "gpu_active_p95": 13.3913,
+ "gpu_active_mean": 12.4761,
+ "queue_p50": 1.4359,
+ "queue_p95": 5.3686,
+ "bw_median": 7050,
+ "bw_max": 10050,
+ "n_buslevel_events": 577,
+ "n_thermal_events": 0,
+ "ddr_cur_khz": "3187000",
+ "ddr_boost_khz": "547000",
+ "llcc_boost_khz": "282000",
+ "thermal_pwrlevel": "0"
+}
