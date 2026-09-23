@@ -218,6 +218,25 @@ Android 与 OpenHarmony 两套官方 runner 协议都解析，**上层报告格�
 
 按状态筛选留帧 + manifest 路线分段，供下游训练/评测管线消费。
 
+## 性能数据来源：安卓与鸿蒙同一份 JSON
+
+```bash
+./phonefarm perf --serial hdc:<connect key> --app <包名> --rounds 30 --json   # 鸿蒙 HiSmartPerf
+./phonefarm perf --serial emulator-5554 --power-rail usb --json               # 安卓 sysfs 电源轨
+./phonefarm perf --from-csv /path/to/data.csv --json                          # 离线解析，不碰设备
+```
+
+安卓读 `/sys/class/power_supply` 电源轨，鸿蒙走 HiSmartPerf 的 `SP_daemon`（帧率/帧时/温度）
+与 Xpower（功耗）——两条通路没有任何共同点，但上层只拿同一个 `PerfSnapshot`：
+字段集合由同一个 struct 保证逐字相同。**采不到的字段是 `null` 并附一条原因，绝不填 0**
+（插着 USB 充电时功耗读数是垃圾值，一个 `0.000 W` 会把上层的 A/B 裁决直接带沟里）。
+安卓侧只是把 `hwcond` 现成的采样包了一层，既有行为一行未动。
+
+> **鸿蒙侧未上真机验证**：本机既没有鸿蒙真机也没装 `hdc`。命令口径取自本机
+> HiSmartPerf-Editor 的实现与 SmartPerf-Device 官方参数表，解析器由 2026-09-18
+> 的真实采集产物钉死，但整条设备通路一次也没在真机上跑过。口径出处、单位约定与
+> 上真机后要补的验证清单见 `docs/SPEC_PERF_SOURCE.md`。
+
 ## 性能优化闭环（`loop_v1/`）怎么跑
 
 ```bash
@@ -416,6 +435,7 @@ tasks/<任务名>/        程序唯一可写区域
 | **`loop_v1/README.md`** | 端到端性能优化闭环：负载→采集→归因→旋钮→复量→统计判定→回滚→证据，五条判据实测通过 |
 | `docs/GOLDEN_RULES.md` | 研发与操作金科玉律：架构铁律 / 设备生命周期 / 模型选型纪律 / 工程规范 |
 | `docs/DESIGN.md` | 核心架构契约：分层与跨通路不变量 / 记录契约 v1 / 六步回路 / 任务隔离 / 写入权限 |
+| `docs/SPEC_PERF_SOURCE.md` | 性能数据来源抽象：安卓 sysfs 与鸿蒙 HiSmartPerf 同一份 JSON / 命令口径出处 / null 纪律（鸿蒙侧未上真机验证） |
 | `docs/SPEC_SR_LOOP.md` | 端侧模型标尺与采集管线：bench / capture 的判定口径 |
 | `docs/SPEC_SCRIPT_MODE.md` | 确定性脚本与历史轨迹回放：纯离线 / 零 Token / 全遥测 / 重放契约 |
 | `docs/SPEC_CTS_HARNESS.md` | 一致性测试 harness：双协议解析 / 对账判定 / 结果提取 |
