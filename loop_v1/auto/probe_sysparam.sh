@@ -50,13 +50,21 @@ effect_test() {
   fi
   sleep 1
   back=$(cat "$et_p" 2>/dev/null)
+  # 「写进去了」不等于「守得住」。红魔的厂商温控/性能管家在游戏过程中会主动改
+  # scaling_max_freq 与 kgsl.max_pwrlevel —— 1 秒回读看到的还是我们写的值,
+  # 十几秒后就被管家压回去了。实测一组候选只写了 DDR/LLCC, 退出时 policy0 的
+  # scaling_max 却从 1785600 变成 1228800。守不住的节点当不了旋钮, 不进白名单。
+  sleep 10
+  hold=$(cat "$et_p" 2>/dev/null)
   echo "$old" > "$et_p" 2>/dev/null
   sleep 1
   rst=$(cat "$et_p" 2>/dev/null)
-  if [ "$back" = "$et_val" ]; then
-    printf '%s.effect=live\n' "$et_key"
-  else
+  if [ "$back" != "$et_val" ]; then
     printf '%s.effect=rejected(wrote=%s readback=%s)\n' "$et_key" "$et_val" "$back"
+  elif [ "$hold" != "$et_val" ]; then
+    printf '%s.effect=contested(wrote=%s 1s=%s 11s=%s)\n' "$et_key" "$et_val" "$back" "$hold"
+  else
+    printf '%s.effect=live\n' "$et_key"
   fi
   if [ "$rst" = "$old" ]; then
     printf '%s.effect_restored=yes\n' "$et_key"

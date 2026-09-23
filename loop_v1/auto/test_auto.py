@@ -410,34 +410,111 @@ class TestLocalMutate(unittest.TestCase):
 
 
 class TestSnapshotDiffClassification(unittest.TestCase):
-    """驱动自己按温度改的项不算「我们留的痕」, 但也不许藏起来。"""
+    """留痕的判据是「这一组候选到底写过哪些项」, 不是一张写死的豁免名单。
+
+    实测: 有一组候选只写了 DDR/LLCC 的 boost_freq, 退出时 cpu.policy0.scaling_max
+    (1785600->1228800)、cpu.policy6.scaling_max、kgsl.max_pwrlevel 照样变了 ——
+    红魔的厂商温控/性能管家在游戏过程中自己在改。拿写死名单豁免它们等于给自己
+    开后门; 按「写没写过」分类才站得住。
+    """
 
     def setUp(self):
         import autoloop
         self.classify = autoloop.classify_diff
+        self.touched = autoloop.touched_keys
+        self.keyof = autoloop.snapshot_key_of
+        self.wl = WL.build_whitelist(WL.parse_probe(PROBE))
 
-    def test_driver_owned_line_is_not_our_residue(self):
-        sd = {"checked": True, "n_lines": 38, "identical": False, "n_diff": 1,
-              "diffs": [{"line": 9, "before": "kgsl.thermal_pwrlevel=0",
-                         "after": "kgsl.thermal_pwrlevel=2"}]}
-        c = self.classify(sd)
+    @staticmethod
+    def _sd(*pairs):
+        return {"checked": True, "n_lines": 38, "identical": not pairs,
+                "n_diff": len(pairs),
+                "diffs": [{"line": i + 1, "before": f"{k}={a}", "after": f"{k}={b}"}
+                          for i, (k, a, b) in enumerate(pairs)]}
+
+    def test_key_mapping_matches_device_snapshot_naming(self):
+        # device_snapshot.sh 用 scaling_max / governor, 不是 sysfs 的叶子名
+        self.assertEqual(self.keyof("sysfs", "/sys/devices/system/cpu/cpufreq/"
+                                             "policy6/scaling_max_freq"),
+                         "cpu.policy6.scaling_max")
+        self.assertEqual(self.keyof("sysfs", "/sys/devices/system/cpu/cpufreq/"
+                                             "policy0/scaling_governor"),
+                         "cpu.policy0.governor")
+        self.assertEqual(self.keyof("sysfs", "/sys/class/kgsl/kgsl-3d0/max_pwrlevel"),
+                         "kgsl.max_pwrlevel")
+        self.assertEqual(self.keyof("sysfs", "/sys/devices/system/cpu/bus_dcvs/"
+                                             "DDR/boost_freq"), "bus.DDR.boost_freq")
+        self.assertEqual(self.keyof("setting", "system:refresh_rate_mode"),
+                         "settings.refresh_rate_mode")
+
+    def test_touched_keys_include_the_rollback_siblings(self):
+        keys = self.touched({"cpu.policy0.scaling_governor": "performance"}, self.wl)
+        # 碰 governor 会波及同 policy 的 min/max, 所以这三项都算我们的账
+        self.assertEqual(keys, {"cpu.policy0.governor",
+                                "cpu.policy0.scaling_max",
+                                "cpu.policy0.scaling_min"})
+
+    def test_vendor_manager_drift_on_untouched_keys_is_not_our_residue(self):
+        """只写了 DDR/LLCC 的那一组, 厂商管家改的三项不该算我们留的痕。"""
+        keys = self.touched({"bus.DDR.boost_freq": "5333000"}, self.wl)
+        c = self.classify(self._sd(
+            ("cpu.policy0.scaling_max", "1785600", "1228800"),
+            ("kgsl.max_pwrlevel", "2", "0")), keys)
         self.assertTrue(c["ours_identical"])
         self.assertFalse(c["strict_identical"])        # 严格 diff 原样保留, 不藏
-        self.assertEqual(len(c["driver_owned_diffs"]), 1)
+        self.assertEqual(len(c["environment_diffs"]), 2)
 
-    def test_a_node_we_write_still_counts_as_residue(self):
-        sd = {"checked": True, "n_lines": 38, "identical": False, "n_diff": 1,
-              "diffs": [{"line": 20, "before": "bus.DDR.boost_freq=0",
-                         "after": "bus.DDR.boost_freq=5333000"}]}
-        c = self.classify(sd)
+    def test_a_node_we_wrote_still_counts_as_residue(self):
+        keys = self.touched({"bus.DDR.boost_freq": "5333000"}, self.wl)
+        c = self.classify(self._sd(("bus.DDR.boost_freq", "0", "5333000")), keys)
         self.assertFalse(c["ours_identical"])
-        self.assertEqual(c["driver_owned_diffs"], [])
+        self.assertEqual(c["environment_diffs"], [])
+
+    def test_sibling_left_behind_is_caught(self):
+        """切 governor 导致 scaling_max 没回来 —— 这正是它必须被抓住的那一类。"""
+        keys = self.touched({"cpu.policy0.scaling_governor": "performance"}, self.wl)
+        c = self.classify(self._sd(("cpu.policy0.scaling_max", "1785600", "1228800")),
+                          keys)
+        self.assertFalse(c["ours_identical"])
 
     def test_clean_snapshot_passes_both_layers(self):
-        c = self.classify({"checked": True, "n_lines": 38, "identical": True,
-                           "n_diff": 0, "diffs": []})
+        c = self.classify(self._sd(), set())
         self.assertTrue(c["ours_identical"])
         self.assertTrue(c["strict_identical"])
+
+    def test_no_key_set_means_everything_counts(self):
+        """探测阶段没有「候选写过什么」的概念, 这时一切差异都算数, 不放水。"""
+        c = self.classify(self._sd(("kgsl.max_pwrlevel", "2", "0")), None)
+        self.assertFalse(c["ours_identical"])
+
+
+class TestHoldTest(unittest.TestCase):
+    """写得进 != 守得住。厂商管家会在十几秒后把值压回去。"""
+
+    def test_contested_nodes_stay_out_of_the_whitelist(self):
+        probe = WL.parse_probe(
+            "cpu.policies=0\n"
+            "cpu.policy0.avail_freqs=300000 1000000 2000000\n"
+            "cpu.policy0.scaling_max_freq.cur=2000000\n"
+            "cpu.policy0.scaling_max_freq.writable=yes\n"
+            "cpu.policy0.scaling_max_freq.effect=contested(wrote=1000000 1s=1000000 11s=1382400)\n")
+        self.assertNotIn("cpu.policy0.scaling_max_freq", WL.build_whitelist(probe))
+
+    def test_live_still_gets_in(self):
+        probe = WL.parse_probe(
+            "cpu.policies=0\n"
+            "cpu.policy0.avail_freqs=300000 1000000 2000000\n"
+            "cpu.policy0.scaling_max_freq.cur=2000000\n"
+            "cpu.policy0.scaling_max_freq.writable=yes\n"
+            "cpu.policy0.scaling_max_freq.effect=live\n")
+        self.assertIn("cpu.policy0.scaling_max_freq", WL.build_whitelist(probe))
+
+    def test_probe_script_reads_back_twice(self):
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "probe_sysparam.sh")).read()
+        body = src[src.index("effect_test() {"):src.index("writable_test() {")]
+        self.assertIn("contested", body)
+        self.assertIn("sleep 10", body)     # 第二次回读要等够久才看得到管家的动作
 
 
 class TestPipelineEndToEnd(unittest.TestCase):
