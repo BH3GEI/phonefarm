@@ -24,7 +24,10 @@
 ```
 phonefarm gpu-op --request <eval_request.json> [--serial S] [--json]
                  [--runner <本地 runner 路径>] [--power-rail usb|battery]
+                 [--carrier headless|refbench] [--reference <参考帧.png>]
+                 [--intensity N] [--frames N]
                  [--out 目录] [--cool-timeout-s N] [--gpu-level N]
+                 [--no-quality-pass]
 phonefarm gpu-op --serial S --unlock      # 回滚上次异常退出遗留的锁频态
 ```
 
@@ -155,7 +158,7 @@ PSNR 是全图平均, 对插帧最刺眼的两类伪影**极不敏感**: HUD 只
 | `operator_latency_ms` | VkQueryPool 时间戳量到的**单次 dispatch** 耗时 | 每帧 GPU 忙时的 **A/B 之差**, 即算子的**边际**开销 |
 | `fps_p95_ms` | `null` (没有渲染上下文) | 真实帧时 p95 |
 | `power_watt` | 空设备上的功耗 | **场景内**整机功耗 |
-| `psnr_db` | 真实测量 | `null` —— refbench 的边界不允许它自带测量逻辑 |
+| `psnr_db` | 主测内联量到 | 主测量不到, 由**画质补测**补上 (见 4.4) |
 
 refbench 载体下 t 检验的主指标是**帧时 p95**, 不是算子耗时: 算子挂在整条管线上,
 分不出"只属于它"的那一段。直接拿 B 臂的整帧 GPU 忙时当算子耗时是错的 ——
@@ -172,6 +175,44 @@ refbench 契约写死 `submits_per_frame: 1`, 所以提交间隔可直接当帧�
 
 **A/B 污染防护**: 候选臂 `postfx.active` 必须为 true, 基线臂必须为 false;
 不符即整轮作废。算子没挂上却当成有效样本, 等于拿 A 去和 A 比。
+
+## 4.4 画质补测 (refbench 载体)
+
+refbench 是渲染靶场, 按边界约定不带任何测量逻辑, 给不出 PSNR。
+主测跑完之后, 用 headless runner 把基线与候选**各跑一次**, 只取画质。
+
+**为什么不需要 A/B/A/B + t 检验**: 画质对 (着色器, 参考帧) 是**确定性**的,
+同一份输入跑一百遍是同一个 dB。等冷、锁频、交替、Welch 检验那一整套是用来
+对付**热漂移**的, 而热漂移污染时延和功耗, 污染不了算术。所以补测不等冷、
+不锁频、两臂各跑一次 —— 省下的是几十分钟真机时间, 换不来任何精度。
+
+补测放在主测之后、cleanup 之前: 主测期间设备要么在等冷要么在锁频跑分,
+插进去会搅乱热状态; 跑完再补则完全不影响已经落袋的帧时与瓦数。
+
+`--no-quality-pass` 可以关掉它。缺省是开 —— 画质是硬底线, 关掉必须是个显式动作。
+补测失败 (runner 找不到 / 跑崩) 不作废主测: 帧时与瓦数是真跑出来的,
+不该被画质这一步连坐; 画质如实留 `null`, 绝不拿基线值顶上。
+
+**这一步是补上一个"永不触发的门禁"**: 在它存在之前, refbench 载体的
+`psnr_db` 恒为 `null`, 而判定代码写的是 `candidate.psnr_db < quality_baseline_db`
+—— `NaN < x` 恒假, 于是 POOR_QUALITY 分支一次都不会走到。更要命的是上游:
+Pareto 前沿的三个目标 `[时延↓, 功耗↓, 画质↑]` 塌成两个, "什么都不做"
+在时延和功耗上永远最优, 演化再也没有理由偏好一个更贵但更清晰的算子。
+实跑验证过 (2026-09-22, 2 代 6 候选): 前沿最后留下的是赛道基线模板本身。
+
+## 4.5 `incumbent_latency_ms`: "更快"要跟谁比
+
+refbench 的 A 臂跑的是 `knob.postfx off` —— **不挂任何算子**的场景,
+所以基线臂的算子耗时按定义是 0。判定代码原本写 `候选 < 基线`,
+在这个载体上等价于 `正数 < 0`, 恒假: `is_pareto_improvement` 永远回 false,
+哪怕候选确实比上一代冠军便宜一半。实跑验证过: 一整轮 5 个候选 p 值
+全在 1e-7 量级 (测量极显著), 却一个 `true` 都没有。
+
+修法是让上游把在位冠军的实测耗时随请求带下来 (`eval_request.incumbent_latency_ms`,
+可空)。有它就跟冠军比 —— 那才是演化真正要问的问题: "它在真实场景里比现任便宜吗";
+没有就退回跟基线臂比 (headless 载体下 A 臂跑的就是上一代算子, 原语义成立)。
+
+显著性仍是必要条件: 不显著的差异不算改进, 哪怕数字更小。
 
 ### 2026-09-22 首次完整跑组 (NX809J, 每臂 2 轮 x 1200 帧, intensity 5)
 
