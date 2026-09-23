@@ -1,0 +1,40 @@
+09-23 20:41:41.569  4388  3562 F HWUI    : Assertion failed: err < 0
+09-23 20:41:41.636  4388  3562 F libc    : Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid 3562 (RenderThread), pid 4388 (ubia.gameassist)
+09-23 20:41:41.801 20546 20546 F DEBUG   : *** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
+09-23 20:41:41.801 20546 20546 F DEBUG   : Build fingerprint: 'REDMAGIC/NX809J/NX809J:16/BQ2A.250705.001-BP2A.250605.031.A3/20260317.232707:user/release-keys'
+09-23 20:41:41.801 20546 20546 F DEBUG   : Revision: '0'
+09-23 20:41:41.801 20546 20546 F DEBUG   : ABI: 'arm64'
+09-23 20:41:41.801 20546 20546 F DEBUG   : Timestamp: 2026-09-23 20:41:41.682072083+0800
+09-23 20:41:41.801 20546 20546 F DEBUG   : Process uptime: 228315s
+09-23 20:41:41.801 20546 20546 F DEBUG   : Cmdline: cn.nubia.gameassist
+09-23 20:41:41.801 20546 20546 F DEBUG   : pid: 4388, tid: 3562, name: RenderThread  >>> cn.nubia.gameassist <<<
+09-23 20:41:41.801 20546 20546 F DEBUG   : uid: 10361
+09-23 20:41:41.801 20546 20546 F DEBUG   : tagged_addr_ctrl: 0000000000000001 (PR_TAGGED_ADDR_ENABLE)
+09-23 20:41:41.801 20546 20546 F DEBUG   : pac_enabled_keys: 000000000000000f (PR_PAC_APIAKEY, PR_PAC_APIBKEY, PR_PAC_APDAKEY, PR_PAC_APDBKEY)
+09-23 20:41:41.801 20546 20546 F DEBUG   : signal 6 (SIGABRT), code -1 (SI_QUEUE), fault addr --------
+09-23 20:41:41.801 20546 20546 F DEBUG   : Abort message: 'Assertion failed: err < 0'
+09-23 20:41:41.801 20546 20546 F DEBUG   :     x0  0000000000000000  x1  0000000000000dea  x2  0000000000000006  x3  0000006d257e7530
+09-23 20:41:41.801 20546 20546 F DEBUG   :     x4  626f1f372f221f39  x5  626f1f372f221f39  x6  626f1f372f221f39  x7  0000000000000000
+09-23 20:41:41.801 20546 20546 F DEBUG   :     x8  00000000000000f0  x9  4c42a082fb9ac01f  x10 000000ff00000020  x11 00000000919cee3c
+09-23 20:41:41.801 20546 20546 F DEBUG   :     x12 000000000012800c  x13 0000006d257e6330  x14 000003fcbcf29c37  x15 0000000034155555
+09-23 20:41:41.801 20546 20546 F DEBUG   :     x16 00000070449150f8  x17 00000070448fbdc0  x18 0000006d08b84000  x19 0000000000001124
+09-23 20:41:41.801 20546 20546 F DEBUG   :     x20 0000000000000dea  x21 00000000ffffffff  x22 0000000000000000  x23 0065636166727573
+09-23 20:41:41.801 20546 20546 F DEBUG   :     x24 0000000000000001  x25 0000006daa00efc8  x26 0000006daa00e000  x27 b400006e7dbe2bc8
+09-23 20:41:41.801 20546 20546 F DEBUG   :     x28 b400006dedaf0610  x29 0000006d257e75b0
+09-23 20:41:41.801 20546 20546 F DEBUG   :     lr  0000007044897268  sp  0000006d257e7530  pc  000000704489728c  pst 0000000000001000
+09-23 20:41:41.801 20546 20546 F DEBUG   : 18 total frames
+09-23 20:41:41.801 20546 20546 F DEBUG   : backtrace:
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #00 pc 000000000007128c  /apex/com.android.runtime/lib64/bionic/libc.so (abort+160) (BuildId: abd5b78d2ef1ec5229362b83244a7f5a)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #01 pc 000000000086b254  /apex/com.android.art/lib64/libart.so (art::Runtime::Abort(char const*)+1640) (BuildId: adf2e1768921adf0155a7a3b2d59775d)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #02 pc 00000000000163c4  /apex/com.android.art/lib64/libbase.so (android::base::SetAborter(std::__1::function<void (char const*)>&&)::$_0::__invoke(char const*)+84) (BuildId: 9c966375eb876a2ba44c10c3b9a43bce)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #03 pc 000000000000a378  /system/lib64/liblog.so (__android_log_assert+324) (BuildId: 742a62f59164792c8ccb54af8b1498b9)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #04 pc 000000000031b47c  /system/lib64/libhwui.so (void std::__1::__call_once_proxy[abi:nn200000]<std::__1::tuple<android::uirenderer::renderthread::VulkanManager::initialize()::$_0&&>>(void*) (.__uniq.192405051647925496281077346275335259674)+3652) (BuildId: b4b146583420cf813ad8d8d789db48ea)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #05 pc 000000000008cc00  /system/lib64/libc++.so (std::__1::__call_once(unsigned long volatile&, void*, void (*)(void*))+180) (BuildId: ada37e5198285720b02f7d77fd27626c7782fe29)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #06 pc 0000000000318cb0  /system/lib64/libhwui.so (android::uirenderer::renderthread::VulkanManager::initialize()+80) (BuildId: b4b146583420cf813ad8d8d789db48ea)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #07 pc 000000000031dc98  /system/lib64/libhwui.so (android::uirenderer::renderthread::RenderThread::requireVkContext()+128) (BuildId: b4b146583420cf813ad8d8d789db48ea)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #08 pc 0000000000314704  /system/lib64/libhwui.so (android::uirenderer::skiapipeline::SkiaVulkanPipeline::setSurface(ANativeWindow*, android::uirenderer::renderthread::SwapBehavior)+140) (BuildId: b4b146583420cf813ad8d8d789db48ea)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #09 pc 00000000002c0668  /system/lib64/libhwui.so (android::uirenderer::renderthread::CanvasContext::setupPipelineSurface()+80) (BuildId: b4b146583420cf813ad8d8d789db48ea)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #10 pc 00000000002c0164  /system/lib64/libhwui.so (android::uirenderer::renderthread::CanvasContext::setSurface(ANativeWindow*, bool)+176) (BuildId: b4b146583420cf813ad8d8d789db48ea)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #11 pc 00000000002cbf48  /system/lib64/libhwui.so (std::__1::__function::__func<android::uirenderer::renderthread::RenderProxy::setSurface(ANativeWindow*, bool)::$_0, std::__1::allocator<android::uirenderer::renderthread::RenderProxy::setSurface(ANativeWindow*, bool)::$_0>, void ()>::operator()() (.__uniq.110435125376433984577876079601927332169.cb3c5e5b002bfdb325630f9957b918a2)+32) (BuildId: b4b146583420cf813ad8d8d789db48ea)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #12 pc 00000000002d0838  /system/lib64/libhwui.so (android::uirenderer::WorkQueue::process()+592) (BuildId: b4b146583420cf813ad8d8d789db48ea)
+09-23 20:41:41.801 20546 20546 F DEBUG   :       #13 pc 000000000031e3a4  /system/lib64/libhwui.so (android::uirenderer::renderthread::RenderThread::threadLoop()+388) (BuildId: b4b146583420cf813ad8d8d789db48ea)

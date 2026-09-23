@@ -176,6 +176,7 @@ VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`de
 
 ```
 loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（非 Rust，独立工具链）
+knobs/                 可改动面：黑档系统旋钮 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，说明见 knobs/README.md）
 src/                   Rust 内核源码
   universal/           通用核心：统一动作协议、三大算子、优先级引擎、插件契约
   plugins/             场景插件层
