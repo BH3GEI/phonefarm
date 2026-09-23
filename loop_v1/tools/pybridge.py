@@ -125,6 +125,11 @@ PRIMARY_METRICS = [
 ]
 
 
+def spin_verdict(frame_a: str, frame_b: str) -> dict:
+    """两张裸帧 → 「视角是否在转」。传路径而不是字节: 一张 13MB, base64 过桥不划算。"""
+    return _call({"op": "spin_verdict", "frame_a": frame_a, "frame_b": frame_b})
+
+
 def env_stats(text: str) -> dict:
     return _call({"op": "env_stats", "text": text})
 

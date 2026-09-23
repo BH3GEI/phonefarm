@@ -72,7 +72,7 @@ bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清�
 - **手柄注入在 7.1.0 上失效**。原来的手柄脚本跑出来是静止画面，而静止画面照样采得到
   帧率、功耗、温度，报告看着一切正常——这种失败不会自己报错。现在负载改用触控版
   [`gray/workload_spin_touch_v1.json`](gray/workload_spin_touch_v1.json)，并且用
-  `loop_v1/tools/frames_moving.py` 抓窗口内两张裸帧算逐像素差，确认画面真的在动
+  `phonefarm frames-moving` 抓窗口内两张裸帧算逐像素差，确认画面真的在动
   （交叉核对那一轮量到 10.458%，静止画面实测约 1%）。
 
 顺带更正一条旧说法：过去把原神封在 30fps 归因成「厂商限帧」，那是 7.0.0、当时那套

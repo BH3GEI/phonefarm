@@ -40,7 +40,6 @@ import pybridge as WL                                       # noqa: E402
 import pybridge as V                                        # noqa: E402
 from pybridge import compare, describe, snapshot_diff       # noqa: E402
 import llm as LLM                                           # noqa: E402
-import spin_check as SPIN                                   # noqa: E402
 
 SERIAL = os.environ.get("SERIAL", "91253241019A")
 # 原神 7.1.0 之后手柄注入失效 (且失效是安静的: 脚本跑完、有帧时序, 但视角不转),
@@ -273,10 +272,14 @@ def check_spin(outdir: str) -> dict:
         drag.wait(timeout=30)
     except subprocess.TimeoutExpired:
         drag.kill()
+    paths = []
     for name, buf in (("spin_a.raw", a), ("spin_b.raw", b)):
-        with open(os.path.join(outdir, name), "wb") as f:
+        p = os.path.join(outdir, name)
+        with open(p, "wb") as f:
             f.write(buf)
-    v = SPIN.verdict(a, b)
+        paths.append(p)
+    # 判据在 src/framecheck.rs; 裸帧走文件路径不走 JSON —— 一张 13MB, base64 过桥不划算
+    v = WL.spin_verdict(*paths)
     with open(os.path.join(outdir, "spin_check.json"), "w") as f:
         json.dump(v, f, ensure_ascii=False, indent=1)
     return v

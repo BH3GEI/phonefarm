@@ -747,6 +747,14 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
             req.get("power_available").and_then(|v| v.as_bool()).unwrap_or(false),
             &s("power_note")),
         "env_stats" => sysparam::env_stats(&s("text")),
+        // 画面动没动: 裸帧走文件路径, 不塞进 JSON (13MB 一张, base64 过桥不划算)
+        "spin_verdict" => {
+            let (Ok(a), Ok(b)) = (std::fs::read(s("frame_a")), std::fs::read(s("frame_b"))) else {
+                eprintln!("读不到裸帧");
+                return 1;
+            };
+            crate::framecheck::verdict(&a, &b)
+        }
         "decide" => sysparam::decide(
             &req.get("comparisons").cloned().unwrap_or(PyVal::Null),
             &sysparam::DecideCtx {

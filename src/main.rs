@@ -17,6 +17,7 @@ mod fleet;
 mod keepalive;
 mod loopreport;
 mod loopstat;
+mod framecheck;
 mod looptrace;
 mod sysparam;
 mod parallel;
@@ -179,6 +180,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 解析:  parse-trace <trace.txt> [--full] [--comm 线程名]   (ftrace 文本 -> 帧时序/GPU 活跃/排队/带宽指标, 纯离线)
        attribute <summary.json>                          (一轮 summary -> 主因判定 + 正交带宽维, 纯离线)
        analyze <A臂glob> [B臂glob] [--metric M]           (离散度 + 漂移 + 精确置换检验 + 置换反演 CI)
+       frames-moving <raw1> <raw2>                        (两张 screencap 裸帧的平均逐像素差 %, 判画面动没动)
        report --baseline <glob> [--knob <glob>] [--snap-before F] [--snap-after F]
               [--replay-result F] [--primary M]          (五条判据汇总成可字节复现的 report.json)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
@@ -667,6 +669,10 @@ fn main() {
         Some("parse-trace") => {
             // ftrace 文本 → 帧时序 + GPU 归因指标。纯离线, 不碰设备, 同一份 trace 逐字节可复现。
             std::process::exit(looptrace::run_parse_trace(&args[1..]));
+        }
+        Some("frames-moving") => {
+            // 两张 adb screencap 裸帧的平均逐像素差 (%)。纯离线, 确认"画面真的在动"。
+            std::process::exit(framecheck::run_frames_moving(&args[1..]));
         }
         Some("analyze") => {
             // 多轮 summary.json → 离散度 (判据 1) 与两臂对比 (判据 3)。纯离线, 无随机。
