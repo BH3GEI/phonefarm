@@ -105,6 +105,10 @@ struct DevDisp {
     PFN_vkCmdDraw CmdDraw = nullptr;
     PFN_vkCmdDrawIndexed CmdDrawIndexed = nullptr;
     PFN_vkCmdBlitImage CmdBlitImage = nullptr;
+    PFN_vkCreateImage CreateImage = nullptr;
+    PFN_vkCreateImageView CreateImageView = nullptr;
+    PFN_vkUpdateDescriptorSets UpdateDescriptorSets = nullptr;
+    PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets = nullptr;
 };
 
 static std::mutex g_mtx;
@@ -163,7 +167,24 @@ static std::map<VkCommandBuffer, uint64_t> g_cb_cur;      // 命令缓冲当前�
 static std::map<VkRenderPass, uint64_t> g_rp_seq;         // VkRenderPass -> 创建序号(稳定可读)
 static std::vector<std::string> g_frame_seq;              // 采样帧内的有序 pass 序列
 static bool g_sampling = false;
+static bool g_seq_done = false;
 static uint32_t g_swap_w = 0, g_swap_h = 0, g_swap_fmt = 0;
+
+// ── 描述符溯源: 回答"送显那一笔 draw 到底采的是哪张图" ──
+// 纯观测, 不改任何渲染。链路是:
+//   VkImage(尺寸/格式/usage) <- VkImageView <- {framebuffer 附件, 描述符里绑的采样图}
+// 在送显分辨率 pass 的**第一笔 draw** 上, 把当时绑着的描述符里的采样图全列出来,
+// 看有没有哪张正好是上一个(渲染分辨率)pass 的颜色附件。
+struct ImgInfo { uint32_t w = 0, h = 0, fmt = 0, usage = 0; };
+static std::map<VkImage, ImgInfo> g_img;
+static std::map<VkImageView, VkImage> g_view;
+static std::map<VkFramebuffer, std::vector<VkImageView>> g_fb_att;
+static std::map<VkDescriptorSet, std::map<uint32_t, VkImageView>> g_set_views;
+static std::map<VkCommandBuffer, std::vector<VkDescriptorSet>> g_cb_sets;
+static std::map<VkCommandBuffer, int> g_cb_draw_idx;          // 本 pass 内第几笔 draw
+static std::map<VkCommandBuffer, std::vector<VkImageView>> g_cb_prev_att;  // 上一个非送显 pass 的附件
+static std::string g_composite_report;                        // 只填一次
+static std::map<VkCommandBuffer, bool> g_cb_cur_is_swap;
 
 static uint64_t pass_key(VkRenderPass rp, uint32_t w, uint32_t h) {
     uint64_t seq = 0;
@@ -247,6 +268,7 @@ static void write_marker() {
         json += ",\"swapchain\":{\"w\":" + std::to_string(g_swap_w)
               + ",\"h\":" + std::to_string(g_swap_h)
               + ",\"fmt\":" + std::to_string(g_swap_fmt) + "}";
+        json += ",\"composite_draw\":" + (g_composite_report.empty() ? std::string("null") : g_composite_report);
         json += ",\"pass_table\":[" + tbl + "]";
         json += ",\"frame_seq\":[" + seq + "]";
     }
@@ -393,6 +415,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     d.CmdDraw = (PFN_vkCmdDraw)gdpa(*pDev, "vkCmdDraw");
     d.CmdDrawIndexed = (PFN_vkCmdDrawIndexed)gdpa(*pDev, "vkCmdDrawIndexed");
     d.CmdBlitImage = (PFN_vkCmdBlitImage)gdpa(*pDev, "vkCmdBlitImage");
+    d.CreateImage = (PFN_vkCreateImage)gdpa(*pDev, "vkCreateImage");
+    d.CreateImageView = (PFN_vkCreateImageView)gdpa(*pDev, "vkCreateImageView");
+    d.UpdateDescriptorSets = (PFN_vkUpdateDescriptorSets)gdpa(*pDev, "vkUpdateDescriptorSets");
+    d.CmdBindDescriptorSets = (PFN_vkCmdBindDescriptorSets)gdpa(*pDev, "vkCmdBindDescriptorSets");
     { std::lock_guard<std::mutex> lk(g_mtx); g_dev[key(*pDev)] = d; }
     return r;
 }
@@ -554,6 +580,65 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyRenderPass(
     d.DestroyRenderPass(dev, rp, a);
 }
 
+// ── 溯源用的四个只读钩子 ──
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateImage(
+    VkDevice dev, const VkImageCreateInfo* ci, const VkAllocationCallbacks* a, VkImage* out) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.CreateImage) { RK_LOG_ONCE("CreateImage: 无下层"); return VK_ERROR_INITIALIZATION_FAILED; }
+    VkResult r = d.CreateImage(dev, ci, a, out);
+    if (r == VK_SUCCESS && ci && g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_img[*out] = ImgInfo{ci->extent.width, ci->extent.height, (uint32_t)ci->format, (uint32_t)ci->usage};
+    }
+    return r;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateImageView(
+    VkDevice dev, const VkImageViewCreateInfo* ci, const VkAllocationCallbacks* a, VkImageView* out) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.CreateImageView) { RK_LOG_ONCE("CreateImageView: 无下层"); return VK_ERROR_INITIALIZATION_FAILED; }
+    VkResult r = d.CreateImageView(dev, ci, a, out);
+    if (r == VK_SUCCESS && ci && g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_view[*out] = ci->image;
+    }
+    return r;
+}
+// 描述符里绑了哪些采样图 —— 只记 image 类的 binding, buffer 一概不碰
+static VKAPI_ATTR void VKAPI_CALL rk_UpdateDescriptorSets(
+    VkDevice dev, uint32_t nw, const VkWriteDescriptorSet* w, uint32_t nc, const VkCopyDescriptorSet* c) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.UpdateDescriptorSets) { RK_LOG_ONCE("UpdateDescriptorSets: 无下层"); return; }
+    if (g_dump_passes && w) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (uint32_t i = 0; i < nw; i++) {
+            const VkWriteDescriptorSet& ws = w[i];
+            if (!ws.pImageInfo) continue;
+            if (ws.descriptorType != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+                ws.descriptorType != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE &&
+                ws.descriptorType != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
+                ws.descriptorType != VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) continue;
+            auto& m = g_set_views[ws.dstSet];
+            for (uint32_t j = 0; j < ws.descriptorCount; j++)
+                if (ws.pImageInfo[j].imageView != VK_NULL_HANDLE)
+                    m[ws.dstArrayElement + j + (ws.dstBinding << 8)] = ws.pImageInfo[j].imageView;
+        }
+    }
+    d.UpdateDescriptorSets(dev, nw, w, nc, c);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdBindDescriptorSets(
+    VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout pl, uint32_t first,
+    uint32_t n, const VkDescriptorSet* sets, uint32_t ndyn, const uint32_t* dyn) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.CmdBindDescriptorSets) { RK_LOG_ONCE("CmdBindDescriptorSets: 无下层"); return; }
+    if (g_dump_passes && sets && bp == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto& v = g_cb_sets[cb];
+        for (uint32_t i = 0; i < n; i++) v.push_back(sets[i]);
+        if (v.size() > 32) v.erase(v.begin(), v.end() - 32);
+    }
+    d.CmdBindDescriptorSets(cb, bp, pl, first, n, sets, ndyn, dyn);
+}
+
 // framebuffer 才有宽高 —— render pass 上没有。两边都记, BeginRenderPass 时关联起来。
 static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateFramebuffer(
     VkDevice dev, const VkFramebufferCreateInfo* ci, const VkAllocationCallbacks* a, VkFramebuffer* out) {
@@ -565,6 +650,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateFramebuffer(
     if (r == VK_SUCCESS && ci && g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_fb_info[*out] = FbInfo{ci->width, ci->height, ci->renderPass};
+        std::vector<VkImageView> att;
+        for (uint32_t i = 0; i < ci->attachmentCount; i++) att.push_back(ci->pAttachments[i]);
+        g_fb_att[*out] = std::move(att);
     }
     return r;
 }
@@ -590,6 +678,67 @@ static void note_draw(VkCommandBuffer cb, uint64_t n) {
     std::lock_guard<std::mutex> lk(g_mtx);
     auto it = g_cb_cur.find(cb);
     if (it != g_cb_cur.end()) g_pass_stat[it->second].draws += n;
+
+    int idx = g_cb_draw_idx[cb]++;
+    // 只在"送显分辨率 pass 的第一笔 draw"上溯源, 且只做一次 (等稳态, 避开加载期)
+    if (idx != 0 || !g_cb_cur_is_swap[cb] || !g_composite_report.empty()) return;
+    if (g_frames.load() < 1800) return;
+
+    // 上一个渲染分辨率 pass 的颜色附件 -> image (这就是"pass 49 的输出")
+    std::vector<VkImage> prev;
+    auto pi = g_cb_prev_att.find(cb);
+    if (pi != g_cb_prev_att.end())
+        for (auto v : pi->second) { auto vi = g_view.find(v); if (vi != g_view.end()) prev.push_back(vi->second); }
+
+    // 这一笔 draw 当时绑着的描述符里, 所有采样图
+    std::string sampled; bool hit = false; std::string hit_desc;
+    auto si = g_cb_sets.find(cb);
+    if (si != g_cb_sets.end()) {
+        int printed = 0;
+        for (auto set : si->second) {
+            auto sv = g_set_views.find(set);
+            if (sv == g_set_views.end()) continue;
+            for (auto& bv : sv->second) {
+                VkImageView view = bv.second;
+                auto vi = g_view.find(view);
+                if (vi == g_view.end()) continue;
+                auto ii = g_img.find(vi->second);
+                if (ii == g_img.end()) continue;
+                const ImgInfo& im = ii->second;
+                bool is_prev = false;
+                for (auto p : prev) if (p == vi->second) is_prev = true;
+                if (is_prev) {
+                    hit = true;
+                    char b[200];
+                    snprintf(b, sizeof b, "{\"w\":%u,\"h\":%u,\"fmt\":%u,\"usage\":%u}",
+                             im.w, im.h, im.fmt, im.usage);
+                    hit_desc = b;
+                }
+                if (printed < 12) {
+                    char b[220];
+                    snprintf(b, sizeof b, "%s{\"w\":%u,\"h\":%u,\"fmt\":%u,\"usage\":%u,\"is_prev_pass_output\":%s}",
+                             sampled.empty() ? "" : ",", im.w, im.h, im.fmt, im.usage, is_prev ? "true" : "false");
+                    sampled += b; printed++;
+                }
+            }
+        }
+    }
+    // 上一个渲染分辨率 pass 的附件本身也记一份 (含 usage), 供判断我们能不能读
+    std::string prevs;
+    for (auto p : prev) {
+        auto ii = g_img.find(p); if (ii == g_img.end()) continue;
+        char b[200];
+        snprintf(b, sizeof b, "%s{\"w\":%u,\"h\":%u,\"fmt\":%u,\"usage\":%u}",
+                 prevs.empty() ? "" : ",", ii->second.w, ii->second.h, ii->second.fmt, ii->second.usage);
+        prevs += b;
+    }
+    size_t nsets = (si != g_cb_sets.end()) ? si->second.size() : 0;
+    g_composite_report = std::string("{\"sets_bound_in_pass\":") + std::to_string(nsets)
+        + ",\"confirmed\":" + (hit ? "true" : "false")
+        + ",\"hit\":" + (hit_desc.empty() ? "null" : hit_desc)
+        + ",\"sampled_by_first_draw\":[" + sampled + "]"
+        + ",\"prev_pass_attachments\":[" + prevs + "]}";
+    RK_LOG("composite draw 溯源: %s", g_composite_report.c_str());
 }
 static VKAPI_ATTR void VKAPI_CALL rk_CmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t ic,
                                              uint32_t fv, uint32_t fi) {
@@ -635,6 +784,12 @@ static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi) {
     }
     st.begins++;
     g_cb_cur[cb] = k;
+    g_cb_draw_idx[cb] = 0;                       // 进新 pass, draw 序号归零
+    g_cb_sets[cb].clear();                       // 只统计"在本 pass 内绑定"的描述符, 避免把上一个 pass 的算进来
+    bool is_swap = (w == g_swap_w && h == g_swap_h);
+    auto ai = g_fb_att.find(bi->framebuffer);
+    if (!is_swap && ai != g_fb_att.end()) g_cb_prev_att[cb] = ai->second;   // 记住上一个渲染分辨率 pass 的附件
+    if (is_swap) g_cb_cur_is_swap[cb] = true; else g_cb_cur_is_swap[cb] = false;
     if (g_sampling && g_frame_seq.size() < 400) {
         uint64_t seq = 0; auto si = g_rp_seq.find(bi->renderPass);
         if (si != g_rp_seq.end()) seq = si->second;
@@ -668,6 +823,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass2(
     }
     g_rp++;
     note_begin(bi ? bi->renderPass : VK_NULL_HANDLE);
+    note_pass(cb, bi);          // 与 CmdBeginRenderPass 一致, 漏了它 RenderPass2 开的 pass 就不进表
     d.CmdBeginRenderPass2(cb, bi, si);
 }
 static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR* pi) {
@@ -679,8 +835,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
     uint64_t f = ++g_frames;
     if (g_dump_passes) {
         // 挑一帧记有序序列: 等画面进入稳态 (第 1200 帧) 再采, 避开加载期
-        if (f == 1200) { std::lock_guard<std::mutex> lk(g_mtx); g_frame_seq.clear(); g_sampling = true; }
-        else if (f == 1201) { std::lock_guard<std::mutex> lk(g_mtx); g_sampling = false; }
+        // 采一帧的有序序列。1200 帧时常常还在加载/过场, 挪到 1800 更稳;
+        // 采完用 g_seq_done 锁住, 免得后面又被 clear 掉 (之前就是这么丢过一次)。
+        if (f == 1800 && !g_seq_done) { std::lock_guard<std::mutex> lk(g_mtx); g_frame_seq.clear(); g_sampling = true; }
+        else if (f == 1801 && !g_seq_done) { std::lock_guard<std::mutex> lk(g_mtx); g_sampling = false; g_seq_done = true; }
     }
     if ((f % 300) == 0) write_marker();  // 周期落盘, 无需等退出
     return d.QueuePresentKHR(q, pi);
@@ -707,11 +865,19 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
     RK_HOOK("vkCmdBeginRenderPass2KHR", rk_CmdBeginRenderPass2);
     RK_HOOK("vkCreateRenderPass", rk_CreateRenderPass);
     RK_HOOK("vkDestroyRenderPass", rk_DestroyRenderPass);
-    RK_HOOK("vkCreateFramebuffer", rk_CreateFramebuffer);
     RK_HOOK("vkCreateSwapchainKHR", rk_CreateSwapchainKHR);
-    RK_HOOK("vkCmdDraw", rk_CmdDraw);
-    RK_HOOK("vkCmdDrawIndexed", rk_CmdDrawIndexed);
-    RK_HOOK("vkCmdBlitImage", rk_CmdBlitImage);
+    // 这几个只为 passdump 观测服务。passdump 没开就**不要挂** ——
+    // vkCmdDraw 这种每帧上万次的热函数, 挂上等于给 loadop 的 A/B 两臂凭空加一层开销。
+    if (g_dump_passes) {
+        RK_HOOK("vkCmdDraw", rk_CmdDraw);
+        RK_HOOK("vkCmdDrawIndexed", rk_CmdDrawIndexed);
+        RK_HOOK("vkCmdBlitImage", rk_CmdBlitImage);
+        RK_HOOK("vkCreateImage", rk_CreateImage);
+        RK_HOOK("vkCreateImageView", rk_CreateImageView);
+        RK_HOOK("vkUpdateDescriptorSets", rk_UpdateDescriptorSets);
+        RK_HOOK("vkCmdBindDescriptorSets", rk_CmdBindDescriptorSets);
+        RK_HOOK("vkCreateFramebuffer", rk_CreateFramebuffer);
+    }
     RK_HOOK("vkCreateRenderPass2", rk_CreateRenderPass2);
     RK_HOOK("vkCreateRenderPass2KHR", rk_CreateRenderPass2);
     RK_HOOK("vkQueuePresentKHR", rk_QueuePresentKHR);
@@ -728,11 +894,19 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     RK_HOOK("vkCmdBeginRenderPass", rk_CmdBeginRenderPass);
     RK_HOOK("vkCreateRenderPass", rk_CreateRenderPass);
     RK_HOOK("vkDestroyRenderPass", rk_DestroyRenderPass);
-    RK_HOOK("vkCreateFramebuffer", rk_CreateFramebuffer);
     RK_HOOK("vkCreateSwapchainKHR", rk_CreateSwapchainKHR);
-    RK_HOOK("vkCmdDraw", rk_CmdDraw);
-    RK_HOOK("vkCmdDrawIndexed", rk_CmdDrawIndexed);
-    RK_HOOK("vkCmdBlitImage", rk_CmdBlitImage);
+    // 这几个只为 passdump 观测服务。passdump 没开就**不要挂** ——
+    // vkCmdDraw 这种每帧上万次的热函数, 挂上等于给 loadop 的 A/B 两臂凭空加一层开销。
+    if (g_dump_passes) {
+        RK_HOOK("vkCmdDraw", rk_CmdDraw);
+        RK_HOOK("vkCmdDrawIndexed", rk_CmdDrawIndexed);
+        RK_HOOK("vkCmdBlitImage", rk_CmdBlitImage);
+        RK_HOOK("vkCreateImage", rk_CreateImage);
+        RK_HOOK("vkCreateImageView", rk_CreateImageView);
+        RK_HOOK("vkUpdateDescriptorSets", rk_UpdateDescriptorSets);
+        RK_HOOK("vkCmdBindDescriptorSets", rk_CmdBindDescriptorSets);
+        RK_HOOK("vkCreateFramebuffer", rk_CreateFramebuffer);
+    }
     if (dev == VK_NULL_HANDLE) return nullptr;
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return nullptr; d = it->second; }
