@@ -5,7 +5,7 @@
  "scene": "bw_pingpong",
  "declared_bottleneck": "bandwidth",
  "effective_knobs": {"loadop": "off"},
- "params": {"frames": 3600, "intensity": 8, "rt_width": 2048, "rt_height": 2048},
+ "params": {"frames": 1800, "intensity": 8, "rt_width": 2048, "rt_height": 2048},
  "render_thread_name": "RefbenchRender",
  "driver_submit_thread_name": "RefbenchDrv",
  "renamed_driver_threads": 1,
@@ -23,6 +23,6 @@
   {"name": "present_blit", "target": "swapchain", "load_op": "DONT_CARE", "store_op": "STORE", "width": 2688, "height": 1216, "format": "R8G8B8A8_UNORM"}
  ],
  "debug_labels_supported": true,
- "frames_submitted": 3600,
+ "frames_submitted": 1800,
  "clean_exit": true
 }

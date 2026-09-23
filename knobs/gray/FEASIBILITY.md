@@ -145,12 +145,12 @@ BeginRenderPass 时已改不动），把 `LOAD` 的 attachment 改成 `DONT_CARE
 
 | 臂 | 层 | `knob.loadop` | 层自报 | `begins` | frames / clean_exit |
 |---|---|---|---|---|---|
-| A | 无 | off | — | — | 3600 / true |
-| B | 无 | on（白档答案） | — | — | 3600 / true |
-| C | 改写 | off | pass 2 att 0 LOAD→DONT_CARE | 28800 | 3600 / true |
-| D | 改写 | on | 同上 | 0 → `rewritten pass never bound` | 3600 / true |
+| A | 无 | off | — | — | 1800 / true |
+| B | 无 | on（白档答案） | — | — | 1800 / true |
+| C | 改写 | off | pass 2 att 0 LOAD→DONT_CARE | 14400 | 1800 / true |
+| D | 改写 | on | 同上 | 0 → `rewritten pass never bound` | 1800 / true |
 
-C 成立：改了、改的那个 pass 真被绑了 28800 次（= 3600 帧 × 8）、refbench 仍自报
+C 成立：改了、改的那个 pass 真被绑了 14400 次（= 1800 帧 × 8）、refbench 仍自报
 `load_op: LOAD`（它不知道自己被改了，这正是灰档改写的定义）、四臂全部 `clean_exit=true`。
 
 **D 臂逼出的一条硬经验**：`effective` 非空 ≠ 旋钮生效。refbench 会把 LOAD 和 DONT_CARE
