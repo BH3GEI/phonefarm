@@ -22,3 +22,8 @@ tools/tflite/android_aarch64_benchmark_model*
 
 # refbench 实跑原始产物 (大 trace, 证据已提交到 HGamey/refbench)
 loop_v1/runs_refbench/
+
+# 系统参数闭环的实跑产物 (大 trace, 只留 JSON 证据入库)
+loop_v1/runs_sysparam/**/trace.txt
+loop_v1/runs_sysparam/**/*.txt.gz
+loop_v1/auto/__pycache__/
