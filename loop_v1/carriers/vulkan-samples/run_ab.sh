@@ -1,7 +1,7 @@
 #!/bin/bash
 # run_ab.sh <sample> <config_A> <config_B> [rounds] [outdir] [frames] [capdur]
 #
-# 对同一个 Vulkan-Samples 样例的两档开关跑交错 NvN, 交给 ../tools/analyze.py 出
+# 对同一个 Vulkan-Samples 样例的两档开关跑交错 NvN, 交给 phonefarm analyze 出
 # 效应量 / 精确置换检验 p 值 / 置换反演 95% CI。
 #
 # 交错 (A,B,A,B,...) 而不是先跑完 A 再跑 B: 温度、内存压力、后台调度都会沿时间漂移,
@@ -23,6 +23,7 @@ CAPDUR="${7:-12}"
 
 SERIAL="${VKS_SERIAL:-91253241019A}"
 TOOLS="$ROOT/tools"
+. "$TOOLS/pf_bin.sh"
 ashell() { adb -s "$SERIAL" shell "$@" </dev/null; }
 
 mkdir -p "$OUT"
@@ -64,6 +65,6 @@ for i in $(seq 1 "$ROUNDS"); do
 done
 
 echo "══ 汇总"
-python3 "$TOOLS/analyze.py" "$OUT/a*/summary.json" "$OUT/b*/summary.json" > "$OUT/analyze.json"
+"$PF" analyze "$OUT/a*/summary.json" "$OUT/b*/summary.json" > "$OUT/analyze.json"
 python3 "$HERE/vks_report.py" --root "$OUT" --sample "$SAMPLE" \
         --config-a "$CFG_A" --config-b "$CFG_B" | tee "$OUT/report.txt"

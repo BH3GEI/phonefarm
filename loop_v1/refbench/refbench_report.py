@@ -24,8 +24,8 @@ import sys
 
 _TOOLS = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
 sys.path.insert(0, _TOOLS)
-from analyze import dispersion, drift, mean, compare  # noqa: E402
-from report import snapshot_diff                       # noqa: E402
+# 统计口径已搬进 phonefarm 二进制, 经 pybridge 转调 —— 不在 Python 侧留第二份实现
+from pybridge import dispersion, drift, mean, compare, snapshot_diff  # noqa: E402
 from statistics import median                          # noqa: E402
 
 RULES = {

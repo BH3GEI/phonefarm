@@ -302,14 +302,14 @@ for i in 1 2 3 4 5; do
   bash tools/run_once.sh ctrl$i runs/ctrl$i
 done
 
-python3 tools/report.py --baseline 'runs/ctrl*' --knob 'runs/knob*' \
+./phonefarm report --baseline 'runs/ctrl*' --knob 'runs/knob*' \
     --snap-before runs/snap_before.txt --snap-after runs/snap_final.txt > runs/report.json
 bash tools/replay_test.sh runs      # 离线回放自检
 ```
 
 两条写死在流程里的纪律：**判定规则在看到候选数据之前落盘冻结**；负载必须在外部条件稳定的
 窗口内跑完（原神的昼夜循环会把离散度从 1.37% 推到 5.35%，而且是单向漂移，只看离散度发现不了，
-所以 `analyze.py` 除离散度外还报最小二乘斜率与相邻递增比例）。
+所以 `phonefarm analyze` 除离散度外还报最小二乘斜率与相邻递增比例）。
 
 细节、测帧手段的选型排除过程、以及「一帧不等于一次 GPU 提交」这个坑，见 [`loop_v1/README.md`](loop_v1/README.md)。
 候选改动从 [`docs/MOBILE_GPU_OPT_ROUTES.md`](docs/MOBILE_GPU_OPT_ROUTES.md) 里挑。

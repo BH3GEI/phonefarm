@@ -12,8 +12,8 @@
 - 本文件只做编排与证据归档, 不含任何判定口径
 
 复用而非重造: 负载回放与 ftrace 采集直接调 `tools/run_once.sh`, 统计用
-`tools/analyze.py` 的精确置换检验, 快照比对用 `tools/device_snapshot.sh` +
-`tools/report.py::snapshot_diff`。本文件新增的只有「参数怎么挑、怎么下发、怎么还原」。
+`phonefarm analyze` 的精确置换检验, 快照比对用 `tools/device_snapshot.sh` +
+`phonefarm report` 的快照比对。本文件新增的只有「参数怎么挑、怎么下发、怎么还原」。
 
 用法:
     python3 loop_v1/auto/autoloop.py --out loop_v1/runs_sysparam/<标签> \\
@@ -33,8 +33,8 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, TOOLS)
 sys.path.insert(0, HERE)
 
-from analyze import compare, describe                      # noqa: E402
-from report import snapshot_diff                            # noqa: E402
+# 统计口径已搬进 phonefarm 二进制, 经 pybridge 转调 —— 不在 Python 侧留第二份实现
+from pybridge import compare, describe, snapshot_diff       # noqa: E402
 import whitelist as WL                                      # noqa: E402
 import verdict as V                                         # noqa: E402
 import llm as LLM                                           # noqa: E402

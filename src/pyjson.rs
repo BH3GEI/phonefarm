@@ -31,6 +31,35 @@ pub enum PyVal {
     Obj(Vec<(String, PyVal)>),
 }
 
+impl PyVal {
+    /// 对象取键; 不是对象或没这个键都返回 None (等价于 Python 的 `d.get(k)`)。
+    pub fn get(&self, k: &str) -> Option<&PyVal> {
+        match self {
+            PyVal::Obj(kvs) => kvs.iter().find(|(ek, _)| ek == k).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+    /// 数字取值, int 与 float 一视同仁。
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            PyVal::Int(i) => Some(*i as f64),
+            PyVal::Float(x) => Some(*x),
+            _ => None,
+        }
+    }
+    /// Python `str(x)` 对这几种值的写法 —— f-string 里插值用的就是它。
+    /// 与 JSON 的差别只有两处: None 不是 `null`, True/False 首字母大写。
+    pub fn py_str(&self) -> String {
+        match self {
+            PyVal::Null => "None".to_string(),
+            PyVal::Bool(true) => "True".to_string(),
+            PyVal::Bool(false) => "False".to_string(),
+            PyVal::Str(s) => s.clone(),
+            other => dumps(other),
+        }
+    }
+}
+
 impl From<f64> for PyVal {
     fn from(v: f64) -> Self {
         PyVal::Float(v)
