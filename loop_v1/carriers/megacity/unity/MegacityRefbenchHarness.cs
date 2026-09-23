@@ -8,16 +8,29 @@
 // 设计边界(与 refbench 一致): 本文件只负责"制造完全一样的渲染负载"并如实记录事实,
 // 不测帧时、不算离散度、不做任何判定。测量归 loop_v1 的 raw ftrace 链路。
 //
-// 状态: 已在 Unity 6000.1.0f1 下编译通过(errors=0), 随 APK 出包成功。
-// 但**一帧都还没在设备上跑过** —— 编译通过只说明语法和 API 用对了, 说明不了
-// 相机接管、路线采样、started 标记、自退这套运行时逻辑真的成立。首轮实跑之前
-// 不要把这里的行为当既成事实。
+// 状态: 首轮已在红魔(Adreno 840 / Vulkan)上跑通 —— clean_exit=true, 600/600 帧,
+// 路线 sha256 与仓库一致, render_thread_comm 实测为 UnityGfxDeviceW。
+// 首轮同时暴露了四个问题, 本版针对它们改: 见下面「首轮实跑发现」。
+//
+// 首轮实跑发现(2026-09-23):
+//   1. 城市没渲染出来。根因不是 UGS 卡住 —— Main.unity 里 6 个 SubScene 全是
+//      AutoLoadScene=1, 城市会自动装, 不需要玩家驱动。问题是装完要时间, 而当时
+//      预热只有 300 帧, 还没装完就开始测了。本版改用"实体数不再增长"作装完信号,
+//      而不是拍脑袋等 N 帧。
+//   2. 游戏 HUD 与 UGS 报错弹窗盖在画面上, 污染负载。本版进场后关掉所有 Canvas
+//      与 UIDocument。
+//   3. 进程不自退: Application.Quit() + Environment.Exit() 都杀不掉 Unity 的
+//      Android 进程, 写完 json 后 30 秒仍在。本版改用 android.os.Process.killProcess。
+//   4. adb push 进 app 外部目录的路线, 应用读不到(scoped storage 下属主是 shell)。
+//      本版去掉这条路径, 路线只从 APK 内的 StreamingAssets 读 —— 这反而更好:
+//      APK 加上游 commit 就完整决定了负载。换路线要重新出包, 而这正是应该的。
 
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using UnityEngine;
@@ -53,8 +66,18 @@ namespace Megacity.Refbench
 
         // ---- 参数 --------------------------------------------------------
         string m_Scene, m_RunId, m_RouteName, m_VSync, m_UnityScene;
-        int    m_Frames, m_Warmup;
+        int    m_Frames, m_Warmup, m_Settle;
         float  m_ResScale;
+
+        // 静置阶段的事实, 全部如实回写进 json
+        int    m_SettleFrames;
+        long   m_Entities = -1;
+        string m_StreamingReady;
+        int    m_UiDisabled;
+        string m_ModeSet = "none";
+
+        // 实体数连续这么多帧不变, 就认为 subscene 装完了
+        const int StableFrames = 120;
 
         Route  m_Route;
         Camera m_Cam;
@@ -74,6 +97,8 @@ namespace Megacity.Refbench
             m_UnityScene = GetIntentExtra("unity_scene") ?? "Main";
             m_Frames    = ParseInt(GetIntentExtra("frames"),  3600, 60, 100000);
             m_Warmup    = ParseInt(GetIntentExtra("warmup"),   600,  0, 100000);
+            // settle 是"等城市装完"的上界, 不是固定等待 —— 装完就提前走
+            m_Settle    = ParseInt(GetIntentExtra("settle"),  7200, 0, 200000);
             m_ResScale  = ParseFloat(GetIntentExtra("resscale"), 1.0f, 0.25f, 2.0f);
         }
 
@@ -109,11 +134,43 @@ namespace Megacity.Refbench
                 while (!load.isDone) yield return null;
             }
 
-            // 4) 接管相机
+            // 4) 切单机模式。两个作用: 上游在非单机时才实例化 Vivox, 而 Vivox 会弹
+            //    录音权限对话框 —— 对话框一出应用就被挂起, 协程根本不跑。
+            m_ModeSet = SetSinglePlayerMode();
+
+            // 5) 静置: 等城市真的装完。
+            //    Main.unity 的 6 个 SubScene 都是 AutoLoadScene=1, 不需要玩家驱动,
+            //    但装完要时间。信号用"实体数连续 StableFrames 帧不再增长", 而不是
+            //    固定等 N 帧 —— 固定等待在慢的轮上会漏, 在快的轮上会白等。
+            //    拿不到实体数(反射失败)时退回走满 settle, 并在 json 里如实标 unknown。
+            long lastCount = -1;
+            int  stable = 0;
+            for (m_SettleFrames = 0; m_SettleFrames < m_Settle; m_SettleFrames++)
+            {
+                yield return new WaitForEndOfFrame();
+                if (!Application.isFocused) { Abort("focus_lost"); yield break; }
+
+                // HUD 和 UGS 弹窗会盖在画面上, 既挡视野又进渲染负载。UI 可能晚于
+                // 场景出现, 所以整个静置期间反复关。
+                m_UiDisabled += DisableGameUI();
+                if (m_SettleFrames % 30 == 0) SuppressOtherCameras();
+
+                long n = TryGetEntityCount();
+                if (n < 0) { m_StreamingReady = "unknown"; continue; }
+                m_Entities = n;
+                if (n == lastCount)
+                {
+                    if (++stable >= StableFrames) { m_StreamingReady = "yes"; break; }
+                }
+                else { stable = 0; lastCount = n; }
+            }
+            if (m_StreamingReady == null) m_StreamingReady = "timeout";
+
+            // 6) 接管相机
             m_Cam = TakeOverCamera();
             if (m_Cam == null) { Abort("no_camera"); yield break; }
 
-            // 5) 预热: 钉在路线起点渲染 warmup 帧, 等 subscene 流式加载与 shader 落定
+            // 7) 预热: 钉在路线起点渲染 warmup 帧, 等 shader 与常驻分配落定
             ApplyPose(0f);
             for (int i = 0; i < m_Warmup; i++)
             {
@@ -123,10 +180,10 @@ namespace Megacity.Refbench
                 m_WarmupRendered++;
             }
 
-            // 6) 落 started 标记 —— 采集从这里开始算
+            // 8) 落 started 标记 —— 采集从这里开始算
             WriteStartedMarker();
 
-            // 7) 被测窗口: 相机位姿只由帧序号决定, 不读 deltaTime。
+            // 9) 被测窗口: 相机位姿只由帧序号决定, 不读 deltaTime。
             //    这是整个载体确定性的根: 同 frames 同 route 两轮走的是逐帧完全相同的位姿序列,
             //    帧率高低不会改变走过的路径, 所以两轮的渲染负载可比。
             for (int i = 0; i < m_Frames; i++)
@@ -147,11 +204,17 @@ namespace Megacity.Refbench
 
         // ---- 相机 --------------------------------------------------------
 
+        // 上游的相机被 ECS/玩家输入驱动, 留着它就没有确定性可言。玩家实体可能在
+        // 静置期间才生成并带出新相机, 所以这件事要反复做, 不能只做一次。
+        static void SuppressOtherCameras()
+        {
+            foreach (var c in Camera.allCameras)
+                if (c != null && c.gameObject.name != "[RefbenchCamera]") c.enabled = false;
+        }
+
         Camera TakeOverCamera()
         {
-            // 关掉场上所有相机, 换成我们自己的 —— 上游的相机被 ECS/玩家输入驱动,
-            // 留着它就没有确定性可言。
-            foreach (var c in Camera.allCameras) c.enabled = false;
+            SuppressOtherCameras();
 
             var go = new GameObject("[RefbenchCamera]");
             DontDestroyOnLoad(go);
@@ -188,6 +251,64 @@ namespace Megacity.Refbench
             return p != null ? Convert.ToSingle(p.GetValue(rp)) : -1f;
         }
 
+        // ---- 上游状态的三处干预 ------------------------------------------
+        // 全部走反射: 这些类型在上游的 asmdef 程序集里, 直接引用会把本文件和上游的
+        // 程序集结构绑死, 上游一改就炸编译。反射拿不到就如实记 none, 不假装成功。
+
+        // 单机模式。上游 SpawnSinglePlayer 只在这个开关为真时生成玩家; 更关键的是
+        // PlayerInfoController.Start() 只在非单机时实例化 Vivox, 而 Vivox 会弹录音
+        // 权限框 —— 框一出应用就挂起, 协程停摆。首轮就是栽在这里。
+        static string SetSinglePlayerMode()
+        {
+            try
+            {
+                // 权威开关是 ScriptableObject 上的字段, 控制器只是转发
+                foreach (var so in Resources.FindObjectsOfTypeAll<ScriptableObject>())
+                {
+                    if (so == null || so.GetType().Name != "PlayerInfoItemSettings") continue;
+                    var f = so.GetType().GetField("GameMode");
+                    if (f == null || !f.FieldType.IsEnum) continue;
+                    f.SetValue(so, Enum.Parse(f.FieldType, "SinglePlayer"));
+                    return "settings";
+                }
+            }
+            catch (Exception e) { return "failed:" + e.GetType().Name; }
+            return "none";
+        }
+
+        // HUD、UGS 报错弹窗这些既挡视野又进渲染负载, 一律关掉。
+        static int DisableGameUI()
+        {
+            int n = 0;
+            try
+            {
+                foreach (var c in FindObjectsByType<Canvas>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+                    if (c != null && c.enabled) { c.enabled = false; n++; }
+                foreach (var b in FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+                    if (b != null && b.enabled && b.GetType().Name == "UIDocument") { b.enabled = false; n++; }
+            }
+            catch { /* 关不掉就算了, 数量会体现在 json 里 */ }
+            return n;
+        }
+
+        // 实体总数。用它的"停止增长"作 subscene 装完的信号。
+        // 注意: 这是装载状态, 不是性能指标 —— 载体不做任何测量, 这条边界没破。
+        static long TryGetEntityCount()
+        {
+            try
+            {
+                var worldType = Type.GetType("Unity.Entities.World, Unity.Entities");
+                var world = worldType?.GetProperty("DefaultGameObjectInjectionWorld",
+                                BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                if (world == null) return -1;
+                var em = worldType.GetProperty("EntityManager")?.GetValue(world);
+                var dbg = em?.GetType().GetProperty("Debug")?.GetValue(em);
+                var cnt = dbg?.GetType().GetProperty("EntityCount")?.GetValue(dbg);
+                return cnt == null ? -1 : Convert.ToInt64(cnt);
+            }
+            catch { return -1; }
+        }
+
         // ---- 路线 --------------------------------------------------------
 
         sealed class Route
@@ -220,20 +341,14 @@ namespace Megacity.Refbench
             }
         }
 
+        // 路线只从 APK 内的 StreamingAssets 读。
+        // 首轮试过把路线 adb push 进 app 的外部 files 目录让它免重新出包就能换,
+        // 实测读不到: scoped storage 下 push 进去的文件属主是 shell, 应用看不见
+        // (chown 也没救回来)。所以这条路径整个去掉 —— 留着只会让人以为能用。
+        // 副作用反而是好的: APK + 上游 commit 完整决定了负载, 换路线必须重新出包,
+        // 而路线本来就是被测配置的一部分, 本就该这样。
         IEnumerator LoadRoute(string name, Action<Route> done)
         {
-            // 优先读 app files 下 adb push 进来的路线 —— 换路线不用重新出包。
-            var pushed = Path.Combine(Application.persistentDataPath, "routes", name + ".json");
-            if (File.Exists(pushed))
-            {
-                byte[] raw = null;
-                try { raw = File.ReadAllBytes(pushed); }
-                catch (Exception e) { m_AbortReason = "route_invalid:" + e.GetType().Name; }
-                done(raw != null ? ParseRoute(name, raw) : null);
-                yield break;
-            }
-
-            // 退而读 APK 内 StreamingAssets。Android 上它在 jar 里, 只能走 UnityWebRequest。
             var url = Path.Combine(Application.streamingAssetsPath, "refbench_routes", name + ".json");
             using var req = UnityWebRequest.Get(url);
             yield return req.SendWebRequest();
@@ -298,10 +413,24 @@ namespace Megacity.Refbench
                                Encoding.UTF8.GetBytes(BuildJson())); }
             catch (Exception e) { Debug.LogError("[refbench] 输出写盘失败: " + e); }
 
+            KillSelf();
+        }
+
+        // 首轮实测: Application.Quit() 和 Environment.Exit() 都杀不掉 Unity 的
+        // Android 进程 —— json 写完 30 秒后进程仍在, 上层的存活探测会一直空等。
+        // 直接走 Android 的进程终止。json 在此之前已经 fsync 落盘, 杀掉是安全的。
+        static void KillSelf()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using var proc = new AndroidJavaClass("android.os.Process");
+                proc.CallStatic("killProcess", proc.CallStatic<int>("myPid"));
+                return;
+            }
+            catch { /* 落到下面的兜底 */ }
+#endif
             Application.Quit();
-            // Application.Quit 在 Android 上不是立刻生效, 兜一手确保进程真的走掉,
-            // 否则 harness 的存活探测会一直等。
-            System.Environment.Exit(m_CleanExit ? 0 : 2);
         }
 
         static void WriteAndSync(string path, byte[] bytes)
@@ -328,6 +457,7 @@ namespace Megacity.Refbench
             sb.Append("\"params\":{");
             J(sb, "frames", m_Frames); sb.Append(',');
             J(sb, "warmup", m_Warmup); sb.Append(',');
+            J(sb, "settle", m_Settle); sb.Append(',');
             sb.Append("\"resscale\":").Append(m_ResScale.ToString("R", ci)).Append(',');
             JS(sb, "vsync", m_VSync);
             sb.Append("},");
@@ -353,6 +483,17 @@ namespace Megacity.Refbench
             sb.Append("},");
 
             JS(sb, "render_thread_comm", DetectGfxThreadComm()); sb.Append(',');
+
+            // 静置阶段的事实。streaming_ready != "yes" 的轮不能当基线用 ——
+            // 城市没装完就开测, 量到的不是这座城。
+            sb.Append("\"streaming\":{");
+            JS(sb, "ready", m_StreamingReady ?? "not_reached"); sb.Append(',');
+            J(sb, "settle_frames", m_SettleFrames); sb.Append(',');
+            sb.Append("\"entities\":").Append(m_Entities).Append(',');
+            J(sb, "ui_disabled", m_UiDisabled); sb.Append(',');
+            JS(sb, "mode_set", m_ModeSet);
+            sb.Append("},");
+
             J(sb, "frames_rendered", m_Rendered); sb.Append(',');
             J(sb, "warmup_frames_rendered", m_WarmupRendered); sb.Append(',');
             sb.Append("\"clean_exit\":").Append(m_CleanExit ? "true" : "false");

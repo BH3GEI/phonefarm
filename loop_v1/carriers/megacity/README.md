@@ -5,21 +5,65 @@ loop_v1 到目前为止的负载有两类: 原神(真游戏, 但闭源、只能�
 这个载体想补中间那一格: **有源码的真游戏** —— 场景复杂度、shader 数量、
 subscene 流式加载都是真的, 同时源码在手, 相机和帧序可以钉死。
 
-> **状态: APK 已出, 但一帧都还没在设备上跑过。**
+> **状态: 首轮在红魔上跑通了契约, 但城市当时没渲染出来; 已定位并修复, 待复验。**
 >
-> 已验证: 三个 `.cs` 在 Unity 6000.1.0f1 下编译通过(`errors=0`); 构建脚本零交互出包成功;
-> 构建后自检通过 —— **arm64 / Vulkan / IL2CPP / apk** 四项都对。
+> 首轮实证(2026-09-23, 红魔 / Adreno 840 / Vulkan): `clean_exit=true`, 600/600 帧,
+> 路线 sha256 与仓库一致, **`render_thread_comm` 实测为 `UnityGfxDeviceW`**(此前只是猜)。
+> 契约的进/出、固定帧数、自报事实这条链是通的。
 >
-> | | |
-> |---|---|
-> | APK | 207.4 MB |
-> | sha256 | `6806eff9289116db04765ee405be9edd5dd534a13f06d55e14bbbd3b4362534e` |
-> | 上游 commit | `07652ee` |
-> | Unity | 6000.1.0f1 (Personal, magicbook) |
-> | 构建场景表 | `Menu.unity`, `Main.unity` |
->
-> 还没验证的: 设备上能不能正常起来、相机路线看到的到底是不是那座城、
-> `render_thread_comm` 实测是什么、以及基线离散度。清单在文末。
+> 但首轮画面上只有天空 —— 见下面「首轮踩到的四个坑」。四个都已改, **还没复验**。
+
+---
+
+## 首轮踩到的四个坑
+
+记在这里是因为每个都花了真金白银的调试时间, 而且没一个是从代码上看得出来的。
+
+### 1. 城市没渲染 —— 不是 UGS 卡住, 是没等它装完
+
+第一反应会怪那个 "TO USE UNITY'S DASHBOARD SERVICES…" 的弹窗, 或者怀疑
+subscene 要玩家驱动才流式加载。**都不是。** `Main.unity` 里 6 个 SubScene
+全是 `AutoLoadScene: 1`, 城市自动装、不需要玩家; 项目里也根本没有自定义流式
+加载代码(`SubScene` / `SceneSystem` / `streaming` 三个词在 Assets/Scripts 下零匹配)。
+
+真实原因平淡得多: **装完要时间, 而当时预热只有 300 帧**, 还没装完就开测了。
+
+改法不是"把预热调大一点"——那只是换个数字继续赌。改成用
+**实体总数连续 120 帧不再增长**作装完信号, `settle` 只当上界, 装完就提前走。
+结果如实写进 `streaming.ready`(yes / timeout / unknown), **ready ≠ yes 的轮直接判无效**。
+
+### 2. 录音权限框把应用挂起
+
+Vivox 要 `RECORD_AUDIO`, 冷启动弹框 → 应用被挂起 → **协程根本不跑**,
+表现是进程活着但永远不落 `megacity_started`。
+
+`pm grant` 能解, 但根治办法更省事: 上游只在**非**单机模式下才实例化 Vivox
+(`PlayerInfoController.Start()`)。所以 harness 直接切单机模式, 框就不会出现。
+run 脚本里仍留一条 `pm grant` 作双保险, 幂等。
+
+### 3. 进程杀不死
+
+`Application.Quit()` 和 `System.Environment.Exit()` 在 Unity 的 Android 播放器上
+**都杀不掉进程** —— json 写完 30 秒后 `pidof` 仍有结果, 上层的存活探测会一直空等。
+改用 `android.os.Process.killProcess(myPid())`, 在 json fsync 之后调。
+
+### 4. adb push 进去的路线, 应用读不到
+
+scoped storage 下 `adb push` 到 `Android/data/<pkg>/files/` 的文件属主是 `shell`,
+应用(`u0_a512`)看不见, `File.Exists` 返回 false; `su` chown 也没救回来。
+首轮"成功"那次其实读的是 APK 内 StreamingAssets 那份。
+
+所以整条 push 路径去掉 —— 留着只会让人以为能用。**副作用反而是好的**:
+APK 加上游 commit 就完整决定了负载, 换路线必须重新出包, 而路线本来就是被测配置
+的一部分, 本就该这样。run 脚本改为核对包内 `route.sha256` 与仓库是否一致。
+
+---
+
+## 对上游的三处干预, 全部走反射
+
+切单机模式、关 UI、读实体数 —— 这些类型都在上游的 asmdef 程序集里。直接引用会把
+本文件和上游的程序集结构绑死, 上游一改就炸编译, 而一次重新出包是几十分钟。
+所以统一走反射, 拿不到就**如实记 `mode_set=none`, 不假装成功**。
 
 ---
 
@@ -110,7 +154,9 @@ harness 的做法是**旁路而非改造**:
 | 手段 | 为什么 |
 |---|---|
 | 相机位姿 `u = 帧序号/(frames-1)`, **不读 deltaTime** | 这是根。帧率高低不改变走过的路径, 两轮才可比。用 deltaTime 的话快的那轮会飞得更远, 测的就不是同一段负载 |
-| 预热窗口(默认 600 帧)在路线起点空跑 | 等 subscene 流式加载和 shader warmup 落定。预热结束才落 `megacity_started`, 采集从那一刻起算 |
+| 静置阶段等"实体数不再增长" | 等城市真的装完, 而不是赌一个帧数。装不完就标 `timeout` 并判该轮无效 —— 城市没装完, 量到的不是这座城 |
+| 预热窗口(默认 600 帧)在路线起点空跑 | 静置之后再等 shader 与常驻分配落定。预热结束才落 `megacity_started`, 采集从那一刻起算 |
+| 进场后反复关 Canvas / UIDocument | HUD 和 UGS 弹窗既挡视野又进渲染负载。UI 可能晚于场景出现, 所以整个静置期反复关 |
 | 路线文件 sha256 写进输出 json | 两臂 sha256 不一致 = 走的不是同一条路线 = 这次对照无效, 一眼看得出来 |
 | `resscale` / `vsync` / 质量档显式写死并回写实际生效值 | 不让引擎自适应。写进去的和落下来的对不上就是 bug |
 | 路线缺失/非法一律 `clean_exit=false` 退出 | 与 refbench 的 `knob.postfx` 同一条原则: **绝不静默降级**。悄悄退回默认相机会让 A/B 两臂变成 A 和 A, 而上层还以为在对照 |
@@ -255,7 +301,7 @@ run_megacity.sh        采集机: 跑一轮并收证据
 - [x] ~~让三个 .cs 过编译~~ 通过, `errors=0`
 - [x] ~~标定 `route_a.json`~~ 已改为从上游场景推导, 见「路线」一节
 - [x] ~~出第一个 APK, 核对图形 API 真的落在 Vulkan~~ 构建后自检通过: arm64 / Vulkan / IL2CPP
-- [ ] **装到红魔跑通第一轮** —— 还没跑过, 下面两条都压在这上面
-- [ ] 目视确认相机路线看到的是城市而不是一片天空
-- [ ] 实测 `render_thread_comm` 到底是不是 `UnityGfxDeviceW`, 固化进 contract
+- [x] ~~装到红魔跑通第一轮~~ 契约跑通(clean_exit / 600 帧 / Vulkan), 但暴露四个坑, 已修待复验
+- [ ] **复验: 目视确认相机看到的是城市而不是一片天空**(首轮是天空, 四个坑修完后待验)
+- [x] ~~实测 `render_thread_comm`~~ 确认是 `UnityGfxDeviceW`, 已固化进 contract
 - [ ] 3 轮基线, 报 frame_p95 离散度, 与 refbench 的 0.45% / 原神的 1.37% 对齐着看
