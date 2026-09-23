@@ -330,8 +330,9 @@ bash tools/replay_test.sh runs      # 离线回放自检
 细节、测帧手段的选型排除过程、以及「一帧不等于一次 GPU 提交」这个坑，见 [`loop_v1/README.md`](loop_v1/README.md)。
 候选改动从 [`docs/MOBILE_GPU_OPT_ROUTES.md`](docs/MOBILE_GPU_OPT_ROUTES.md) 里挑。
 
-> **进行中**：`loop_v1/` 的 Python 工具链与 `knobs/` 的 shell 脚本正在往 Rust 内核里收，
-> 目标形态是这两块都不再需要宿主机上另装解释器。上面的跑法在收完之前仍然有效。
+> **进行中**：`loop_v1/` 的判定口径（解析→归因→统计→判据收口→白名单→判定→画面判据→
+> 模型交互/本地变异器）已经全部收进 Rust 内核；剩下 `autoloop.py`（编排与设备驱动）、
+> 报告类与设备端 shell 脚本还没收。上面的跑法在收完之前仍然有效。
 
 ## 假设—实验—证据闭环
 
