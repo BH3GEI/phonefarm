@@ -26,6 +26,7 @@ SERIAL="${MEGACITY_SERIAL:-91253241019A}"
 PKG=com.unity.megacity.metro
 ACT=com.unity.megacity.MegacityMetro
 WARMUP="${MEGACITY_WARMUP:-600}"
+SETTLE="${MEGACITY_SETTLE:-7200}"
 RESSCALE="${MEGACITY_RESSCALE:-1.0}"
 VSYNC="${MEGACITY_VSYNC:-off}"
 
@@ -39,9 +40,12 @@ ashell() { adb -s "$SERIAL" shell "$@" </dev/null; }
 mkdir -p "$OUTDIR"
 APPFILES="/storage/emulated/0/Android/data/$PKG/files"
 
-# 0) 路线文件必须真实存在 —— 没有就停, 不拿默认相机顶
+# 0) 路线在 APK 里(StreamingAssets), 不能 push —— 实测 push 进 app 外部目录的文件
+#    应用读不到(scoped storage 下属主是 shell)。这里只留仓库那份作事后核对:
+#    包里用的是哪条路线, 由输出 json 的 route.sha256 说了算。
 ROUTE_SRC="$HERE/routes/$ROUTE.json"
-[ -f "$ROUTE_SRC" ] || { echo "[$LABEL] 路线文件不存在: $ROUTE_SRC (见 README 的路线标定一节)"; exit 2; }
+[ -f "$ROUTE_SRC" ] || { echo "[$LABEL] 仓库里没有 $ROUTE.json, 无法核对包内路线"; exit 2; }
+EXPECT_SHA=$(shasum -a 256 "$ROUTE_SRC" | cut -d" " -f1)
 
 # 1) 温度回落轮询 (有界 360×2s), 保证每轮起点热态一致
 T=999999
@@ -57,20 +61,20 @@ ashell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDIR/snap_at_run.tx
 ashell "am force-stop $PKG" >/dev/null 2>&1 || true
 ashell "rm -f $APPFILES/megacity_out.json $APPFILES/megacity_started" >/dev/null 2>&1 || true
 
-# 3) 推路线。放 app files 下, 换路线不用重新出包; 同时留一份进证据目录, 便于事后核对
-ashell "mkdir -p $APPFILES/routes" >/dev/null 2>&1 || true
-adb -s "$SERIAL" push "$ROUTE_SRC" "$APPFILES/routes/$ROUTE.json" >/dev/null
+# 3) 录音权限双保险。Vivox 会弹权限框, 框一出应用被挂起、协程停摆 —— 首轮就栽在这。
+#    harness 现在切单机模式绕开了 Vivox, 这里再授一次, 幂等, 不会因为已授权而失败。
+ashell "pm grant $PKG android.permission.RECORD_AUDIO" >/dev/null 2>&1 || true
 cp "$ROUTE_SRC" "$OUTDIR/route.json"
 
 # 4) 启动并等渲染真正进入被测窗口 (harness 预热结束才落 megacity_started;
 #    同样不用 logcat —— 这台设备的 logcat 会整个哑掉)
 ashell "am start -W -n $PKG/$ACT \
   --es scene $SCENE --es run_id $LABEL --es frames $FRAMES --es route $ROUTE \
-  --es warmup $WARMUP --es resscale $RESSCALE --es vsync $VSYNC" > "$OUTDIR/am.log" 2>&1
+  --es warmup $WARMUP --es settle $SETTLE --es resscale $RESSCALE --es vsync $VSYNC" > "$OUTDIR/am.log" 2>&1
 
-# 预热窗口可能很长 (subscene 流式加载), 所以这里的上界比 refbench 宽: 300×0.5s = 150s
+# 静置 + 预热可能很久(城市装完要时间), 上界放宽到 600×0.5s = 300s
 STARTED=0
-for _ in $(seq 1 300); do
+for _ in $(seq 1 600); do
   M=$(ashell "cat $APPFILES/megacity_started 2>/dev/null" | tr -d '\r' || true)
   [ -n "$M" ] && { STARTED=1; break; }
   P=$(ashell "pidof $PKG" 2>/dev/null | tr -d '\r' || true)
@@ -108,7 +112,7 @@ python3 "$TOOLS/parse_trace.py" "$OUTDIR/trace.txt" --comm "$COMM" > "$OUTDIR/su
 python3 "$TOOLS/attribute.py" "$OUTDIR/summary.json" > "$OUTDIR/attribution.json"
 
 # 8) 轮内有效性判定
-python3 - "$OUTDIR" "$LABEL" <<'PYEOF'
+EXPECT_SHA="$EXPECT_SHA" python3 - "$OUTDIR" "$LABEL" <<'PYEOF'
 import json, sys, os
 out, label = sys.argv[1], sys.argv[2]
 s = json.load(open(os.path.join(out, "summary.json")))
@@ -118,6 +122,15 @@ bad = []
 if s["n_thermal_events"] != 0:            bad.append(f"热事件={s['n_thermal_events']}")
 if not m["clean_exit"]:                   bad.append("clean_exit=false:" + m.get("abort_reason", "?"))
 if m["graphics"]["api"] != "Vulkan":      bad.append("图形 API=" + m["graphics"]["api"] + " (不是 Vulkan, 这包白打了)")
+
+st = m.get("streaming", {})
+if st.get("ready") != "yes":
+    bad.append("城市没装完 streaming.ready=" + str(st.get("ready")) +
+               " settle_frames=" + str(st.get("settle_frames")) +
+               " entities=" + str(st.get("entities")))
+expect = os.environ.get("EXPECT_SHA", "")
+if expect and m["route"]["sha256"] != expect:
+    bad.append("包内路线与仓库不一致: 包=" + m["route"]["sha256"][:12] + " 仓库=" + expect[:12])
 if m["frames_rendered"] != m["params"]["frames"]:
     bad.append(f"帧数不足 {m['frames_rendered']}/{m['params']['frames']}")
 
@@ -128,5 +141,6 @@ if bad:
 
 print(f"[{label}] fps={s['fps_mean']} spf={s['submits_per_frame']} "
       f"p50={s['frame_p50']}ms p95={s['frame_p95']}ms gpu={s['gpu_active_mean']}ms bw={s['bw_median']} "
-      f"route={m['route']['name']}@{m['route']['sha256'][:12]}")
+      f"route={m['route']['name']}@{m['route']['sha256'][:12]} "
+      f"entities={m.get('streaming',{}).get('entities')}")
 PYEOF

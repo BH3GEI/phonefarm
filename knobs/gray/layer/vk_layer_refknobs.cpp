@@ -19,6 +19,8 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
+#include <sys/system_properties.h>
 #include <unistd.h>
 
 // ── layer 协商接口 (来自 vk_layer.h, ABI 稳定) ──
@@ -95,6 +97,9 @@ struct DevDisp {
     PFN_vkCmdBeginRenderPass CmdBeginRenderPass = nullptr;
     PFN_vkCmdBeginRenderPass2 CmdBeginRenderPass2 = nullptr;
     PFN_vkQueuePresentKHR QueuePresentKHR = nullptr;
+    PFN_vkCreateRenderPass CreateRenderPass = nullptr;
+    PFN_vkCreateRenderPass2 CreateRenderPass2 = nullptr;
+    PFN_vkDestroyRenderPass DestroyRenderPass = nullptr;
 };
 
 static std::mutex g_mtx;
@@ -102,6 +107,41 @@ static std::map<void*, InstDisp> g_inst;
 static std::map<void*, DevDisp> g_dev;
 static std::atomic<uint64_t> g_frames{0};
 static std::atomic<uint64_t> g_rp{0};
+
+// ── 改写档: LoadOp LOAD → DONT_CARE ──
+//
+// 默认关闭, 靠属性 `debug.knobs.loadop=1` 打开 —— 同一个 .so 既是只读探针也是改写旋钮,
+// 不用为两种模式各编一份, 也方便 harness 在 A/B 两臂之间只切一个开关。
+//
+// 只改 loadOp, **不动 initialLayout**。refbench 的白档 knob.loadop=on 除了 DONT_CARE
+// 还把 initialLayout 设成 UNDEFINED(等于允许驱动直接丢弃旧内容), 所以本改写是白档那个
+// 答案的**真子集**; 两者效果可能不完全相等, 这一点如实记在 FEASIBILITY 里, 不含糊过去。
+static bool g_rewrite_loadop = false;
+static std::atomic<uint64_t> g_rp_created{0};   // 第几个被创建的 render pass (自报里的 pass 序号)
+
+struct Effective {
+    uint64_t pass;        // render pass 创建序号
+    uint32_t attachment;  // 该 pass 里的第几个 attachment
+    // 这个被改写的 pass 被 vkCmdBeginRenderPass **录制**了多少次。
+    // 注意是录制不是提交: 应用若预录命令缓冲反复提交, 这个数会偏小(录一次提交五千次);
+    // 录了却没提交则会偏大。refbench 每帧重录, 所以那里的数字精确。
+    // harness 只应把它当作"这条改写到底有没有被用上"的**布尔判据**, 不要当调用次数用。
+    uint64_t begins;
+};
+static std::vector<Effective> g_effective;
+// 被改写过的 VkRenderPass 句柄 -> 它对应的**全部** g_effective 下标。
+// 一个 pass 可能有多个 attachment 被改, 只记最后一个会让其余条目永远 begins=0,
+// harness 会把它们误读成"没生效"。
+static std::map<VkRenderPass, std::vector<size_t>> g_rewritten;
+// effective 不设上限会在长跑的真游戏里无限涨 (每 300 帧还要整份序列化+fsync)。
+static const size_t RK_MAX_EFFECTIVE = 256;
+static uint64_t g_effective_dropped = 0;
+
+static bool read_bool_prop(const char* name) {
+    char v[PROP_VALUE_MAX] = {0};
+    if (__system_property_get(name, v) <= 0) return false;
+    return v[0] == '1' || v[0] == 't' || v[0] == 'y';
+}
 
 // 证据双通道。原本只走文件系统, 因为立项时以为本机 logcat 哑掉 —— 2026-09-23 实测发现
 // logcat 只是对 shell uid 不可读, `su -c logcat` 一切正常 (refbench 与原神都验过)。
@@ -121,15 +161,39 @@ static std::string self_pkg() {
 
 static void write_marker() {
     std::string pkg = self_pkg();
-    char json[512];
-    snprintf(json, sizeof json,
-             "{\"knob\":\"gray_readonly_probe\",\"layer_loaded\":true,\"pkg\":\"%s\","
-             "\"effective\":[],\"failed\":[],\"unavailable_reason\":null,"
-             "\"readonly_stats\":{\"frames\":%llu,\"render_pass_begins\":%llu}}",
-             pkg.c_str(), (unsigned long long)g_frames.load(), (unsigned long long)g_rp.load());
+
+    // effective 按 contract/knob.md 的形状: 层只自报"实际改了什么", 不判断改得好不好。
+    std::string eff;
+    bool used = false;   // 有没有哪条改写真的被用上
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (const auto& e : g_effective) {
+            char one[160];
+            snprintf(one, sizeof one,
+                     "%s{\"pass\":%llu,\"attachment\":%u,\"field\":\"loadOp\","
+                     "\"from\":\"LOAD\",\"to\":\"DONT_CARE\",\"begins\":%llu}",
+                     eff.empty() ? "" : ",", (unsigned long long)e.pass, e.attachment,
+                     (unsigned long long)e.begins);
+            eff += one;
+            if (e.begins) used = true;
+        }
+    }
+    // harness 据此判断该轮算不算数。两种"没生效"要分开报:
+    //   没找到 LOAD 可改 vs 改了但应用根本没用那个 pass 对象
+    const char* unavail = "null";
+    if (g_rewrite_loadop && eff.empty())      unavail = "\"no LOAD attachment seen\"";
+    else if (g_rewrite_loadop && !used)       unavail = "\"rewritten pass never bound\"";
+
+    std::string json =
+        std::string("{\"knob\":\"") + (g_rewrite_loadop ? "gray_loadop_dontcare" : "gray_readonly_probe")
+        + "\",\"layer_loaded\":true,\"pkg\":\"" + pkg
+        + "\",\"effective\":[" + eff + "],\"failed\":[],\"unavailable_reason\":" + unavail
+        + ",\"readonly_stats\":{\"frames\":" + std::to_string(g_frames.load())
+        + ",\"render_pass_begins\":" + std::to_string(g_rp.load())
+        + ",\"render_passes_created\":" + std::to_string(g_rp_created.load()) + "}}";
 
     // 通道 1: logcat (root 可读, 不受目标应用存储沙箱影响)
-    RK_LOG("%s", json);
+    RK_LOG("%s", json.c_str());
 
     // 通道 2: 文件。三个候选落点, 头一个写得进就停。
     const std::string cands[] = {
@@ -140,7 +204,7 @@ static void write_marker() {
     for (const auto& path : cands) {
         FILE* o = fopen(path.c_str(), "w");
         if (!o) continue;
-        fprintf(o, "%s\n", json);
+        fprintf(o, "%s\n", json.c_str());
         fflush(o); fsync(fileno(o)); fclose(o);
         return;
     }
@@ -179,7 +243,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_EnumerateDeviceExtensionProperties(
 // ── 拦截: instance ──
 static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     const VkInstanceCreateInfo* ci, const VkAllocationCallbacks* a, VkInstance* pInst) {
-    RK_LOG("rk_CreateInstance entered (pkg=%s)", self_pkg().c_str());
+    g_rewrite_loadop = read_bool_prop("debug.knobs.loadop");
+    RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d",
+           self_pkg().c_str(), (int)g_rewrite_loadop);
     auto* link = reinterpret_cast<RkInstCreateInfo*>(const_cast<void*>(ci->pNext));
     while (link && !(link->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
                      link->function == RK_LAYER_LINK_INFO))
@@ -246,6 +312,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     d.CmdBeginRenderPass = (PFN_vkCmdBeginRenderPass)gdpa(*pDev, "vkCmdBeginRenderPass");
     d.CmdBeginRenderPass2 = (PFN_vkCmdBeginRenderPass2)gdpa(*pDev, "vkCmdBeginRenderPass2");
     d.QueuePresentKHR = (PFN_vkQueuePresentKHR)gdpa(*pDev, "vkQueuePresentKHR");
+    d.CreateRenderPass = (PFN_vkCreateRenderPass)gdpa(*pDev, "vkCreateRenderPass");
+    d.CreateRenderPass2 = (PFN_vkCreateRenderPass2)gdpa(*pDev, "vkCreateRenderPass2");
+    if (!d.CreateRenderPass2)
+        d.CreateRenderPass2 = (PFN_vkCreateRenderPass2)gdpa(*pDev, "vkCreateRenderPass2KHR");
+    d.DestroyRenderPass = (PFN_vkDestroyRenderPass)gdpa(*pDev, "vkDestroyRenderPass");
     { std::lock_guard<std::mutex> lk(g_mtx); g_dev[key(*pDev)] = d; }
     return r;
 }
@@ -277,6 +348,122 @@ static bool dev_of(void* k, DevDisp* out) {
     return true;
 }
 
+// ── 改写: LoadOp LOAD → DONT_CARE ──
+//
+// 钩 vkCreateRenderPass 而不是 vkCmdBeginRenderPass: loadOp 是**创建期**就烘进
+// VkRenderPass 对象的, BeginRenderPass 时已经改不动了。
+//
+// 只在 g_rewrite_loadop 打开时改; 关着的时候这两个钩子就是纯转发, 与只读档等价。
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
+    VkDevice dev, const VkRenderPassCreateInfo* ci, const VkAllocationCallbacks* a, VkRenderPass* out) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.CreateRenderPass) {
+        RK_LOG_ONCE("CreateRenderPass: 查不到下层函数");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    uint64_t idx = g_rp_created++;
+    if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0)
+        return d.CreateRenderPass(dev, ci, a, out);
+
+    // pAttachments 是 const, 必须整份拷出来再改
+    std::vector<VkAttachmentDescription> atts(ci->pAttachments, ci->pAttachments + ci->attachmentCount);
+    std::vector<Effective> hits;
+    for (uint32_t i = 0; i < atts.size(); i++) {
+        if (atts[i].loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) continue;
+        atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        hits.push_back({idx, i, 0});
+    }
+    if (hits.empty()) return d.CreateRenderPass(dev, ci, a, out);
+
+    VkRenderPassCreateInfo mod = *ci;
+    mod.pAttachments = atts.data();
+    VkResult r = d.CreateRenderPass(dev, &mod, a, out);
+    if (r != VK_SUCCESS) {   // 改写导致创建失败就如实报, 不偷偷回退成原样
+        RK_LOG("CreateRenderPass(改写后) 失败: %d, pass=%llu", (int)r, (unsigned long long)idx);
+        return r;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto& idxs = g_rewritten[*out];
+        for (auto& h : hits) {
+            if (g_effective.size() >= RK_MAX_EFFECTIVE) { g_effective_dropped++; continue; }
+            idxs.push_back(g_effective.size());
+            g_effective.push_back(h);
+        }
+    }
+    RK_LOG("改写 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
+           (unsigned long long)idx, hits.size());
+    return r;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
+    VkDevice dev, const VkRenderPassCreateInfo2* ci, const VkAllocationCallbacks* a, VkRenderPass* out) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.CreateRenderPass2) {
+        RK_LOG_ONCE("CreateRenderPass2: 查不到下层函数");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    uint64_t idx = g_rp_created++;
+    if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0)
+        return d.CreateRenderPass2(dev, ci, a, out);
+
+    std::vector<VkAttachmentDescription2> atts(ci->pAttachments, ci->pAttachments + ci->attachmentCount);
+    std::vector<Effective> hits;
+    for (uint32_t i = 0; i < atts.size(); i++) {
+        if (atts[i].loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) continue;
+        atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        hits.push_back({idx, i, 0});
+    }
+    if (hits.empty()) return d.CreateRenderPass2(dev, ci, a, out);
+
+    VkRenderPassCreateInfo2 mod = *ci;
+    mod.pAttachments = atts.data();
+    VkResult r = d.CreateRenderPass2(dev, &mod, a, out);
+    if (r != VK_SUCCESS) {
+        RK_LOG("CreateRenderPass2(改写后) 失败: %d, pass=%llu", (int)r, (unsigned long long)idx);
+        return r;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto& idxs = g_rewritten[*out];
+        for (auto& h : hits) {
+            if (g_effective.size() >= RK_MAX_EFFECTIVE) { g_effective_dropped++; continue; }
+            idxs.push_back(g_effective.size());
+            g_effective.push_back(h);
+        }
+    }
+    RK_LOG("改写2 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
+           (unsigned long long)idx, hits.size());
+    return r;
+}
+
+// 记一次"被改写的 render pass 真的被用来开 pass 了"。
+// 没有这个计数, effective 只能说明"我改过这个对象", 说不了"应用真的用了它" ——
+// 实测 refbench 会把 LOAD 和 DONT_CARE 两个 pass 对象都建出来、只绑其中一个,
+// 于是不加区分的 effective 会把一次空改写报成生效。
+static void note_begin(VkRenderPass rp) {
+    // 只读档没有任何改写, 这里不该占 CmdBeginRenderPass 的热路径去抢全局锁
+    if (!g_rewrite_loadop || rp == VK_NULL_HANDLE) return;
+    std::lock_guard<std::mutex> lk(g_mtx);
+    auto it = g_rewritten.find(rp);
+    if (it == g_rewritten.end()) return;
+    for (size_t i : it->second) g_effective[i].begins++;
+}
+
+// 句柄回收是真事: 驱动会复用非 dispatchable handle 的数值。不摘掉已销毁的句柄, 后来
+// 某个**没被改写**的 pass 复用到同一个数值, 就会把 begins 记到一条已死的改写上 ——
+// 正好是 begins 这个计数要防的那种假阳性。
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyRenderPass(
+    VkDevice dev, VkRenderPass rp, const VkAllocationCallbacks* a) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.DestroyRenderPass) {
+        RK_LOG_ONCE("DestroyRenderPass: 查不到下层函数");
+        return;
+    }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_rewritten.erase(rp); }
+    d.DestroyRenderPass(dev, rp, a);
+}
+
 static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass(
     VkCommandBuffer cb, const VkRenderPassBeginInfo* bi, VkSubpassContents c) {
     DevDisp d;
@@ -285,6 +472,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass(
         return;
     }
     g_rp++;
+    note_begin(bi ? bi->renderPass : VK_NULL_HANDLE);
     d.CmdBeginRenderPass(cb, bi, c);
 }
 static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass2(
@@ -297,6 +485,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass2(
         return;
     }
     g_rp++;
+    note_begin(bi ? bi->renderPass : VK_NULL_HANDLE);
     d.CmdBeginRenderPass2(cb, bi, si);
 }
 static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR* pi) {
@@ -329,6 +518,10 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
     RK_HOOK("vkCmdBeginRenderPass", rk_CmdBeginRenderPass);
     RK_HOOK("vkCmdBeginRenderPass2", rk_CmdBeginRenderPass2);
     RK_HOOK("vkCmdBeginRenderPass2KHR", rk_CmdBeginRenderPass2);
+    RK_HOOK("vkCreateRenderPass", rk_CreateRenderPass);
+    RK_HOOK("vkDestroyRenderPass", rk_DestroyRenderPass);
+    RK_HOOK("vkCreateRenderPass2", rk_CreateRenderPass2);
+    RK_HOOK("vkCreateRenderPass2KHR", rk_CreateRenderPass2);
     RK_HOOK("vkQueuePresentKHR", rk_QueuePresentKHR);
     if (instance == VK_NULL_HANDLE) return nullptr;
     InstDisp d;
@@ -341,6 +534,8 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     RK_HOOK("vkDestroyDevice", rk_DestroyDevice);
     RK_HOOK("vkQueuePresentKHR", rk_QueuePresentKHR);
     RK_HOOK("vkCmdBeginRenderPass", rk_CmdBeginRenderPass);
+    RK_HOOK("vkCreateRenderPass", rk_CreateRenderPass);
+    RK_HOOK("vkDestroyRenderPass", rk_DestroyRenderPass);
     if (dev == VK_NULL_HANDLE) return nullptr;
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return nullptr; d = it->second; }
@@ -348,6 +543,9 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     if (!strcmp(name, "vkCmdBeginRenderPass2") || !strcmp(name, "vkCmdBeginRenderPass2KHR"))
         return d.CmdBeginRenderPass2 ? reinterpret_cast<PFN_vkVoidFunction>(rk_CmdBeginRenderPass2)
                                      : (d.gdpa ? d.gdpa(dev, name) : nullptr);
+    if (!strcmp(name, "vkCreateRenderPass2") || !strcmp(name, "vkCreateRenderPass2KHR"))
+        return d.CreateRenderPass2 ? reinterpret_cast<PFN_vkVoidFunction>(rk_CreateRenderPass2)
+                                   : (d.gdpa ? d.gdpa(dev, name) : nullptr);
     return d.gdpa ? d.gdpa(dev, name) : nullptr;
 }
 
