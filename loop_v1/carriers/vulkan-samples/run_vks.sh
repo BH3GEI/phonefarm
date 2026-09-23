@@ -100,7 +100,14 @@ PYFAN
 echo "[$LABEL] 风扇: $(cat "$OUTDIR/fan.json")"
 
 # 5) 稳态窗口内采集 (ftrace_capture.sh 自带四项状态存档还原)
+#    采集窗的**设备墙钟**边界要记下来: 日志里的 FPS 行带的是设备本地时间, 而 trace 里
+#    的是 ftrace 时钟, 两者对不上。记下边界后 crosscheck.py 才能只拿同一段时间的
+#    FPS 样本去和 trace 对账 —— 否则拿整段运行的中位数去比 12 秒的窗口, 本来好的轮
+#    也会被判掉(2026-09-23 实测就是这么误杀了好几轮)。
+CAP_T0=$(ashell "date '+%Y-%m-%d %H:%M:%S'" | tr -d '\r')
 ashell "su -c 'sh /data/local/tmp/ftrace_capture.sh $CAPDUR /data/local/tmp/vks_$LABEL.txt'" > "$OUTDIR/capture.log" 2>&1
+CAP_T1=$(ashell "date '+%Y-%m-%d %H:%M:%S'" | tr -d '\r')
+printf '{"cap_start":"%s","cap_end":"%s"}\n' "$CAP_T0" "$CAP_T1" > "$OUTDIR/window.json"
 adb -s "$SERIAL" pull "/data/local/tmp/vks_$LABEL.txt" "$OUTDIR/trace.txt" >/dev/null
 ashell "rm -f /data/local/tmp/vks_$LABEL.txt" || true
 
@@ -147,12 +154,19 @@ fi
 "$PF" attribute "$OUTDIR/summary.json" > "$OUTDIR/attribution.json"
 
 # 8) 交叉校验: 内核侧提交节奏 vs 应用侧自报帧率 (两个独立来源对账, 细节见 crosscheck.py)
-python3 "$HERE/crosscheck.py" "$OUTDIR/run.log" "$OUTDIR/summary.json" > "$OUTDIR/crosscheck.json"
-REL=$(python3 -c "import json;d=json.load(open('$OUTDIR/crosscheck.json'));print(d['rel_diff'] if d['rel_diff'] is not None else 9)")
-OK=$(python3 -c "print(1 if $REL <= ${VKS_CROSSCHECK_MAX:-0.35} else 0)")
+python3 "$HERE/crosscheck.py" "$OUTDIR/run.log" "$OUTDIR/summary.json" "$OUTDIR/window.json" > "$OUTDIR/crosscheck.json"
+WINDOWED=$(python3 -c "import json;print(json.load(open('$OUTDIR/crosscheck.json'))['windowed'])")
+OK=$(python3 -c "import json;print(1 if json.load(open('$OUTDIR/crosscheck.json'))['in_band'] else 0)")
+RATIO=$(python3 -c "import json;print(json.load(open('$OUTDIR/crosscheck.json'))['ratio_to_log_fps'])")
+if [ "$WINDOWED" != "True" ]; then
+  # 采集窗内一条 FPS 行都没落下 → 这次对账拿的是整段运行的中位数, 不可信, 不放行
+  echo "crosscheck 没能按采集窗过滤 (窗内无 FPS 样本)" > "$OUTDIR/INVALID"
+  echo "[$LABEL] 无效轮: 采集窗内没有应用侧帧率样本"
+  exit 3
+fi
 if [ "$OK" != "1" ]; then
-  echo "crosscheck rel_diff=$REL > ${VKS_CROSSCHECK_MAX:-0.35} (内核侧与应用侧帧率对不上)" > "$OUTDIR/INVALID"
-  echo "[$LABEL] 无效轮: 帧率交叉校验不过 rel_diff=$REL"
+  echo "crosscheck 提交速率/应用帧率=$RATIO 不在 [0.5,6.0] 带内 (内核侧与应用侧差一个数量级)" > "$OUTDIR/INVALID"
+  echo "[$LABEL] 无效轮: 交叉校验不过 ratio=$RATIO"
   exit 3
 fi
 
