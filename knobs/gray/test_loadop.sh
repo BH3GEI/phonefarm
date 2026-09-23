@@ -21,7 +21,7 @@ set -uo pipefail
 
 SERIAL="${REFBENCH_SERIAL:-91253241019A}"
 PKG=io.github.hgamey.refbench
-FRAMES="${FRAMES:-1800}"
+FRAMES="${FRAMES:-1800}"   # refbench 的 frames = 帧数; 它每帧发 2 次提交
 INTENSITY="${INTENSITY:-8}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUTDIR="${1:-$HERE/../evidence/05_loadop}"
@@ -38,24 +38,34 @@ arm() { # $1=臂名  $2=层(none|rewrite)  $3=knob.loadop(off|on)
 
   if [ "$layer" = "rewrite" ]; then
     # 只挂 .so + 开属性, 不让 enable_layer.sh 自己启动 (我们要带 intent 参数启动)
-    bash "$HERE/enable_layer.sh" loadop "$PKG" --keep-prop >/dev/null 2>&1
+    if ! bash "$HERE/enable_layer.sh" loadop "$PKG" --keep-prop >/dev/null 2>&1; then
+      echo "  挂层失败, 这一臂作废 (不要把它当成无层对照)" >&2; return 1
+    fi
     ashell "am force-stop $PKG"
   fi
 
+  # 必须用 --es: refbench 的 extras 全走字符串解析, --ei 会被静默丢掉,
+  # 结果是 frames/intensity 悄悄退回默认值而脚本还以为自己设上了。
   ashell "am start -n $PKG/android.app.NativeActivity \
-          --es scene bw_pingpong --es run_id $name --ei frames $FRAMES \
-          --ei intensity $INTENSITY --es knob.loadop $knob" >/dev/null 2>&1
+          --es scene bw_pingpong --es run_id $name --es frames $FRAMES \
+          --es intensity $INTENSITY --es knob.loadop $knob" >/dev/null 2>&1
 
   # 全局属性一旦置上, 期间启动的、lib 目录里没有本 .so 的 Vulkan 应用会起不来
   # (实测 cn.nubia.gameassist 会崩溃重启)。所以**一检测到层已加载就立刻清掉**,
   # 把暴露窗口压到几秒, 而不是等这一臂整个跑完。层已在 refbench 进程里, 清掉不影响它。
   local i p
   if [ "$layer" = "rewrite" ]; then
+    local got=""
     for i in $(seq 1 30); do
-      [ -n "$(ashell "su -c 'cat $FILES/knobs_layer_out.json 2>/dev/null'" | tr -d '\r')" ] && break
+      got=$(ashell "su -c 'cat $FILES/knobs_layer_out.json 2>/dev/null'" | tr -d '\r')
+      [ -n "$got" ] && break
       sleep 1
     done
     ashell "su -c 'setprop debug.vulkan.layers \"\"'"
+    if [ -z "$got" ]; then
+      echo "  等不到层的 marker: 层没挂上, 这一臂作废 (不要当成无层对照)" >&2
+      ashell "am force-stop $PKG"; return 1
+    fi
     echo "  (全局属性已清, 暴露窗口约 ${i} 秒)"
   fi
   for i in $(seq 1 60); do

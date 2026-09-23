@@ -99,6 +99,7 @@ struct DevDisp {
     PFN_vkQueuePresentKHR QueuePresentKHR = nullptr;
     PFN_vkCreateRenderPass CreateRenderPass = nullptr;
     PFN_vkCreateRenderPass2 CreateRenderPass2 = nullptr;
+    PFN_vkDestroyRenderPass DestroyRenderPass = nullptr;
 };
 
 static std::mutex g_mtx;
@@ -121,11 +122,20 @@ static std::atomic<uint64_t> g_rp_created{0};   // 第几个被创建的 render 
 struct Effective {
     uint64_t pass;        // render pass 创建序号
     uint32_t attachment;  // 该 pass 里的第几个 attachment
-    uint64_t begins;      // 这个被改写的 pass 实际被 BeginRenderPass 用了多少次
+    // 这个被改写的 pass 被 vkCmdBeginRenderPass **录制**了多少次。
+    // 注意是录制不是提交: 应用若预录命令缓冲反复提交, 这个数会偏小(录一次提交五千次);
+    // 录了却没提交则会偏大。refbench 每帧重录, 所以那里的数字精确。
+    // harness 只应把它当作"这条改写到底有没有被用上"的**布尔判据**, 不要当调用次数用。
+    uint64_t begins;
 };
 static std::vector<Effective> g_effective;
-// 被改写过的 VkRenderPass 句柄 -> g_effective 下标, 用来回答"改了之后到底用没用上"
-static std::map<VkRenderPass, size_t> g_rewritten;
+// 被改写过的 VkRenderPass 句柄 -> 它对应的**全部** g_effective 下标。
+// 一个 pass 可能有多个 attachment 被改, 只记最后一个会让其余条目永远 begins=0,
+// harness 会把它们误读成"没生效"。
+static std::map<VkRenderPass, std::vector<size_t>> g_rewritten;
+// effective 不设上限会在长跑的真游戏里无限涨 (每 300 帧还要整份序列化+fsync)。
+static const size_t RK_MAX_EFFECTIVE = 256;
+static uint64_t g_effective_dropped = 0;
 
 static bool read_bool_prop(const char* name) {
     char v[PROP_VALUE_MAX] = {0};
@@ -306,6 +316,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     d.CreateRenderPass2 = (PFN_vkCreateRenderPass2)gdpa(*pDev, "vkCreateRenderPass2");
     if (!d.CreateRenderPass2)
         d.CreateRenderPass2 = (PFN_vkCreateRenderPass2)gdpa(*pDev, "vkCreateRenderPass2KHR");
+    d.DestroyRenderPass = (PFN_vkDestroyRenderPass)gdpa(*pDev, "vkDestroyRenderPass");
     { std::lock_guard<std::mutex> lk(g_mtx); g_dev[key(*pDev)] = d; }
     return r;
 }
@@ -373,7 +384,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
     }
     {
         std::lock_guard<std::mutex> lk(g_mtx);
-        for (auto& h : hits) { g_rewritten[*out] = g_effective.size(); g_effective.push_back(h); }
+        auto& idxs = g_rewritten[*out];
+        for (auto& h : hits) {
+            if (g_effective.size() >= RK_MAX_EFFECTIVE) { g_effective_dropped++; continue; }
+            idxs.push_back(g_effective.size());
+            g_effective.push_back(h);
+        }
     }
     RK_LOG("改写 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
            (unsigned long long)idx, hits.size());
@@ -409,7 +425,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
     }
     {
         std::lock_guard<std::mutex> lk(g_mtx);
-        for (auto& h : hits) { g_rewritten[*out] = g_effective.size(); g_effective.push_back(h); }
+        auto& idxs = g_rewritten[*out];
+        for (auto& h : hits) {
+            if (g_effective.size() >= RK_MAX_EFFECTIVE) { g_effective_dropped++; continue; }
+            idxs.push_back(g_effective.size());
+            g_effective.push_back(h);
+        }
     }
     RK_LOG("改写2 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
            (unsigned long long)idx, hits.size());
@@ -421,10 +442,26 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
 // 实测 refbench 会把 LOAD 和 DONT_CARE 两个 pass 对象都建出来、只绑其中一个,
 // 于是不加区分的 effective 会把一次空改写报成生效。
 static void note_begin(VkRenderPass rp) {
-    if (rp == VK_NULL_HANDLE) return;
+    // 只读档没有任何改写, 这里不该占 CmdBeginRenderPass 的热路径去抢全局锁
+    if (!g_rewrite_loadop || rp == VK_NULL_HANDLE) return;
     std::lock_guard<std::mutex> lk(g_mtx);
     auto it = g_rewritten.find(rp);
-    if (it != g_rewritten.end()) g_effective[it->second].begins++;
+    if (it == g_rewritten.end()) return;
+    for (size_t i : it->second) g_effective[i].begins++;
+}
+
+// 句柄回收是真事: 驱动会复用非 dispatchable handle 的数值。不摘掉已销毁的句柄, 后来
+// 某个**没被改写**的 pass 复用到同一个数值, 就会把 begins 记到一条已死的改写上 ——
+// 正好是 begins 这个计数要防的那种假阳性。
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyRenderPass(
+    VkDevice dev, VkRenderPass rp, const VkAllocationCallbacks* a) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.DestroyRenderPass) {
+        RK_LOG_ONCE("DestroyRenderPass: 查不到下层函数");
+        return;
+    }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_rewritten.erase(rp); }
+    d.DestroyRenderPass(dev, rp, a);
 }
 
 static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass(
@@ -482,6 +519,7 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
     RK_HOOK("vkCmdBeginRenderPass2", rk_CmdBeginRenderPass2);
     RK_HOOK("vkCmdBeginRenderPass2KHR", rk_CmdBeginRenderPass2);
     RK_HOOK("vkCreateRenderPass", rk_CreateRenderPass);
+    RK_HOOK("vkDestroyRenderPass", rk_DestroyRenderPass);
     RK_HOOK("vkCreateRenderPass2", rk_CreateRenderPass2);
     RK_HOOK("vkCreateRenderPass2KHR", rk_CreateRenderPass2);
     RK_HOOK("vkQueuePresentKHR", rk_QueuePresentKHR);
@@ -497,6 +535,7 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     RK_HOOK("vkQueuePresentKHR", rk_QueuePresentKHR);
     RK_HOOK("vkCmdBeginRenderPass", rk_CmdBeginRenderPass);
     RK_HOOK("vkCreateRenderPass", rk_CreateRenderPass);
+    RK_HOOK("vkDestroyRenderPass", rk_DestroyRenderPass);
     if (dev == VK_NULL_HANDLE) return nullptr;
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return nullptr; d = it->second; }

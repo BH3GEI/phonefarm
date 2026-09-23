@@ -158,7 +158,13 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 case "${1:-}" in
   probe)   ashell "su -c 'setprop $LOADOP_PROP 0'"; mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
   # 改写档: 与 probe 唯一的差别就是这个属性, A/B 两臂只切它一个
-  loadop)  ashell "su -c 'setprop $LOADOP_PROP 1'"; mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
+  loadop)
+    ashell "su -c 'setprop $LOADOP_PROP 1'"
+    # 回读: 写不进就静默退化成只读档, 而自报里 knob 会变成 gray_readonly_probe、
+    # unavailable_reason 还是 null, harness 根本看不出这一轮没开改写
+    [ "$(ashell "getprop $LOADOP_PROP" | tr -d '\r')" = "1" ] \
+      || { echo "setprop $LOADOP_PROP 没生效, 拒绝按改写档继续" >&2; exit 1; }
+    mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
   target)
     [ -n "${2:-}" ] || { echo "target 要给包名" >&2; exit 2; }
     ashell "su -c 'setprop $LOADOP_PROP 0'"; mount_layer "$2" "$KEEP" ;;
