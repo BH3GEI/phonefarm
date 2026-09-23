@@ -1685,7 +1685,10 @@ pub fn run_batch(cfg: &BatchCfg) -> Result<i32, String> {
         }
 
         // 遥测通道(被测包)
-        let tele_ok = phone.telemetry_setup(&plan.package);
+        let tele_root = phone.telemetry_setup(&plan.package);
+        // HDC 无 root 仍可采 hidumper 等公开指标。telemetry_setup 的返回值
+        // 表示 root 权限,不能把它当成鸿蒙遥测整体是否可用。
+        let tele_ok = tele_root || phone.backend_name() == "hdc";
 
         // 方法切片列表(空=整模块一次跑)
         let methods: Vec<Option<String>> = if plan.methods.is_empty() {

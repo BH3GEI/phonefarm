@@ -505,7 +505,7 @@ pub fn from_android(raw: &str, pkg: &str) -> Telemetry {
     t
 }
 
-/// OpenHarmony: 分段原始输出 → 快照(hdc shell 本身即 root,root 层恒采)
+/// OpenHarmony: 分段原始输出 → 快照。root 权限由设备层探测后写入。
 pub fn from_oh(raw: &str) -> Telemetry {
     let ss = split_sections(raw);
     let mut t = Telemetry::default();
@@ -572,7 +572,6 @@ pub fn from_oh(raw: &str) -> Telemetry {
     if let Some(s) = sec(&ss, "procnet") { t.proc_net_raw = raw_cut(s, 500); }
     if let Some(s) = sec(&ss, "cgroup") { t.cgroup_raw = raw_cut(s, 400); }
     if let Some(s) = sec(&ss, "dmesg") { t.dmesg_tail = raw_cut(s, 800); }
-    t.root = Some(true);
     t
 }
 
@@ -702,6 +701,6 @@ mod tests {
         let t2 = from_oh(&format!("-----PF:fpscount-----\n{O_FPS}\n-----PF:faultcnt-----\n{O_FAULT}"));
         assert_eq!(t2.frames_total, Some(3497));
         assert_eq!(t2.crash_count, Some(0));
-        assert_eq!(t2.root, Some(true), "OH shell 即 root");
+        assert_eq!(t2.root, None, "原始输出不含权限信息,由设备层写入");
     }
 }

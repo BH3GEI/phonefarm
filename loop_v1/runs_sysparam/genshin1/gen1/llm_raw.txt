@@ -1,0 +1,5 @@
+[
+  {"why":"复现并确认已知的访存上限收益，把 DDR 与 LLCC 同时钉到上限做归因基线","params":{"bus.DDR.boost_freq":"5333000","bus.LLCC.boost_freq":"1350000"}},
+  {"why":"单独验证把 GPU 最低档位锁到最高档能否压低帧时，单参数便于归因功耗代价","params":{"gpu.min_pwrlevel":"0"}},
+  {"why":"验证小核与大核 governor 换成 performance 后调度响应性对 p95 帧时的影响","params":{"cpu.policy0.scaling_governor":"performance","cpu.policy6.scaling_governor":"performance"}}
+]

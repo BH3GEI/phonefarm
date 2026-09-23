@@ -87,6 +87,16 @@ am start -n com.khronos.vulkan_samples/.SampleLauncherActivity --es cmd \
 cached process，`pidof` 仍然有值。拿它当结束判据会让每一轮都空等满超时再判成无效。
 → 用 (a) 里那行 `Total device memory leaked` 当结束信号。
 
+## 3b. 测试条件里必须记下来的：主动散热风扇
+
+红魔有主动散热风扇，**风扇自身耗电会进功耗读数**，而它**不在** `device_snapshot.sh`
+的 38 行快照里。所以：
+
+- `run_vks.sh` 每轮把 `fan_enable` / `fan_speed_level` 单独存成 `fan.json`；
+- `vks_report.py` 跨轮比对，各轮不一致就打警告 —— 风扇开/关不能混进臂间差异；
+- `run_ab.sh` 保证整批对照期间风扇状态恒定：**已经开着就原样不动**（挡位可能是用户手动选的），
+  只有关着时才由我们打开并在结束时还原。要的是"恒定"，不是某个特定挡位。
+
 ## 4. 轮内有效性判定(任一条不过 → `INVALID`，证据保留、样本不计、就地重试至多 2 次)
 
 1. 采集窗内 GPU 提交数 ≥ 200(低于此值 = 没在出帧)
@@ -128,5 +138,10 @@ bash run_ab.sh render_passes 0 1 5     # loadOp/storeOp 两臂，交错 5v5
 bash run_ab.sh subpasses    0 1 5      # subpass 合并 vs 两个 render pass
 ```
 
-`frames` 要给够：本机真实渲染约 340 fps，而每轮要跨过 §3(b) 的空跑段 + settle + 12s
-采集窗，所以缺省 3000 帧不够，建议 `run_ab.sh <sample> <a> <b> 5 <outdir> 30000`。
+`frames` 的缺省值已经按本机实测定为 **30000**：真实渲染约 340 fps，而每轮要先跨过
+§3(b) 的空跑段（约 20000 帧），再留出 settle 与 12s 采集窗。给少了应用会在采集开始前
+就跑完自退，采到的全是空窗 —— 这正是头几轮全判无效的原因。
+
+汇总链已用合成的 5v5 数据离线自检过（`analyze.py` → `vks_report.py` 全通，
+p = 0.007937 即 5v5 的理论下限 2/252）；`run_ab.sh` 的 `one()` 三条分支
+（有效 / 硬失败 / 三次无效放弃）也单独验过。
