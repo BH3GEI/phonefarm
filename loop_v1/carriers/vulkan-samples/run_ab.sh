@@ -101,5 +101,5 @@ done
 
 echo "══ 汇总"
 "$PF" analyze "$OUT/a*/summary.json" "$OUT/b*/summary.json" > "$OUT/analyze.json"
-python3 "$HERE/vks_report.py" --root "$OUT" --sample "$SAMPLE" \
+"$PF" vks-report --root "$OUT" --sample "$SAMPLE" \
         --config-a "$CFG_A" --config-b "$CFG_B" | tee "$OUT/report.txt"

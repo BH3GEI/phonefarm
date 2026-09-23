@@ -82,7 +82,7 @@ impl Num {
             Num::Float(x) => Num::Float(py_round(x, n)),
         }
     }
-    fn from_json(v: &PyVal) -> Option<Num> {
+    pub fn from_json(v: &PyVal) -> Option<Num> {
         match v {
             // Python 的 isinstance(x, (int, float)) 对 bool 也成立 (bool 是 int 的子类),
             // 但 summary.json 里这些字段从来不是布尔, 这里不特殊照顾。
@@ -103,7 +103,7 @@ impl From<Num> for PyVal {
 }
 
 /// `statistics.median`: 奇数个原样返回 (int 还是 int), 偶数个取两中位数的均值 (真除法, 必为 float)。
-fn median(xs: &[Num]) -> Option<Num> {
+pub fn median(xs: &[Num]) -> Option<Num> {
     if xs.is_empty() {
         return None;
     }
@@ -436,7 +436,7 @@ fn join(base: &str, name: &str) -> String {
 }
 
 /// 单个路径段的通配匹配: `*` 任意串、`?` 单字符、`[abc]` / `[!abc]` 字符类。
-fn fnmatch(name: &str, pat: &str) -> bool {
+pub fn fnmatch(name: &str, pat: &str) -> bool {
     let (n, p): (Vec<char>, Vec<char>) = (name.chars().collect(), pat.chars().collect());
     fn go(n: &[char], p: &[char]) -> bool {
         match p.first() {

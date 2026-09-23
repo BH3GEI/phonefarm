@@ -33,8 +33,9 @@
 白盒靶子在同级的 `refbench` 仓库。`sr_loop` 是已结项的前序实验，不在当前主线上。
 
 **进行中，别写成已完成**：`loop_v1/` 的判定口径（解析→归因→统计→判据收口→白名单→判定→
-画面判据→模型交互/本地变异器）已经全部收进 Rust，剩下 `autoloop.py`（编排与设备驱动）、
-报告类与设备端 shell 脚本还没收。上层的 `game_opt_loop` 那边，`optimize` 总入口、agent skill 与
+画面判据→模型交互/本地变异器）、两通路对照、Vulkan-Samples 三道闸与两臂判读面、refbench/vks
+报告都已经收进 Rust，剩下 `autoloop.py`（编排与设备驱动）、载体构建/路线工具、
+设备端 shell 与 `knobs/` 那批还没收。上层的 `game_opt_loop` 那边，`optimize` 总入口、agent skill 与
 可视化前端都已经落地，还差的只是系统参数与画面流程改写两层的真机评测（等本仓库的
 `eval --request`）。写目标形态时要标明状态。
 

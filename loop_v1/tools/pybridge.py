@@ -2,7 +2,7 @@
 """pybridge.py — 还没搬走的 Python 拿统计口径的唯一通道 (迁移期专用)
 
 离散度、漂移、精确置换检验、置换反演 CI、快照比对这些已经搬进 phonefarm 二进制
-(`src/loopstat.rs` / `src/loopreport.rs`)。`refbench_report.py` 与 `auto/autoloop.py`
+(`src/loopstat.rs` / `src/loopreport.rs`)。`auto/autoloop.py`
 还在把它们当库用, 于是统一从这里转调。
 
 **不要在这个文件里重新实现任何统计量。** 口径只能有一份: 两份实现哪怕只差一个舍入位,

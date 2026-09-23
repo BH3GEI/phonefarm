@@ -7,7 +7,7 @@
 ```
 bash run_m0.sh                    # 全套电池, 零交互, 产物在 ../runs_refbench/
 bash run_refbench.sh <label> <outdir> <scene> <intensity> <loadop> <frames>   # 单轮
-python3 refbench_report.py --root ../runs_refbench                            # 六判据汇总
+phonefarm refbench-report --root ../runs_refbench                            # 六判据汇总
 ```
 
 要点:
@@ -19,9 +19,10 @@ python3 refbench_report.py --root ../runs_refbench                            # 
 - **无效轮纪律**：采集窗内出现热事件或非干净退出 → 该轮标 `INVALID`，证据保留、
   样本不计、就地重试（至多 2 次）。每轮起跑前有 GPU 温度回落轮询；跑测期间开
   设备风扇、结束还原（风扇不在 38 行快照内，单独存取还原）。
-- **判据 4 的映射**（归因结论 vs 靶子自报瓶颈）冻结在 `refbench_report.py` 的
-  `RULES` 里，连同脚本自身 sha256 写进报告——事后改规则哈希对不上（harness v2
-  判据 5 的种子）。
+- **判据 4 的映射**（归因结论 vs 靶子自报瓶颈）冻结在 `rules_frozen.py`
+  （生成过现存证据的那份判读源码，原封不动）里，其 sha256 连同 `RULES`（现于
+  `src/refbenchreport.rs`）写进报告——事后改规则哈希对不上（harness v2 判据 5
+  的种子）。报告本体由 `phonefarm refbench-report --root <runs目录>` 产出。
 - **harness v2 衔接**：`run_refbench.sh` 是刻意收窄的负载专属面；负载插件接口
   落地后本文件整体即插件实现，编排一行不用改。
 

@@ -2,7 +2,7 @@
 # run_m0.sh — refbench M0 全套判据电池, 零交互
 #
 # 序列: 强度阶梯 (判据 2) → 交错 5v5 loadop 两臂 (判据 1/3) → frag/idle 变体 (判据 4)
-#       → 末快照 (判据 5) → 回放自检 (判据 6) → refbench_report.py 汇总
+#       → 末快照 (判据 5) → 回放自检 (判据 6) → phonefarm refbench-report 汇总
 # 无效轮 (热事件/非干净退出) 就地重试至多 2 次, 证据全部保留。
 set -uo pipefail
 
@@ -101,12 +101,7 @@ trap - EXIT
 bash "$RB/replay_refbench.sh" "$OUT" > "$OUT/replay1.log" 2>&1
 echo $? > "$OUT/replay_exit.txt"
 
-python3 - "$RB" "$OUT" <<'PYEOF'
-import os, sys
-rel = os.path.relpath(os.path.join(sys.argv[1], "refbench_report.py"), sys.argv[2])
-with open(os.path.join(sys.argv[2], "report.cmd"), "w") as f:
-    f.write(f'python3 "{rel}" --root .\n')
-PYEOF
+printf '%s\n' '. ../tools/pf_bin.sh' '"$PF" refbench-report --root .' > "$OUT/report.cmd"
 (cd "$OUT" && bash report.cmd) > "$OUT/report.json"
 bash "$RB/replay_refbench.sh" "$OUT" > "$OUT/replay2.log" 2>&1
 R2=$?
