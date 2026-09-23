@@ -1,6 +1,6 @@
 # knobs — 可改动面：黑盒系统旋钮 + 灰盒 API 注入层
 
-> 立项 2026-09-21 · 上游依赖 [BH3GEI/phonefarm](https://github.com/BH3GEI/phonefarm)（loop_v1 是驱动方）
+> 立项 2026-09-21 · 上游依赖本仓库根目录的 phonefarm（`../loop_v1` 是驱动方）
 > 分工：harness 那条线单独有会话在跑；本仓库只提供「能改什么」，不碰编排/采集/判定
 > 配套：[HGamey/refbench](https://github.com/HGamey/refbench) 是白档靶子（已知答案的考场）
 
@@ -24,7 +24,7 @@
 ## 1. 一句话目标
 
 给 harness 一个**可插拔的旋钮库**：黑档是系统级开关，灰档是 API 拦截层。
-每一条对应 `phonefarm/docs/MOBILE_GPU_OPT_ROUTES.md` 里的一条路线，能被 harness 从外部驱动。
+每一条对应 [`../docs/MOBILE_GPU_OPT_ROUTES.md`](../docs/MOBILE_GPU_OPT_ROUTES.md) 里的一条路线，能被 harness 从外部驱动。
 
 ## 2. 边界
 

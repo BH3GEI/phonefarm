@@ -1,6 +1,6 @@
 # knobs — 可改动面：黑盒系统旋钮 + 灰盒 API 注入层
 
-给 [phonefarm](https://github.com/BH3GEI/phonefarm) 的 loop_v1 harness 提供**能改什么**：
+给本仓库的 [`../loop_v1`](../loop_v1) harness 提供**能改什么**：
 黑档是系统级开关（DVFS / 限帧 / 热 / 调度 / 刷新率），灰档是 Vulkan layer 注入
 （render pass 观测 + LoadOp/精度/分辨率/shader 改写）。跑测分离——本仓库不碰编排/采集/判定。
 
