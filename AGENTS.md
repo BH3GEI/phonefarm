@@ -33,8 +33,9 @@
 白盒靶子在同级的 `refbench` 仓库。`sr_loop` 是已结项的前序实验，不在当前主线上。
 
 **进行中，别写成已完成**：`loop_v1/` 的 Python 工具链与 `knobs/` 的 shell 脚本
-正在往 Rust 内核里收。上层的 `game_opt_loop` 那边也在做总入口、agent skill 与可视化前端。
-这些都还没落地，文档里写目标形态时要标明状态。
+正在往 Rust 内核里收。上层的 `game_opt_loop` 那边，`optimize` 总入口、agent skill 与
+可视化前端都已经落地，还差的只是系统参数与画面流程改写两层的真机评测（等本仓库的
+`eval --request`）。写目标形态时要标明状态。
 
 ## 能力族与常用命令
 
