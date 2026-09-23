@@ -23,16 +23,20 @@ mkdir -p "$OUT"
 GLSLC="$NDK/shader-tools/$HOST_TAG/glslc"
 [ -x "$GLSLC" ] || { echo "缺 glslc: $GLSLC" >&2; exit 1; }
 "$GLSLC" -O "$ROOT/layer/copyprobe_copy.comp" -o "$OUT/copyprobe_copy.spv"
-python3 - "$OUT/copyprobe_copy.spv" > "$OUT/copy_spv.h" <<'PYEOF'
+"$GLSLC" -O "$ROOT/layer/upop.comp" -o "$OUT/upop.spv"
+python3 - "$OUT/copyprobe_copy.spv" "$OUT/upop.spv" > "$OUT/copy_spv.h" <<'PYEOF'
 import sys
-d = open(sys.argv[1], "rb").read()
-print("static const unsigned char kCopySpv[] = {")
-for i in range(0, len(d), 16):
-    print("  " + ",".join(str(b) for b in d[i:i+16]) + ",")
-print("};")
-print(f"static const unsigned int kCopySpvLen = {len(d)};")
+def emit(name, path):
+    d = open(path, "rb").read()
+    print(f"static const unsigned char {name}[] = {{")
+    for i in range(0, len(d), 16):
+        print("  " + ",".join(str(b) for b in d[i:i+16]) + ",")
+    print("};")
+    print(f"static const unsigned int {name}Len = {len(d)};")
+emit("kCopySpv", sys.argv[1])
+emit("kUpopSpv", sys.argv[2])
 PYEOF
-echo "shader: $OUT/copyprobe_copy.spv ($(wc -c < "$OUT/copyprobe_copy.spv" | tr -d ' ') B) -> copy_spv.h"
+echo "shader: copy=$(wc -c < "$OUT/copyprobe_copy.spv" | tr -d ' ')B upop=$(wc -c < "$OUT/upop.spv" | tr -d ' ')B -> copy_spv.h"
 
 "$CXX" -O2 -Wall -fPIC -std=c++17 -fno-exceptions -fno-rtti \
     -static-libstdc++ -Wl,--exclude-libs,ALL \

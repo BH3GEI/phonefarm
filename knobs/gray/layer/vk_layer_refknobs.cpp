@@ -28,6 +28,8 @@
 #else
 static const unsigned char kCopySpv[] = {0};
 static const unsigned int kCopySpvLen = 0;
+static const unsigned char kUpopSpv[] = {0};
+static const unsigned int kUpopSpvLen = 0;
 #endif
 
 // ── layer 协商接口 (来自 vk_layer.h, ABI 稳定) ──
@@ -163,6 +165,7 @@ static std::atomic<uint64_t> g_rp{0};
 // 答案的**真子集**; 两者效果可能不完全相等, 这一点如实记在 FEASIBILITY 里, 不含糊过去。
 static bool g_rewrite_loadop = false;
 static bool g_copyprobe = false;   // debug.knobs.copyprobe=1: 1:1 拷贝探针 (是改写, 非只读)
+static bool g_upop = false;        // debug.knobs.upop=1: 真超分算子 (gen1_loc3), dst 是送显分辨率
 static std::atomic<uint64_t> g_rp_created{0};   // 第几个被创建的 render pass (自报里的 pass 序号)
 
 struct Effective {
@@ -355,10 +358,11 @@ static void write_marker() {
         // 免得"空序列"和"还没采"在 harness 眼里长得一样 (评审 #5 的根因)
         json += std::string(",\"frame_seq_ready\":") + (g_seq_done ? "true" : "false");
         json += ",\"frame_seq\":[" + seq + "]";
-        if (g_copyprobe) {
+        if (g_copyprobe || g_upop) {
             std::lock_guard<std::mutex> lk(g_mtx);
             char b[256];
-            snprintf(b, sizeof b, ",\"copyprobe\":{\"copies\":%llu,\"subs\":%llu,\"dst\":[%u,%u,%u],\"disabled\":%s}",
+            snprintf(b, sizeof b, ",\"copyprobe\":{\"mode\":\"%s\",\"copies\":%llu,\"subs\":%llu,\"dst\":[%u,%u,%u],\"disabled\":%s}",
+                     g_upop ? "upop" : "copy",
                      (unsigned long long)g_cp.copies, (unsigned long long)g_cp.subs,
                      g_cp.w, g_cp.h, g_cp.fmt, g_cp.disabled ? "true" : "false");
             json += b;
@@ -441,9 +445,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     g_rewrite_loadop = read_bool_prop("debug.knobs.loadop");
     g_dump_passes = read_bool_prop("debug.knobs.passdump");
     g_copyprobe = read_bool_prop("debug.knobs.copyprobe");
-    if (g_copyprobe) g_dump_passes = true;   // 探针的 src/dst/替换全部建立在溯源表上
-    RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d",
-           self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe);
+    g_upop = read_bool_prop("debug.knobs.upop");
+    if (g_copyprobe || g_upop) g_dump_passes = true;   // 探针/算子的 src/dst/替换全部建立在溯源表上
+    RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d upop=%d",
+           self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe, (int)g_upop);
     auto* link = reinterpret_cast<RkInstCreateInfo*>(const_cast<void*>(ci->pNext));
     while (link && !(link->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
                      link->function == RK_LAYER_LINK_INFO))
@@ -861,7 +866,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBindDescriptorSets(
         if (v.size() > 32) v.erase(v.begin(), v.end() - 32);
     }
     // copyprobe: 只在送显 pass 内替换 (UI draw 在别的 set 上, 不受影响)
-    if (g_copyprobe && !g_cp.disabled && sets && n > 0 && bp == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+    if ((g_copyprobe || g_upop) && !g_cp.disabled && sets && n > 0 && bp == VK_PIPELINE_BIND_POINT_GRAPHICS) {
         std::lock_guard<std::mutex> lk(g_mtx);
         auto ci = g_cb_cur_is_swap.find(cb);
         if (ci != g_cb_cur_is_swap.end() && ci->second) {
@@ -1035,11 +1040,13 @@ static bool copyprobe_ensure(VkDevice dev, const DevDisp& d, uint32_t w, uint32_
         RK_LOG_ONCE("copyprobe 停用: src fmt=%u 不是 R8G8B8A8_UNORM, 算子不适用", fmt);
         g_cp.disabled = true; return false;
     }
-    if (kCopySpvLen == 0) { RK_LOG_ONCE("copyprobe 停用: 内嵌 SPV 为空 (构建没编 shader?)"); g_cp.disabled = true; return false; }
+    const unsigned char* spv = g_upop ? kUpopSpv : kCopySpv;
+    unsigned int spv_len = g_upop ? kUpopSpvLen : kCopySpvLen;
+    if (spv_len == 0) { RK_LOG_ONCE("copyprobe 停用: 内嵌 SPV 为空 (构建没编 shader?)"); g_cp.disabled = true; return false; }
     VkResult r;
     if (g_cp.pipe == VK_NULL_HANDLE) {
         VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        smci.codeSize = kCopySpvLen; smci.pCode = (const uint32_t*)kCopySpv;
+        smci.codeSize = spv_len; smci.pCode = (const uint32_t*)spv;
         r = d.CreateShaderModule(dev, &smci, nullptr, &g_cp.sm);
         if (r != VK_SUCCESS) { cp_fail("CreateShaderModule", r); return false; }
 
@@ -1156,7 +1163,13 @@ static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPas
     // (上一版拿 pass 49 的 finalLayout=COLOR_ATTACHMENT_OPTIMAL 当注入时布局, 错了:
     //  那是渲染 pass 结束时的布局, 不是合成 pass 开始时的布局。2026-09-23 实测。)
     uint32_t src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (!copyprobe_ensure(d.dev, d, im.w, im.h, im.fmt)) return;
+    // copy 探针: dst 与 src 同尺寸 (逐纹素拷贝)。upop: dst 是送显分辨率 (放大就是算子干的活)。
+    uint32_t dw = im.w, dh = im.h;
+    if (g_upop) {
+        if (!g_swap_w || !g_swap_h) return;   // swapchain 还没建, 首几帧跳过
+        dw = g_swap_w; dh = g_swap_h;
+    }
+    if (!copyprobe_ensure(d.dev, d, dw, dh, im.fmt)) return;
 
     // compute set 绑上本帧的 src: view 直接用 pass 49 颜色附件的 view, sampler 从
     // 游戏对 src 的既有描述符写里拿 (combined image sampler 必须带 sampler)。
@@ -1301,7 +1314,7 @@ static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi, const
     }
     if (is_swap) {
         g_cb_cur_is_swap[cb] = true;
-        if (g_copyprobe) copyprobe_dispatch(cb, d, g_cb_prev_rp.count(cb) ? g_cb_prev_rp[cb] : VK_NULL_HANDLE,
+        if (g_copyprobe || g_upop) copyprobe_dispatch(cb, d, g_cb_prev_rp.count(cb) ? g_cb_prev_rp[cb] : VK_NULL_HANDLE,
                                             g_cb_prev_att.count(cb) ? g_cb_prev_att[cb] : std::vector<VkImageView>{});
     } else g_cb_cur_is_swap[cb] = false;
     if (g_sampling && g_frame_seq.size() < 400) {
