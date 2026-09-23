@@ -1,0 +1,15 @@
+### 命令: bash gray/enable_layer.sh probe   (时间 2026-09-23 05:22:50)
+/Users/mac/projects/knobs/gray/build/out/libVkLayer_refknobs.so: 1 file pushed, 0 skipped. 20.4 MB/s (22168 bytes in 0.001s)
+已挂层于 io.github.hgamey.refbench。启动它, 然后查:
+  adb -s 91253241019A shell run-as io.github.hgamey.refbench cat files/knobs_layer_out.json  (或 root cat 外部 files 目录)
+  layer_loaded=true → 问题1 机制成立; 游戏能进大世界 → 问题2 反作弊放行
+
+### 挂层后 settings 回读
+enable_gpu_debug_layers = 1
+gpu_debug_app = io.github.hgamey.refbench
+gpu_debug_layers = VK_LAYER_refknobs_readonly
+gpu_debug_layer_app = io.github.hgamey.refbench
+
+### .so 实际落点
+-rwxr-xr-x 1 root  root  22168 2026-09-23 20:22 /data/data/io.github.hgamey.refbench/libVkLayer_refknobs.so
+-rwxrwxrwx 1 shell shell 22168 2026-09-23 20:22 /data/local/tmp/libVkLayer_refknobs.so
