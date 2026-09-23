@@ -688,6 +688,7 @@ impl Adb {
 pub struct Hdc {
     key: Option<String>, // hdc -t <connect key>
     tmp: String,
+    is_root: AtomicBool, // 设备 shell 的实际权限;零权限指标必须留空
     /// 分辨率缓存: OH 无 wm size,取尺寸要付一趟截屏+回传;物理屏不会中途变,采一次终身用
     size_cache: OnceLock<(i32, i32)>,
     /// uiInput inputText 需要坐标(点哪输哪): 记最近一次 tap 落点。契约里 type 紧跟在
@@ -705,7 +706,7 @@ pub struct Hdc {
 
 impl Hdc {
     pub fn new(key: Option<String>, tmp: String) -> Self {
-        Hdc { key, tmp, size_cache: OnceLock::new(),
+        Hdc { key, tmp, is_root: AtomicBool::new(false), size_cache: OnceLock::new(),
               last_tap: (AtomicI32::new(-1), AtomicI32::new(-1)),
               fg_cache: std::sync::Mutex::new(None),
               frozen: AtomicBool::new(false) }
@@ -986,18 +987,22 @@ impl Hdc {
         self.run_timeout(&["file", "send", local, remote], 6000, "send");
     }
 
-    /// 遥测开局: 脚本上载。hdc shell 本身即 root(真机 id 实测 uid=0),恒 true;
+    /// 遥测开局: 探测 shell 权限并上载脚本。零售机的 hdc shell 可能是 uid=2000;
+    /// 此时仍采集公开指标,但跳过需要 root 的 /proc 与 dmesg 字段。
     /// 脚本文件承载整批命令——绕开 hdc 参数按空白切分的通道限制(inputText 实测教训)。
     pub fn telemetry_setup(&self, pkg: &str) -> bool {
+        let id = self.run_timeout(&["shell", "id"], 4000, "id");
+        let root = shell_uid_is_root(&String::from_utf8_lossy(&id));
+        self.is_root.store(root, Ordering::Relaxed);
         let l1 = format!("{}/_pf_t1.sh", self.tmp);
         let l2 = format!("{}/_pf_t2.sh", self.tmp);
-        if std::fs::write(&l1, tele_script_oh(pkg, false)).is_ok() {
+        if std::fs::write(&l1, tele_script_oh(pkg, root, false)).is_ok() {
             self.send(&l1, "/data/local/tmp/pf_t1.sh");
         }
-        if std::fs::write(&l2, tele_script_oh(pkg, true)).is_ok() {
+        if std::fs::write(&l2, tele_script_oh(pkg, root, true)).is_ok() {
             self.send(&l2, "/data/local/tmp/pf_t2.sh");
         }
-        true
+        root
     }
 
     /// 遥测采集: 每脚本一趟 shell;heavy 时两趟。限时失败返已得部分(解析容忍)。
@@ -1015,7 +1020,9 @@ impl Hdc {
     }
 
     pub fn telemetry(&self, heavy: bool, _pkg: &str) -> crate::telemetry::Telemetry {
-        crate::telemetry::from_oh(&self.telemetry_collect(heavy))
+        let mut t = crate::telemetry::from_oh(&self.telemetry_collect(heavy));
+        t.root = Some(self.is_root.load(Ordering::Relaxed));
+        t
     }
 
     /// 任意设备 shell 命令(CLI probe/exec 用)。整句一个参数交远端解释。
@@ -1280,10 +1287,18 @@ fi
     s
 }
 
-/// OpenHarmony 遥测脚本(shell 即 root,root 层恒采;hidumper 子命令均为真机实测形态)。
+/// 只认 shell 的直接 uid=0: 脚本经 `hdc shell sh` 执行,不会通过 su 提权。
+fn shell_uid_is_root(id: &str) -> bool {
+    id.split_whitespace()
+        .find_map(|word| word.strip_prefix("uid="))
+        .and_then(|value| value.split('(').next())
+        .and_then(|uid| uid.parse::<u32>().ok()) == Some(0)
+}
+
+/// OpenHarmony 遥测脚本。非 root 时省略无法读取的进程详情,保留 hidumper 等公开指标。
 /// OH 设备无 awk(实测教训)——聚合一律用 smaps_rollup/hidumper 自带汇总,不依赖文本工具。
-fn tele_script_oh(pkg: &str, heavy: bool) -> String {
-    let mut s = format!("PKG={pkg}\nset -- $(pidof $PKG 2>/dev/null); PID=$1\n");
+fn tele_script_oh(pkg: &str, root: bool, heavy: bool) -> String {
+    let mut s = format!("PKG={pkg}\nROOT={}\nset -- $(pidof $PKG 2>/dev/null); PID=$1\n", if root { 1 } else { 0 });
     if !heavy {
         s.push_str(r#"echo "-----PF:pid-----"; echo $PID
 echo "-----PF:meminfo-----"; head -48 /proc/meminfo 2>/dev/null
@@ -1296,7 +1311,7 @@ echo "-----PF:fpscount-----"; hidumper -s RenderService -a fpsCount 2>/dev/null 
 echo "-----PF:status-----"; if [ -n "$PID" ]; then grep -E "^(VmRSS|VmHWM|Threads):" /proc/$PID/status 2>/dev/null; fi
 echo "-----PF:nettcp-----"; cat /proc/net/tcp 2>/dev/null | wc -l; cat /proc/net/tcp6 2>/dev/null | wc -l
 echo "-----PF:faultcnt-----"; hidumper -e --list 2>/dev/null | head -10
-if [ -n "$PID" ]; then
+if [ "$ROOT" = "1" ] && [ -n "$PID" ]; then
 echo "-----PF:io-----"; cat /proc/$PID/io 2>/dev/null
 echo "-----PF:fd-----"; ls /proc/$PID/fd 2>/dev/null | wc -l; ls -l /proc/$PID/fd 2>/dev/null | grep -c socket
 fi
@@ -1309,12 +1324,12 @@ echo "-----PF:storage-----"; hidumper --storage 2>/dev/null | head -15
 echo "-----PF:df-----"; df -k /data 2>/dev/null | tail -1
 echo "-----PF:net-----"; hidumper --net 2>/dev/null | head -8
 echo "-----PF:ipc-----"; hidumper --ipc -a --stat 2>/dev/null | head -40
-if [ -n "$PID" ]; then
+if [ "$ROOT" = "1" ] && [ -n "$PID" ]; then
 echo "-----PF:smaps-----"; head -25 /proc/$PID/smaps_rollup 2>/dev/null
 echo "-----PF:procnet-----"; head -6 /proc/$PID/net/dev 2>/dev/null
 echo "-----PF:cgroup-----"; head -4 /proc/$PID/cgroup 2>/dev/null; cat /proc/$PID/schedstat 2>/dev/null
 fi
-echo "-----PF:dmesg-----"; dmesg 2>/dev/null | tail -8
+if [ "$ROOT" = "1" ]; then echo "-----PF:dmesg-----"; dmesg 2>/dev/null | tail -8; fi
 "#);
     }
     s
@@ -1711,6 +1726,26 @@ mod tests {
         assert!(matches!(Device::new(Some("hdc:5ce1227d".into()), "/tmp".into()), Device::Hdc(_)));
         assert!(matches!(Device::new(Some("emulator-5554".into()), "/tmp".into()), Device::Adb(_)));
         assert!(matches!(Device::new(None, "/tmp".into()), Device::Adb(_)));
+    }
+
+    #[test]
+    fn hdc_shell_root_is_detected_from_uid() {
+        assert!(shell_uid_is_root("uid=0(root) gid=0(root)"));
+        assert!(shell_uid_is_root("uid=0 gid=0"));
+        assert!(!shell_uid_is_root("uid=2000(shell) gid=2000(shell)"));
+        assert!(!shell_uid_is_root("permission denied"));
+        assert!(!shell_uid_is_root("uid=2000(shell) root=0"));
+    }
+
+    #[test]
+    fn hdc_telemetry_guards_privileged_sections() {
+        let light = tele_script_oh("com.example.app", false, false);
+        assert!(light.contains("ROOT=0"));
+        assert!(light.contains("hidumper --cpuusage"));
+        assert!(light.contains("if [ \"$ROOT\" = \"1\" ] && [ -n \"$PID\" ]; then"));
+        let heavy = tele_script_oh("com.example.app", false, true);
+        assert!(heavy.contains("hidumper --mem $PID"));
+        assert!(heavy.contains("if [ \"$ROOT\" = \"1\" ]; then echo \"-----PF:dmesg-----\""));
     }
 
     #[test]
