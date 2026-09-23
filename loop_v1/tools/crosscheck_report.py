@@ -43,11 +43,23 @@ def delta(a, b):
     return f"{d:+.3f}", f"{100.0 * d / b:+.1f}%"
 
 
+# 手机上物理上说得通的温度区间 (摄氏度)。超出这个范围的不是温度。
+TEMP_MIN_C = -20.0
+TEMP_MAX_C = 150.0
+
+
 def thermal_zones(path):
     """窗口中点直读的 /sys/class/thermal → {类型: 摄氏度}。
 
     内核这里的单位是毫摄氏度; 但不同热区偶有直接给摄氏度的, 故按量级判:
-    大于 1000 视为毫摄氏度。**0 不是 0 摄氏度**, 是这台机器没有这个传感器, 一律丢掉。
+    大于 1000 视为毫摄氏度。
+
+    两类值必须丢掉, 否则对比表里会混进根本不是温度的数字:
+
+      - **0 不是 0 摄氏度**, 是这台机器没有这个传感器;
+      - 折算完落在 -20..150 °C 之外的: 掉线的射频热区回 `-273000` (绝对零度哨兵),
+        而 `vbat` 这种压根不是热区的节点回的是**毫伏** (`4200` → 会被当成 4.2 °C)。
+        按量级猜单位本来就只能猜个大概, 物理区间是兜底的那道闸。
     """
     out = {}
     try:
@@ -63,7 +75,14 @@ def thermal_zones(path):
                     continue
                 if v == 0:
                     continue
-                out.setdefault(name, v / 1000.0 if abs(v) > 1000 else float(v))
+                # 名字里写明是电压的, 直接不收: `vbat` 回的是毫伏 (`4200`),
+                # 折算完是 4.2, 物理区间拦不住它 —— 量级判不出来的只能按名字判。
+                if any(k in name.lower() for k in ("vbat", "volt", "vph")):
+                    continue
+                c = v / 1000.0 if abs(v) > 1000 else float(v)
+                if not (TEMP_MIN_C <= c <= TEMP_MAX_C):
+                    continue
+                out.setdefault(name, c)
     except OSError:
         pass
     return out
