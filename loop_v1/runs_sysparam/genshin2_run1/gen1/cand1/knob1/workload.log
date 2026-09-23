@@ -1,0 +1,16 @@
+════ 启动脚本模式 (Script Mode) ════
+目标任务: loop_v1_sp_knob1
+运行ID:   20260923-115536-11173-0
+单轮步数: 5 | 轮数: 1 | 总执行步: 5
+监控应用: com.miHoYo.Yuanshen (Root 遥测: 开启)
+落盘目录: ./tasks/loop_v1_sp_knob1/runs/20260923-115536-11173-0
+────────────────────────────────────
+[1/5] 动作: sleep 等待 3000ms | CPU:34% | PSS:2928.8MB | 电池:41.0℃
+[2/5] 动作: exec 执行 shell "input swipe 900 400 2000 400 12000" | FPS:0 | CPU:34% | PSS:2931.3MB | 电池:41.0℃
+[3/5] 动作: exec 执行 shell "input swipe 900 400 2000 400 12000" | FPS:0 | CPU:34% | PSS:2932.2MB | 电池:41.0℃
+[4/5] 动作: exec 执行 shell "input swipe 900 400 2000 400 12000" | FPS:0 | CPU:34% | PSS:2931.5MB | 电池:41.0℃
+[5/5] 动作: sleep 等待 1000ms | FPS:0 | CPU:34% | PSS:2928.7MB | 电池:41.0℃
+────────────────────────────────────
+summary: run=20260923-115536-11173-0 stop=done steps=5 calls=0 tokens=0 wall=56.5s achieved=true
+📊 查看遥测指标曲线: phonefarm stats 20260923-115536-11173-0
+🔍 检查单步动作回溯: phonefarm show 20260923-115536-11173-0

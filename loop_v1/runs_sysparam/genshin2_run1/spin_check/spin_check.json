@@ -1,0 +1,7 @@
+{
+ "spinning": true,
+ "moved_fraction": 0.8749,
+ "gate": 0.2,
+ "sampled_pixels": 51072,
+ "note": "画面在动, 负载生效"
+}

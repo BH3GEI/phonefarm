@@ -1,0 +1,5 @@
+[
+  {"why":"已知线索显示访存下限吃紧,只改两条总线频率验证单独抬总线是否复现 frame_p95 改善","params":{"bus.DDR.boost_freq":"5333000","bus.LLCC.boost_freq":"1350000"}},
+  {"why":"测 GPU 侧:钉住 GPU 最低性能档防止降频,看对帧时尾部的独立贡献","params":{"gpu.min_pwrlevel":"0"}},
+  {"why":"测 CPU 调度侧:两簇改 performance 治理并抬小核下限,看调度器响应性对帧稳定性的影响","params":{"cpu.policy0.scaling_governor":"performance","cpu.policy6.scaling_governor":"performance","cpu.policy0.scaling_min_freq":"1785600","cpu.policy6.scaling_min_freq":"1382400"}}
+]

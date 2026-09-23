@@ -1,0 +1,213 @@
+{
+ "version": "sysparam_v1",
+ "alpha_regression": 0.05,
+ "alpha_win_bonferroni": 0.016667,
+ "n_metrics": 3,
+ "metrics": [
+  {
+   "id": "frame_p95",
+   "better": "lower"
+  },
+  {
+   "id": "fps_mean",
+   "better": "higher"
+  },
+  {
+   "id": "power_w_mean",
+   "better": "lower"
+  }
+ ],
+ "pairs_per_candidate": 5,
+ "min_reachable_p": 0.007936507936507936,
+ "reachable": true,
+ "temp_cap_c": 70.0,
+ "power_in_verdict": true,
+ "power_note": "功耗计入判定 (基线轮全程放电态; 停充: CHARGE_SUSPENDED /sys/class/qcom-battery/charging_enabled: 1 -> 0)",
+ "keep_condition": "至少一个指标显著改善 (p < alpha_win) 且没有任何指标显著变差 (p < 0.05)",
+ "abort_conditions": [
+  "旋钮未全部生效",
+  "SoC 结温超过 temp_cap_c",
+  "轮末快照与轮前不一致"
+ ],
+ "power_measurable": true,
+ "power_in_verdict_mode": "auto",
+ "baseline_on_battery": true,
+ "charge_suspend_log": [
+  "CHARGE_SUSPENDED /sys/class/qcom-battery/charging_enabled: 1 -> 0",
+  "CHARGE_STATE status=Discharging current_now=-21000 capacity=100 on_battery=yes"
+ ],
+ "charge_restore_log": [
+  "CHARGE_RESTORED /sys/class/qcom-battery/charging_enabled: -> 1",
+  "CHARGE_STATE status=Charging current_now=-1100000 capacity=100 on_battery=no"
+ ],
+ "power_reasons": [
+  "放电态(已停充), 用 |V x I| (本机 power_now 单位有误, 不采用)"
+ ],
+ "temp_cap_derivation": {
+  "floor_c": 70.0,
+  "margin_c": 10.0,
+  "baseline_max_c": 55.2,
+  "formula": "max(floor, baseline_max + margin)"
+ },
+ "cooldown_target_c": 50.2,
+ "cooldown_derivation": {
+  "floor_c": 40.0,
+  "baseline_start_c": 49.2,
+  "formula": "min(max(floor, baseline_start + 1), temp_cap - 2)",
+  "on_timeout": "如实记录后继续 (组内 ABBA 交替已让两臂承受同样的残余热漂移), 不作废本组"
+ },
+ "baseline": {
+  "title": "baseline",
+  "n_runs": 2,
+  "runs": [
+   "base1",
+   "base2"
+  ],
+  "metrics": {
+   "frame_p50": {
+    "values": [
+     16.655,
+     16.659
+    ],
+    "median": 16.657,
+    "mean": 16.657,
+    "min": 16.655,
+    "max": 16.659,
+    "dispersion_pct": 0.024,
+    "drift": {
+     "slope_per_run": null,
+     "slope_pct_per_run": null,
+     "monotonic_frac": null
+    }
+   },
+   "frame_p95": {
+    "values": [
+     20.9642,
+     19.2967
+    ],
+    "median": 20.1305,
+    "mean": 20.1305,
+    "min": 19.2967,
+    "max": 20.9642,
+    "dispersion_pct": 8.283,
+    "drift": {
+     "slope_per_run": null,
+     "slope_pct_per_run": null,
+     "monotonic_frac": null
+    }
+   },
+   "frame_p99": {
+    "values": [
+     33.7572,
+     28.5367
+    ],
+    "median": 31.1469,
+    "mean": 31.1469,
+    "min": 28.5367,
+    "max": 33.7572,
+    "dispersion_pct": 16.761,
+    "drift": {
+     "slope_per_run": null,
+     "slope_pct_per_run": null,
+     "monotonic_frac": null
+    }
+   },
+   "frame_mean": {
+    "values": [
+     17.2893,
+     16.8821
+    ],
+    "median": 17.0857,
+    "mean": 17.0857,
+    "min": 16.8821,
+    "max": 17.2893,
+    "dispersion_pct": 2.383,
+    "drift": {
+     "slope_per_run": null,
+     "slope_pct_per_run": null,
+     "monotonic_frac": null
+    }
+   },
+   "gpu_active_mean": {
+    "values": [
+     13.865,
+     13.2782
+    ],
+    "median": 13.5716,
+    "mean": 13.5716,
+    "min": 13.2782,
+    "max": 13.865,
+    "dispersion_pct": 4.324,
+    "drift": {
+     "slope_per_run": null,
+     "slope_pct_per_run": null,
+     "monotonic_frac": null
+    }
+   },
+   "gpu_active_p95": {
+    "values": [
+     14.5877,
+     14.2686
+    ],
+    "median": 14.4281,
+    "mean": 14.4281,
+    "min": 14.2686,
+    "max": 14.5877,
+    "dispersion_pct": 2.212,
+    "drift": {
+     "slope_per_run": null,
+     "slope_pct_per_run": null,
+     "monotonic_frac": null
+    }
+   },
+   "queue_p50": {
+    "values": [
+     2.3909,
+     2.2927
+    ],
+    "median": 2.3418,
+    "mean": 2.3418,
+    "min": 2.2927,
+    "max": 2.3909,
+    "dispersion_pct": 4.193,
+    "drift": {
+     "slope_per_run": null,
+     "slope_pct_per_run": null,
+     "monotonic_frac": null
+    }
+   },
+   "fps_mean": {
+    "values": [
+     57.839,
+     59.234
+    ],
+    "median": 58.5365,
+    "mean": 58.5365,
+    "min": 57.839,
+    "max": 59.234,
+    "dispersion_pct": 2.383,
+    "drift": {
+     "slope_per_run": null,
+     "slope_pct_per_run": null,
+     "monotonic_frac": null
+    }
+   },
+   "bw_median": {
+    "values": [
+     7050.0,
+     7150
+    ],
+    "median": 7100.0,
+    "mean": 7100.0,
+    "min": 7050.0,
+    "max": 7150,
+    "dispersion_pct": 1.408,
+    "drift": {
+     "slope_per_run": null,
+     "slope_pct_per_run": null,
+     "monotonic_frac": null
+    }
+   }
+  }
+ }
+}
