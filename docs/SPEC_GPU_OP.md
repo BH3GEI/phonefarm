@@ -241,7 +241,7 @@ refbench 载体下 t 检验的主指标是**帧时 p95**, 不是算子耗时: �
 
 refbench 契约写死 `submits_per_frame: 1`, 所以提交间隔可直接当帧间隔。
 原神那种每帧两次提交的必须先做自检, 否则帧率会算成两倍
-(见 `loop_v1/tools/parse_trace.py` 的 `detect_submits_per_frame`)。
+(见 `src/looptrace.rs` 的 `detect_submits_per_frame`)。
 
 **A/B 污染防护**: 候选臂 `postfx.active` 必须为 true, 基线臂必须为 false;
 不符即整轮作废。算子没挂上却当成有效样本, 等于拿 A 去和 A 比。

@@ -47,7 +47,7 @@ KNOBS: dict[str, dict[int, str]] = {
     },
 }
 
-# 主指标与它在这套采集里的口径 (见 ../tools/parse_trace.py 文件头)
+# 主指标与它在这套采集里的口径 (见 src/looptrace.rs 文件头)
 METRIC_MEANING = {
     "frame_p95": "帧时间 p95 (ms), 提交节奏推出来的真实出帧",
     "frame_p50": "帧时间中位数 (ms)",

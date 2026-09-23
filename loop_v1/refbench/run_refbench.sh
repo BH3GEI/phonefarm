@@ -23,6 +23,7 @@ SERIAL="${REFBENCH_SERIAL:-91253241019A}"
 PKG=io.github.hgamey.refbench
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TOOLS="$ROOT/loop_v1/tools"
+. "$TOOLS/pf_bin.sh"
 COOL_TO="${REFBENCH_COOL_MC:-40000}"   # kgsl 温度回落阈值, 毫摄氏度
 
 ashell() { adb -s "$SERIAL" shell "$@" </dev/null; }
@@ -72,8 +73,8 @@ done
 # 6) 收证据: 靶子自报 JSON + 轮末快照 + 解析 + 归因
 adb -s "$SERIAL" pull "/storage/emulated/0/Android/data/$PKG/files/refbench_out.json" "$OUTDIR/refbench_out.json" >/dev/null
 ashell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDIR/snap_after_run.txt" 2>&1
-python3 "$TOOLS/parse_trace.py" "$OUTDIR/trace.txt" --comm RefbenchDrv > "$OUTDIR/summary.json"
-python3 "$TOOLS/attribute.py" "$OUTDIR/summary.json" > "$OUTDIR/attribution.json"
+"$PF" parse-trace "$OUTDIR/trace.txt" --comm RefbenchDrv > "$OUTDIR/summary.json"
+"$PF" attribute "$OUTDIR/summary.json" > "$OUTDIR/attribution.json"
 
 # 7) 轮内有效性判定: 采集窗有热事件 / 非干净退出 → 无效 (证据保留, 不进样本)
 NT=$(python3 -c "import json;print(json.load(open('$OUTDIR/summary.json'))['n_thermal_events'])")

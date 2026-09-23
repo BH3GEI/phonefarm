@@ -8,6 +8,7 @@ set -uo pipefail
 
 ROOT="${1:?用法: replay_refbench.sh <runs根目录>}"
 TOOLS="$(cd "$(dirname "$0")/../tools" && pwd)"
+. "$TOOLS/pf_bin.sh"
 COMM="${REFBENCH_COMM:-RefbenchDrv}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -18,7 +19,7 @@ echo "── refbench 离线回放自检 (不连设备, --comm $COMM) ──"
 for d in "$ROOT"/*/; do
   [ -f "$d/trace.txt" ] && [ -f "$d/summary.json" ] || continue
   n=$((n+1)); label=$(basename "$d")
-  python3 "$TOOLS/parse_trace.py" "$d/trace.txt" --comm "$COMM" > "$TMP/$label.json" 2>/dev/null
+  "$PF" parse-trace "$d/trace.txt" --comm "$COMM" > "$TMP/$label.json" 2>/dev/null
   if cmp -s "$TMP/$label.json" "$d/summary.json"; then echo "  ✓ $label summary 字节一致"
   else echo "  ✗ $label summary 不一致"; fail=1; fi
 done
@@ -26,7 +27,7 @@ done
 for d in "$ROOT"/*/; do
   [ -f "$d/attribution.json" ] || continue
   label=$(basename "$d")
-  python3 "$TOOLS/attribute.py" "$d/summary.json" > "$TMP/$label.attr.json" 2>/dev/null
+  "$PF" attribute "$d/summary.json" > "$TMP/$label.attr.json" 2>/dev/null
   cmp -s "$TMP/$label.attr.json" "$d/attribution.json" && echo "  ✓ $label attribution 字节一致" \
     || { echo "  ✗ $label attribution 不一致"; fail=1; }
 done

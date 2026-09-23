@@ -4,7 +4,7 @@
 为什么需要它
 ------------
 refbench 是我们自己的靶子, 可以把提交线程改名成稳定契约 (`RefbenchDrv`), 所以
-`parse_trace.py --comm RefbenchDrv` 直接写死就行。Vulkan-Samples 是上游第三方工程,
+`phonefarm parse-trace --comm RefbenchDrv` 直接写死就行。Vulkan-Samples 是上游第三方工程,
 提交线程名由 GameActivity / Adreno 驱动决定, 不同样例、不同 Android 版本都可能不一样,
 写死等于埋雷。
 

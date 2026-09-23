@@ -24,6 +24,7 @@ WORKLOAD="${3:-refbench}"
 
 SERIAL=91253241019A
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+. "$ROOT/loop_v1/tools/pf_bin.sh"
 LEAD=6          # 负载起跑后等几秒再开采 (让负载进入稳态)
 CAPDUR=30       # 采集窗口, 两条通路共用这一段
 export PATH="$PATH:/Users/mac/Library/Android/sdk/platform-tools"
@@ -184,7 +185,7 @@ wait "$SP_PID"  || echo "[$LABEL] 提示: HiSmartPerf 通路非零退出 (看 JS
 # 3) 拉回 ftrace 原始证据并解析
 adb -s "$SERIAL" pull "/data/local/tmp/xcheck_$LABEL.txt" "$OUTDIR/trace.txt" >/dev/null 2>&1
 adb -s "$SERIAL" shell "rm -f /data/local/tmp/xcheck_$LABEL.txt" >/dev/null 2>&1
-python3 "$ROOT/loop_v1/tools/parse_trace.py" "$OUTDIR/trace.txt" --comm "$COMM" > "$OUTDIR/summary.json"
+"$PF" parse-trace "$OUTDIR/trace.txt" --comm "$COMM" > "$OUTDIR/summary.json"
 
 [ "$WORKLOAD" = refbench ] && adb -s "$SERIAL" shell "am force-stop $PKG" >/dev/null 2>&1 || true
 
