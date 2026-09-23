@@ -129,3 +129,19 @@ python3 tools/report.py --baseline 'runs/ctrl*' --knob 'runs/knob*' \
     --snap-before runs/snap_before.txt --snap-after runs/snap_final.txt > runs/report.json
 bash tools/replay_test.sh runs
 ```
+
+---
+
+## 全自动版本: 连「挑哪个旋钮」也交给机器
+
+上面这套是手工挑一个旋钮跑一次。`auto/` 把挑旋钮这一步接进循环:
+真机探出可写系统参数的白名单 → 冻结判定规则 → 大模型每代挑几组参数 →
+逐组「等冷 → A/B 交替 → 置换检验 → 保留/淘汰 → 还原」→ 结果喂回模型挑下一组。
+
+```bash
+python3 auto/autoloop.py --out runs_sysparam/<标签> --generations 2 --children 3 --pairs 5
+cd auto && python3 -m unittest      # 纯函数单测
+```
+
+判定看三样 (帧时 p95 / 帧率 / 整机功耗), 不是只看省电; 温控保护相关的节点永远不进
+白名单。白名单、判定口径、旋钮实现与证据目录说明见 [`auto/README.md`](auto/README.md)。
