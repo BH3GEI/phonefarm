@@ -1,0 +1,11 @@
+{
+  "comm": "binder:2965_4",
+  "share": 0.9822,
+  "dist": {
+    "binder:2965_4": 774,
+    "RenderThread": 9,
+    "RenderEngine": 4,
+    "kgsl_hwsched": 1
+  },
+  "total": 788
+}

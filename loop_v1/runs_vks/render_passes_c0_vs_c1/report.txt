@@ -1,0 +1,42 @@
+══════════════════════════════════════════════════════════════════════════════
+Vulkan-Samples 两臂对照 · sample=render_passes
+  A 臂 (--config 0): 颜色附件 loadOp=LOAD + 深度附件 storeOp=STORE, 不用 vkCmdClearAttachments
+  B 臂 (--config 1): 颜色附件 loadOp=CLEAR + 深度附件 storeOp=DONT_CARE, 用 vkCmdClearAttachments
+  判读脚本 sha256: ef6202a5d3aa7b5d9596a4978f8a40ac64bffcd36bbf70aff59ab7ca830003d5
+══════════════════════════════════════════════════════════════════════════════
+
+提交线程 (由 pick_comm.py 从 trace 里认出, 非写死):
+  binder:<应用提交线程>: 10 轮, 占比 0.963~0.991
+
+测试条件 · 主动散热风扇 (不在 38 行快照里, 单独存证):
+  enable=1 level=5: 10 轮
+
+逐轮条件 (这两项一变, 所有逐帧指标的口径就变了):
+  a1:spf=1,app_fps=120.2  a2:spf=1,app_fps=60.1  a3:spf=1,app_fps=60.2  a4:spf=1,app_fps=119.8  a5:spf=1,app_fps=60.2  b1:spf=1,app_fps=60.2  b2:spf=6,app_fps=60.1  b3:spf=1,app_fps=99.5  b4:spf=1,app_fps=120.0  b5:spf=1,app_fps=60.1
+  ⚠ submits_per_frame 在同一批里取了 [1, 6] —— 逐帧指标 (frame_p50/p95, gpu_active_mean, fps_mean) 是按它分组算的, 口径不一致, 不可比。
+  ⚠ 应用帧率在同一批里取了 [60, 100, 120] —— 开着 vsync 时它就是面板刷新率, 本机面板自适应刷新, 各轮帧预算不同, 逐帧指标没有可比性。
+  → 这一批里只有 bw_median 可用: 它是 kgsl_buslevel 的直接观测量, 不经过分帧。
+
+样本: A=5 轮  B=5 轮
+
+臂内离散度 (max-min)/median:
+  A: frame_p95=49.391%  gpu_active_mean=65.648%  bw_median=49.153%
+  B: frame_p95=487.855%  gpu_active_mean=437.226%  bw_median=89.189%
+
+臂间对照 (精确置换检验, 全枚举, 无随机种子):
+  指标                        A 均值        B 均值           差       差%         p  显著
+  -----------------------------------------------------------------------------
+  frame_p95              15.4986     33.8993     18.4006  118.724  0.269841  否
+  frame_p50              10.0669     28.3576     18.2907  181.691  0.452381  否
+  frame_mean             11.7896     29.6861     17.8965  151.799  0.460317  否
+  gpu_active_mean         2.6251      4.9398      2.3148   88.179  0.468254  否
+  bw_median               2680.0      1110.0     -1570.0  -58.582  0.015873  是
+
+指标口径:
+  frame_p95: 帧时间 p95 (ms), 提交节奏推出来的真实出帧
+  frame_p50: 帧时间中位数 (ms)
+  gpu_active_mean: 每帧 GPU 真正在跑命令的时间 (ms), 不含排队
+  bw_median: kgsl_buslevel 的 avg_bw 中位数, GPU 侧总线带宽投票 (直接观测量)
+
+结论口径: 本文件只判'这套采集有没有把开关的差异测出来', 不判'这个优化值不值得做'。
+  测出显著差异的指标: bw_median

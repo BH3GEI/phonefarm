@@ -1,0 +1,23 @@
+{
+ "verdict": "提交/同步受限",
+ "evidence": "排队开销 6.09ms 占帧周期 71.2% (>25%)",
+ "actionable": "查 CPU 侧提交节奏与 fence 等待",
+ "measures": {
+  "frame_p50_ms": 8.556,
+  "frame_p95_ms": 17.0882,
+  "jitter_p95_minus_p50_ms": 8.5322,
+  "gpu_active_mean_ms": 2.3977,
+  "gpu_share_pct": 28.02,
+  "queue_p50_ms": 6.091,
+  "queue_share_pct": 71.19,
+  "n_thermal_events": 0,
+  "detected_fps_cap": null
+ },
+ "bandwidth": {
+  "ddr_cur_khz": 547000.0,
+  "ddr_boost_khz": 547000.0,
+  "gpu_bus_vote_median": 1100.0,
+  "gpu_bus_vote_max": 1800,
+  "bus_vote_headroom_pct": 38.89
+ }
+}
