@@ -40,7 +40,6 @@ import pybridge as WL                                       # noqa: E402
 import pybridge as V                                        # noqa: E402
 from pybridge import compare, describe, snapshot_diff       # noqa: E402
 import llm as LLM                                           # noqa: E402
-import spin_check as SPIN                                   # noqa: E402
 
 SERIAL = os.environ.get("SERIAL", "91253241019A")
 # 原神 7.1.0 之后手柄注入失效 (且失效是安静的: 脚本跑完、有帧时序, 但视角不转),
@@ -273,10 +272,14 @@ def check_spin(outdir: str) -> dict:
         drag.wait(timeout=30)
     except subprocess.TimeoutExpired:
         drag.kill()
+    paths = []
     for name, buf in (("spin_a.raw", a), ("spin_b.raw", b)):
-        with open(os.path.join(outdir, name), "wb") as f:
+        p = os.path.join(outdir, name)
+        with open(p, "wb") as f:
             f.write(buf)
-    v = SPIN.verdict(a, b)
+        paths.append(p)
+    # 判据在 src/framecheck.rs; 裸帧走文件路径不走 JSON —— 一张 13MB, base64 过桥不划算
+    v = WL.spin_verdict(*paths)
     with open(os.path.join(outdir, "spin_check.json"), "w") as f:
         json.dump(v, f, ensure_ascii=False, indent=1)
     return v
@@ -361,7 +364,7 @@ BAD_APPLY_TOKENS = ("KNOB_FAIL", "KNOB_REFUSE", "KNOB_PLAN_REJECTED",
 
 
 def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: float,
-                  power_available: bool, cool_c: float = COOL_C_FLOOR) -> dict:
+                  power_available: bool, metrics: list, cool_c: float = COOL_C_FLOOR) -> dict:
     """等冷 → A/B 交替 pairs 轮 → 置换检验 → 判定 → 还原。
 
     A/B **交替**而不是先跑完一臂再跑另一臂: 温度、光照、内存压力这些外生变量都在
@@ -468,7 +471,8 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
              if m.get("soc_temp_max_c") is not None]
     temp_max = max(temps) if temps else None
 
-    metrics = [m for m, _ in V.PRIMARY_METRICS if power_available or m != "power_w_mean"]
+    # metrics 由调用方从 rule["metrics"] 传进来 —— 判定那一侧用的就是同一张表,
+    # 两边各存一份的话, 将来只改一处就会出现「永远缺数据、永远不 KEEP」的哑火。
     cmps: dict = {}
     if len(knob_runs) >= 2 and len(ctrl_runs) >= 2:
         for met in metrics:
@@ -734,7 +738,7 @@ def main() -> int:
             cdir = os.path.join(gdir, f"cand{ci}")
             log(f"[gen{gen}/cand{ci}] {json.dumps(cand['params'], ensure_ascii=False)}")
             res = run_candidate(cand, wl, cdir, a.pairs, temp_cap, power_available,
-                                cool_c=cool_target)
+                                [m["id"] for m in rule["metrics"]], cool_c=cool_target)
             res["gen"], res["cand"] = gen, ci
             session_keys |= touched_keys(cand["params"], wl)
             all_results.append(res)

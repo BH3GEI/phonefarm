@@ -469,25 +469,43 @@ fn list_repr(xs: &[String]) -> String {
 }
 
 /// Python `int(cand.get(id, wl[id]['current'] or 默认))` 那一串的等价物。
-fn cross_val(cand: &[(String, String)], wl: &Whitelist, pid: &str, dflt: i64) -> i64 {
+///
+/// 解析不了就是错, 不是"取默认值"。默认值一律是**最宽松**的那一端, 拿它兜底等于
+/// 把 min<=max / pwrlevel 倒置这些闸门直接关掉 —— Python 那边 `int("abc")` 是抛
+/// ValueError 把整组打掉的, 这里照样报错。
+fn cross_val(cand: &[(String, String)], wl: &Whitelist, pid: &str, dflt: i64) -> Result<i64, String> {
     if let Some((_, v)) = cand.iter().find(|(k, _)| k == pid) {
-        return v.parse().unwrap_or(dflt);
+        return v.parse().map_err(|_| format!("{pid}={v} 不是整数"));
     }
     match wl_get(wl, pid).map(|s| s.current.as_str()) {
         // Python 的 `or`: 空串是假值, 退回默认
-        Some(c) if !c.is_empty() => c.parse().unwrap_or(dflt),
-        _ => dflt,
+        Some(c) if !c.is_empty() => c
+            .parse()
+            .map_err(|_| format!("{pid} 的探测原值 {c:?} 不是整数, 无法做跨项约束检查")),
+        _ => Ok(dflt),
     }
 }
 
-fn cross_val_f(cand: &[(String, String)], wl: &Whitelist, pid: &str, dflt: f64) -> f64 {
+fn cross_val_f(cand: &[(String, String)], wl: &Whitelist, pid: &str, dflt: f64) -> Result<f64, String> {
     if let Some((_, v)) = cand.iter().find(|(k, _)| k == pid) {
-        return v.parse().unwrap_or(dflt);
+        return v.parse().map_err(|_| format!("{pid}={v} 不是数字"));
     }
     match wl_get(wl, pid).map(|s| s.current.as_str()) {
-        Some(c) if !c.is_empty() => c.parse().unwrap_or(dflt),
-        _ => dflt,
+        Some(c) if !c.is_empty() => c
+            .parse()
+            .map_err(|_| format!("{pid} 的探测原值 {c:?} 不是数字, 无法做跨项约束检查")),
+        _ => Ok(dflt),
     }
+}
+
+/// 跨项约束里取不到数就整组作废 —— 把 Err 直接变成"这组不合法"。
+macro_rules! cross {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(why) => return (false, why),
+        }
+    };
 }
 
 /// Python 的 `1 << 62`
@@ -521,8 +539,10 @@ pub fn validate_candidate(cand: &[(String, String)], wl: &Whitelist) -> (bool, S
     for (pid, v) in cand {
         if let Some(stem) = pid.strip_suffix(".scaling_min_freq") {
             let mx_id = format!("{stem}.scaling_max_freq");
-            let mn: i64 = v.parse().unwrap_or(0);
-            let mx = cross_val(cand, wl, &mx_id, HUGE);
+            let Ok(mn) = v.parse::<i64>() else {
+                return (false, format!("{pid}={v} 不是整数"));
+            };
+            let mx = cross!(cross_val(cand, wl, &mx_id, HUGE));
             if mn > mx {
                 return (false, format!("{pid}={mn} 超过同簇 max={mx}"));
             }
@@ -533,8 +553,8 @@ pub fn validate_candidate(cand: &[(String, String)], wl: &Whitelist) -> (bool, S
     // 否则 min_pwrlevel 没进白名单时会把一切合法的 max_pwrlevel 都误判成倒置。
     let has = |k: &str| cand.iter().any(|(p, _)| p == k);
     if has("gpu.max_pwrlevel") || has("gpu.min_pwrlevel") {
-        let mx = cross_val(cand, wl, "gpu.max_pwrlevel", 0);
-        let mn = cross_val(cand, wl, "gpu.min_pwrlevel", HUGE);
+        let mx = cross!(cross_val(cand, wl, "gpu.max_pwrlevel", 0));
+        let mn = cross!(cross_val(cand, wl, "gpu.min_pwrlevel", HUGE));
         if mx > mn {
             return (
                 false,
@@ -544,16 +564,16 @@ pub fn validate_candidate(cand: &[(String, String)], wl: &Whitelist) -> (bool, S
     }
     // GPU devfreq min <= max
     if has("gpu.devfreq.min_freq") || has("gpu.devfreq.max_freq") {
-        let mn = cross_val(cand, wl, "gpu.devfreq.min_freq", 0);
-        let mx = cross_val(cand, wl, "gpu.devfreq.max_freq", HUGE);
+        let mn = cross!(cross_val(cand, wl, "gpu.devfreq.min_freq", 0));
+        let mx = cross!(cross_val(cand, wl, "gpu.devfreq.max_freq", HUGE));
         if mn > mx {
             return (false, format!("gpu.devfreq.min_freq={mn} 超过 max={mx}"));
         }
     }
     // 刷新率 min <= peak
     if has("setting.system.min_refresh_rate") || has("setting.system.peak_refresh_rate") {
-        let mn = cross_val_f(cand, wl, "setting.system.min_refresh_rate", 0.0);
-        let pk = cross_val_f(cand, wl, "setting.system.peak_refresh_rate", 1e9);
+        let mn = cross!(cross_val_f(cand, wl, "setting.system.min_refresh_rate", 0.0));
+        let pk = cross!(cross_val_f(cand, wl, "setting.system.peak_refresh_rate", 1e9));
         if mn > pk {
             return (
                 false,
@@ -573,7 +593,7 @@ pub fn validate_candidate(cand: &[(String, String)], wl: &Whitelist) -> (bool, S
 /// 输出按 param_id 排序, 所以同一组参数每次生成逐字节相同 (证据可比对)。
 /// 写入顺序里把「放宽上限」排在「抬高下限」之前, 少踩一次内核的 min<=max 夹取;
 /// knob_sysparam.sh 另有两遍写兜底。
-pub fn plan_text(cand: &[(String, String)], wl: &Whitelist) -> String {
+pub fn plan_text(cand: &[(String, String)], wl: &Whitelist) -> Result<String, String> {
     let rank = |pid: &str| -> (u8, String) {
         let first = if pid.ends_with("max_freq")
             || pid.ends_with("max_pwrlevel")
@@ -589,11 +609,14 @@ pub fn plan_text(cand: &[(String, String)], wl: &Whitelist) -> String {
     ids.sort_by_key(|(p, _)| rank(p));
     let mut lines = vec!["# loop_v1 sysparam plan".to_string()];
     for (pid, val) in ids {
-        if let Some(s) = wl_get(wl, pid) {
-            lines.push(format!("{}\t{}\t{}", s.kind, s.path, val));
-        }
+        // 白名单里没有这一项 = 调用方漏了校验。悄悄少写一行的后果是: 推到设备上的
+        // plan 与 result.json 里记的 params 不是同一组, 整份证据对不上账。
+        let Some(s) = wl_get(wl, pid) else {
+            return Err(format!("{pid} 不在白名单, 生成不了 plan"));
+        };
+        lines.push(format!("{}\t{}\t{}", s.kind, s.path, val));
     }
-    lines.join("\n") + "\n"
+    Ok(lines.join("\n") + "\n")
 }
 
 /// 给大模型看的白名单说明 (紧凑, 取值表超过 8 个时只给首尾与档数)。
@@ -1198,6 +1221,34 @@ setting.system.refresh_rate_mode.mode1_fps=60 (readback=1)
         .0);
     }
 
+    /// 白名单里没有的 id 生成不出 plan —— 悄悄少写一行会让推到设备上的 plan
+    /// 与 result.json 里记的 params 不是同一组。
+    #[test]
+    fn plan_text_refuses_unknown_ids() {
+        let wl = wl_of("");
+        let e = plan_text(&cand(&[("nope.nope", "1")]), &wl).unwrap_err();
+        assert!(e.contains("nope.nope"), "{e}");
+    }
+
+    /// 探测原值不是数字时, 跨项约束查不了就整组作废, 不能用"最宽松的默认值"放行。
+    #[test]
+    fn unparseable_current_fails_the_candidate_not_the_guard() {
+        let wl = wl_of("");
+        let mut broken = wl.clone();
+        for (pid, spec) in broken.iter_mut() {
+            if pid == "cpu.policy0.scaling_max_freq" {
+                spec.current = "auto".into();
+            }
+        }
+        // 只给 min, max 得从 current 取 —— 那个 current 是坏的
+        let (ok, why) = validate_candidate(
+            &cand(&[("cpu.policy0.scaling_min_freq", "2000000")]),
+            &broken,
+        );
+        assert!(!ok, "居然放行了");
+        assert!(why.contains("scaling_max_freq") && why.contains("auto"), "{why}");
+    }
+
     /// 取值表的报错文本里带 Python 列表 repr, 证据里是逐字节比的。
     #[test]
     fn value_table_error_keeps_python_list_repr() {
@@ -1221,8 +1272,8 @@ setting.system.refresh_rate_mode.mode1_fps=60 (readback=1)
         ]);
         let mut rev = c.clone();
         rev.reverse();
-        let t1 = plan_text(&c, &wl);
-        assert_eq!(t1, plan_text(&rev, &wl)); // 同一组参数, 逐字节相同
+        let t1 = plan_text(&c, &wl).unwrap();
+        assert_eq!(t1, plan_text(&rev, &wl).unwrap()); // 同一组参数, 逐字节相同
         for l in t1.lines().filter(|l| !l.starts_with('#')) {
             assert_eq!(l.split('\t').count(), 3, "{l}");
         }

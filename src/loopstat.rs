@@ -739,7 +739,13 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
             let (ok, why) = sysparam::validate_candidate(&pairs_arg(&req, "cand"), &wl_arg(&req));
             PyVal::List(vec![PyVal::Bool(ok), PyVal::Str(why)])
         }
-        "plan_text" => PyVal::Str(sysparam::plan_text(&pairs_arg(&req, "cand"), &wl_arg(&req))),
+        "plan_text" => match sysparam::plan_text(&pairs_arg(&req, "cand"), &wl_arg(&req)) {
+            Ok(t) => PyVal::Str(t),
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        },
         // 数字原样带过去 (int 进 int 出), 不在桥上做类型提升
         "rule_doc" => sysparam::rule_doc(
             req.get("temp_cap_c").unwrap_or(&PyVal::Null),
@@ -747,6 +753,15 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
             req.get("power_available").and_then(|v| v.as_bool()).unwrap_or(false),
             &s("power_note")),
         "env_stats" => sysparam::env_stats(&s("text")),
+        "deny_keywords" => PyVal::List(
+            sysparam::DENY_KEYWORDS.iter().map(|k| PyVal::Str(k.to_string())).collect()),
+        // 画面动没动: 裸帧走文件路径, 不塞进 JSON (13MB 一张, base64 过桥不划算)
+        // 读不到裸帧也按"没在转"回一个带 error 的结论, 而不是非零退出 ——
+        // 上游 autoloop 靠这个 dict 落证据再退出 3, 抛异常会把那条路绕掉。
+        "spin_verdict" => match (std::fs::read(s("frame_a")), std::fs::read(s("frame_b"))) {
+            (Ok(a), Ok(b)) => crate::framecheck::verdict(&a, &b),
+            (Err(e), _) | (_, Err(e)) => crate::framecheck::read_error(&e.to_string()),
+        },
         "decide" => sysparam::decide(
             &req.get("comparisons").cloned().unwrap_or(PyVal::Null),
             &sysparam::DecideCtx {

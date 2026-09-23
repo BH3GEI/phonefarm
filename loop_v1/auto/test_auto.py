@@ -5,8 +5,10 @@
 
 白名单构建/校验、plan 生成、功耗温度解析、判定规则已经搬进 `src/sysparam.rs`,
 对应的用例也跟着搬成了 Rust 测试 (`cd src && cargo test sysparam`) —— 口径只有一份,
-测试也只该有一份。这里剩下的是模型回包解析、密钥解析、局部变异、画面动没动、
-快照差异分类、回滚波及面, 以及整条链路的离线串测 (白名单那一头经 pybridge 转调)。
+测试也只该有一份。这里剩下的是模型回包解析、密钥解析、局部变异、
+回滚波及面, 以及整条链路的离线串测 (白名单那一头经 pybridge 转调二进制)。
+
+「画面动没动」也已搬进 `src/framecheck.rs` (`cargo test framecheck`)。
 
 涉及设备的部分不在这里测 —— 那部分由真机跑出来的 report.json 作证。
 """
@@ -21,7 +23,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 
 import pybridge as WL           # noqa: E402  (白名单/判定已搬进 src/sysparam.rs, 这里转调)
 import llm as LLM               # noqa: E402
-import spin_check as SPIN       # noqa: E402
 
 
 PROBE = """# probe_sysparam v1
@@ -217,7 +218,7 @@ class TestPipelineEndToEnd(unittest.TestCase):
                     kind, path, _val = line.split("\t")
                     self.assertIn(kind, ("sysfs", "setting"))
                     self.assertIn(path, allowed_paths)
-                    self.assertFalse(any(k in path.lower() for k in WL.DENY_KEYWORDS))
+                    self.assertFalse(any(k in path.lower() for k in WL.deny_keywords()))
 
     def test_model_output_is_filtered_not_trusted(self):
         """模型回包里夹带越界参数时, 整组作废, 不是「剔掉违规项后凑合跑」。"""
@@ -264,80 +265,6 @@ setting.system.refresh_rate_mode.mode4_fps=144 (readback=4)
                 if v:
                     seen.add(v)
         self.assertEqual(seen, {"1", "4"})   # 当前值 0 之外的全部可达
-
-
-class TestSpinCheck(unittest.TestCase):
-    """原神 7.1.0 之后手柄注入安静失效 —— 脚本跑完、有帧时序, 但视角不转。
-    这组测试钉住「画面真的在动」这条判据。"""
-
-    W, H = 64, 64          # 4096 像素: 大于抽样下限, 不会退化成只看一个点
-
-    def _frame(self, fill):
-        import struct
-        head = struct.pack("<III", self.W, self.H, 1)
-        return head + bytes(fill)
-
-    def _solid(self, r, g, b):
-        return self._frame([r, g, b, 255] * (self.W * self.H))
-
-    def test_identical_frames_are_not_spinning(self):
-        f = self._solid(10, 20, 30)
-        v = SPIN.verdict(f, f)
-        self.assertFalse(v["spinning"])
-        self.assertEqual(v["moved_fraction"], 0.0)
-        self.assertIn("7.1.0", v["note"])
-
-    def test_whole_frame_change_is_spinning(self):
-        v = SPIN.verdict(self._solid(10, 20, 30), self._solid(200, 210, 220))
-        self.assertTrue(v["spinning"])
-        self.assertEqual(v["moved_fraction"], 1.0)
-
-    def test_tiny_animation_does_not_count_as_spinning(self):
-        """静止场景里草和 UI 时钟也会动几个像素 —— 那不算视角在转。"""
-        import struct
-        px = [10, 20, 30, 255] * (self.W * self.H)
-        head = struct.pack("<III", self.W, self.H, 1)
-        a = head + bytes(px)
-        px2 = list(px)
-        for i in range(8):                   # 4096 个像素里只有 8 个大变 (0.2%)
-            px2[i * 4:i * 4 + 4] = [250, 250, 250, 255]
-        b = head + bytes(px2)
-        v = SPIN.verdict(a, b)
-        self.assertFalse(v["spinning"])
-
-    def test_sub_threshold_noise_is_ignored(self):
-        """编码噪声级别的浮动 (每通道 <= 16) 不算变化。"""
-        v = SPIN.verdict(self._solid(100, 100, 100), self._solid(110, 108, 112))
-        self.assertEqual(v["moved_fraction"], 0.0)
-
-    def test_malformed_capture_reports_error_not_a_pass(self):
-        """读不懂的帧一律判「没在转」——  宁可白停一次, 不要放过静止数据。"""
-        v = SPIN.verdict(b"", b"")
-        self.assertFalse(v["spinning"])
-        self.assertIn("error", v)
-
-    def test_header_length_is_derived_not_assumed(self):
-        """头 12 / 16 字节两种都要认, 对不上就报错而不是瞎猜。"""
-        import struct
-        px = bytes([1, 2, 3, 255] * (self.W * self.H))
-        w, h, p = SPIN.parse_screencap(struct.pack("<IIII", self.W, self.H, 1, 0) + px)
-        self.assertEqual((w, h, len(p)), (self.W, self.H, len(px)))
-        with self.assertRaises(ValueError):
-            SPIN.parse_screencap(struct.pack("<III", self.W, self.H, 1) + px[:-8])
-
-
-    def test_small_frames_do_not_degenerate_to_one_sample(self):
-        """帧比固定步长还小时要自动加密抽样, 否则一个像素变了就等于 100% 变了。"""
-        import struct
-        w = h = 16                            # 256 像素, 远小于固定步长下的样本需求
-        head = struct.pack("<III", w, h, 1)
-        px = [10, 20, 30, 255] * (w * h)
-        a = head + bytes(px)
-        px2 = list(px)
-        px2[0:4] = [250, 250, 250, 255]       # 256 个里只变 1 个
-        frac, total = SPIN.moved_fraction(a, head + bytes(px2))
-        self.assertEqual(total, 256)          # 全采, 而不是只采 4 个
-        self.assertAlmostEqual(frac, 1 / 256, places=6)
 
 
 class TestKnobRollbackBlastRadius(unittest.TestCase):
