@@ -1,0 +1,1 @@
+{"knob":"gray_loadop_dontcare","layer_loaded":true,"pkg":"io.github.hgamey.refbench","effective":[{"pass":2,"attachment":0,"field":"loadOp","from":"LOAD","to":"DONT_CARE","begins":14400}],"failed":[],"unavailable_reason":null,"readonly_stats":{"frames":1800,"render_pass_begins":16200,"render_passes_created":4}}
