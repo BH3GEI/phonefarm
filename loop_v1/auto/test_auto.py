@@ -246,7 +246,9 @@ class TestEnvStats(unittest.TestCase):
         self.assertIsNone(s["power_w_mean"])
         self.assertTrue(s["battery_charging"])
         self.assertEqual(s["battery_status"], "Charging")
-        self.assertIn("充电态", s["power_usable_reason"])
+        self.assertIn("非放电态", s["power_usable_reason"])
+        self.assertFalse(s["on_battery"])
+        self.assertEqual(s["power_source"], "usb")
         # 原始量照常留下, 停充测量做好后可以回头核
         self.assertAlmostEqual(s["usb_input_w_mean"], 10.0, places=3)
         self.assertEqual(s["current_now_ua_mean"], 1000000)
@@ -501,6 +503,55 @@ class TestFanIsEvidenceNotAKnob(unittest.TestCase):
 
 # unittest.main() 必须留在文件最末: 放在中间的话, 直接 `python3 test_auto.py`
 # 会在它下面的测试类还没定义时就开跑, 那几个类一声不响地不会被收集。
+
+
+class TestOnBatteryRule(unittest.TestCase):
+    """on_battery 的判据与 hwcond.rs::BatteryState::on_battery 一致:
+    status 不是 Charging **且** 电流确实是放电方向。两个判据都要看, 因为两个都会
+    单独骗人 —— 停充之后有的内核仍写 "Not charging"; current_now 在充放平衡时会过零。"""
+
+    def test_stop_charge_leaves_not_charging_but_still_counts(self):
+        s = V.env_stats("#battery_status=Not charging\n#battery_capacity=88\n"
+                        "#charge_suspended=yes\n"
+                        "ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n")
+        self.assertTrue(s["on_battery"])
+        self.assertTrue(s["charge_suspended"])
+        self.assertEqual(s["power_source"], "battery")
+        self.assertAlmostEqual(s["power_w_mean"], 6.0, places=3)
+        self.assertEqual(s["battery_capacity_pct"], "88")
+        self.assertIn("已停充", s["power_usable_reason"])
+
+    def test_not_charging_with_positive_current_is_not_on_battery(self):
+        """status 说 Not charging 但电流是正的 = 还在往电池里灌, 不算放电态。"""
+        s = V.env_stats("#battery_status=Not charging\n"
+                        "ENV 1.0 4000000 771000 NA 0 0 cpu-1-0 41000\n")
+        self.assertFalse(s["on_battery"])
+        self.assertIsNone(s["power_w_mean"])
+
+    def test_zero_current_is_not_on_battery(self):
+        """充放平衡的瞬间电流过零 —— 判不出放电态就不算。"""
+        s = V.env_stats("#battery_status=Not charging\n"
+                        "ENV 1.0 4000000 0 NA 0 0 cpu-1-0 41000\n")
+        self.assertFalse(s["on_battery"])
+        self.assertIsNone(s["power_w_mean"])
+
+
+class TestChargeCtlIsNotAKnob(unittest.TestCase):
+    """停充节点是测量前提, 不是可调参数 —— 它也进不了自动调参白名单。"""
+
+    def test_charging_nodes_never_enter_whitelist(self):
+        wl = WL.build_whitelist(WL.parse_probe(PROBE + """
+charge.qcom_battery_charging_enabled.writable=yes
+charge.qcom_battery_charging_enabled.effect=live
+"""))
+        self.assertTrue(all("charg" not in k.lower() for k in wl))
+        self.assertTrue(all("charg" not in v["path"].lower() for v in wl.values()))
+
+    def test_charge_path_cannot_be_requested_directly(self):
+        wl = WL.build_whitelist(WL.parse_probe(PROBE))
+        ok, _ = WL.validate_candidate(
+            {"/sys/class/qcom-battery/charging_enabled": "0"}, wl)
+        self.assertFalse(ok)
 
 
 class TestOrdinalHeuristic(unittest.TestCase):

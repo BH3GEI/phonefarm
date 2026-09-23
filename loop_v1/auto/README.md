@@ -113,11 +113,26 @@ GPU `min_pwrlevel` / `max_pwrlevel` / devfreq 的 min/max/governor、DDR 与 LLC
   `hwcond.rs::PowerSample::watt` 那样优先用它, 而是以 `|V x I|` 为准;
   `power_now` 只作为原始值记录并标一个 `power_now_plausible` 位。
 
-所以功耗进不进判定是个**显式开关** (`--power-in-verdict`, 缺省关闭), 不是
-"能测到就用" —— 充电态下测到的数看起来很正常, 悄悄拿它判保留/淘汰比不测还糟。
-功耗照常逐轮记录 (`power_rail` / `battery_status` / `current_now` / `voltage_now` /
-`usb_input_w_mean` 全部落盘), 报告里 `test_conditions.power_caveat` 注明
-「充电态, 功耗仅供参考」。停充测量另有人在做, 做好之后把开关打开即可把功耗加回判定。
+解法是**停充**: `charge_suspend.sh` 在测量期间把充电关掉, 让整机真由电池供电,
+测完自动恢复。节点表、12 秒等待、30% 电量下限、`on_battery` 判据全部照搬
+phonefarm `src/hwcond.rs` (PR #27 真机验过的那一版), 不另造一套 —— 本机管用的是
+`/sys/class/qcom-battery/charging_enabled`, 它不在 `power_supply` class 下,
+只看 `power_supply` 会整个错过。
+
+`on_battery` 要两个判据**同时**成立: `status` 不是 `Charging` **且** `current_now < 0`。
+两个都会单独骗人 —— 停充之后有的内核仍写 `Not charging` 而不是 `Discharging`,
+而 `current_now` 在充放平衡的瞬间会过零。
+
+功耗进不进判定因此是 `--power-in-verdict {auto,on,off}`, 缺省 `auto`:
+**基线轮每一轮都真的拿到放电态才计入**。不是"能测到就用" —— 充电态下测到的数
+看起来很正常, 悄悄拿它判保留/淘汰比不测还糟。
+
+停充失败不致命: 拿不到放电态就只是功耗这一项不进判定, 帧时与帧率照常测。
+功耗数据无论如何照常逐轮记录 (`power_source` / `on_battery` / `battery_status` /
+`battery_capacity_pct` / `current_now` / `voltage_now` / `usb_input_w_mean` /
+`power_usable_reason` 全部落盘), 报告里 `test_conditions.power_caveat` 写明结论。
+
+停充节点本身是**测量前提, 不是可调参数** —— 它进不了自动调参白名单, 有单测钉死。
 
 - **保留** = 任一指标显著改善, 且没有任何指标显著变差
 - **淘汰** = 其余情况
@@ -152,9 +167,12 @@ apply 前全量校验, 有任何一项越界就**整份拒绝, 一个字节都�
 # 只探白名单, 不跑实验 (几分钟, 会短暂改写几个节点并立刻还原)
 python3 loop_v1/auto/autoloop.py --out loop_v1/runs_sysparam/probe --probe-only
 
-# 完整闭环: 2 代 × 3 组, 每组 5 对 A/B
+# 完整闭环: 2 代 × 3 组, 每组 5 对 A/B (测量期间自动停充, 测完恢复)
 python3 loop_v1/auto/autoloop.py --out loop_v1/runs_sysparam/<标签> \
     --generations 2 --children 3 --pairs 5
+
+# 功耗强制不进判定 (例如电量低停不了充时)
+python3 loop_v1/auto/autoloop.py --out ... --power-in-verdict off
 
 # 不用大模型, 只用本地变异器 (离线也能跑通闭环)
 python3 loop_v1/auto/autoloop.py --out ... --no-llm

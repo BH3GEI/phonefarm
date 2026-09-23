@@ -17,6 +17,8 @@ U=/sys/class/power_supply/usb
 
 echo "#sample_env v1 dur=$DUR interval=$IVL"
 echo "#battery_status=$(cat $B/status 2>/dev/null)"
+echo "#battery_capacity=$(cat $B/capacity 2>/dev/null)"
+echo "#charge_suspended=$( [ -f /data/local/tmp/loop_v1_charge.state ] && echo yes || echo no)"
 # 主动散热风扇状态: 风扇自身耗电会进功耗读数, 所以每一轮都留一行证据, 好复核
 # 「同一组对照的两臂是同一风扇状态」。只读, 从不写。
 # 只取**设定档**类节点 (enable / level / pwm), 不取转速读数 (fan_speed_count、

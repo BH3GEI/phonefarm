@@ -101,14 +101,20 @@ def env_stats(text: str) -> dict:
     voltages: list[int] = []
     temps: list[float] = []
     status = ""
-    charging = False
+    capacity = None
+    charge_suspended = False
     fan_state = None
     n = 0
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("#battery_status="):
             status = line.split("=", 1)[1].strip()
-            charging = status.lower() in ("charging", "full")
+            continue
+        if line.startswith("#battery_capacity="):
+            capacity = line.split("=", 1)[1].strip() or None
+            continue
+        if line.startswith("#charge_suspended="):
+            charge_suspended = line.split("=", 1)[1].strip() == "yes"
             continue
         if line.startswith("#fan_state="):
             # 主动散热风扇自己耗电, 会进功耗读数。逐轮记下来, 好复核同一组对照的
@@ -144,6 +150,14 @@ def env_stats(text: str) -> dict:
     def avg(xs):
         return round(sum(xs) / len(xs), 4) if xs else None
 
+    # on_battery 的判据与 phonefarm hwcond.rs::BatteryState::on_battery 一致:
+    # status 不是 Charging **且** 电流确实是放电方向。两个判据都要看, 因为两个都会
+    # 单独骗人 —— 停充之后有的内核仍写 "Not charging" 而不是 "Discharging",
+    # 而 current_now 在充放平衡的瞬间会过零。
+    cur_mean = avg(currents)
+    charging = status.lower() == "charging"
+    on_battery = (not charging) and cur_mean is not None and cur_mean < 0
+
     now_mean = avg(now_watts)
     # 手机整机功耗合理区间。777W 这种读数只能说明单位不对, 不能进任何均值。
     now_plausible = now_mean is not None and PLAUSIBLE_W[0] <= now_mean <= PLAUSIBLE_W[1]
@@ -151,10 +165,14 @@ def env_stats(text: str) -> dict:
     out: dict = {
         "n_samples": n,
         "battery_status": status,
+        "battery_capacity_pct": capacity,
         "battery_charging": charging,
+        "charge_suspended": charge_suspended,
+        "on_battery": on_battery,
+        "power_source": "battery" if on_battery else "usb",
         "fan_state": fan_state,
         "power_rail": "battery",
-        "current_now_ua_mean": avg(currents),
+        "current_now_ua_mean": cur_mean,
         "voltage_now_uv_mean": avg(voltages),
         "power_now_w_mean": now_mean,
         "power_now_plausible": now_plausible,
@@ -166,16 +184,19 @@ def env_stats(text: str) -> dict:
         "soc_temp_max_c": max(temps) if temps else None,
         "soc_temp_mean_c": round(sum(temps) / len(temps), 3) if temps else None,
     }
-    if charging:
+    if not on_battery:
         out["power_usable_reason"] = (
-            f"充电态 (battery status={status or '?'}): USB 输入功率里含给电池充电的部分, "
-            "且充电电流随电量单调衰减, 量不到整机功耗")
+            f"非放电态 (status={status or '?'}, current_now 均值={cur_mean}): "
+            "USB 输入功率里含给电池充电的部分, 且充电电流随电量单调衰减, 量不到整机功耗。"
+            "跑之前用 charge_suspend.sh 停充即可")
     elif not vi_watts:
         out["power_usable_reason"] = "读不到 voltage_now/current_now"
     else:
         out["power_w_mean"] = avg(vi_watts)
         out["power_w_median"] = round(median(vi_watts), 4)
-        out["power_usable_reason"] = "放电态, 用 |V x I| (本机 power_now 单位有误, 不采用)"
+        out["power_usable_reason"] = (
+            "放电态" + ("(已停充)" if charge_suspended else "") +
+            ", 用 |V x I| (本机 power_now 单位有误, 不采用)")
     return out
 
 

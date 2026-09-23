@@ -57,7 +57,8 @@ def _find_adb() -> str:
 ADB = _find_adb()
 DEV_TMP = "/data/local/tmp"
 DEV_SCRIPTS = ["device_snapshot.sh", "ftrace_capture.sh"]
-AUTO_SCRIPTS = ["probe_sysparam.sh", "knob_sysparam.sh", "sample_env.sh"]
+AUTO_SCRIPTS = ["probe_sysparam.sh", "knob_sysparam.sh", "sample_env.sh",
+                "charge_suspend.sh"]
 
 # 等冷门槛的下界。真正的门槛在基线之后定 (见 main): 目标是「回到基线是在什么
 # 热态下量的」, 而不是一个拍脑袋的绝对温度 —— 连跑几十轮游戏之后设备根本降不到
@@ -177,6 +178,26 @@ def classify_diff(sd: dict) -> dict:
     }
 
 
+# ── 停充 (测功耗的前提) ──
+
+def charge_suspend() -> str:
+    """测功耗期间停充, 让整机真由电池供电。实现与判据照搬 hwcond.rs, 见脚本注释。
+
+    失败不致命: 拿不到放电态就只是功耗这一项不进判定 (env_stats 会如实报原因),
+    帧时与帧率照常测。绝不因为量不了功耗就不跑实验。
+    """
+    out = su(f"sh {DEV_TMP}/charge_suspend.sh suspend", timeout=90, want_status=True)
+    log("停充: " + " | ".join(out.strip().splitlines()[-2:]))
+    return out
+
+
+def charge_restore() -> str:
+    out = su(f"sh {DEV_TMP}/charge_suspend.sh restore", timeout=60, want_status=True)
+    if "CHARGE_RESTORE_FAIL" in out:
+        log(f"警告: 充电未能恢复, 保留 state 文件以便人工回滚:\n{out}")
+    return out
+
+
 # ── 单轮 ──
 
 def run_one(label: str, outdir: str, lead: int = 6, capdur: int = 30) -> dict:
@@ -266,6 +287,8 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
     if not cool.get("ok"):
         log(f"等冷未达标 ({cool.get('reason')}), 仍按 ABBA 交替继续, 已记进证据")
 
+    charge_log = charge_suspend()
+
     knob_runs, ctrl_runs = [], []
     apply_logs: list[str] = []
     apply_ok = True
@@ -325,8 +348,9 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
         aborted = f"实验过程异常, 已强制还原: {type(e).__name__}: {e}"
         log(aborted)
 
-    # 无论如何先还原, 再核快照
+    # 无论如何先还原 (旋钮 + 充电), 再核快照
     restore_log = restore()
+    charge_restore_log = charge_restore()
     status_log = su(f"sh {DEV_TMP}/knob_sysparam.sh status")
     snap_after = snapshot()
     with open(os.path.join(outdir, "snap_after.txt"), "w") as f:
@@ -370,6 +394,9 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
         "restore_log": restore_log.strip().splitlines(),
         "knob_state_after": status_log.strip().splitlines(),
         "cooldown": cool,
+        "charge_suspend_log": charge_log.strip().splitlines(),
+        "charge_restore_log": charge_restore_log.strip().splitlines(),
+        "on_battery_uniform": len({m.get("on_battery") for _, m in knob_runs + ctrl_runs}) <= 1,
         "snapshot_check": sd,
         "temp_max_c": temp_max,
         "temp_cap_c": temp_cap_c,
@@ -416,12 +443,12 @@ def main() -> int:
     ap.add_argument("--probe-only", action="store_true", help="只探白名单, 不跑实验")
     ap.add_argument("--baseline-runs", type=int, default=2,
                     help="冻结温度上限用的基线轮数")
-    ap.add_argument("--power-in-verdict", action="store_true",
+    ap.add_argument("--power-in-verdict", choices=("auto", "on", "off"), default="auto",
                     help="把整机功耗计入判定。**缺省关闭**: 本机插着 USB 时 USB 输入"
-                         "功率里约 46%% 是在给电池充电, 充电电流还随电量单调衰减, "
-                         "battery/power_now 的单位也有误 (读出过 777W) —— 充电态下"
-                         "测到的不是整机功耗。停充测量做好之后再打开。功耗数据照常"
-                         "逐轮记录, 只是不参与保留/淘汰。")
+                         "help 见 README。auto (缺省): 基线轮真的拿到放电态 "
+                         "(停充成功) 才计入; on: 强制计入; off: 强制不计入。"
+                         "插着 USB 充电时测到的不是整机功耗 —— USB 输入里约 46%% 是在给"
+                         "电池充电, 且充电电流随电量单调衰减。功耗数据无论如何照常逐轮记录。")
     a = ap.parse_args()
 
     out = os.path.abspath(a.out)
@@ -477,12 +504,15 @@ def main() -> int:
     cool = wait_cool()
     log(f"基线前等冷: {cool}")
     base_start_c = cool.get("c")
+    base_charge_log = charge_suspend()
     base_runs = []
     for i in range(1, a.baseline_runs + 1):
         m = run_one(f"sp_base{i}", os.path.join(out, "baseline", f"base{i}"))
         base_runs.append((f"base{i}", m))
         log(f"  base{i}: p95={m.get('frame_p95')}ms fps={m.get('fps_mean')} "
-            f"power={m.get('power_w_mean')}W temp={m.get('soc_temp_max_c')}C")
+            f"power={m.get('power_w_mean')}W ({m.get('power_source')}) "
+            f"temp={m.get('soc_temp_max_c')}C")
+    base_charge_restore_log = charge_restore()
     base_temps = [m.get("soc_temp_max_c") for _, m in base_runs
                   if m.get("soc_temp_max_c") is not None]
     temp_cap = max(TEMP_CAP_FLOOR_C,
@@ -492,11 +522,17 @@ def main() -> int:
     power_reasons = sorted({m.get("power_usable_reason") or "" for _, m in base_runs})
     # 功耗进不进判定是个**显式开关**, 不是"能测到就用"。充电态下测到的数看起来
     # 很正常, 但它不是整机功耗 —— 悄悄拿它判保留/淘汰, 比不测还糟。
-    power_available = bool(a.power_in_verdict and power_measurable)
-    power_note = ("功耗计入判定" if power_available else
-                  "功耗**不计入判定**, 仅记录供参考 (--power-in-verdict 未开启" +
-                  ("" if power_measurable else "; 且基线轮未测到可用功耗") + ")。" +
-                  " / ".join(r for r in power_reasons if r))
+    on_battery_all = all(m.get("on_battery") for _, m in base_runs) if base_runs else False
+    if a.power_in_verdict == "on":
+        power_available = True
+    elif a.power_in_verdict == "off":
+        power_available = False
+    else:   # auto: 只有基线轮**每一轮**都真的在放电态才算数
+        power_available = bool(power_measurable and on_battery_all)
+    power_note = (
+        f"功耗计入判定 (基线轮全程放电态; 停充: {base_charge_log.strip().splitlines()[0] if base_charge_log.strip() else '?'})"
+        if power_available else
+        "功耗**不计入判定**, 仅记录供参考。" + " / ".join(r for r in power_reasons if r))
     # 每组候选的等冷目标 = 「回到基线是在什么热态下量的」, 而不是一个绝对温度。
     # 取基线起跑温度 + 1C, 下界 40C, 上界比温度上限低 2C —— 也在看候选数据前冻结。
     cool_target = min(max(COOL_C_FLOOR, round((base_start_c or COOL_C_FLOOR) + 1.0, 1)),
@@ -505,6 +541,10 @@ def main() -> int:
     # 4) **在看到任何候选数据之前**冻结判定规则
     rule = V.rule_doc(temp_cap, a.pairs, power_available, power_note)
     rule["power_measurable"] = power_measurable
+    rule["power_in_verdict_mode"] = a.power_in_verdict
+    rule["baseline_on_battery"] = on_battery_all
+    rule["charge_suspend_log"] = base_charge_log.strip().splitlines()
+    rule["charge_restore_log"] = base_charge_restore_log.strip().splitlines()
     rule["power_reasons"] = [r for r in power_reasons if r]
     rule["temp_cap_derivation"] = {
         "floor_c": TEMP_CAP_FLOOR_C, "margin_c": TEMP_CAP_MARGIN_C,
@@ -583,7 +623,8 @@ def main() -> int:
                             "per_metric": res.get("per_metric", {})})
             log(f"[gen{gen}/cand{ci}] 判定 {res['verdict']}: {res.get('reason')}")
 
-    # 7) 收尾: 强制还原 + 全局快照比对
+    # 7) 收尾: 强制还原 (旋钮 + 充电) + 全局快照比对
+    charge_restore()
     fin_restore = su(f"sh {DEV_TMP}/knob_sysparam.sh restore", want_status=True)
     if "KNOB_RESTORE_FAIL" in fin_restore or "#adb_exit=" in fin_restore:
         # state 文件是「还原不成功时唯一的回滚依据」, 这时候删它等于把现场毁了
@@ -614,6 +655,9 @@ def main() -> int:
                                                   for _, m in base_runs if m.get("battery_status")}),
             "power_in_verdict": power_available,
             "power_caveat": power_note,
+            "power_source_at_baseline": sorted({m.get("power_source")
+                                                for _, m in base_runs if m.get("power_source")}),
+            "charge_suspended_during_measurement": "CHARGE_SUSPENDED" in base_charge_log,
             "fan_is_a_knob": False,
             "fan_note": "风扇转速是系统参数的一种, 但不进自动调参白名单 (DENY_KEYWORDS 含 fan)",
             "power_rail": "battery",
