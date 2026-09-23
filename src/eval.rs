@@ -134,7 +134,12 @@ pub fn run_eval(args: &[String]) -> i32 {
     let kind = req.get("kind").and_then(|v| v.as_str()).unwrap_or("shader");
     if version == 1 {
         // v1 扁平格式: gpu-op 就是它的消费者, 行为一字不动地转交
-        return delegate_gpu_op(&a.request, a.serial.as_deref(), a.power_rail.as_deref());
+        return delegate_gpu_op(
+            &a.request,
+            a.serial.as_deref(),
+            a.power_rail.as_deref(),
+            a.out.as_deref(),
+        );
     }
     if version != 2 {
         eprintln!("不认识的 eval_request 版本 {version} (契约只认 1 与 2)");
@@ -178,6 +183,24 @@ fn eval_shader_v2(req: &Value, a: &EvalArgs) -> i32 {
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
     let _ = std::fs::create_dir_all(&dir);
+    // v1 的 cool_c 与 quality_baseline_db 是必填数字, 表达不了 "null = 不等冷 /
+    // 没给地板"。冻结条件纪律下不允许接收端偷偷挑数值顶替, 缺了就明说降级失败。
+    let cool_c = req["conditions"]["cool_c"]
+        .as_f64()
+        .or(req["protocol"]["cool_c"].as_f64());
+    let Some(cool_c) = cool_c.filter(|x| *x > 0.0 && *x < 100.0) else {
+        eprintln!(
+            "v2 shader 降级失败: conditions.cool_c={} 而 v1 (gpu-op) 必须有一个等冷目标温度 (0,100)。\n\
+             冻结条件纪律下收端不代填数值, 请在请求里显式给 conditions.cool_c",
+            serde_json::to_string(&req["conditions"]["cool_c"]).unwrap_or_default()
+        );
+        return 2;
+    };
+    let Some(qbase) = req["payload"]["quality_baseline_db"].as_f64() else {
+        eprintln!("v2 shader 降级失败: payload.quality_baseline_db=null 而 v1 (gpu-op) 必须有画质地板数值。\n\
+                   收端不代填, 请显式给出");
+        return 2;
+    };
     let v1 = json!({
         "version": 1,
         "candidate_id": req["candidate_id"],
@@ -189,16 +212,13 @@ fn eval_shader_v2(req: &Value, a: &EvalArgs) -> i32 {
         "shader_path": req["payload"]["shader_path"],
         "spirv_path": req["payload"]["spirv_path"],
         "budget_ms": req["payload"]["budget_ms"],
-        "quality_baseline_db": req["payload"]["quality_baseline_db"].as_f64().unwrap_or(0.0),
+        "quality_baseline_db": qbase,
         "incumbent_latency_ms": req["payload"]["incumbent_latency_ms"],
         "quality_reference": req["payload"]["quality_reference"]
             .as_str()
             .or(req["conditions"]["quality_reference"].as_str()),
         "protocol": {
-            // v1 只有 protocol.cool_c 一个等冷口, conditions.cool_c 优先
-            "cool_c": req["conditions"]["cool_c"]
-                .as_f64()
-                .or(req["protocol"]["cool_c"].as_f64()),
+            "cool_c": cool_c,
             "replay_seconds": req["workload"]["seconds"].as_i64()
                 .or(req["protocol"]["replay_seconds"].as_i64())
                 .unwrap_or(30),
@@ -224,6 +244,9 @@ fn eval_shader_v2(req: &Value, a: &EvalArgs) -> i32 {
     }
     if let Some(r) = &a.power_rail {
         cmd.arg("--power-rail").arg(r);
+    }
+    if let Some(o) = &a.out {
+        cmd.arg("--out").arg(o);
     }
     let out = match cmd.output() {
         Ok(o) => o,
@@ -257,7 +280,12 @@ fn eval_shader_v2(req: &Value, a: &EvalArgs) -> i32 {
     0
 }
 
-fn delegate_gpu_op(request: &str, serial: Option<&str>, power_rail: Option<&str>) -> i32 {
+fn delegate_gpu_op(
+    request: &str,
+    serial: Option<&str>,
+    power_rail: Option<&str>,
+    out: Option<&str>,
+) -> i32 {
     // run_gpu_op 吃的是 main.rs 剥掉子命令后的参数 —— 这里别把 "gpu-op" 再带上
     let mut v = vec!["--request".to_string(), request.to_string()];
     if let Some(s) = serial {
@@ -267,6 +295,10 @@ fn delegate_gpu_op(request: &str, serial: Option<&str>, power_rail: Option<&str>
     if let Some(r) = power_rail {
         v.push("--power-rail".into());
         v.push(r.to_string());
+    }
+    if let Some(o) = out {
+        v.push("--out".into());
+        v.push(o.to_string());
     }
     gpuop_passthrough(&v)
 }
@@ -573,6 +605,7 @@ fn run_one(
     outdir: &Path,
     seconds: u64,
     workload: &Path,
+    pkg: &str,
 ) -> Result<Value, String> {
     std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
     let root = repo_root();
@@ -595,6 +628,7 @@ fn run_one(
         .env("LEAD", "6")
         .env("CAPDUR", seconds.to_string())
         .env("WL", workload)
+        .env("PKG", pkg)
         .env(
             "PATH",
             format!(
@@ -606,7 +640,21 @@ fn run_one(
         .env("PF_BIN", std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm")))
         .output();
     if let Ok(mut s) = sampler {
-        let _ = s.wait();
+        // 采样器卡死不能把整个 eval 挂住: 等一段时间, 超时就杀 (负载收尾后的
+        // env 尾巴本来就只要几秒)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            match s.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() > deadline => {
+                    let _ = s.kill();
+                    let _ = s.wait();
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(_) => break,
+            }
+        }
     }
     let rc = match rc {
         Ok(o) if o.status.success() => 0,
@@ -638,6 +686,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     };
     let kind = "sysparam";
     let mut report = base_report(req, kind);
+    let _ = std::fs::create_dir_all(evidence);
     let probe_only = req["payload"]["probe_only"].as_bool().unwrap_or(false);
 
     // ── 白名单: 请求带着就用它的 (但结构上仍按本端 Spec 解析), 没带就真机探 ──
@@ -721,6 +770,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
         .as_str()
         .map(String::from)
         .unwrap_or_else(|| "loop_v1/scripts/workload_spin_touch_v1.json".into());
+    let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen");
     let workload_path = repo_root().join(&wl_file);
     if !workload_path.exists() {
         report["verdict"]["reason"] = json!(format!("负载脚本不在: {}", workload_path.display()));
@@ -762,7 +812,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
                 }
             }
             let label = format!("sp_{arm}{i}");
-            let res = run_one(serial, &label, &evidence.join(format!("{arm}{i}")), seconds, &workload_path);
+            let res = run_one(serial, &label, &evidence.join(format!("{arm}{i}")), seconds, &workload_path, pkg);
             if arm == "knob" {
                 let r = restore(serial);
                 if r.contains("KNOB_RESTORE_FAIL") && restore_fail.is_none() {
@@ -923,7 +973,12 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     });
 
     // ── metrics: 逐臂聚合 (B 臂 = 候选臂) ──
-    let f = |runs: &[Value], k: &str| -> Option<f64> { runs.last().and_then(|r| r["summary"][k].as_f64()) };
+    // 臂内均值: ABBA 的全部轮一起算 —— 只取最后一轮的话, 那恰好是整场最热的
+    // 一轮, 交替设计要抹掉的热漂移就全进了头条指标
+    let f = |runs: &[Value], k: &str| -> Option<f64> {
+        let xs: Vec<f64> = runs.iter().filter_map(|r| r["summary"][k].as_f64()).collect();
+        (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
+    };
     let temps: Vec<f64> = knob_runs
         .iter()
         .chain(ctrl_runs.iter())
@@ -1014,7 +1069,10 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         if !arg.is_empty() {
             cmd.arg(arg);
         }
-        cmd.env("PF_BIN", std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm")))
+        // enable_layer.sh 从 REFBENCH_SERIAL 读设备 (缺省写死 91253241019A) ——
+        // 不传的话 --serial 指哪台都白搭, 层会挂到别人的机器上
+        cmd.env("REFBENCH_SERIAL", serial)
+            .env("PF_BIN", std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm")))
             .output()
             .map(|o| {
                 format!(
@@ -1034,9 +1092,12 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         serde_json::to_string_pretty(&req["payload"]["rewrites"]).unwrap_or_default(),
     )
     .map_err(|e| e.to_string())?;
-    let out = layer("loadop", "");
+    let out = layer("loadop", pkg);
     std::fs::write(evidence.join("enable_layer.log"), &out).map_err(|e| e.to_string())?;
     if out.contains("#adb_exit=") && !out.ends_with("#adb_exit=0") {
+        // 施加失败也可能已经动了全局属性: 尽力摘干净再回报, 绝不把设备留在挂层态
+        let off = layer("off", pkg);
+        std::fs::write(evidence.join("restore.log"), &off).ok();
         report["verdict"]["reason"] = json!(format!("enable_layer loadop 施加失败: {out}"));
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
@@ -1059,7 +1120,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     for i in 1..=rounds {
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 候选臂: 层在 (loadop 已施加); 对照臂: 层摘掉
-            let off = if arm == "ctrl" { layer("off", "") } else { String::new() };
+            let off = if arm == "ctrl" { layer("off", pkg) } else { String::new() };
             if arm == "ctrl" && (off.contains("#adb_exit=") && !off.ends_with("#adb_exit=0")) {
                 abort_reason = Some("对照臂摘层失败".into());
                 break;
@@ -1071,7 +1132,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                     break;
                 }
             }
-            let res = run_one(serial, &format!("gray_{arm}{i}"), &evidence.join(format!("{arm}{i}")), seconds, &workload_path);
+            let res = run_one(serial, &format!("gray_{arm}{i}"), &evidence.join(format!("{arm}{i}")), seconds, &workload_path, pkg);
             match res {
                 Ok(m) => match arm {
                     "knob" => knob_runs.push(m),
@@ -1090,7 +1151,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         }
     }
     // 还原
-    let restore_log = layer("off", "");
+    let restore_log = layer("off", pkg);
     std::fs::write(evidence.join("restore.log"), &restore_log).ok();
 
     let hits = hits.unwrap_or(0);
@@ -1134,7 +1195,12 @@ fn layer_hits(serial: &str, pkg: &str, evidence: &Path) -> Option<u64> {
         let out = su(serial, &format!("cat {path} 2>/dev/null"), 30);
         if out.contains("\"effective\"") {
             std::fs::write(evidence.join(format!("knobs_layer_out.{i}.json")), &out).ok();
-            if let Ok(v) = serde_json::from_str::<Value>(out.trim()) {
+            // su() 恒在尾部追 #adb_exit=N, 不剥掉 JSON 永远解析不出来
+            let body = match out.rfind("#adb_exit=") {
+                Some(i) => &out[..i],
+                None => &out[..],
+            };
+            if let Ok(v) = serde_json::from_str::<Value>(body.trim()) {
                 return v["effective"].as_array().map(|a| a.len() as u64);
             }
         }

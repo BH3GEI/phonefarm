@@ -418,12 +418,14 @@ mod tests {
 
     /// 对照源: runs_refbench/report.json —— 归档时由旧 Python 版落盘, 判据 5/6
     /// 直接 cmp 的就是它。整份 6 判据重算, 逐字节比。
+    /// 证据目录在主 checkout (大 trace 不入库), 别的机器上没有就跳过, 不算失败。
     #[test]
     fn report_matches_recorded_golden() {
         let root = runs_root();
         let want = root.join("report.json");
         if !want.exists() {
-            panic!("归档 report.json 不在 {}", want.display());
+            eprintln!("跳过: 归档证据不在 {} (异机/新 clone 属正常)", want.display());
+            return;
         }
         assert_eq!(
             report(&root),
