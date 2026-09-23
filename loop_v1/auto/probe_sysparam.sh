@@ -96,6 +96,16 @@ for p in "$CPU"/policy*; do
   # 生效测试: 把 min 抬到第二高的可用频点 (不用最高点, 免得与 max 撞上被夹)
   f2=$(cat "$p/scaling_available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | tail -2 | head -1)
   [ -n "$f2" ] && effect_test "$k.scaling_min_freq" "$p/scaling_min_freq" "$f2"
+  # max 往下试第二低的频点 (同样避开端点, 免得撞上当前 min 被夹回去)
+  g2=$(cat "$p/scaling_available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | head -2 | tail -1)
+  cmin=$(cat "$p/scaling_min_freq" 2>/dev/null)
+  if [ -n "$g2" ] && [ "$g2" != "$cmin" ]; then
+    effect_test "$k.scaling_max_freq" "$p/scaling_max_freq" "$g2"
+  fi
+  # governor 试一个与当前不同的可用值
+  curgov=$(cat "$p/scaling_governor" 2>/dev/null)
+  othergov=$(cat "$p/scaling_available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curgov" | head -1)
+  [ -n "$othergov" ] && effect_test "$k.scaling_governor" "$p/scaling_governor" "$othergov"
 done
 
 # ════ GPU (kgsl) ════
@@ -119,11 +129,24 @@ mpl=$(cat "$KGSL/min_pwrlevel" 2>/dev/null)
 if [ -n "$mpl" ] && [ "$mpl" -gt 0 ] 2>/dev/null; then
   effect_test gpu.min_pwrlevel "$KGSL/min_pwrlevel" "$((mpl - 1))"
 fi
+# max_pwrlevel 语义同上: 恒有 max_pwrlevel <= min_pwrlevel, 所以只能往 min 的方向试
+xpl=$(cat "$KGSL/max_pwrlevel" 2>/dev/null)
+if [ -n "$xpl" ] && [ -n "$mpl" ] && [ "$xpl" -lt "$mpl" ] 2>/dev/null; then
+  effect_test gpu.max_pwrlevel "$KGSL/max_pwrlevel" "$((xpl + 1))"
+fi
 gmin=$(cat "$KGSL/devfreq/min_freq" 2>/dev/null)
 g2=$(cat "$KGSL/devfreq/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | tail -2 | head -1)
 if [ -n "$g2" ] && [ "$g2" != "$gmin" ]; then
   effect_test gpu.devfreq.min_freq "$KGSL/devfreq/min_freq" "$g2"
 fi
+gmax=$(cat "$KGSL/devfreq/max_freq" 2>/dev/null)
+g3=$(cat "$KGSL/devfreq/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | head -2 | tail -1)
+if [ -n "$g3" ] && [ "$g3" != "$gmax" ] && [ "$g3" != "$gmin" ]; then
+  effect_test gpu.devfreq.max_freq "$KGSL/devfreq/max_freq" "$g3"
+fi
+curggov=$(cat "$KGSL/devfreq/governor" 2>/dev/null)
+oggov=$(cat "$KGSL/devfreq/available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curggov" | head -1)
+[ -n "$oggov" ] && effect_test gpu.devfreq.governor "$KGSL/devfreq/governor" "$oggov"
 
 # ════ 总线 (DDR / LLCC) ════
 for n in DDR LLCC; do

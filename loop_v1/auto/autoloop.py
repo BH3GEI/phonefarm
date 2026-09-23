@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -58,15 +57,26 @@ def log(msg: str) -> None:
     print(f"[autoloop] {msg}", flush=True)
 
 
-def adb(args: list[str], timeout: int = 120) -> str:
+def adb(args: list[str], timeout: int = 120, want_status: bool = False) -> str:
+    """want_status=True 时把 stderr 与非零退出码一并带回。
+
+    设备端脚本的失败信息有一部分走 stderr (如 knob_sysparam.sh 的「缺 plan 文件」),
+    adb shell v2 不会把 stderr 并进 stdout —— 只读 stdout 会把失败当成功。
+    快照类调用仍走默认 (stdout only), 免得偶发的 adb 告警污染逐行比对的快照文本。
+    """
     r = subprocess.run([ADB, "-s", SERIAL] + args, capture_output=True, text=True,
                        timeout=timeout)
-    return r.stdout
+    if not want_status:
+        return r.stdout
+    out = r.stdout + (r.stderr or "")
+    if r.returncode != 0:
+        out += f"\n#adb_exit={r.returncode}\n"
+    return out
 
 
-def su(cmd: str, timeout: int = 180) -> str:
+def su(cmd: str, timeout: int = 180, want_status: bool = False) -> str:
     """root shell。命令整体单引号包住, 与 phonefarm hwcond.rs 的 snapshot_cmd 同形。"""
-    return adb(["shell", f"su -c '{cmd}'"], timeout=timeout)
+    return adb(["shell", f"su -c '{cmd}'"], timeout=timeout, want_status=want_status)
 
 
 # ── 设备准备 ──
@@ -110,12 +120,10 @@ def read_soc_temp() -> tuple[str, float] | None:
 
 def wait_cool(cool_c: float = COOL_C, timeout_s: int = COOL_TIMEOUT_S) -> dict:
     t0 = time.time()
-    last = None
     while True:
         cur = read_soc_temp()
         if cur is None:
             return {"ok": False, "reason": "读不到任何 SoC 热区"}
-        last = cur
         if cur[1] < cool_c:
             return {"ok": True, "zone": cur[0], "c": cur[1],
                     "waited_s": round(time.time() - t0, 1)}
@@ -125,6 +133,30 @@ def wait_cool(cool_c: float = COOL_C, timeout_s: int = COOL_TIMEOUT_S) -> dict:
         log(f"等冷: {cur[0]}={cur[1]}C >= {cool_c}C, 8s 后重测 "
             f"(已等 {int(time.time() - t0)}s)")
         time.sleep(8)
+
+
+# 这几项由驱动按当前温度/负载自己改, 本闭环从不写它们。拿它们当「留痕」,
+# 会把「跑完比跑前热」误判成没还原干净, 一整组 5 对实验就白跑了。
+# 所以分两层报: strict 是原样的逐行 diff (什么都不藏), ours 只看
+# 「我们写过的那类项」—— 判定用 ours, 证据里两份都留。
+DRIVER_OWNED_PREFIXES = ("kgsl.thermal_pwrlevel",)
+
+
+def classify_diff(sd: dict) -> dict:
+    """把快照 diff 拆成「我们留的痕」与「驱动自己动的」两堆。"""
+    ours, driver = [], []
+    for d in sd.get("diffs", []) or []:
+        key = (d.get("before") or "").split("=", 1)[0].strip()
+        (driver if key.startswith(DRIVER_OWNED_PREFIXES) else ours).append(d)
+    return {
+        "checked": sd.get("checked"),
+        "n_lines": sd.get("n_lines"),
+        "strict_identical": bool(sd.get("identical")),
+        "strict_n_diff": sd.get("n_diff"),
+        "ours_identical": not ours,
+        "ours_diffs": ours,
+        "driver_owned_diffs": driver,
+    }
 
 
 # ── 单轮 ──
@@ -138,21 +170,25 @@ def run_one(label: str, outdir: str, lead: int = 6, capdur: int = 30) -> dict:
 
     # 功耗/温度采样与 ftrace 并行: 覆盖整段负载, 间隔 2s
     env_path = os.path.join(outdir, "env.txt")
+    rc: int | None = None
     with open(env_path, "w") as fh:
         sampler = subprocess.Popen(
             [ADB, "-s", SERIAL, "shell",
              f"su -c 'sh {DEV_TMP}/sample_env.sh {lead + capdur + 4} 2'"],
             stdout=fh, stderr=subprocess.STDOUT)
         try:
-            subprocess.run(["bash", os.path.join(TOOLS, "run_once.sh"), label, outdir],
-                           env=env, timeout=300, check=False)
+            rc = subprocess.run(["bash", os.path.join(TOOLS, "run_once.sh"), label, outdir],
+                                env=env, timeout=300, check=False).returncode
+        except subprocess.TimeoutExpired:
+            log(f"{label}: run_once.sh 超时 (>300s), 本轮作废")
         finally:
             try:
                 sampler.wait(timeout=60)
             except subprocess.TimeoutExpired:
                 sampler.kill()
+                sampler.wait()
 
-    m: dict = {"label": label}
+    m: dict = {"label": label, "run_once_rc": rc}
     sp = os.path.join(outdir, "summary.json")
     if os.path.exists(sp):
         try:
@@ -161,6 +197,10 @@ def run_one(label: str, outdir: str, lead: int = 6, capdur: int = 30) -> dict:
         except json.JSONDecodeError:
             m["parse_error"] = True
     else:
+        m["parse_error"] = True
+    # run_once.sh 非零退出 = 负载或采集出过问题, 这一轮的数字不可信。如实标出来,
+    # 由上层判 ABORT —— 不能让基础设施故障悄悄变成一个「淘汰」结论。
+    if rc != 0:
         m["parse_error"] = True
     with open(env_path) as f:
         envm = V.env_stats(f.read())
@@ -172,12 +212,18 @@ def run_one(label: str, outdir: str, lead: int = 6, capdur: int = 30) -> dict:
 
 # ── 一组候选参数的完整实验 ──
 
+BAD_APPLY_TOKENS = ("KNOB_FAIL", "KNOB_REFUSE", "KNOB_PLAN_REJECTED",
+                    "KNOB_ALREADY_APPLIED", "#adb_exit=")
+
+
 def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: float,
                   power_available: bool) -> dict:
     """等冷 → A/B 交替 pairs 轮 → 置换检验 → 判定 → 还原。
 
     A/B **交替**而不是先跑完一臂再跑另一臂: 温度、光照、内存压力这些外生变量都在
     单向漂移, 交替能让残余漂移对两臂等量影响 (loop_v1 README 里已验证过的做法)。
+    而且每对内部的先后顺序逐对翻转 (ABBA): 固定「旋钮先、对照后」的话, 单向漂移
+    会整体加到对照臂上, 变成一个偏向旋钮臂的系统误差 —— 那不是抵消, 是作弊。
     """
     os.makedirs(outdir, exist_ok=True)
     params = cand["params"]
@@ -185,7 +231,11 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
     plan_local = os.path.join(outdir, "plan.txt")
     with open(plan_local, "w") as f:
         f.write(plan)
-    adb(["push", plan_local, f"{DEV_TMP}/loop_v1_sysparam.plan"])
+    # push 失败必须当场停: 设备上可能还躺着上一组的 plan, 那会让「旋钮臂」施加的是
+    # 上一组参数, 而证据里记的是这一组 —— 账对不上比跑不成更糟。
+    push_out = adb(["push", plan_local, f"{DEV_TMP}/loop_v1_sysparam.plan"], want_status=True)
+    if "#adb_exit=" in push_out:
+        return _abort(outdir, cand, f"plan 下发失败: {push_out.strip()}", temp_cap_c)
 
     snap_before = snapshot()
     with open(os.path.join(outdir, "snap_before.txt"), "w") as f:
@@ -196,44 +246,72 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
         return _abort(outdir, cand, f"等冷失败: {cool.get('reason')}", temp_cap_c)
 
     knob_runs, ctrl_runs = [], []
-    apply_logs = []
+    apply_logs: list[str] = []
     apply_ok = True
     aborted = None
+    restore_fail = None
 
-    for i in range(1, pairs + 1):
-        # ── 旋钮臂 ──
-        out = su(f"sh {DEV_TMP}/knob_sysparam.sh apply {DEV_TMP}/loop_v1_sysparam.plan")
-        apply_logs.append(out)
-        if "KNOB_FAIL" in out or "KNOB_REFUSE" in out or "KNOB_PLAN_REJECTED" in out:
-            apply_ok = False
-            log(f"旋钮未全部生效, 停止本组:\n{out}")
-            su(f"sh {DEV_TMP}/knob_sysparam.sh restore")
-            break
-        m = run_one(f"sp_knob{i}", os.path.join(outdir, f"knob{i}"))
-        knob_runs.append((f"knob{i}", m))
-        su(f"sh {DEV_TMP}/knob_sysparam.sh restore")
+    def restore() -> str:
+        """还原并**检查还原结果**。还原失败必须立刻中止本组: 旋钮还在生效状态下
+        跑出来的「对照臂」根本不是对照, 而且下一次 apply 会因为 STATE 还在而
+        变成空操作 (KNOB_ALREADY_APPLIED), 整组数据会悄悄变成两臂同构。"""
+        nonlocal restore_fail
+        out = su(f"sh {DEV_TMP}/knob_sysparam.sh restore", want_status=True)
+        if ("KNOB_RESTORE_FAIL" in out or "#adb_exit=" in out) and restore_fail is None:
+            restore_fail = out.strip()
+            log(f"旋钮还原失败:\n{out}")
+        return out
 
-        if m.get("soc_temp_max_c") is not None and m["soc_temp_max_c"] > temp_cap_c:
-            aborted = f"旋钮臂第 {i} 轮 SoC 结温 {m['soc_temp_max_c']}C 超过上限 {temp_cap_c}C"
-            log(aborted)
-            break
+    def run_arm(arm: str, i: int) -> str | None:
+        """跑一臂。返回 None = 正常, 否则返回中止原因。"""
+        nonlocal apply_ok
+        if arm == "knob":
+            out = su(f"sh {DEV_TMP}/knob_sysparam.sh apply {DEV_TMP}/loop_v1_sysparam.plan",
+                     want_status=True)
+            apply_logs.append(out)
+            if any(t in out for t in BAD_APPLY_TOKENS):
+                apply_ok = False
+                log(f"旋钮未全部生效, 停止本组:\n{out}")
+                restore()
+                return "旋钮未全部生效"
+        try:
+            m = run_one(f"sp_{arm}{i}", os.path.join(outdir, f"{arm}{i}"))
+        finally:
+            # 负载/采集抛异常也要先把旋钮摘掉, 绝不把设备留在施加态
+            if arm == "knob":
+                restore()
+        (knob_runs if arm == "knob" else ctrl_runs).append((f"{arm}{i}", m))
+        if restore_fail:
+            return "旋钮还原失败, 后续数据不可信"
+        if m.get("parse_error"):
+            return f"{arm} 臂第 {i} 轮没拿到可用 summary.json (负载或采集失败)"
+        t = m.get("soc_temp_max_c")
+        if t is not None and t > temp_cap_c:
+            return f"{arm} 臂第 {i} 轮 SoC 结温 {t}C 超过上限 {temp_cap_c}C"
+        return None
 
-        # ── 对照臂 (旋钮已还原) ──
-        m = run_one(f"sp_ctrl{i}", os.path.join(outdir, f"ctrl{i}"))
-        ctrl_runs.append((f"ctrl{i}", m))
-        if m.get("soc_temp_max_c") is not None and m["soc_temp_max_c"] > temp_cap_c:
-            aborted = f"对照臂第 {i} 轮 SoC 结温 {m['soc_temp_max_c']}C 超过上限 {temp_cap_c}C"
-            log(aborted)
-            break
+    try:
+        for i in range(1, pairs + 1):
+            # ABBA: 奇数对旋钮先跑, 偶数对对照先跑, 让残余漂移在两臂之间对消
+            for arm in (("knob", "ctrl") if i % 2 else ("ctrl", "knob")):
+                aborted = run_arm(arm, i)
+                if aborted:
+                    log(aborted)
+                    break
+            if aborted:
+                break
+    except Exception as e:  # noqa: BLE001 — 任何异常都要落到「还原 + 归档」这条路上
+        aborted = f"实验过程异常, 已强制还原: {type(e).__name__}: {e}"
+        log(aborted)
 
     # 无论如何先还原, 再核快照
-    restore_log = su(f"sh {DEV_TMP}/knob_sysparam.sh restore")
+    restore_log = restore()
     status_log = su(f"sh {DEV_TMP}/knob_sysparam.sh status")
     snap_after = snapshot()
     with open(os.path.join(outdir, "snap_after.txt"), "w") as f:
         f.write(snap_after)
-    sd = snapshot_diff(os.path.join(outdir, "snap_before.txt"),
-                       os.path.join(outdir, "snap_after.txt"))
+    sd = classify_diff(snapshot_diff(os.path.join(outdir, "snap_before.txt"),
+                                     os.path.join(outdir, "snap_after.txt")))
 
     temps = [m.get("soc_temp_max_c") for _, m in knob_runs + ctrl_runs
              if m.get("soc_temp_max_c") is not None]
@@ -245,6 +323,8 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
         for met in metrics:
             cmps[met] = compare(ctrl_runs, knob_runs, met)
 
+    if aborted is None and restore_fail:
+        aborted = "收尾还原失败, 本组作废"
     if aborted:
         dec = {"verdict": "ABORT", "reason": aborted, "temp_max_c": temp_max,
                "temp_cap_c": temp_cap_c}
@@ -254,7 +334,7 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
                "temp_max_c": temp_max, "temp_cap_c": temp_cap_c}
     else:
         dec = V.decide(cmps, temp_max_c=temp_max, temp_cap_c=temp_cap_c,
-                       apply_ok=apply_ok, snapshot_identical=bool(sd.get("identical")),
+                       apply_ok=apply_ok, snapshot_identical=bool(sd.get("ours_identical")),
                        power_available=power_available)
 
     result = {
@@ -264,11 +344,12 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
         "pairs_completed": min(len(knob_runs), len(ctrl_runs)),
         "apply_ok": apply_ok,
         "apply_log": apply_logs[:2],
+        "restore_ok": restore_fail is None,
+        "restore_fail": restore_fail,
         "restore_log": restore_log.strip().splitlines(),
         "knob_state_after": status_log.strip().splitlines(),
         "cooldown": cool,
-        "snapshot_check": {"identical": bool(sd.get("identical")),
-                           "n_diff": sd.get("n_diff"), "diffs": sd.get("diffs")},
+        "snapshot_check": sd,
         "temp_max_c": temp_max,
         "temp_cap_c": temp_cap_c,
         "arms": {
@@ -445,13 +526,22 @@ def main() -> int:
             log(f"[gen{gen}/cand{ci}] 判定 {res['verdict']}: {res.get('reason')}")
 
     # 7) 收尾: 强制还原 + 全局快照比对
-    su(f"sh {DEV_TMP}/knob_sysparam.sh restore")
-    su(f"rm -f {DEV_TMP}/loop_v1_sysparam.state {DEV_TMP}/loop_v1_knob_ddr.state")
+    fin_restore = su(f"sh {DEV_TMP}/knob_sysparam.sh restore", want_status=True)
+    if "KNOB_RESTORE_FAIL" in fin_restore or "#adb_exit=" in fin_restore:
+        # state 文件是「还原不成功时唯一的回滚依据」, 这时候删它等于把现场毁了
+        log(f"警告: 收尾还原失败, 保留 state 文件以便人工回滚:\n{fin_restore}")
+    else:
+        su(f"rm -f {DEV_TMP}/loop_v1_sysparam.state {DEV_TMP}/loop_v1_knob_ddr.state")
+    # 收尾快照前先等冷: 进入前那份快照是在冷机状态下采的, 刚跑完游戏就采会让
+    # 驱动自己按温度改的那几项对不上 —— 那是热态差异, 不是留痕。等不下来也继续,
+    # classify_diff 会把这类项单独归到 driver_owned 里如实报出来。
+    fin_cool = wait_cool()
+    log(f"收尾等冷: {fin_cool}")
     snap_final = snapshot()
     with open(os.path.join(out, "snap_final.txt"), "w") as f:
         f.write(snap_final)
-    final_sd = snapshot_diff(os.path.join(out, "snap_before.txt"),
-                             os.path.join(out, "snap_final.txt"))
+    final_sd = classify_diff(snapshot_diff(os.path.join(out, "snap_before.txt"),
+                                           os.path.join(out, "snap_final.txt")))
 
     kept = [r for r in all_results if r["verdict"] == "KEEP"]
     report = {
@@ -469,14 +559,18 @@ def main() -> int:
         "rejected": [{"params": r["params"], "verdict": r["verdict"],
                       "reason": r.get("reason")} for r in all_results
                      if r["verdict"] != "KEEP"],
-        "final_snapshot_identical": bool(final_sd.get("identical")),
+        "final_restore_log": fin_restore.strip().splitlines(),
+        "final_cooldown": fin_cool,
+        "final_snapshot_identical": bool(final_sd.get("ours_identical")),
+        "final_snapshot_strict_identical": bool(final_sd.get("strict_identical")),
         "final_snapshot_diff": final_sd,
     }
     with open(os.path.join(out, "report.json"), "w") as f:
         json.dump(report, f, ensure_ascii=False, indent=1)
     log(f"完成。保留 {len(kept)} 组 / 共 {len(all_results)} 组; "
-        f"收尾快照一致: {final_sd.get('identical')}")
-    return 0 if final_sd.get("identical") else 1
+        f"收尾快照一致 (我们写过的项): {final_sd.get('ours_identical')}, "
+        f"严格逐行一致: {final_sd.get('strict_identical')}")
+    return 0 if final_sd.get("ours_identical") else 1
 
 
 if __name__ == "__main__":

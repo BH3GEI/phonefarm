@@ -316,6 +316,37 @@ class TestLocalMutate(unittest.TestCase):
         self.assertNotIn(first[0]["params"], [c["params"] for c in again])
 
 
+class TestSnapshotDiffClassification(unittest.TestCase):
+    """驱动自己按温度改的项不算「我们留的痕」, 但也不许藏起来。"""
+
+    def setUp(self):
+        import autoloop
+        self.classify = autoloop.classify_diff
+
+    def test_driver_owned_line_is_not_our_residue(self):
+        sd = {"checked": True, "n_lines": 38, "identical": False, "n_diff": 1,
+              "diffs": [{"line": 9, "before": "kgsl.thermal_pwrlevel=0",
+                         "after": "kgsl.thermal_pwrlevel=2"}]}
+        c = self.classify(sd)
+        self.assertTrue(c["ours_identical"])
+        self.assertFalse(c["strict_identical"])        # 严格 diff 原样保留, 不藏
+        self.assertEqual(len(c["driver_owned_diffs"]), 1)
+
+    def test_a_node_we_write_still_counts_as_residue(self):
+        sd = {"checked": True, "n_lines": 38, "identical": False, "n_diff": 1,
+              "diffs": [{"line": 20, "before": "bus.DDR.boost_freq=0",
+                         "after": "bus.DDR.boost_freq=5333000"}]}
+        c = self.classify(sd)
+        self.assertFalse(c["ours_identical"])
+        self.assertEqual(c["driver_owned_diffs"], [])
+
+    def test_clean_snapshot_passes_both_layers(self):
+        c = self.classify({"checked": True, "n_lines": 38, "identical": True,
+                           "n_diff": 0, "diffs": []})
+        self.assertTrue(c["ours_identical"])
+        self.assertTrue(c["strict_identical"])
+
+
 class TestPipelineEndToEnd(unittest.TestCase):
     """离线跑通「探测 → 白名单 → 挑参数 → 校验 → plan」整条链路, 不碰设备。"""
 
