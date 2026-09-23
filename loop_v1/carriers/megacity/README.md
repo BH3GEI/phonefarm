@@ -145,9 +145,14 @@ adb shell am start -W -n com.unity.megacity.metro/com.unity.megacity.MegacityMet
 Android Build Support(含 OpenJDK / SDK / NDK)。
 
 ```powershell
-pwsh -File setup_on_magicbook.ps1 -ThirdParty C:\thirdparty
-pwsh -File build_megacity.ps1 -ProjDir C:\thirdparty\megacity-metro
+powershell.exe -ExecutionPolicy Bypass -File setup_on_magicbook.ps1 -ThirdParty C:\thirdparty
+powershell.exe -ExecutionPolicy Bypass -File build_megacity.ps1 -ProjDir C:\thirdparty\megacity-metro
 ```
+
+> 两个 `.ps1` **必须存成带 BOM 的 UTF-8**。Windows PowerShell 5.1 对无 BOM 的 .ps1 按 ANSI
+> (中文系统上是 GBK) 解码, 注释里的中文会被打碎成非法字符, 直接报
+> `Missing argument in parameter list` / `The string is missing the terminator` —— 实际踩过。
+> 编辑这两个文件后别把 BOM 去掉。magicbook 上没有 pwsh, 只有 5.1。
 
 第三方工程克隆到 `C:\thirdparty\`, **不进本仓库**。产物在 `out\megacity.apk`。
 
