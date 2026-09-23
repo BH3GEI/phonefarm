@@ -134,10 +134,36 @@ layer 注入点未知；不成立则灰档只在 Android 成立，鸿蒙退回�
 - `build/build_layer.sh` — NDK 直编 + `DT_NEEDED` 自检
 - `enable_layer.sh {probe|target <pkg>|status|off}` — `off` 带 state 回滚 + 全盘残留清扫
 
+## 灰档改写 #1：LoadOp LOAD → DONT_CARE —— 已成立
+
+2026-09-23 在 refbench 上跑通四臂对照，证据
+[`evidence/05_loadop/RESULT.md`](../evidence/05_loadop/RESULT.md)。
+
+层钩 `vkCreateRenderPass`（loadOp 是**创建期**烘进 VkRenderPass 对象的，
+BeginRenderPass 时已改不动），把 `LOAD` 的 attachment 改成 `DONT_CARE`，并自报改了什么。
+开关是属性 `debug.knobs.loadop`，与只读档共用同一个 .so，A/B 两臂只切它一个。
+
+| 臂 | 层 | `knob.loadop` | 层自报 | `begins` | frames / clean_exit |
+|---|---|---|---|---|---|
+| A | 无 | off | — | — | 3600 / true |
+| B | 无 | on（白档答案） | — | — | 3600 / true |
+| C | 改写 | off | pass 2 att 0 LOAD→DONT_CARE | 28800 | 3600 / true |
+| D | 改写 | on | 同上 | 0 → `rewritten pass never bound` | 3600 / true |
+
+C 成立：改了、改的那个 pass 真被绑了 28800 次（= 3600 帧 × 8）、refbench 仍自报
+`load_op: LOAD`（它不知道自己被改了，这正是灰档改写的定义）、四臂全部 `clean_exit=true`。
+
+**D 臂逼出的一条硬经验**：`effective` 非空 ≠ 旋钮生效。refbench 会把 LOAD 和 DONT_CARE
+两个 render pass 对象都建出来、只绑一个，层把那个**永远不会被绑**的也改了并报成 effective。
+已加 `begins` 计数与 `"rewritten pass never bound"`。**harness 判该轮算不算数要看 `begins > 0`。**
+
+**与白档答案不等价**：refbench 的 `knob.loadop=on` 还把 `initialLayout` 改成 `UNDEFINED`，
+本层只改 `loadOp` → 灰档改写是白档答案的**真子集**，性能效果不保证相等。
+差多少由 loop_v1 判定，本仓库不做测量。
+
 ## 下一步（按性价比排）
 
-1. **把大世界这一环补上**：需要人决定是否更新原神客户端（会作废 loop_v1 历史基线）。
-   在那之前问题 2 只能停在 `PARTIAL`。
-2. **先在 refbench 上做 LoadOp→DONT_CARE 改写**：refbench 是白档靶子、有已知答案，
-   不依赖原神能否登录，能独立推进判据 5。改写必须配有/无层对照。
+1. **把大世界这一环补上**：原神客户端用户已手动更新，基线要重测；重测后再验问题 2 的登录态。
+2. 下一条改写候选：RT 精度降级 / 格式替换（同为 A 类），或分辨率缩放（D 类）。
+   每条都要配有/无层对照 + `begins` 自洽检查。
 3. 鸿蒙机制调研（问题 3），等设备。
