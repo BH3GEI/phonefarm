@@ -48,6 +48,9 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ```bash
 ./phonefarm devices                        # adb 与 hdc 两族设备一并列出
 ./phonefarm keepalive [--status|--watch]   # 农场级保活：唤醒 + 解锁 + 不息屏
+./phonefarm fleet [--json]                 # 农场只读快照：每台手机的在线/型号/电量/温度/风扇/
+                                           # 前台应用/保活策略 + 设备锁。别人持锁时自动降成
+                                           # 只读 sysfs 的轻量档，不跑 dumpsys
 ./phonefarm probe --serial S "只读命令"     # 只读调试通道
 ./phonefarm exec --serial S "命令" --yes    # 写操作通道，高危，必须显式 --yes
 ```
