@@ -1,17 +1,45 @@
 # phonefarm
 
-**设备自动化与实测基础设施**：一个 Rust 内核，两种设备后端（Android `adb` / OpenHarmony `hdc`），
+设备自动化与实测基础设施：一个 Rust 内核，两种设备后端（Android `adb` / OpenHarmony `hdc`），
 在同一套「设备抽象 + 记录契约 + 遥测 + 证据分级」之上，并列提供多条互不依赖的上层能力。
 
-多模态视觉模型（VLM）只是其中**一条**上层通路，不是这个项目的定义。
+多模态视觉模型（VLM）只是其中一条上层通路，不是这个项目的定义。
 `script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `keepalive` 全程零 Token，不碰模型也能独立工作。
 宿主架构实现执行回路与决策机制分离：模型只做屏幕理解与动作规划，状态采集、规则拦截、
 校验、复盘与系统监控全部由 Rust 宿主进程控制。
 
+## 在整体里的位置（改这个仓库之前先看这一段）
+
+整套东西是一个 harness。用户只提一种任务——「把某个游戏在某台手机上优化一下」，
+内部自动决定用哪几层。本仓库是底座那一层，四件事：
+
+- 设备：adb / hdc 两族的连接、保活、确定性脚本回放。
+- 应用改动（`knobs/`）：黑档系统参数，灰档 Vulkan layer 注入。
+- 测量：安卓 sysfs 电源轨加 raw ftrace kgsl，鸿蒙 HiSmartPerf，上层拿同一份 JSON；
+  测功耗期间停充。
+- 统计判定与还原：规则先于数据冻结，不显著就回退，退出前恢复现场。
+
+提改动的是上层（`game_opt_loop` 的决策层，或者人），判定这一侧留在本仓库。
+这条边界是硬的：**判定口径与阈值只能在本仓库里定，且在看到候选数据之前冻结**。
+上层可以随请求带参数（比如 `incumbent_latency_ms` 说明现任冠军的耗时），
+但那是被判定的输入，不是判定规则本身——出主意的一方不能改判定，否则整套证据失去意义。
+
+优化分三个层级：① 游戏代码（需要白盒）② 图形接口 Vulkan 层 ③ 系统参数。
+闭源商用游戏只剩 ②③。鸿蒙商用机在没有 root 的情况下只能测不能改：HiSmartPerf 采得到
+帧率、帧时、温度、功耗，但 ② 和 ③ 都动不了。可能的出路有工程机、官方性能接口、
+开发者模式下自签名应用三条，都还没核实过，不要当成现成能力写进文档或代码注释。
+
+测试载体在 `loop_v1/carriers/`（Megacity / Vulkan-Samples / AnKi），
+白盒靶子在同级的 `refbench` 仓库。`sr_loop` 是已结项的前序实验，不在当前主线上。
+
+**进行中，别写成已完成**：`loop_v1/` 的 Python 工具链与 `knobs/` 的 shell 脚本
+正在往 Rust 内核里收。上层的 `game_opt_loop` 那边也在做总入口、agent skill 与可视化前端。
+这些都还没落地，文档里写目标形态时要标明状态。
+
 ## 能力族与常用命令
 
 ```bash
-# 编译构建（Apple Silicon 必须重新签名，见「安全边界」第 6 条）
+# 编译构建（Apple Silicon 必须重新签名，见「安全边界」第 7 条）
 cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && codesign --force --sign - ./phonefarm
 ```
 
@@ -78,9 +106,11 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
 ```
 
-`game_opt_loop` 自主进化闭环的物理采样与统计裁决端，契约见 `docs/SPEC_GPU_OP.md`。
-设备条件化与功耗遥测提在 `src/hwcond.rs`（与 `bench` 共享），统计在 `src/gpustat.rs`。
-**当前阻塞**：设备侧 `vkop_runner` 需要 Android NDK 构建，尚未就绪。
+`game_opt_loop` 决策层的物理采样与统计裁决端，契约见 `docs/SPEC_GPU_OP.md`。
+设备条件化与功耗遥测在 `src/hwcond.rs`（与 `bench` 共享），统计在 `src/gpustat.rs`。
+设备侧 `vkop_runner` 已构建（`tools/vkop/android_aarch64_vkop_runner`，源码与 `build.sh` 同目录）。
+画质补测支持真机参考帧集，回包里 `quality_reference` 记清真值出处。
+`SPEC_GPU_OP.md` §7 还写着「vkop_runner 尚未构建」，那一段已过时，待一并修订。
 
 **性能优化闭环**（零 Token，需 root）
 
@@ -135,22 +165,32 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
    这些零 Token 通路，可自由执行。
 2. **密钥管理**：程序运行时自动检测并加载 `./secrets.env`。缺失密钥时提示格式并安全退出。
    严禁在代码、日志及任何可提交文件（`AGENTS.md`、`README.md` 等）中硬编码真实密钥。
-3. **测试环境约束**：Android 统一使用 AVD 模拟器（AVD 名 `agentphone`）；OpenHarmony 需在特定的
-   intel-mac 物理中转端上通过 ssh 控制，连接真机前先核实该物理端是否完成本地构建与代码同步。
-4. **数据持久化规范**：程序唯一合法写入路径为 `tasks/<任务名>/`。`log.jsonl` 只追加；
+3. **测试环境约束**：VLM 通路与 CTS 通路的 Android 侧统一使用 AVD 模拟器（AVD 名 `agentphone`）；
+   OpenHarmony 需在特定的 intel-mac 物理中转端上通过 ssh 控制，连接真机前先核实该物理端
+   是否完成本地构建与代码同步。性能测量必须上真机，模拟器的帧时与功耗没有意义。
+4. **设备纪律**（性能测量相关）：
+   - 同一个候选的 A/B 两臂必须落在**同一台**手机上。跨机比较会把机间差异算进改动的效果里。
+   - 设备是共享资源，跑之前用设备锁 `devlock` 抢占（拿锁 → 后台心跳续期 → 跑完释放）。
+     被别人占着时排队，不要绕过去硬跑——两个任务同时压一台手机，两边的数都作废。
+   - 影响稳态的环境条件（风扇开关、冷机阈值、供电状态）逐轮记进证据。这些不是无关细节，
+     条件不同的两批数据不能混在一起比。
+   - 规划中的最小设备配置是 4 台：骁龙 2 台（一台跑测试、一台留给调试）、天玑 1 台、鸿蒙 1 台；
+     完全体 8 到 10 台。这是计划不是现状，不要按「已有这些机器」来写流程。
+5. **数据持久化规范**：程序唯一合法写入路径为 `tasks/<任务名>/`。`log.jsonl` 只追加；
    `lessons.jsonl` 必须原子写；禁止自行清理 `runs/` 历史目录；媒体与树结构大文件已由 `.gitignore`
    排除，严禁提交大体积非文本文件。`test-batch`/`cts-fetch`/`bench`/`capture` 的产物写入各自 `--out` 目录。
-5. **代码稳定性**：任何逻辑或代码变更后，必须在本地运行 `cd src && cargo test`，确保单测 100% 通过。
-6. **构建后必须重新签名（Apple Silicon 硬性要求）**：`[profile.release] strip = true` 会在链接后剥离符号，
+6. **代码稳定性**：任何逻辑或代码变更后，必须在本地运行 `cd src && cargo test`，确保单测 100% 通过。
+7. **构建后必须重新签名（Apple Silicon 硬性要求）**：`[profile.release] strip = true` 会在链接后剥离符号，
    使 ad-hoc 代码签名失效；失效的二进制在 macOS 上不报错，而是**静默卡死在 `_dyld_start`**
    （进程存活、CPU 为零、无输出），极易被误判为死循环或设备失联。跑任何实机测试前，
    先确认用的是当前源码构建并已签名的二进制。
-7. **缺陷修复规范**：新缺陷修复遵循项目编号管理（从 #20 起递增）。修复必须保证通用性，
+8. **缺陷修复规范**：新缺陷修复遵循项目编号管理（从 #20 起递增）。修复必须保证通用性，
    严禁针对特定任务或界面编写硬编码拦截逻辑。完成后用今日头条断言局做标准回归。
-8. **版本控制与提交**：`push` 权限属于用户。完成本地提交后，把提交哈希与变更概要呈报用户，
+9. **版本控制与提交**：`push` 权限属于用户。完成本地提交后，把提交哈希与变更概要呈报用户，
    由用户决定推送。部署时用 `mv` 做原子产物替换，防止进程踩踏。
-9. **汇报规范**：呈报进度或结果时给最直接的技术事实、运行指标与对局结论（成功率、耗时分位数、
-   Token 支出），禁止含糊夸张的非技术词汇，严禁在文档中堆砌虚假的性能或战绩宣称。
+10. **汇报规范**：呈报进度或结果时给最直接的技术事实、运行指标与对局结论（成功率、耗时分位数、
+    Token 支出），禁止含糊夸张的非技术词汇，严禁在文档中堆砌虚假的性能或战绩宣称。
+    计划中的能力写成「计划」，不写成「已完成」；撤回过的结论不要再引用。
 
 ## 架构：不变内核 + 并列上层
 
@@ -175,8 +215,12 @@ VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`de
 ## 目录结构
 
 ```
-loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（非 Rust，独立工具链）
-knobs/                 可改动面：黑档系统旋钮 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，说明见 knobs/README.md）
+loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（Python 工具链，正在往 Rust 收）
+  carriers/            测试载体：megacity / vulkan-samples / anki-sponza
+  refbench/            白盒靶子的驱动侧（靶子本身在同级 refbench 仓库）
+  auto/                自动挑旋钮：白名单探测 → 冻结规则 → 大模型选参 → 逐组对照
+knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，
+                       说明见 knobs/README.md；原 HGamey/knobs 仓库已归档并入，shell 正在往 Rust 收）
 src/                   Rust 内核源码
   universal/           通用核心：统一动作协议、三大算子、优先级引擎、插件契约
   plugins/             场景插件层
