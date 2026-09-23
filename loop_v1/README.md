@@ -79,7 +79,7 @@ tools/
   ftrace_capture.sh     ftrace 采集, 自带四项状态存档与 trap 还原
   knob_ddr_boost.sh     旋钮: DDR/LLCC 总线下限钉到硬件上限, apply/restore/status
   pf_bin.sh             解析 phonefarm 二进制路径 (供各脚本 source)
-  pybridge.py           迁移期通道: 尚未搬走的 Python 从这里转调二进制拿统计口径
+  pybridge.py           迁移期通道: 尚未搬走的 Python 从这里转调二进制拿统计与判定口径
   replay_test.sh        离线回放自检 (判据 5)
   run_once.sh           一轮"负载 + 采集"的编排
 scripts/
@@ -114,7 +114,7 @@ runs/<标签>/
 > ⚠️ **手柄注入在原神 7.1.0 上已失效**, 这份脚本跑出来是静止画面。
 > 麻烦在于静止画面照样采得到帧率、功耗、温度, 报告看着一切正常 —— 这种失败不会自己报错。
 > 7.1.0 起改用触控版 [`../knobs/gray/workload_spin_touch_v1.json`](../knobs/gray/workload_spin_touch_v1.json),
-> 并用 `tools/frames_moving.py` 抓窗口内两张裸帧算逐像素差, 确认画面真的在动
+> 并用 `phonefarm frames-moving` 抓窗口内两张裸帧算逐像素差, 确认画面真的在动
 > (交叉核对那一轮量到 10.458%, 静止画面实测约 1%)。
 >
 > 换版本还有一个代价: **7.0.0 与 7.1.0 的历史基线不能混比**。下面「必须在光照稳定窗口内跑」

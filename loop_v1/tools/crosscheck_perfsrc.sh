@@ -161,7 +161,7 @@ SP_PID=$!
 adb -s "$SERIAL" exec-out screencap > "$OUTDIR/frame_a.raw" 2>/dev/null
 sleep 3
 adb -s "$SERIAL" exec-out screencap > "$OUTDIR/frame_b.raw" 2>/dev/null
-MOVED=$(python3 "$ROOT/loop_v1/tools/frames_moving.py" "$OUTDIR/frame_a.raw" "$OUTDIR/frame_b.raw" 2>/dev/null || echo "?")
+MOVED=$("$PF" frames-moving "$OUTDIR/frame_a.raw" "$OUTDIR/frame_b.raw" 2>/dev/null || echo "?")
 echo "[$LABEL] 画面逐像素差 ${MOVED}% (静止画面会接近 0)"
 printf 'frame_diff_pct=%s\n' "$MOVED" >> "$OUTDIR/test_conditions.txt"
 

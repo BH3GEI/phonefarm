@@ -23,7 +23,9 @@
 //! 同一个字段两臂一个是 `"median": 3250` 一个是 `"median": 3300.0` —— 这个差别直接
 //! 落在字节上, 所以这一层的算术全走 [`Num`], 不能一律当 f64。
 
-use crate::pyjson::{dumps, py_round, py_sum, PyVal};
+use crate::pyjson::{self, dumps, py_round, py_sum, PyVal};
+use crate::llm;
+use crate::sysparam;
 use crate::pyobj;
 use std::path::Path;
 
@@ -80,14 +82,12 @@ impl Num {
             Num::Float(x) => Num::Float(py_round(x, n)),
         }
     }
-    fn from_json(v: &serde_json::Value) -> Option<Num> {
+    fn from_json(v: &PyVal) -> Option<Num> {
         match v {
             // Python 的 isinstance(x, (int, float)) 对 bool 也成立 (bool 是 int 的子类),
             // 但 summary.json 里这些字段从来不是布尔, 这里不特殊照顾。
-            serde_json::Value::Number(n) => Some(match n.as_i64() {
-                Some(i) => Num::Int(i),
-                None => Num::Float(n.as_f64()?),
-            }),
+            PyVal::Int(i) => Some(Num::Int(*i)),
+            PyVal::Float(f) => Some(Num::Float(*f)),
             _ => None,
         }
     }
@@ -384,7 +384,7 @@ pub fn perm_ci(a: &[Num], b: &[Num], alpha: f64, steps: usize) -> Option<(f64, f
 // ══════════════ 载入 ══════════════
 
 /// 一轮: (标签, summary.json 的内容)
-pub type Run = (String, serde_json::Value);
+pub type Run = (String, PyVal);
 
 /// Python `glob.glob` 的最小复刻: 逐路径段匹配 `*` / `?` / `[...]`,
 /// `*` 不跨 `/`, 也不匹配以 `.` 开头的名字。结果按路径字符串排序 (调用方的 `sorted()`)。
@@ -494,7 +494,7 @@ pub fn load_runs(pattern: &str) -> Vec<Run> {
         let Ok(text) = std::fs::read_to_string(&f) else {
             continue;
         };
-        let Ok(v) = serde_json::from_str(&text) else {
+        let Ok(v) = pyjson::loads(&text) else {
             continue;
         };
         let label = Path::new(&f)
@@ -621,6 +621,59 @@ pub fn run_analyze(args: &[String]) -> i32 {
 
 // ══════════════ 给尚未搬迁的 Python 用的过渡通道 ══════════════
 
+/// 从请求里取「有序的 [键, 值] 对列表」。
+///
+/// 为什么不用 JSON 对象: serde_json 默认用 BTreeMap 存对象, 一解析键就按字典序排好了,
+/// 而 Python 的 dict 是插入序 —— 候选参数的遍历顺序决定了多处违规时先报哪一条,
+/// 白名单的插入顺序也影响不了别的但一样该守住。所以过桥一律走 pair 列表。
+fn pairs_arg(req: &PyVal, key: &str) -> Vec<(String, String)> {
+    let Some(PyVal::List(a)) = req.get(key) else {
+        return Vec::new();
+    };
+    a.iter()
+        .filter_map(|e| {
+            let PyVal::List(p) = e else { return None };
+            let PyVal::Str(k) = p.first()? else { return None };
+            Some((k.clone(), p.get(1)?.py_str()))
+        })
+        .collect()
+}
+
+/// 从请求里还原白名单 (同样走有序 pair 列表)。
+fn wl_arg(req: &PyVal) -> sysparam::Whitelist {
+    let Some(PyVal::List(a)) = req.get("wl") else {
+        return Vec::new();
+    };
+    let text = |v: Option<&PyVal>| match v {
+        Some(PyVal::Str(s)) => s.clone(),
+        _ => String::new(),
+    };
+    a.iter()
+        .filter_map(|e| {
+            let PyVal::List(p) = e else { return None };
+            let PyVal::Str(pid) = p.first()? else { return None };
+            let s = p.get(1)?;
+            Some((
+                pid.clone(),
+                sysparam::Spec {
+                    kind: text(s.get("kind")),
+                    path: text(s.get("path")),
+                    values: match s.get("values") {
+                        Some(PyVal::List(v)) => v.iter().map(|x| x.py_str()).collect(),
+                        _ => Vec::new(),
+                    },
+                    current: text(s.get("current")),
+                    group: match s.get("group") {
+                        Some(PyVal::Str(g)) => Some(g.clone()),
+                        _ => None,
+                    },
+                    effect: text(s.get("effect")),
+                },
+            ))
+        })
+        .collect()
+}
+
 /// `phonefarm loopstat`: 从 stdin 读一个 JSON 请求, 往 stdout 写一个 JSON 结果。
 ///
 /// 只为迁移期存在。`report.py` / `refbench_report.py` / `autoloop.py` 还在把
@@ -633,48 +686,132 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
         eprintln!("读不到 stdin");
         return 1;
     }
-    let req: serde_json::Value = match serde_json::from_str(&buf) {
+    let req = match pyjson::loads(&buf) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("请求不是合法 JSON: {e}");
             return 1;
         }
     };
-    let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
-    let nums = |k: &str| -> Vec<Num> {
-        req.get(k)
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(Num::from_json).collect())
-            .unwrap_or_default()
+    let op = match req.get("op") {
+        Some(PyVal::Str(s)) => s.clone(),
+        _ => String::new(),
     };
+    let arr = |k: &str| -> &[PyVal] {
+        match req.get(k) {
+            Some(PyVal::List(a)) => a.as_slice(),
+            _ => &[],
+        }
+    };
+    let nums = |k: &str| -> Vec<Num> { arr(k).iter().filter_map(Num::from_json).collect() };
     let runs = |k: &str| -> Vec<Run> {
-        req.get(k)
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|e| {
-                        let p = e.as_array()?;
-                        Some((p.first()?.as_str()?.to_string(), p.get(1)?.clone()))
-                    })
-                    .collect()
+        arr(k)
+            .iter()
+            .filter_map(|e| {
+                let PyVal::List(p) = e else { return None };
+                let PyVal::Str(label) = p.first()? else { return None };
+                Some((label.clone(), p.get(1)?.clone()))
             })
-            .unwrap_or_default()
+            .collect()
     };
-    let s = |k: &str| req.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let s = |k: &str| match req.get(k) {
+        Some(PyVal::Str(v)) => v.clone(),
+        _ => String::new(),
+    };
 
-    let out = match op {
+    let out = match op.as_str() {
         "mean" => PyVal::Float(mean(&nums("xs"))),
         "dispersion" => dispersion(&nums("xs")).into(),
         "drift" => drift(&nums("xs")),
         "load_runs" => PyVal::List(
             load_runs(&s("pattern"))
                 .into_iter()
-                .map(|(l, v)| PyVal::List(vec![PyVal::Str(l), PyVal::from(&v)]))
+                .map(|(l, v)| PyVal::List(vec![PyVal::Str(l), v]))
                 .collect(),
         ),
         "describe" => describe(&runs("runs"), &s("title")),
         "compare" => compare(&runs("a"), &runs("b"), &s("metric")),
         "snapshot_diff" => crate::loopreport::snapshot_diff(&s("before"), &s("after")),
+        // ── 系统参数闭环 (src/sysparam.rs) ──
+        "build_whitelist" => sysparam::whitelist_to_pyval(&sysparam::build_whitelist(
+            &sysparam::parse_probe(&s("probe_text")))),
+        "describe_whitelist" => PyVal::Str(sysparam::describe_whitelist(&wl_arg(&req))),
+        "validate_candidate" => {
+            let (ok, why) = sysparam::validate_candidate(&pairs_arg(&req, "cand"), &wl_arg(&req));
+            PyVal::List(vec![PyVal::Bool(ok), PyVal::Str(why)])
+        }
+        "plan_text" => match sysparam::plan_text(&pairs_arg(&req, "cand"), &wl_arg(&req)) {
+            Ok(t) => PyVal::Str(t),
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        },
+        // 数字原样带过去 (int 进 int 出), 不在桥上做类型提升
+        "rule_doc" => sysparam::rule_doc(
+            req.get("temp_cap_c").unwrap_or(&PyVal::Null),
+            req.get("pairs").unwrap_or(&PyVal::Null),
+            req.get("power_available").and_then(|v| v.as_bool()).unwrap_or(false),
+            &s("power_note")),
+        "env_stats" => sysparam::env_stats(&s("text")),
+        // ── 模型侧 (src/llm.rs) ──
+        "load_keys" => {
+            match llm::load_keys(&arr("paths").iter().map(|p| p.py_str()).collect::<Vec<_>>()) {
+                Ok(kv) => PyVal::Obj(kv.into_iter().map(|(k, v)| (k, PyVal::Str(v))).collect()),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            }
+        }
+        "build_prompt" => PyVal::Str(llm::build_prompt(
+            &s("whitelist_desc"),
+            match req.get("history") { Some(PyVal::List(h)) => h, _ => &[] },
+            req.get("n").and_then(|v| v.as_i64()).unwrap_or(0) as usize,
+            &s("goal_note"))),
+        "parse_candidates" => PyVal::List(
+            llm::parse_candidates(&s("text"), req.get("n").and_then(|v| v.as_i64()).unwrap_or(0) as usize)
+                .iter().map(|c| c.to_pyval()).collect()),
+        "local_mutate" => PyVal::List(
+            llm::local_mutate(
+                &wl_arg(&req),
+                match req.get("history") { Some(PyVal::List(h)) => h, _ => &[] },
+                req.get("n").and_then(|v| v.as_i64()).unwrap_or(0) as usize,
+                req.get("seed").and_then(|v| v.as_i64()).unwrap_or(0),
+            ).iter().map(|c| c.to_pyval()).collect()),
+        "llm_chat" => {
+            let keys: Vec<(String, String)> = match req.get("keys") {
+                Some(PyVal::Obj(kvs)) => kvs.iter().map(|(k, v)| (k.clone(), v.py_str())).collect(),
+                _ => Vec::new(),
+            };
+            let tmp = if s("tmp_dir").is_empty() {
+                std::env::temp_dir().to_string_lossy().to_string()
+            } else {
+                s("tmp_dir")
+            };
+            let (got, log) = llm::chat_with_log(&s("prompt"), &keys, &tmp);
+            pyobj! {
+                "provider" => got.as_ref().map(|(p, _)| p.clone()),
+                "content" => got.as_ref().map(|(_, c)| c.clone()),
+                "log" => log,
+            }
+        }
+        // 画面动没动: 裸帧走文件路径, 不塞进 JSON (13MB 一张, base64 过桥不划算)
+        // 读不到裸帧也按"没在转"回一个带 error 的结论, 而不是非零退出 ——
+        // 上游 autoloop 靠这个 dict 落证据再退出 3, 抛异常会把那条路绕掉。
+        "spin_verdict" => match (std::fs::read(s("frame_a")), std::fs::read(s("frame_b"))) {
+            (Ok(a), Ok(b)) => crate::framecheck::verdict(&a, &b),
+            (Err(e), _) | (_, Err(e)) => crate::framecheck::read_error(&e.to_string()),
+        },
+        "decide" => sysparam::decide(
+            &req.get("comparisons").cloned().unwrap_or(PyVal::Null),
+            &sysparam::DecideCtx {
+                temp_max_c: req.get("temp_max_c").cloned().unwrap_or(PyVal::Null),
+                temp_cap_c: req.get("temp_cap_c").cloned().unwrap_or(PyVal::Null),
+                apply_ok: req.get("apply_ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                snapshot_identical: req.get("snapshot_identical").and_then(|v| v.as_bool()).unwrap_or(false),
+                power_available: req.get("power_available").and_then(|v| v.as_bool()).unwrap_or(false),
+            }),
         other => {
             eprintln!("不认识的 op: {other}");
             return 2;
