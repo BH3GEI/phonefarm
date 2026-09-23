@@ -55,7 +55,7 @@ ashell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUT/snap_before.txt" 
 
 # ── 单轮 + 无效重试 ──
 # 设备被本会话连续压测热浸透, 起测温度偏高 → 满载时偶发单次 kgsl_thermal_constraint。
-# 实测该单次事件对帧时无影响 (无效 i06 与有效重试 p50 差 0.05%), 但 attribute.py 只要
+# 实测该单次事件对帧时无影响 (无效 i06 与有效重试 p50 差 0.05%), 但归因 (phonefarm attribute) 只要
 # n_thermal>0 就判"热降频受限", 污染判据4 的归因, 所以仍须拿到 0 事件轮 —— 靠更深的
 # 轮前散热 (REFBENCH_COOL_MC) + 更多重试, 而非放宽判定。
 export REFBENCH_COOL_MC=39500   # 松散热地板 (快速轮转), 靠 12s 短采集 + 6 次重试拿 0 事件轮

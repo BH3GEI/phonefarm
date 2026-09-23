@@ -109,7 +109,7 @@
   "trace": {
     "comm_filter": "UnityGfxDeviceW",
     "comm_filter_status": "VERIFIED 2026-09-23",
-    "comm_filter_note": "红魔(Adreno 840 / Vulkan)上实测确认为 UnityGfxDeviceW —— harness 自己扫 /proc/self/task/*/comm 得到并回写进 render_thread_comm, 不靠猜。parse_trace.py 的 --comm 从输出 json 取, 不要在脚本里写死。",
+    "comm_filter_note": "红魔(Adreno 840 / Vulkan)上实测确认为 UnityGfxDeviceW —— harness 自己扫 /proc/self/task/*/comm 得到并回写进 render_thread_comm, 不靠猜。phonefarm parse-trace 的 --comm 从输出 json 取, 不要在脚本里写死。",
     "submits_per_frame": "auto",
     "submits_per_frame_note": "不写死。URP 单帧提交次数随 render pass 配置变化, 交给 loop_v1 的 detect_submits_per_frame 自相关自检 (原神 2 次/帧就是这么测出来的)。"
   },
