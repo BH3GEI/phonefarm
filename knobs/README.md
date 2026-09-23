@@ -26,9 +26,10 @@ bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清�
 | 问题 | 结论 | 判据 |
 |---|---|---|
 | 1 能给非 debuggable 应用挂层 | ✅ 成立 | refbench 外部 files 出现 `layer_loaded=true`；层数到 3600 帧 = 应用自报 3600 帧 |
-| 2 目标游戏反作弊放行 | ⚠ 部分 | 层挂进去了、游戏跑 5 分钟不崩不被杀；但被强制更新公告挡在登录界面，**没进大世界** |
+| 2 目标游戏反作弊放行 | ✅ 成立 | 更新到 7.1.0 后补齐：正常登录、进大世界、跑满一轮负载，无崩溃无反作弊告警 |
 | 3 鸿蒙等价机制 | ⏸ 无设备 | |
-| 灰档改写 #1 LoadOp→DONT_CARE | ✅ 成立 | refbench 四臂对照；改写被绑 14400 次、应用仍自报 LOAD、四臂 `clean_exit=true` |
+| 灰档改写 #1 LoadOp→DONT_CARE（refbench） | ✅ 成立 | 四臂对照；改写被绑 14400 次、应用仍自报 LOAD、四臂 `clean_exit=true` |
+| 同上，在原神大世界的效果 | ⚠ 命中但无效果 | 5 对 A/B：改写真被绑 4.4–5.2 万次，但 p95 / GPU / 带宽 p 值全 > 0.05 |
 
 **层对宿主是透明的**（有无层对照：swapchain、`frames_submitted=3600`、`clean_exit=true` 全相等）。
 

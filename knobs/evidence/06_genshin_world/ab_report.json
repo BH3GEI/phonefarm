@@ -1,0 +1,615 @@
+{
+ "goal": "GOAL v1 — 最小可信闭环",
+ "primary_metric": "frame_p95",
+ "baseline": {
+  "title": "loop_v1/runs_graylayer/ab/ctrl*",
+  "n_runs": 5,
+  "runs": [
+   "ctrl1",
+   "ctrl2",
+   "ctrl3",
+   "ctrl4",
+   "ctrl5"
+  ],
+  "metrics": {
+   "frame_p50": {
+    "values": [
+     16.665,
+     16.695,
+     16.6935,
+     16.6675,
+     16.706
+    ],
+    "median": 16.6935,
+    "mean": 16.6854,
+    "min": 16.665,
+    "max": 16.706,
+    "dispersion_pct": 0.246,
+    "drift": {
+     "slope_per_run": 0.00545,
+     "slope_pct_per_run": 0.0327,
+     "monotonic_frac": 0.5
+    }
+   },
+   "frame_p95": {
+    "values": [
+     20.0028,
+     20.0268,
+     19.681,
+     20.2164,
+     20.0707
+    ],
+    "median": 20.0268,
+    "mean": 19.9995,
+    "min": 19.681,
+    "max": 20.2164,
+    "dispersion_pct": 2.673,
+    "drift": {
+     "slope_per_run": 0.03254,
+     "slope_pct_per_run": 0.1627,
+     "monotonic_frac": 0.5
+    }
+   },
+   "frame_p99": {
+    "values": [
+     28.8485,
+     29.5067,
+     27.6423,
+     25.8999,
+     29.9991
+    ],
+    "median": 28.8485,
+    "mean": 28.3793,
+    "min": 25.8999,
+    "max": 29.9991,
+    "dispersion_pct": 14.209,
+    "drift": {
+     "slope_per_run": -0.13056,
+     "slope_pct_per_run": -0.4601,
+     "monotonic_frac": 0.5
+    }
+   },
+   "frame_mean": {
+    "values": [
+     16.9191,
+     16.8987,
+     16.8577,
+     16.8463,
+     16.8978
+    ],
+    "median": 16.8978,
+    "mean": 16.8839,
+    "min": 16.8463,
+    "max": 16.9191,
+    "dispersion_pct": 0.431,
+    "drift": {
+     "slope_per_run": -0.0095,
+     "slope_pct_per_run": -0.0563,
+     "monotonic_frac": 0.25
+    }
+   },
+   "gpu_active_mean": {
+    "values": [
+     13.3649,
+     13.2924,
+     13.3749,
+     13.2643,
+     13.2507
+    ],
+    "median": 13.2924,
+    "mean": 13.3094,
+    "min": 13.2507,
+    "max": 13.3749,
+    "dispersion_pct": 0.934,
+    "drift": {
+     "slope_per_run": -0.02565,
+     "slope_pct_per_run": -0.1927,
+     "monotonic_frac": 0.25
+    }
+   },
+   "gpu_active_p95": {
+    "values": [
+     14.5572,
+     14.7307,
+     14.4285,
+     14.4199,
+     14.5539
+    ],
+    "median": 14.5539,
+    "mean": 14.538,
+    "min": 14.4199,
+    "max": 14.7307,
+    "dispersion_pct": 2.136,
+    "drift": {
+     "slope_per_run": -0.03174,
+     "slope_pct_per_run": -0.2183,
+     "monotonic_frac": 0.5
+    }
+   },
+   "queue_p50": {
+    "values": [
+     2.5139,
+     2.5544,
+     2.5891,
+     2.6627,
+     2.1938
+    ],
+    "median": 2.5544,
+    "mean": 2.5028,
+    "min": 2.1938,
+    "max": 2.6627,
+    "dispersion_pct": 18.357,
+    "drift": {
+     "slope_per_run": -0.05319,
+     "slope_pct_per_run": -2.1252,
+     "monotonic_frac": 0.75
+    }
+   },
+   "fps_mean": {
+    "values": [
+     59.081,
+     59.143,
+     59.314,
+     59.36,
+     59.179
+    ],
+    "median": 59.179,
+    "mean": 59.2154,
+    "min": 59.081,
+    "max": 59.36,
+    "dispersion_pct": 0.471,
+    "drift": {
+     "slope_per_run": 0.0413,
+     "slope_pct_per_run": 0.0697,
+     "monotonic_frac": 0.75
+    }
+   },
+   "bw_median": {
+    "values": [
+     7175.0,
+     7250,
+     7300,
+     7350.0,
+     7000
+    ],
+    "median": 7250,
+    "mean": 7215.0,
+    "min": 7000,
+    "max": 7350.0,
+    "dispersion_pct": 4.828,
+    "drift": {
+     "slope_per_run": -25.0,
+     "slope_pct_per_run": -0.3465,
+     "monotonic_frac": 0.75
+    }
+   }
+  }
+ },
+ "criterion_1_workload_repeatable": {
+  "pass": true,
+  "metric": "frame_p95",
+  "dispersion_pct": 2.673,
+  "gate_pct": 5.0,
+  "values": [
+   20.0028,
+   20.0268,
+   19.681,
+   20.2164,
+   20.0707
+  ],
+  "drift": {
+   "slope_per_run": 0.03254,
+   "slope_pct_per_run": 0.1627,
+   "monotonic_frac": 0.5
+  },
+  "systematic_drift_flagged": false,
+  "note": "离散度合格且无单调漂移"
+ },
+ "criterion_2_attribution": {
+  "pass": true,
+  "verdicts_per_run": [
+   "限帧器封顶 @60fps",
+   "限帧器封顶 @60fps",
+   "限帧器封顶 @60fps",
+   "限帧器封顶 @60fps",
+   "限帧器封顶 @60fps"
+  ],
+  "consistent": true,
+  "verdict": "限帧器封顶 @60fps",
+  "evidence": "帧周期 16.66ms 贴着 60fps 的 16.67ms (±2%), 而 GPU 只用掉 80.2%, 余量 3.30ms",
+  "actionable": "p50 被软件限帧钉死, 物理上降不下去。可动的只有: 抖动 p95-p50=3.34ms, 以及每帧 GPU 工作量 13.36ms (省功耗/热预算)",
+  "measures_run1": {
+   "frame_p50_ms": 16.665,
+   "frame_p95_ms": 20.0028,
+   "jitter_p95_minus_p50_ms": 3.3378,
+   "gpu_active_mean_ms": 13.3649,
+   "gpu_share_pct": 80.2,
+   "queue_p50_ms": 2.5139,
+   "queue_share_pct": 15.08,
+   "n_thermal_events": 0,
+   "detected_fps_cap": 60
+  },
+  "bandwidth_run1": {
+   "ddr_cur_khz": 3187000.0,
+   "ddr_boost_khz": 547000.0,
+   "gpu_bus_vote_median": 7175.0,
+   "gpu_bus_vote_max": 9650,
+   "bus_vote_headroom_pct": 25.65
+  }
+ },
+ "knob_arm": {
+  "title": "loop_v1/runs_graylayer/ab/knob*",
+  "n_runs": 5,
+  "runs": [
+   "knob1",
+   "knob2",
+   "knob3",
+   "knob4",
+   "knob5"
+  ],
+  "metrics": {
+   "frame_p50": {
+    "values": [
+     16.675,
+     16.6825,
+     16.686,
+     16.639,
+     16.67
+    ],
+    "median": 16.675,
+    "mean": 16.6705,
+    "min": 16.639,
+    "max": 16.686,
+    "dispersion_pct": 0.282,
+    "drift": {
+     "slope_per_run": -0.00535,
+     "slope_pct_per_run": -0.0321,
+     "monotonic_frac": 0.75
+    }
+   },
+   "frame_p95": {
+    "values": [
+     19.867,
+     19.8349,
+     20.0456,
+     19.946,
+     19.7942
+    ],
+    "median": 19.867,
+    "mean": 19.8975,
+    "min": 19.7942,
+    "max": 20.0456,
+    "dispersion_pct": 1.265,
+    "drift": {
+     "slope_per_run": -0.00345,
+     "slope_pct_per_run": -0.0173,
+     "monotonic_frac": 0.25
+    }
+   },
+   "frame_p99": {
+    "values": [
+     27.9901,
+     28.9168,
+     30.6041,
+     27.9499,
+     29.4172
+    ],
+    "median": 28.9168,
+    "mean": 28.9756,
+    "min": 27.9499,
+    "max": 30.6041,
+    "dispersion_pct": 9.179,
+    "drift": {
+     "slope_per_run": 0.18873,
+     "slope_pct_per_run": 0.6513,
+     "monotonic_frac": 0.75
+    }
+   },
+   "frame_mean": {
+    "values": [
+     16.8366,
+     16.849,
+     16.947,
+     16.8028,
+     16.8918
+    ],
+    "median": 16.849,
+    "mean": 16.8654,
+    "min": 16.8028,
+    "max": 16.947,
+    "dispersion_pct": 0.856,
+    "drift": {
+     "slope_per_run": 0.00642,
+     "slope_pct_per_run": 0.0381,
+     "monotonic_frac": 0.75
+    }
+   },
+   "gpu_active_mean": {
+    "values": [
+     13.2385,
+     13.3414,
+     13.3113,
+     13.346,
+     13.3216
+    ],
+    "median": 13.3216,
+    "mean": 13.3118,
+    "min": 13.2385,
+    "max": 13.346,
+    "dispersion_pct": 0.807,
+    "drift": {
+     "slope_per_run": 0.01708,
+     "slope_pct_per_run": 0.1283,
+     "monotonic_frac": 0.5
+    }
+   },
+   "gpu_active_p95": {
+    "values": [
+     14.5882,
+     14.405,
+     14.8563,
+     14.8732,
+     14.3176
+    ],
+    "median": 14.5882,
+    "mean": 14.6081,
+    "min": 14.3176,
+    "max": 14.8732,
+    "dispersion_pct": 3.809,
+    "drift": {
+     "slope_per_run": -0.0073,
+     "slope_pct_per_run": -0.05,
+     "monotonic_frac": 0.5
+    }
+   },
+   "queue_p50": {
+    "values": [
+     2.3169,
+     2.5792,
+     2.5457,
+     3.1425,
+     2.18
+    ],
+    "median": 2.5457,
+    "mean": 2.5529,
+    "min": 2.18,
+    "max": 3.1425,
+    "dispersion_pct": 37.809,
+    "drift": {
+     "slope_per_run": 0.02895,
+     "slope_pct_per_run": 1.134,
+     "monotonic_frac": 0.5
+    }
+   },
+   "fps_mean": {
+    "values": [
+     59.394,
+     59.331,
+     58.982,
+     59.514,
+     59.2
+    ],
+    "median": 59.331,
+    "mean": 59.2842,
+    "min": 58.982,
+    "max": 59.514,
+    "dispersion_pct": 0.897,
+    "drift": {
+     "slope_per_run": -0.0205,
+     "slope_pct_per_run": -0.0346,
+     "monotonic_frac": 0.25
+    }
+   },
+   "bw_median": {
+    "values": [
+     7250,
+     7350.0,
+     7250,
+     7350,
+     7175.0
+    ],
+    "median": 7250,
+    "mean": 7275.0,
+    "min": 7175.0,
+    "max": 7350.0,
+    "dispersion_pct": 2.414,
+    "drift": {
+     "slope_per_run": -15.0,
+     "slope_pct_per_run": -0.2062,
+     "monotonic_frac": 0.5
+    }
+   }
+  }
+ },
+ "comparison": {
+  "frame_p95": {
+   "metric": "frame_p95",
+   "a_values": [
+    20.0028,
+    20.0268,
+    19.681,
+    20.2164,
+    20.0707
+   ],
+   "b_values": [
+    19.867,
+    19.8349,
+    20.0456,
+    19.946,
+    19.7942
+   ],
+   "a_mean": 19.9995,
+   "b_mean": 19.8975,
+   "diff_mean": -0.102,
+   "diff_pct": -0.51,
+   "hodges_lehmann": -0.1598,
+   "cohens_d": -0.6548,
+   "perm_p_two_sided": 0.325397,
+   "perm_enumerated": 252,
+   "ci95": [
+    -0.3055,
+    0.1336
+   ],
+   "significant_at_0.05": false
+  },
+  "frame_p50": {
+   "metric": "frame_p50",
+   "a_values": [
+    16.665,
+    16.695,
+    16.6935,
+    16.6675,
+    16.706
+   ],
+   "b_values": [
+    16.675,
+    16.6825,
+    16.686,
+    16.639,
+    16.67
+   ],
+   "a_mean": 16.6854,
+   "b_mean": 16.6705,
+   "diff_mean": -0.0149,
+   "diff_pct": -0.089,
+   "hodges_lehmann": -0.0185,
+   "cohens_d": -0.8087,
+   "perm_p_two_sided": 0.253968,
+   "perm_enumerated": 252,
+   "ci95": [
+    -0.043,
+    0.0132
+   ],
+   "significant_at_0.05": false
+  },
+  "frame_mean": {
+   "metric": "frame_mean",
+   "a_values": [
+    16.9191,
+    16.8987,
+    16.8577,
+    16.8463,
+    16.8978
+   ],
+   "b_values": [
+    16.8366,
+    16.849,
+    16.947,
+    16.8028,
+    16.8918
+   ],
+   "a_mean": 16.8839,
+   "b_mean": 16.8654,
+   "diff_mean": -0.0185,
+   "diff_pct": -0.109,
+   "hodges_lehmann": -0.0211,
+   "cohens_d": -0.4116,
+   "perm_p_two_sided": 0.507937,
+   "perm_enumerated": 252,
+   "ci95": [
+    -0.0819,
+    0.045
+   ],
+   "significant_at_0.05": false
+  },
+  "gpu_active_mean": {
+   "metric": "gpu_active_mean",
+   "a_values": [
+    13.3649,
+    13.2924,
+    13.3749,
+    13.2643,
+    13.2507
+   ],
+   "b_values": [
+    13.2385,
+    13.3414,
+    13.3113,
+    13.346,
+    13.3216
+   ],
+   "a_mean": 13.3094,
+   "b_mean": 13.3118,
+   "diff_mean": 0.0023,
+   "diff_pct": 0.017,
+   "hodges_lehmann": -0.0122,
+   "cohens_d": 0.0457,
+   "perm_p_two_sided": 0.944444,
+   "perm_enumerated": 252,
+   "ci95": [
+    -0.0768,
+    0.076
+   ],
+   "significant_at_0.05": false
+  },
+  "bw_median": {
+   "metric": "bw_median",
+   "a_values": [
+    7175.0,
+    7250,
+    7300,
+    7350.0,
+    7000
+   ],
+   "b_values": [
+    7250,
+    7350.0,
+    7250,
+    7350,
+    7175.0
+   ],
+   "a_mean": 7215.0,
+   "b_mean": 7275.0,
+   "diff_mean": 60.0,
+   "diff_pct": 0.832,
+   "hodges_lehmann": 50.0,
+   "cohens_d": 0.5449,
+   "perm_p_two_sided": 0.52381,
+   "perm_enumerated": 252,
+   "ci95": [
+    -94.0,
+    221.0
+   ],
+   "significant_at_0.05": false
+  }
+ },
+ "criterion_3_statistically_significant": {
+  "pass": false,
+  "metric": "frame_p95",
+  "baseline_mean": 19.9995,
+  "knob_mean": 19.8975,
+  "diff_mean": -0.102,
+  "diff_pct": -0.51,
+  "effect_size_cohens_d": -0.6548,
+  "hodges_lehmann": -0.1598,
+  "ci95": [
+   -0.3055,
+   0.1336
+  ],
+  "ci_excludes_zero": false,
+  "perm_p_two_sided": 0.325397,
+  "perm_enumerated": 252,
+  "alpha": 0.05,
+  "direction": "改善"
+ },
+ "criterion_4_no_residue": {
+  "pass": true,
+  "checked": true,
+  "n_lines": 38,
+  "n_diff": 0,
+  "identical": true,
+  "diffs": []
+ },
+ "summary": {
+  "criteria_total": 5,
+  "criteria_evaluated": 4,
+  "criteria_passed": 3,
+  "all_pass": false,
+  "per_criterion": {
+   "criterion_1_workload_repeatable": true,
+   "criterion_2_attribution": true,
+   "criterion_3_statistically_significant": false,
+   "criterion_4_no_residue": true
+  }
+ }
+}
