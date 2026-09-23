@@ -33,4 +33,4 @@ git apply /Users/mac/projects/phonefarm/loop_v1/carriers/anki-sponza/patches/000
 
 ## 还没写的 patch
 
-`0002` 挂外部 Compute 算子 —— 设计在 `../DESIGN_COMPUTE_HOOK.md`，代码未落地。
+`0003` 挂外部 Compute 算子 —— 设计在 `../DESIGN_COMPUTE_HOOK.md`，代码未落地。

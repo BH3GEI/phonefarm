@@ -18,18 +18,46 @@
 | 宿主着色器编译链路 (容器) | ✅ 跑通，63/63 `.ankiprogbin` |
 | arm64 APK 构建 | ✅ **出包成功**，133 MB |
 | 确定性跑法 patch 进包 | ✅ 编译通过，产物内已验到标记字符串 |
-| 装机 / 上机跑通 | ⏳ 手机被别的 agent 占着，没轮到 |
-| 3 轮基线 / 帧时 p95 离散度 | ⏳ 同上 |
+| 装机 | ✅ 装上了，能启动 |
+| started 标记 / 输出 JSON 落盘 | ✅ 路径与内容都对（`orbit unset`） |
+| **稳定跑完固定帧数** | ❌ **GPU device lost，见下 §0** |
+| 3 轮基线 / 帧时 p95 离散度 | ❌ 没采 —— 载体不稳，采了也不算数 |
 | 挂 Compute 算子要改哪几处 | ✅ [`DESIGN_COMPUTE_HOOK.md`](DESIGN_COMPUTE_HOOK.md) |
-
-**没上过机**：APK 从没在设备上启动过。所以下面这些仍然**不是实测事实** ——
-相机轨迹是否真的逐帧可重复、`frames` 到了会不会干净自退、标记文件与 JSON 落盘路径
-对不对、每帧提交几次。`contract/launch.json` 里带 `unverified` 的字段同理。
-第一次上机要先验这些，再谈基线。
 
 已知没接的部分：intent extras 还没接（Android 走 NativeActivity，`argc/argv` 是空的，
 要走 JNI），所以 `frames`/`run_id`/`campath` 目前用的是代码里的默认值；
 驱动线程改名 `AnkiDrv` 也还没做。详见 [`patches/README.md`](patches/README.md)。
+
+---
+
+## 0. ⚠ 当前拦路虎：`VK_ERROR_DEVICE_LOST`
+
+2026-09-23 首次上机（红魔 NX809J / Android 16 / Adreno，2688×1216）实测：
+
+- 启动正常，`anki_sponza_started` 落盘、内容 `orbit unset`，契约那部分是通的
+- 但渲染很快就出问题：首轮自报 `frames_submitted: 45`（目标 3600）、`clean_exit: false`
+- 屏幕上画面**疯狂闪烁**
+- `/data/tombstones/` 留下 **两份 `VK_ERROR_DEVICE_LOST`**，崩的是
+  `com.android.systemui` 的 RenderThread（`GrVkGpu::checkVkResult` →
+  `onVkDeviceFault` → abort）—— 也就是说 GPU 设备级 fault，把系统 UI 一起带崩了
+
+**结论：是渲染/驱动本身的问题，不是反复启停造成的。** 启停 app 不会产生 device lost；
+而且闪的那段时间进程是一直存活的，没有重启。
+
+排查方向（按怀疑度）：
+
+1. **shader 变体 / Adreno 兼容** —— 最可疑。我们的 `.ankiprogbin` 是在 x86_64 Linux
+   容器里用 DXC 编的（`-DANKI_PLATFORM_MOBILE=1 -spirv`），参数和上游 CMake 一致，
+   但从没人在这条链路上验证过产物能在 Adreno 上跑。先拿掉重的 pass
+   （`Render.RenderScaling` 调低、关 TAA/反射/volumetric）二分定位是哪个 pass 炸的。
+2. **AnKi 在 Adreno 上的已知问题** —— 上游 CI 只跑 Linux/Windows，Android 是手动验的。
+3. **相机 patch** —— 基本排除：`0001` 只改 transform，不碰任何 GPU 资源，
+   不会导致 device fault。
+
+**在这条解决之前，任何基线数字都不要采信**，载体还不能用。
+
+排查纪律：这台手机是多 agent 共用的，而且会把 SystemUI 搞崩 ——
+上机前先抢 `/private/tmp/claude-501/device.lock`，跑完立刻删，不要连续重试。
 
 ---
 
