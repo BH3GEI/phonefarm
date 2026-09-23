@@ -1,0 +1,253 @@
+{
+ "params": {
+  "cpu.policy0.scaling_governor": "performance",
+  "cpu.policy6.scaling_governor": "performance",
+  "cpu.policy0.scaling_min_freq": "1785600",
+  "cpu.policy6.scaling_min_freq": "1382400"
+ },
+ "why": "测 CPU 调度侧:两簇改 performance 治理并抬小核下限,看调度器响应性对帧稳定性的影响",
+ "plan": "# loop_v1 sysparam plan\nsysfs\t/sys/devices/system/cpu/cpufreq/policy0/scaling_governor\tperformance\nsysfs\t/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq\t1785600\nsysfs\t/sys/devices/system/cpu/cpufreq/policy6/scaling_governor\tperformance\nsysfs\t/sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq\t1382400\n",
+ "pairs_completed": 0,
+ "apply_ok": true,
+ "apply_log": [
+  "KNOB_APPLIED /sys/devices/system/cpu/cpufreq/policy0/scaling_governor: walt -> performance\nKNOB_APPLIED /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq: 787200 -> 1785600\nKNOB_APPLIED /sys/devices/system/cpu/cpufreq/policy6/scaling_governor: walt -> performance\nKNOB_APPLIED /sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq: 883200 -> 1382400\n"
+ ],
+ "restore_ok": false,
+ "restore_fail": "KNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy0/scaling_governor: -> walt\nKNOB_RESTORE_FAIL /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq: 想写 1785600, 回读 1324800\nKNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq: -> 787200\nKNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy6/scaling_governor: -> walt\nKNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy6/scaling_max_freq: -> 1382400\nKNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq: -> 883200\n\n#adb_exit=4",
+ "restore_log": [
+  "KNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy0/scaling_governor: -> walt",
+  "KNOB_RESTORE_FAIL /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq: 想写 1785600, 回读 1440000",
+  "KNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq: -> 787200",
+  "KNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy6/scaling_governor: -> walt",
+  "KNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy6/scaling_max_freq: -> 1382400",
+  "KNOB_RESTORED /sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq: -> 883200",
+  "",
+  "#adb_exit=4"
+ ],
+ "knob_state_after": [
+  "state: 已施加",
+  "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor cur=walt orig=walt",
+  "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq cur=1440000 orig=1785600",
+  "/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq cur=787200 orig=787200",
+  "/sys/devices/system/cpu/cpufreq/policy6/scaling_governor cur=walt orig=walt",
+  "/sys/devices/system/cpu/cpufreq/policy6/scaling_max_freq cur=1382400 orig=1382400",
+  "/sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq cur=883200 orig=883200"
+ ],
+ "cooldown": {
+  "ok": true,
+  "zone": "cpu-0-2-1",
+  "c": 48.4,
+  "waited_s": 31.8
+ },
+ "charge_suspend_log": [
+  "CHARGE_SUSPENDED /sys/class/qcom-battery/charging_enabled: 1 -> 0",
+  "CHARGE_STATE status=Discharging current_now=-657000 capacity=94 on_battery=yes"
+ ],
+ "charge_restore_log": [
+  "CHARGE_RESTORED /sys/class/qcom-battery/charging_enabled: -> 1",
+  "CHARGE_STATE status=Charging current_now=-1132000 capacity=93 on_battery=no"
+ ],
+ "on_battery_uniform": true,
+ "snapshot_check": {
+  "checked": true,
+  "n_lines": 39,
+  "strict_identical": false,
+  "strict_n_diff": 2,
+  "ours_identical": false,
+  "ours_keys": [
+   "cpu.policy0.governor",
+   "cpu.policy0.scaling_max",
+   "cpu.policy0.scaling_min",
+   "cpu.policy6.governor",
+   "cpu.policy6.scaling_max",
+   "cpu.policy6.scaling_min"
+  ],
+  "ours_diffs": [
+   {
+    "line": 29,
+    "before": "cpu.policy0.scaling_max=1785600",
+    "after": "cpu.policy0.scaling_max=1324800"
+   }
+  ],
+  "environment_diffs": [
+   {
+    "line": 7,
+    "before": "kgsl.max_pwrlevel=17",
+    "after": "kgsl.max_pwrlevel=0"
+   }
+  ]
+ },
+ "temp_max_c": 56.6,
+ "temp_cap_c": 70.0,
+ "arms": {
+  "ctrl": null,
+  "knob": {
+   "title": "knob",
+   "n_runs": 1,
+   "runs": [
+    "knob1"
+   ],
+   "metrics": {
+    "frame_p50": {
+     "values": [
+      16.6535
+     ],
+     "median": 16.6535,
+     "mean": 16.6535,
+     "min": 16.6535,
+     "max": 16.6535,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_p95": {
+     "values": [
+      19.1883
+     ],
+     "median": 19.1883,
+     "mean": 19.1883,
+     "min": 19.1883,
+     "max": 19.1883,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_p99": {
+     "values": [
+      25.4641
+     ],
+     "median": 25.4641,
+     "mean": 25.4641,
+     "min": 25.4641,
+     "max": 25.4641,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "frame_mean": {
+     "values": [
+      16.7877
+     ],
+     "median": 16.7877,
+     "mean": 16.7877,
+     "min": 16.7877,
+     "max": 16.7877,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "gpu_active_mean": {
+     "values": [
+      13.426
+     ],
+     "median": 13.426,
+     "mean": 13.426,
+     "min": 13.426,
+     "max": 13.426,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "gpu_active_p95": {
+     "values": [
+      14.2986
+     ],
+     "median": 14.2986,
+     "mean": 14.2986,
+     "min": 14.2986,
+     "max": 14.2986,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "queue_p50": {
+     "values": [
+      1.6575
+     ],
+     "median": 1.6575,
+     "mean": 1.6575,
+     "min": 1.6575,
+     "max": 1.6575,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "fps_mean": {
+     "values": [
+      59.558
+     ],
+     "median": 59.558,
+     "mean": 59.558,
+     "min": 59.558,
+     "max": 59.558,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    },
+    "bw_median": {
+     "values": [
+      7300
+     ],
+     "median": 7300,
+     "mean": 7300.0,
+     "min": 7300,
+     "max": 7300,
+     "dispersion_pct": null,
+     "drift": {
+      "slope_per_run": null,
+      "slope_pct_per_run": null,
+      "monotonic_frac": null
+     }
+    }
+   }
+  }
+ },
+ "env_per_run": {
+  "knob1": {
+   "power_w_mean": 4.134,
+   "power_w_median": 4.4305,
+   "power_now_w_mean": 685.7375,
+   "power_now_plausible": false,
+   "power_vi_w_mean": 4.134,
+   "usb_input_w_mean": null,
+   "current_now_ua_mean": -966300.0,
+   "voltage_now_uv_mean": 4279450.0,
+   "power_rail": "battery",
+   "battery_status": "Discharging",
+   "battery_charging": false,
+   "power_usable_reason": "放电态(已停充), 用 |V x I| (本机 power_now 单位有误, 不采用)",
+   "soc_temp_max_c": 56.6,
+   "soc_temp_mean_c": 53.415,
+   "n_samples": 20,
+   "fan_state": "fan_enable=1,fan_speed_level=5,fan_speed_pwm="
+  }
+ },
+ "fan_state_uniform": true,
+ "comparisons": {},
+ "verdict": "ABORT",
+ "reason": "旋钮还原失败, 后续数据不可信"
+}

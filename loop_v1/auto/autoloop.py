@@ -690,6 +690,7 @@ def main() -> int:
     wl_desc = WL.describe_whitelist(wl)
     history: list[dict] = []
     all_results: list[dict] = []
+    session_keys: set = set()   # 本场所有候选写过的项, 收尾留痕判据用它
 
     for gen in range(1, a.generations + 1):
         log(f"=== 第 {gen} 代 ===")
@@ -735,6 +736,7 @@ def main() -> int:
             res = run_candidate(cand, wl, cdir, a.pairs, temp_cap, power_available,
                                 cool_c=cool_target)
             res["gen"], res["cand"] = gen, ci
+            session_keys |= touched_keys(cand["params"], wl)
             all_results.append(res)
             # 把 KNOB_FAIL 原文喂回模型: 实测 gpu.min_pwrlevel 写 0 会被内核夹到 2
             # (热限档位)。探测只验过一个试写值, 不代表每个合法值都写得进去 ——
@@ -763,8 +765,12 @@ def main() -> int:
     snap_final = snapshot()
     with open(os.path.join(out, "snap_final.txt"), "w") as f:
         f.write(snap_final)
+    # 收尾也按「我们写过什么」判, 与逐候选同一套口径。用写死名单或者一律从严都不对:
+    # 从严的话, 厂商管家在整场里改掉的 cpu.policyN.scaling_max 会让退出码永远是 1,
+    # 那个退出码就再也说明不了任何事情了。
     final_sd = classify_diff(snapshot_diff(os.path.join(out, "snap_before.txt"),
-                                           os.path.join(out, "snap_final.txt")))
+                                           os.path.join(out, "snap_final.txt")),
+                             session_keys)
 
     kept = [r for r in all_results if r["verdict"] == "KEEP"]
     fan_states = sorted({m.get("fan_state") for _, m in base_runs if m.get("fan_state")})
