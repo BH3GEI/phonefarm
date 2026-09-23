@@ -53,6 +53,29 @@ else
   ashell "su -c 'echo 1 > /sys/kernel/fan/fan_enable; echo 5 > /sys/kernel/fan/fan_speed_level'" >/dev/null 2>&1 || true
 fi
 
+# ── 面板刷新率钉死, 退出必还原 ──
+# 开着 vsync 时应用帧率就是面板刷新率, 而本机面板是自适应刷新的(支持 60/90/120/144)。
+# 2026-09-23 实测同一批 10 轮里应用帧率出现过 60 / 99.5 / 120 三档 —— 每轮的帧预算
+# 都不一样, 逐帧指标(frame_p50/p95、gpu_active_mean)根本没有可比性。
+# 所以整批对照期间把它钉死; 原值是 null(自动) 时还原用 settings delete。
+REFRESH="${VKS_REFRESH_HZ:-120}"
+RR_MIN=$(ashell "settings get system min_refresh_rate" 2>/dev/null | tr -d '\r' || true)
+RR_PEAK=$(ashell "settings get system peak_refresh_rate" 2>/dev/null | tr -d '\r' || true)
+restore_refresh() {
+  for kv in "min_refresh_rate:$RR_MIN" "peak_refresh_rate:$RR_PEAK"; do
+    k="${kv%%:*}"; v="${kv#*:}"
+    if [ -z "$v" ] || [ "$v" = "null" ]; then
+      ashell "settings delete system $k" >/dev/null 2>&1 || true
+    else
+      ashell "settings put system $k $v" >/dev/null 2>&1 || true
+    fi
+  done
+}
+restore_all() { restore_fan; restore_refresh; }
+trap restore_all EXIT
+echo "  面板刷新率: 原值 min=$RR_MIN peak=$RR_PEAK, 本批钉在 ${REFRESH}Hz, 结束还原"
+ashell "settings put system min_refresh_rate $REFRESH; settings put system peak_refresh_rate $REFRESH" >/dev/null 2>&1 || true
+
 one() {   # one <label> <config>
   local label="$1" cfg="$2" try rc
   for try in 1 2 3; do
