@@ -19,7 +19,10 @@ set -euo pipefail
 ANKI_SRC="${1:-/Users/mac/projects/thirdparty/anki-3d-engine}"
 CACHE_DIR="${2:-/Users/mac/projects/thirdparty/anki-shaderbins}"
 BUILD_DIR="${ANKI_BUILD_DIR:-/Users/mac/projects/thirdparty/anki-build-linux}"
-IMAGE="anki-shadercompiler:bookworm-amd64"
+# 基础镜像必须够新: 随包的 libdxcompiler.so 要 GLIBC_2.38。
+# debian:bookworm 是 2.36 —— dlopen 会以 "missing or wrong architecture" 失败
+# (真实原因是 glibc 版本, 报错信息有误导性)。trixie 是 2.41, 够。
+IMAGE="anki-shadercompiler:trixie-amd64"
 
 [ -d "$ANKI_SRC/AnKi/Shaders" ] || { echo "找不到 AnKi 源码: $ANKI_SRC" >&2; exit 1; }
 mkdir -p "$CACHE_DIR" "$BUILD_DIR"
@@ -39,8 +42,11 @@ guard() {
 guard
 
 # ── 1. 构建镜像 (只装编译 ShaderCompiler 需要的东西) ──────────────
-docker build --platform linux/amd64 -t "$IMAGE" -f - "$ANKI_SRC" <<'DOCKEREOF'
-FROM debian:bookworm-slim
+# 注意用空目录当 build context: 镜像里不 COPY 任何东西, 源码是后面 -v 挂进去的。
+# 拿 $ANKI_SRC 当 context 会把 1.6GB 源码整个塞给 docker daemon, 纯属浪费。
+CTX="$(mktemp -d)"; trap 'rm -rf "$CTX"' EXIT
+docker build --platform linux/amd64 -t "$IMAGE" -f - "$CTX" <<'DOCKEREOF'
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build python3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -54,13 +60,25 @@ guard
 # (/src) 必须和运行时一致 —— 也因此 ShaderCompiler 只能在容器内跑。
 docker run --rm --platform linux/amd64 \
   -v "$ANKI_SRC:/src" -v "$BUILD_DIR:/build" -v "$CACHE_DIR:/out" \
-  -w /build "$IMAGE" bash -euxc '
+  -w /build "$IMAGE" bash -euc '
     cmake /src -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
+      -DANKI_HEADLESS=ON \
       -DANKI_BUILD_SAMPLES=OFF \
       -DANKI_BUILD_TESTS=OFF \
       -DANKI_BUILD_TOOLS=ON
-    ninja ShaderCompiler
+
+    # qemu 模拟 x86_64 时 gcc 会随机 cc1plus segfault (ICE), 和源码无关 ——
+    # 同一个文件重试一次往往就过了。ninja 是增量的, 每轮都往前推进, 所以
+    # 重试若干次即可收敛。-j 2 降低并发也能少踩一些。
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+      if ninja -j 2 ShaderCompiler; then
+        echo "ninja 第 $attempt 轮通过"
+        break
+      fi
+      echo "== 第 $attempt 轮有 ICE, 增量重试 =="
+      [ "$attempt" = 10 ] && { echo "重试 10 轮仍未过" >&2; exit 1; }
+    done
     ls -la /build/Binaries/ShaderCompiler
   '
 guard
@@ -74,7 +92,11 @@ docker run --rm --platform linux/amd64 \
     n=0
     for p in /src/AnKi/Shaders/*.ankiprog; do
       b="/out/$(basename "$p")bin"
+      rm -f "$b"
       /build/Binaries/ShaderCompiler -o "$b" -j 4 -I /src -DANKI_PLATFORM_MOBILE=1 -spirv "$p"
+      # 不能只信退出码: 编译失败时它仍可能返回 0 (见 ShaderProgramCompilerMain)。
+      # 以产物存在且非空为准 —— 缺了一个 bin 就是引擎在设备上少一个 pass, 必须硬失败。
+      [ -s "$b" ] || { echo "!! 没产出: $b (源: $p)" >&2; exit 1; }
       n=$((n+1))
     done
     echo "编了 $n 个 ankiprogbin"

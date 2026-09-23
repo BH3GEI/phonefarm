@@ -14,7 +14,8 @@ SHIM="$HERE/shadercompiler_shim.py"
 
 SDK="${ANDROID_SDK_ROOT:-/opt/homebrew/share/android-commandlinetools}"
 NDK_VER="${ANKI_NDK_VER:-28.2.13676358}"
-JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home}"
+# JDK 必须是 17: 模板自带的 wrapper 是 Gradle 7.4.2 + AGP 7.1.3, 跑不了 JDK 21/25。
+JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home}"
 export JAVA_HOME ANDROID_SDK_ROOT="$SDK"
 export PATH="$JAVA_HOME/bin:$PATH"
 export ANKI_SHADERBIN_CACHE="$CACHE_DIR"
@@ -37,8 +38,8 @@ if [ "$n_bin" != "$n_prog" ] || [ "$n_bin" = "0" ]; then
   exit 1
 fi
 [ -d "$SDK/ndk/$NDK_VER" ] || { echo "缺 NDK: $SDK/ndk/$NDK_VER" >&2; exit 1; }
-command -v gradle >/dev/null || { echo "缺 gradle —— brew install gradle" >&2; exit 1; }
-[ -x "$JAVA_HOME/bin/java" ] || { echo "缺 JDK: $JAVA_HOME —— brew install openjdk@21" >&2; exit 1; }
+[ -x "$JAVA_HOME/bin/java" ] || { echo "缺 JDK 17: $JAVA_HOME —— brew install openjdk@17" >&2; exit 1; }
+[ -d "$SDK/platforms/android-32" ] || { echo "缺 platforms;android-32 (模板 compileSdk 32)" >&2; exit 1; }
 guard
 
 # ── 1. 生成 AndroidProject_Sponza ────────────────────────────
@@ -53,23 +54,23 @@ else
 fi
 guard
 
-# ── 2. 把模板里过时的版本号顶上去 ────────────────────────────
-# 上游模板写死 compileSdk 32 / ndkVersion 26.1.10909125; 本机 brew 的
-# android-commandlinetools 只有 platforms/android-35 和 ndk/28.2.x。
-# 这两处不改, gradle 会去下载(离线/限速环境下就卡死), 所以就地改成本机已有的。
+# ── 2. 只把 NDK 版本顶成本机装了的那个 ──────────────────────
+# 其余版本(compileSdk 32 / AGP 7.1.3 / Gradle 7.4.2)**保持模板原样** —— 那是上游
+# 实际测过的组合, 跟着走比擅自升级少踩坑。所以宁可去装 platforms;android-32,
+# 也不改 compileSdk。NDK 是例外: 模板写死 26.1.10909125, 本机只有 28.2.x,
+# 装一个 26.1 要另外 ~2.5GB, 先试 28.2。
 GRADLE_FILE="$PROJ/app/build.gradle"
-/usr/bin/sed -i '' \
-  -e "s/compileSdk 32/compileSdk 35/" \
-  -e "s/targetSdk 32/targetSdk 35/" \
-  -e "s/ndkVersion \"26.1.10909125\"/ndkVersion \"$NDK_VER\"/" \
-  "$GRADLE_FILE"
+/usr/bin/sed -i '' -e "s/ndkVersion \"26.1.10909125\"/ndkVersion \"$NDK_VER\"/" "$GRADLE_FILE"
 grep -E "compileSdk|targetSdk|ndkVersion" "$GRADLE_FILE"
 
 # shim 得可执行, 而且 gradle 是直接 exec 它的 —— 要有 shebang
 chmod +x "$SHIM"
 
 # ── 3. gradle 出包 ───────────────────────────────────────────
-( cd "$PROJ" && gradle --no-daemon assembleRelease )
+# 用模板自带的 wrapper (Gradle 7.4.2), 不要用系统 gradle —— 系统上是 9.x,
+# 和 AGP 7.1.3 不兼容。
+chmod +x "$PROJ/gradlew"
+( cd "$PROJ" && ./gradlew --no-daemon assembleRelease )
 guard
 
 APK="$PROJ/app/build/outputs/apk/release/app-release.apk"
