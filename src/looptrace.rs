@@ -18,7 +18,7 @@
 //! 为什么用提交节奏而不是 vsync: vsync (encoder_vblank_callback) 是显示刷新节奏,
 //! 恒定跟着面板刷新率跳, 游戏 30fps 锁帧时它照样 60/120 次每秒; 提交节奏才反映实际出帧速度。
 
-use crate::pyjson::{dumps, median_ints, py_round, PyVal};
+use crate::pyjson::{dumps, median_ints, py_round, py_sum, PyVal};
 use crate::pyobj;
 use regex::Regex;
 use std::collections::HashMap;
@@ -53,11 +53,11 @@ fn cv(xs: &[f64]) -> f64 {
     if xs.len() < 2 {
         return f64::INFINITY;
     }
-    let mu = xs.iter().sum::<f64>() / xs.len() as f64;
+    let mu = py_sum(xs.iter().copied()) / xs.len() as f64;
     if mu <= 0.0 {
         return f64::INFINITY;
     }
-    let var = xs.iter().map(|x| (x - mu).powi(2)).sum::<f64>() / (xs.len() - 1) as f64;
+    let var = py_sum(xs.iter().map(|x| (x - mu).powi(2))) / (xs.len() - 1) as f64;
     var.sqrt() / mu
 }
 
@@ -69,10 +69,10 @@ fn acf(xs: &[f64], lag: usize) -> f64 {
     let n = xs.len() - lag;
     let (a, b) = (&xs[..n], &xs[lag..lag + n]);
     let nf = n as f64;
-    let (ma, mb) = (a.iter().sum::<f64>() / nf, b.iter().sum::<f64>() / nf);
-    let num: f64 = (0..n).map(|i| (a[i] - ma) * (b[i] - mb)).sum();
-    let da = a.iter().map(|v| (v - ma).powi(2)).sum::<f64>().sqrt();
-    let db = b.iter().map(|v| (v - mb).powi(2)).sum::<f64>().sqrt();
+    let (ma, mb) = (py_sum(a.iter().copied()) / nf, py_sum(b.iter().copied()) / nf);
+    let num: f64 = py_sum((0..n).map(|i| (a[i] - ma) * (b[i] - mb)));
+    let da = py_sum(a.iter().map(|v| (v - ma).powi(2))).sqrt();
+    let db = py_sum(b.iter().map(|v| (v - mb).powi(2))).sqrt();
     if da > 0.0 && db > 0.0 {
         num / (da * db)
     } else {
@@ -149,7 +149,7 @@ pub fn detect_submits_per_frame(gaps: &[f64], max_n: usize) -> (usize, SpfScores
         }
         let groups: Vec<f64> = (0..=gaps.len() - n)
             .step_by(n)
-            .map(|i| gaps[i..i + n].iter().sum::<f64>())
+            .map(|i| py_sum(gaps[i..i + n].iter().copied()))
             .collect();
         cv_norm.push((n, cv(&groups) * (n as f64).sqrt()));
     }
@@ -329,7 +329,7 @@ pub fn parse(text: &str, render_comm: &str) -> Parsed {
     let mut queue_ms = Vec::new();
     if gaps.len() >= spf {
         for i in (0..=gaps.len() - spf).step_by(spf) {
-            frame_ms.push(gaps[i..i + spf].iter().sum::<f64>());
+            frame_ms.push(py_sum(gaps[i..i + spf].iter().copied()));
             let mut act_sum = 0.0;
             let mut q_sum = 0.0;
             let mut matched = 0usize;
@@ -415,7 +415,7 @@ impl Parsed {
         let bw: Vec<i64> = self.buslevel.iter().map(|(_, b, _)| *b).collect();
         let r4 = |xs: &[f64], p: f64| pct(xs, p).map(|v| py_round(v, 4));
         let mean4 = |xs: &[f64]| {
-            (!xs.is_empty()).then(|| py_round(xs.iter().sum::<f64>() / xs.len() as f64, 4))
+            (!xs.is_empty()).then(|| py_round(py_sum(xs.iter().copied()) / xs.len() as f64, 4))
         };
         pyobj! {
             "span_s" => self.span_s,

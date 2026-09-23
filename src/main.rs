@@ -15,6 +15,8 @@ mod cts;
 mod experiment;
 mod fleet;
 mod keepalive;
+mod loopreport;
+mod loopstat;
 mod looptrace;
 mod parallel;
 mod device;
@@ -175,6 +177,9 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
         保活策略/设备锁读齐, 采不到的字段留空并写明原因。截图默认关, 且别人持锁时不截)
 解析:  parse-trace <trace.txt> [--full] [--comm 线程名]   (ftrace 文本 -> 帧时序/GPU 活跃/排队/带宽指标, 纯离线)
        attribute <summary.json>                          (一轮 summary -> 主因判定 + 正交带宽维, 纯离线)
+       analyze <A臂glob> [B臂glob] [--metric M]           (离散度 + 漂移 + 精确置换检验 + 置换反演 CI)
+       report --baseline <glob> [--knob <glob>] [--snap-before F] [--snap-after F]
+              [--replay-result F] [--primary M]          (五条判据汇总成可字节复现的 report.json)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
@@ -661,6 +666,19 @@ fn main() {
         Some("parse-trace") => {
             // ftrace 文本 → 帧时序 + GPU 归因指标。纯离线, 不碰设备, 同一份 trace 逐字节可复现。
             std::process::exit(looptrace::run_parse_trace(&args[1..]));
+        }
+        Some("analyze") => {
+            // 多轮 summary.json → 离散度 (判据 1) 与两臂对比 (判据 3)。纯离线, 无随机。
+            std::process::exit(loopstat::run_analyze(&args[1..]));
+        }
+        Some("report") => {
+            // 五条判据汇总成一份可字节复现的 report.json。纯离线。
+            std::process::exit(loopreport::run_report(&args[1..]));
+        }
+        Some("loopstat") => {
+            // 迁移期过渡通道: stdin 收一个 JSON 请求, stdout 出一个 JSON 结果。
+            // 尚未搬迁的 Python 靠它复用同一份统计口径, 搬完即删。
+            std::process::exit(loopstat::run_loopstat(&args[1..]));
         }
         Some("attribute") => {
             // 一轮 summary.json → "这一帧的时间花在哪类开销上"。纯离线。

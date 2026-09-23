@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """refbench_report.py — refbench M0 六条判据汇总 (纯函数, 字节可复现)
 
-与 loop_v1/tools/report.py 同一纪律: 不带时间戳、不带绝对路径、无随机数,
+与 phonefarm report 同一纪律: 不带时间戳、不带绝对路径、无随机数,
 同样的输入每次产出逐字节相同的 report.json。回放自检直接 cmp 本文件的输出。
 
 判定规则先于数据冻结: RULES 与本文件自身的 sha256 一并写进报告 —— 事后改规则
@@ -24,8 +24,8 @@ import sys
 
 _TOOLS = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
 sys.path.insert(0, _TOOLS)
-from analyze import dispersion, drift, mean, compare  # noqa: E402
-from report import snapshot_diff                       # noqa: E402
+# 统计口径已搬进 phonefarm 二进制, 经 pybridge 转调 —— 不在 Python 侧留第二份实现
+from pybridge import dispersion, drift, mean, compare, snapshot_diff  # noqa: E402
 from statistics import median                          # noqa: E402
 
 RULES = {
