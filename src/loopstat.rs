@@ -740,17 +740,18 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
             PyVal::List(vec![PyVal::Bool(ok), PyVal::Str(why)])
         }
         "plan_text" => PyVal::Str(sysparam::plan_text(&pairs_arg(&req, "cand"), &wl_arg(&req))),
+        // 数字原样带过去 (int 进 int 出), 不在桥上做类型提升
         "rule_doc" => sysparam::rule_doc(
-            req.get("temp_cap_c").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            req.get("pairs").and_then(|v| v.as_i64()).unwrap_or(0),
+            req.get("temp_cap_c").unwrap_or(&PyVal::Null),
+            req.get("pairs").unwrap_or(&PyVal::Null),
             req.get("power_available").and_then(|v| v.as_bool()).unwrap_or(false),
             &s("power_note")),
         "env_stats" => sysparam::env_stats(&s("text")),
         "decide" => sysparam::decide(
             &req.get("comparisons").cloned().unwrap_or(PyVal::Null),
             &sysparam::DecideCtx {
-                temp_max_c: req.get("temp_max_c").and_then(|v| v.as_f64()),
-                temp_cap_c: req.get("temp_cap_c").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                temp_max_c: req.get("temp_max_c").cloned().unwrap_or(PyVal::Null),
+                temp_cap_c: req.get("temp_cap_c").cloned().unwrap_or(PyVal::Null),
                 apply_ok: req.get("apply_ok").and_then(|v| v.as_bool()).unwrap_or(false),
                 snapshot_identical: req.get("snapshot_identical").and_then(|v| v.as_bool()).unwrap_or(false),
                 power_available: req.get("power_available").and_then(|v| v.as_bool()).unwrap_or(false),

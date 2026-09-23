@@ -138,7 +138,7 @@ impl<T: Into<PyVal>> From<Vec<T>> for PyVal {
 pub fn loads(text: &str) -> Result<PyVal, String> {
     let b = text.as_bytes();
     let mut i = 0usize;
-    let v = parse_value(b, &mut i)?;
+    let v = parse_value(b, &mut i, 0)?;
     skip_ws(b, &mut i);
     if i != b.len() {
         return Err(format!("第 {i} 字节之后还有多余内容"));
@@ -161,7 +161,14 @@ fn expect(b: &[u8], i: &mut usize, lit: &str) -> Result<(), String> {
     }
 }
 
-fn parse_value(b: &[u8], i: &mut usize) -> Result<PyVal, String> {
+/// 嵌套层数上限, 与 serde_json 的默认值一致。没有这道闸, 一份几十万层的畸形
+/// 数组会把进程的栈直接撑爆 (abort), 而不是回一句"请求不合法"。
+const MAX_DEPTH: usize = 128;
+
+fn parse_value(b: &[u8], i: &mut usize, depth: usize) -> Result<PyVal, String> {
+    if depth > MAX_DEPTH {
+        return Err(format!("嵌套超过 {MAX_DEPTH} 层"));
+    }
     skip_ws(b, i);
     match b.get(*i) {
         None => Err("内容为空".into()),
@@ -178,7 +185,7 @@ fn parse_value(b: &[u8], i: &mut usize) -> Result<PyVal, String> {
                 return Ok(PyVal::List(out));
             }
             loop {
-                out.push(parse_value(b, i)?);
+                out.push(parse_value(b, i, depth + 1)?);
                 skip_ws(b, i);
                 match b.get(*i) {
                     Some(b',') => *i += 1,
@@ -206,7 +213,7 @@ fn parse_value(b: &[u8], i: &mut usize) -> Result<PyVal, String> {
                     return Err(format!("第 {i} 字节处缺冒号"));
                 }
                 *i += 1;
-                let v = parse_value(b, i)?;
+                let v = parse_value(b, i, depth + 1)?;
                 // Python dict: 重复键就地覆盖, 不改位置
                 match out.iter_mut().find(|(ek, _)| *ek == k) {
                     Some(slot) => slot.1 = v,
@@ -253,20 +260,29 @@ fn parse_string(b: &[u8], i: &mut usize) -> Result<String, String> {
                     b'u' => {
                         let hi = hex4(b, i)?;
                         // 代理对: 高位后面必须跟低位, 才拼得出一个真字符
+                        // 高位代理后面必须跟一个**合法的**低位, 才拼得出一个真字符。
+                        // 不验低位就直接减 0xDC00 会下溢 (debug 下 panic, release 下回绕)。
+                        // Rust 的 String 存不下孤立代理, 这里一律报错而不是造一个坏字符。
                         let ch = if (0xD800..0xDC00).contains(&hi) {
                             if b.get(*i) == Some(&b'\\') && b.get(*i + 1) == Some(&b'u') {
+                                let save = *i;
                                 *i += 2;
                                 let lo = hex4(b, i)?;
-                                char::from_u32(
-                                    0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00),
-                                )
+                                if (0xDC00..0xE000).contains(&lo) {
+                                    char::from_u32(
+                                        0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00),
+                                    )
+                                } else {
+                                    *i = save;
+                                    None
+                                }
                             } else {
                                 None
                             }
                         } else {
                             char::from_u32(hi)
                         };
-                        out.push(ch.ok_or("非法的 \\u 转义")?);
+                        out.push(ch.ok_or("孤立的 \\u 代理项")?);
                     }
                     other => return Err(format!("不认识的转义 \\{}", other as char)),
                 }
@@ -618,6 +634,19 @@ mod tests {
             let via_serde: f64 = serde_json::from_str::<f64>(s).unwrap();
             assert_ne!(py_repr_f64(via_serde), s, "{s} 上 serde_json 居然对了?");
         }
+    }
+
+    /// 畸形输入要回错误, 不能 panic 或把栈撑爆。
+    #[test]
+    fn loads_survives_hostile_input() {
+        // 高位代理后面跟的不是低位: 减法会下溢, 必须先验
+        assert!(loads(r#""\ud83d\ud83d""#).is_err());
+        assert!(loads(r#""\ud83d""#).is_err());
+        assert!(loads(r#""\ud83dx""#).is_err());
+        // 深嵌套: 有上限就回错误, 没上限就 abort
+        let deep = format!("{}{}", "[".repeat(200_000), "]".repeat(200_000));
+        assert!(loads(&deep).is_err());
+        assert!(loads(&format!("{}{}", "[".repeat(100), "]".repeat(100))).is_ok());
     }
 
     #[test]

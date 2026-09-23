@@ -653,20 +653,23 @@ fn active_metrics(power_available: bool) -> Vec<(&'static str, &'static str)> {
 }
 
 /// 落盘用的规则快照。autoloop 在采第一组候选数据之前写它。
-pub fn rule_doc(temp_cap_c: f64, pairs: i64, power_available: bool, power_note: &str) -> PyVal {
+///
+/// `temp_cap_c` / `pairs` 原样回写, 所以收的是 [`PyVal`] 而不是 f64/i64 ——
+/// 调用方传 int 46 就该写回 `46`, 传 float 46.0 就该写回 `46.0`。
+pub fn rule_doc(temp_cap_c: &PyVal, pairs: &PyVal, power_available: bool, power_note: &str) -> PyVal {
     let metrics = active_metrics(power_available);
     let k = metrics.len();
-    let minp = min_reachable_p(pairs);
+    let minp = min_reachable_p(pairs.as_i64().unwrap_or(0));
     pyobj! {
         "version" => RULE_VERSION,
         "alpha_regression" => ALPHA,
         "alpha_win_bonferroni" => if k > 0 { PyVal::Float(py_round(ALPHA / k as f64, 6)) } else { PyVal::Null },
         "n_metrics" => k,
         "metrics" => PyVal::List(metrics.iter().map(|(m, d)| pyobj!{ "id" => *m, "better" => *d }).collect()),
-        "pairs_per_candidate" => pairs,
+        "pairs_per_candidate" => pairs.clone(),
         "min_reachable_p" => minp,
         "reachable" => minp.unwrap_or(1.0) < if k > 0 { ALPHA / k as f64 } else { 0.0 },
-        "temp_cap_c" => temp_cap_c,
+        "temp_cap_c" => temp_cap_c.clone(),
         "power_in_verdict" => power_available,
         "power_note" => power_note,
         "keep_condition" => "至少一个指标显著改善 (p < alpha_win) 且没有任何指标显著变差 (p < 0.05)",
@@ -848,8 +851,10 @@ fn significant(c: &PyVal, alpha: f64) -> bool {
 /// comparisons 里 a 臂是对照 (旋钮已还原), b 臂是旋钮臂 —— 与 compare 的参数顺序
 /// 一致, diff = b - a。
 pub struct DecideCtx {
-    pub temp_max_c: Option<f64>,
-    pub temp_cap_c: f64,
+    /// 温度两项原样回写 (int 进 int 出), 所以收 [`PyVal`]: 旧版对 int 46 写的是
+    /// `超过上限 46C` 而不是 `46.0C`, 这个差别直接落在 result.json 的字节上。
+    pub temp_max_c: PyVal,
+    pub temp_cap_c: PyVal,
     pub apply_ok: bool,
     pub snapshot_identical: bool,
     pub power_available: bool,
@@ -868,13 +873,13 @@ pub fn decide(comparisons: &PyVal, ctx: &DecideCtx) -> PyVal {
             "alpha_win" => alpha_win,
         };
     }
-    if let Some(tm) = ctx.temp_max_c {
-        if tm > ctx.temp_cap_c {
+    if let (Some(tm), Some(cap)) = (ctx.temp_max_c.as_f64(), ctx.temp_cap_c.as_f64()) {
+        if tm > cap {
             return pyobj! {
                 "verdict" => "ABORT",
                 "reason" => format!("SoC 结温 {}C 超过上限 {}C",
-                                    PyVal::Float(tm).py_str(), PyVal::Float(ctx.temp_cap_c).py_str()),
-                "temp_max_c" => tm,
+                                    ctx.temp_max_c.py_str(), ctx.temp_cap_c.py_str()),
+                "temp_max_c" => ctx.temp_max_c.clone(),
                 "alpha_win" => alpha_win,
             };
         }
@@ -940,8 +945,8 @@ pub fn decide(comparisons: &PyVal, ctx: &DecideCtx) -> PyVal {
         "regressions" => regressions.clone(),
         "alpha_win" => py_round(alpha_win, 6),
         "alpha_regression" => ALPHA,
-        "temp_max_c" => ctx.temp_max_c,
-        "temp_cap_c" => ctx.temp_cap_c,
+        "temp_max_c" => ctx.temp_max_c.clone(),
+        "temp_cap_c" => ctx.temp_cap_c.clone(),
         "per_metric" => PyVal::Obj(detail),
         "reason" => if keep {
             format!("改善 {} 且无显著退化", wins.join(","))
@@ -1317,8 +1322,8 @@ ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
     }
     fn base_ctx() -> DecideCtx {
         DecideCtx {
-            temp_max_c: Some(42.0),
-            temp_cap_c: 46.0,
+            temp_max_c: PyVal::Float(42.0),
+            temp_cap_c: PyVal::Float(46.0),
             apply_ok: true,
             snapshot_identical: true,
             power_available: true,
@@ -1382,14 +1387,19 @@ ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
     fn three_abort_lines_beat_any_improvement() {
         let c = pyobj! { "frame_p95" => cmp_of(-9.0, 0.0001) };
         for ctx in [
-            DecideCtx { temp_max_c: Some(50.0), ..base_ctx() },
+            DecideCtx { temp_max_c: PyVal::Float(50.0), ..base_ctx() },
             DecideCtx { snapshot_identical: false, ..base_ctx() },
             DecideCtx { apply_ok: false, ..base_ctx() },
         ] {
             assert_eq!(verdict_of(&decide(&c, &ctx)), "ABORT");
         }
-        let d = decide(&c, &DecideCtx { temp_max_c: Some(50.0), ..base_ctx() });
+        let d = decide(&c, &DecideCtx { temp_max_c: PyVal::Float(50.0), ..base_ctx() });
         assert!(matches!(d.get("reason"), Some(PyVal::Str(r)) if r.contains("超过上限")));
+        // int 进 int 出: 旧版对整数温度写的是 "50C 超过上限 46C", 不是 "50.0C"
+        let d = decide(&c, &DecideCtx {
+            temp_max_c: PyVal::Int(50), temp_cap_c: PyVal::Int(46), ..base_ctx()
+        });
+        assert_eq!(d.get("reason"), Some(&PyVal::Str("SoC 结温 50C 超过上限 46C".into())));
     }
 
     /// 功耗关掉时只剩两个指标 (Bonferroni 放宽到 0.025), 且功耗哪怕显著变差也不算退化
@@ -1416,17 +1426,21 @@ ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
 
     #[test]
     fn rule_doc_records_reachability_and_why_power_is_out() {
-        let r = rule_doc(46.0, 5, false, "功耗不计入判定, 仅记录供参考 (充电态)");
+        let r = rule_doc(&PyVal::Float(46.0), &PyVal::Int(5), false, "功耗不计入判定, 仅记录供参考 (充电态)");
         assert_eq!(r.get("power_in_verdict"), Some(&PyVal::Bool(false)));
         assert_eq!(r.get("n_metrics"), Some(&PyVal::Int(2)));
         assert!(matches!(r.get("power_note"), Some(PyVal::Str(s)) if s.contains("充电态")));
         // 4v4 最小可达 p = 2/C(8,4) = 0.0286, 够不着 alpha_win=0.0167
-        assert_eq!(rule_doc(46.0, 4, true, "").get("reachable"), Some(&PyVal::Bool(false)));
+        assert_eq!(rule_doc(&PyVal::Float(46.0), &PyVal::Int(4), true, "").get("reachable"), Some(&PyVal::Bool(false)));
         // 5v5 最小可达 p = 2/C(10,5) = 0.0079, 够得着
-        let r = rule_doc(46.0, 5, true, "");
+        let r = rule_doc(&PyVal::Float(46.0), &PyVal::Int(5), true, "");
         assert_eq!(r.get("reachable"), Some(&PyVal::Bool(true)));
         assert!((r.get("min_reachable_p").unwrap().as_f64().unwrap() - 2.0 / 252.0).abs() < 1e-12);
-        assert_eq!(rule_doc(46.0, 1, true, "").get("min_reachable_p"), Some(&PyVal::Null));
+        assert_eq!(rule_doc(&PyVal::Float(46.0), &PyVal::Int(1), true, "").get("min_reachable_p"), Some(&PyVal::Null));
+        // 整数入参原样回写, 不该被提成浮点
+        let r = rule_doc(&PyVal::Int(46), &PyVal::Int(5), true, "");
+        assert_eq!(r.get("temp_cap_c"), Some(&PyVal::Int(46)));
+        assert_eq!(r.get("pairs_per_candidate"), Some(&PyVal::Int(5)));
     }
 
     // ── 真机录制对照 ──
@@ -1477,8 +1491,8 @@ ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
         let got = decide(
             v.get("comparisons").unwrap(),
             &DecideCtx {
-                temp_max_c: v.get("temp_max_c").and_then(|x| x.as_f64()),
-                temp_cap_c: v.get("temp_cap_c").and_then(|x| x.as_f64()).unwrap(),
+                temp_max_c: v.get("temp_max_c").cloned().unwrap_or(PyVal::Null),
+                temp_cap_c: v.get("temp_cap_c").cloned().unwrap_or(PyVal::Null),
                 apply_ok: matches!(v.get("apply_ok"), Some(PyVal::Bool(true))),
                 // snapshot_check.ours_identical = false 就是这一轮作废的原因
                 snapshot_identical: false,

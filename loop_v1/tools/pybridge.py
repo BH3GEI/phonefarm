@@ -114,9 +114,15 @@ def rule_doc(temp_cap_c: float, pairs: int, power_available: bool,
                   "power_available": power_available, "power_note": power_note})
 
 
-# 温控保护关键词表由二进制那边定义 (src/sysparam.rs::DENY_KEYWORDS), 这里照抄一份
-# 只为串测里那句"生成的 plan 不许命中任何一个"能自检 —— 真正拦截在二进制里做。
+# 下面两张表由二进制那边定义 (src/sysparam.rs), 这里照抄一份只为调用方好写:
+# 真正的拦截与判定都在二进制里做, 改口径要改那边, 这里跟着改。
 DENY_KEYWORDS = ("thermal", "trip_point", "cooling", "fan", "tsens", "bcl", "throttl")
+# (指标, 方向) —— 方向 "lower" = 越小越好
+PRIMARY_METRICS = [
+    ("frame_p95", "lower"),
+    ("fps_mean", "higher"),
+    ("power_w_mean", "lower"),
+]
 
 
 def env_stats(text: str) -> dict:
