@@ -1,0 +1,1 @@
+{"log_fps_median": 60.150000000000006, "windowed": true, "trace_fps_mean": 85.376, "submits_per_frame": 1, "trace_submit_rate": 85.376, "ratio_to_log_fps": 1.4194, "band": [0.5, 6.0], "in_band": true, "n_fps_samples": 28}

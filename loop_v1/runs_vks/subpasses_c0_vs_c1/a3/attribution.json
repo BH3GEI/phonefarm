@@ -1,0 +1,23 @@
+{
+ "verdict": "无单一主因",
+ "evidence": "GPU 占比 50.3%, 排队占比 3.9%, 无热事件, 帧周期不贴任何常见限帧上限",
+ "actionable": "需要更细的归因面才能定位",
+ "measures": {
+  "frame_p50_ms": 16.2455,
+  "frame_p95_ms": 17.1901,
+  "jitter_p95_minus_p50_ms": 0.9446,
+  "gpu_active_mean_ms": 8.173,
+  "gpu_share_pct": 50.31,
+  "queue_p50_ms": 0.6368,
+  "queue_share_pct": 3.92,
+  "n_thermal_events": 0,
+  "detected_fps_cap": null
+ },
+ "bandwidth": {
+  "ddr_cur_khz": 3187000.0,
+  "ddr_boost_khz": 547000.0,
+  "gpu_bus_vote_median": 900,
+  "gpu_bus_vote_max": 1850,
+  "bus_vote_headroom_pct": 51.35
+ }
+}
