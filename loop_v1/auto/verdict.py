@@ -83,11 +83,17 @@ def env_stats(text: str) -> dict:
     watts: list[float] = []
     temps: list[float] = []
     charging = False
+    fan_state = None
     n = 0
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("#battery_status="):
             charging = line.split("=", 1)[1].strip().lower() in ("charging", "full")
+            continue
+        if line.startswith("#fan_state="):
+            # 主动散热风扇自己耗电, 会进功耗读数。逐轮记下来, 好复核同一组对照的
+            # 两臂是不是同一风扇状态 —— 风扇开关前后的数据不能混着比。
+            fan_state = line.split("=", 1)[1].strip() or None
             continue
         if not line.startswith("ENV "):
             continue
@@ -112,6 +118,7 @@ def env_stats(text: str) -> dict:
     out: dict = {
         "n_samples": n,
         "battery_charging": charging,
+        "fan_state": fan_state,
         "power_rail": "battery(charging)" if charging else "battery",
         "power_w_mean": None,
         "power_w_median": None,

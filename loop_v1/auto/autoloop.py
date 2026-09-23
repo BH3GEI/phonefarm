@@ -363,8 +363,11 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
         },
         "env_per_run": {name: {k: m.get(k) for k in
                                ("power_w_mean", "power_w_median", "soc_temp_max_c",
-                                "soc_temp_mean_c", "n_samples", "battery_charging")}
+                                "soc_temp_mean_c", "n_samples", "battery_charging",
+                                "fan_state")}
                         for name, m in knob_runs + ctrl_runs},
+        # 两臂的风扇状态必须一致, 否则功耗那一项比的是风扇不是参数
+        "fan_state_uniform": len({m.get("fan_state") for _, m in knob_runs + ctrl_runs}) <= 1,
         "comparisons": cmps,
         **dec,
     }
@@ -561,8 +564,18 @@ def main() -> int:
                                            os.path.join(out, "snap_final.txt")))
 
     kept = [r for r in all_results if r["verdict"] == "KEEP"]
+    fan_states = sorted({m.get("fan_state") for _, m in base_runs if m.get("fan_state")})
     report = {
         "goal": "系统参数全自动闭环 (原神实测)",
+        # 测试条件: 主动散热风扇自己耗电, 会进功耗读数。风扇开关前后的数据不能混着比,
+        # 所以把当次的风扇状态原样记进报告 —— 它不是被调的参数, 是本次实验的前提条件。
+        "test_conditions": {
+            "device": SERIAL,
+            "fan_state_at_baseline": fan_states,
+            "fan_is_a_knob": False,
+            "fan_note": "风扇转速是系统参数的一种, 但不进自动调参白名单 (DENY_KEYWORDS 含 fan)",
+            "power_rail": "battery",
+        },
         "rule": rule,
         "whitelist": sorted(wl),
         "whitelist_detail": wl,

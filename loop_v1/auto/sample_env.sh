@@ -17,6 +17,14 @@ U=/sys/class/power_supply/usb
 
 echo "#sample_env v1 dur=$DUR interval=$IVL"
 echo "#battery_status=$(cat $B/status 2>/dev/null)"
+# 主动散热风扇状态: 风扇自身耗电会进功耗读数, 所以每一轮都留一行证据, 好复核
+# 「同一组对照的两臂是同一风扇状态」。只读, 从不写。
+fan_line=""
+for f in /sys/kernel/fan/* /sys/class/hwmon/hwmon*/fan1_input; do
+  [ -f "$f" ] || continue
+  fan_line="$fan_line$(basename "$f")=$(cat "$f" 2>/dev/null),"
+done
+echo "#fan_state=$(echo "$fan_line" | sed 's/,$//')"
 
 n=0
 while [ "$n" -lt "$DUR" ]; do

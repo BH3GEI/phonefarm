@@ -381,3 +381,33 @@ class TestPipelineEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFanIsEvidenceNotAKnob(unittest.TestCase):
+    """风扇转速是系统参数的一种, 但它不进自动调参白名单 —— 只当测试条件记录。"""
+
+    def test_fan_nodes_can_never_enter_whitelist(self):
+        probe = WL.parse_probe(PROBE + "\n".join([
+            "fan._sys_kernel_fan_speed.writable=yes",
+            "fan._sys_kernel_fan_speed.effect=live",
+        ]))
+        wl = WL.build_whitelist(probe)
+        self.assertTrue(all("fan" not in k for k in wl))
+        self.assertTrue(all("fan" not in v["path"].lower() for v in wl.values()))
+
+    def test_fan_path_is_denied_even_if_asked_for_directly(self):
+        self.assertTrue(WL._denied("/sys/kernel/fan/speed"))
+        wl = WL.build_whitelist(WL.parse_probe(PROBE))
+        ok, why = WL.validate_candidate({"/sys/kernel/fan/speed": "3"}, wl)
+        self.assertFalse(ok)
+
+    def test_fan_state_is_parsed_into_every_run_metrics(self):
+        s = V.env_stats("#battery_status=Discharging\n"
+                        "#fan_state=speed=3,fan1_input=4200\n"
+                        "ENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n")
+        self.assertEqual(s["fan_state"], "speed=3,fan1_input=4200")
+
+    def test_missing_fan_readout_is_none_not_a_guess(self):
+        s = V.env_stats("#battery_status=Discharging\n#fan_state=\n"
+                        "ENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n")
+        self.assertIsNone(s["fan_state"])

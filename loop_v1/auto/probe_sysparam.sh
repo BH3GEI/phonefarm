@@ -185,6 +185,17 @@ for rail in battery usb; do
   printf 'power.%s.status=%s\n'      "$rail" "$(cat "$d/status" 2>/dev/null)"
 done
 
+# ════ 主动散热风扇 (只读记录, 永不进白名单) ════
+# 红魔内置风扇。它自己也耗电, 会进整机功耗读数, 所以必须把当轮的风扇状态记进证据:
+# 同一组对照的两臂要是同一风扇状态, 风扇开启前后的数据不能混在一起比。
+# 风扇转速本身是个系统参数, 但**不进自动调参白名单** —— DENY_KEYWORDS 里的 "fan"
+# 在主机端拦一道, knob_sysparam.sh 的 denied() 在设备端再拦一道。
+for f in /sys/kernel/fan/* /sys/class/hwmon/hwmon*/fan1_input /sys/class/hwmon/hwmon*/pwm1; do
+  [ -f "$f" ] || continue
+  printf 'fan.%s=%s\n' "$(echo "$f" | tr '/' '_')" "$(cat "$f" 2>/dev/null)"
+done
+printf 'fan.props=%s\n' "$(getprop 2>/dev/null | grep -i fan | head -10 | tr '\n' ';' | sed 's/;$//')"
+
 # ════ 热区 ════
 for z in /sys/class/thermal/thermal_zone*; do
   [ -d "$z" ] || continue
