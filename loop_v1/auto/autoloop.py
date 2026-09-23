@@ -378,8 +378,12 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
             "knob": describe(knob_runs, "knob") if knob_runs else None,
         },
         "env_per_run": {name: {k: m.get(k) for k in
-                               ("power_w_mean", "power_w_median", "soc_temp_max_c",
-                                "soc_temp_mean_c", "n_samples", "battery_charging",
+                               ("power_w_mean", "power_w_median", "power_now_w_mean",
+                                "power_now_plausible", "power_vi_w_mean",
+                                "usb_input_w_mean", "current_now_ua_mean",
+                                "voltage_now_uv_mean", "power_rail", "battery_status",
+                                "battery_charging", "power_usable_reason",
+                                "soc_temp_max_c", "soc_temp_mean_c", "n_samples",
                                 "fan_state")}
                         for name, m in knob_runs + ctrl_runs},
         # 两臂的风扇状态必须一致, 否则功耗那一项比的是风扇不是参数
@@ -412,6 +416,12 @@ def main() -> int:
     ap.add_argument("--probe-only", action="store_true", help="只探白名单, 不跑实验")
     ap.add_argument("--baseline-runs", type=int, default=2,
                     help="冻结温度上限用的基线轮数")
+    ap.add_argument("--power-in-verdict", action="store_true",
+                    help="把整机功耗计入判定。**缺省关闭**: 本机插着 USB 时 USB 输入"
+                         "功率里约 46%% 是在给电池充电, 充电电流还随电量单调衰减, "
+                         "battery/power_now 的单位也有误 (读出过 777W) —— 充电态下"
+                         "测到的不是整机功耗。停充测量做好之后再打开。功耗数据照常"
+                         "逐轮记录, 只是不参与保留/淘汰。")
     a = ap.parse_args()
 
     out = os.path.abspath(a.out)
@@ -478,14 +488,24 @@ def main() -> int:
     temp_cap = max(TEMP_CAP_FLOOR_C,
                    round(max(base_temps) + TEMP_CAP_MARGIN_C, 1)) if base_temps \
         else TEMP_CAP_FLOOR_C
-    power_available = any(m.get("power_w_mean") is not None for _, m in base_runs)
+    power_measurable = any(m.get("power_w_mean") is not None for _, m in base_runs)
+    power_reasons = sorted({m.get("power_usable_reason") or "" for _, m in base_runs})
+    # 功耗进不进判定是个**显式开关**, 不是"能测到就用"。充电态下测到的数看起来
+    # 很正常, 但它不是整机功耗 —— 悄悄拿它判保留/淘汰, 比不测还糟。
+    power_available = bool(a.power_in_verdict and power_measurable)
+    power_note = ("功耗计入判定" if power_available else
+                  "功耗**不计入判定**, 仅记录供参考 (--power-in-verdict 未开启" +
+                  ("" if power_measurable else "; 且基线轮未测到可用功耗") + ")。" +
+                  " / ".join(r for r in power_reasons if r))
     # 每组候选的等冷目标 = 「回到基线是在什么热态下量的」, 而不是一个绝对温度。
     # 取基线起跑温度 + 1C, 下界 40C, 上界比温度上限低 2C —— 也在看候选数据前冻结。
     cool_target = min(max(COOL_C_FLOOR, round((base_start_c or COOL_C_FLOOR) + 1.0, 1)),
                       temp_cap - 2.0)
 
     # 4) **在看到任何候选数据之前**冻结判定规则
-    rule = V.rule_doc(temp_cap, a.pairs, power_available)
+    rule = V.rule_doc(temp_cap, a.pairs, power_available, power_note)
+    rule["power_measurable"] = power_measurable
+    rule["power_reasons"] = [r for r in power_reasons if r]
     rule["temp_cap_derivation"] = {
         "floor_c": TEMP_CAP_FLOOR_C, "margin_c": TEMP_CAP_MARGIN_C,
         "baseline_max_c": max(base_temps) if base_temps else None,
@@ -503,7 +523,7 @@ def main() -> int:
     log(f"判定规则已冻结: 温度上限 {temp_cap}C, 等冷目标 {cool_target}C, 指标 {rule['n_metrics']} 个, "
         f"alpha_win={rule['alpha_win_bonferroni']}, "
         f"{a.pairs}v{a.pairs} 最小可达 p={rule['min_reachable_p']}, "
-        f"可达={rule['reachable']}, 功耗可测={power_available}")
+        f"可达={rule['reachable']}; {power_note}")
     if not rule["reachable"]:
         log("警告: 轮数不足以达到 Bonferroni 收紧后的显著性门槛, 本次任何候选都不可能判保留")
 
@@ -590,6 +610,10 @@ def main() -> int:
         "test_conditions": {
             "device": SERIAL,
             "fan_state_at_baseline": fan_states,
+            "battery_status_at_baseline": sorted({m.get("battery_status")
+                                                  for _, m in base_runs if m.get("battery_status")}),
+            "power_in_verdict": power_available,
+            "power_caveat": power_note,
             "fan_is_a_knob": False,
             "fan_note": "风扇转速是系统参数的一种, 但不进自动调参白名单 (DENY_KEYWORDS 含 fan)",
             "power_rail": "battery",

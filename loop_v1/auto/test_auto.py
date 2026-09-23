@@ -215,26 +215,41 @@ class TestPlanText(unittest.TestCase):
 
 
 class TestEnvStats(unittest.TestCase):
-    def test_power_prefers_device_reported_wattage(self):
+    """功耗在本机有两个实测踩出来的坑, 解析层必须如实反映, 不许美化。"""
+
+    def test_discharging_uses_volts_times_amps_not_power_now(self):
+        """本机 battery/power_now 单位有误 (读出过 777W), 所以以 |V x I| 为准。"""
         s = V.env_stats(
             "#sample_env v1\n#battery_status=Discharging\n"
-            "ENV 100.0 4000000 -1000000 5000000 0 0 cpu-1-0 41000\n"
-            "ENV 102.0 4000000 -1000000 5000000 0 0 gpuss-0 43500\n")
-        self.assertEqual(s["power_w_mean"], 5.0)      # 用 power_now, 不去乘 V x I
+            "ENV 100.0 4000000 -1500000 777000000 0 0 cpu-1-0 41000\n"
+            "ENV 102.0 4000000 -1500000 777000000 0 0 gpuss-0 43500\n")
+        self.assertAlmostEqual(s["power_w_mean"], 6.0, places=3)
+        self.assertAlmostEqual(s["power_vi_w_mean"], 6.0, places=3)
+        # power_now 原样记录, 但标成不合理, 不进任何均值
+        self.assertEqual(s["power_now_w_mean"], 777.0)
+        self.assertFalse(s["power_now_plausible"])
         self.assertEqual(s["soc_temp_max_c"], 43.5)
         self.assertEqual(s["n_samples"], 2)
 
-    def test_falls_back_to_volt_times_amp(self):
+    def test_plausible_power_now_is_still_only_recorded(self):
         s = V.env_stats("#battery_status=Discharging\n"
-                        "ENV 1.0 4000000 -1500000 NA 0 0 cpu-1-0 40000\n")
-        self.assertAlmostEqual(s["power_w_mean"], 6.0, places=3)
+                        "ENV 1.0 4000000 -1500000 5000000 0 0 cpu-1-0 40000\n")
+        self.assertTrue(s["power_now_plausible"])
+        self.assertEqual(s["power_now_w_mean"], 5.0)
+        self.assertAlmostEqual(s["power_w_mean"], 6.0, places=3)   # 仍用 V x I
 
     def test_charging_makes_power_unusable(self):
-        """充电态读到的是流入功率, 量不到整机开销 —— 如实报 None, 不假装能测。"""
+        """充电态: USB 输入里含给电池充电的部分, 且充电电流随电量单调衰减 ——
+        那个衰减会被当成「功耗随时间下降」混进 A/B 比较。所以如实报 None。"""
         s = V.env_stats("#battery_status=Charging\n"
                         "ENV 1.0 4000000 1000000 5000000 5000000 2000000 cpu-1-0 40000\n")
         self.assertIsNone(s["power_w_mean"])
         self.assertTrue(s["battery_charging"])
+        self.assertEqual(s["battery_status"], "Charging")
+        self.assertIn("充电态", s["power_usable_reason"])
+        # 原始量照常留下, 停充测量做好后可以回头核
+        self.assertAlmostEqual(s["usb_input_w_mean"], 10.0, places=3)
+        self.assertEqual(s["current_now_ua_mean"], 1000000)
         self.assertEqual(s["soc_temp_max_c"], 40.0)
 
     def test_sentinel_temps_are_skipped(self):
@@ -299,11 +314,29 @@ class TestVerdict(unittest.TestCase):
         d = V.decide({"frame_p95": _cmp(-9.0, 0.0001)}, **args)
         self.assertEqual(d["verdict"], "ABORT")
 
-    def test_power_unavailable_drops_to_two_metrics(self):
+    def test_power_out_of_verdict_drops_to_two_metrics(self):
+        """功耗不计入判定时只剩两个指标, Bonferroni 相应放宽到 0.025。"""
         args = dict(self.BASE, power_available=False)
         d = V.decide({"frame_p95": _cmp(-2.0, 0.02), "fps_mean": _cmp(0.0, 1.0)}, **args)
         self.assertAlmostEqual(d["alpha_win"], 0.025, places=5)
         self.assertEqual(d["verdict"], "KEEP")
+
+    def test_power_out_of_verdict_ignores_power_entirely(self):
+        """功耗关掉时, 哪怕功耗显著变差也不算退化 —— 它根本不在判定里,
+        不能拿一个量不准的数去否决一个真实的帧时改善。"""
+        args = dict(self.BASE, power_available=False)
+        d = V.decide({"frame_p95": _cmp(-2.0, 0.001), "fps_mean": _cmp(0.0, 1.0),
+                      "power_w_mean": _cmp(5.0, 0.0001)}, **args)
+        self.assertEqual(d["verdict"], "KEEP")
+        self.assertEqual(d["regressions"], [])
+        self.assertNotIn("power_w_mean", d["per_metric"])
+
+    def test_rule_doc_records_why_power_is_out(self):
+        r = V.rule_doc(46.0, 5, False, "功耗不计入判定, 仅记录供参考 (充电态)")
+        self.assertFalse(r["power_in_verdict"])
+        self.assertEqual(r["n_metrics"], 2)
+        self.assertIn("充电态", r["power_note"])
+        self.assertNotIn("power_w_mean", [m["id"] for m in r["metrics"]])
 
     def test_rule_doc_reports_reachability(self):
         # 4v4 最小可达 p = 2/C(8,4) = 0.0286, 够不着 alpha_win=0.0167

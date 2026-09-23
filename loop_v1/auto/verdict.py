@@ -31,6 +31,10 @@ from statistics import median
 
 ALPHA = 0.05
 
+# 手机整机功耗的合理区间 (瓦)。本机 battery/power_now 读出过 777W —— 单位有误,
+# 这种数不进任何均值, 只如实记录并标 plausible=False。
+PLAUSIBLE_W = (0.05, 30.0)
+
 # (指标, 方向) —— 方向 "lower" = 越小越好
 PRIMARY_METRICS = [
     ("frame_p95", "lower"),
@@ -41,7 +45,8 @@ PRIMARY_METRICS = [
 RULE_VERSION = "sysparam_v1"
 
 
-def rule_doc(temp_cap_c: float, pairs: int, power_available: bool) -> dict:
+def rule_doc(temp_cap_c: float, pairs: int, power_available: bool,
+             power_note: str = "") -> dict:
     """落盘用的规则快照。autoloop 在采第一组候选数据之前写它。"""
     metrics = [m for m, _ in PRIMARY_METRICS if power_available or m != "power_w_mean"]
     k = len(metrics)
@@ -56,7 +61,8 @@ def rule_doc(temp_cap_c: float, pairs: int, power_available: bool) -> dict:
         "min_reachable_p": _min_reachable_p(pairs),
         "reachable": (_min_reachable_p(pairs) or 1.0) < (ALPHA / k if k else 0),
         "temp_cap_c": temp_cap_c,
-        "power_available": power_available,
+        "power_in_verdict": power_available,
+        "power_note": power_note,
         "keep_condition": "至少一个指标显著改善 (p < alpha_win) 且没有任何指标显著变差 (p < 0.05)",
         "abort_conditions": ["旋钮未全部生效", "SoC 结温超过 temp_cap_c", "轮末快照与轮前不一致"],
     }
@@ -75,20 +81,34 @@ def _min_reachable_p(pairs: int) -> float | None:
 def env_stats(text: str) -> dict:
     """sample_env.sh 输出 → 功耗与温度统计。
 
-    功耗优先用设备直报的 power_now (微瓦), 没有就用 |V x I| 折算,
-    与 phonefarm hwcond.rs 的 PowerSample::watt 同口径。
-    电池轨在充电态读出来的是流入功率, 量不到整机开销 —— 这种情况
-    power_rail 报 "battery(charging)" 且 power_w_mean 为 None, 由上层决定降级。
+    功耗在本机有两个坑, 都是实测踩出来的, 所以这里**不做任何美化**, 原始量与
+    折算量一起落盘, 由上层决定用不用:
+
+    1. **充电态量不到整机功耗**。插着 USB 时 USB 输入功率里有约一半是在给电池充电,
+       且充电电流随电量单调衰减 —— 这个衰减会被当成"功耗随时间下降"混进 A/B 比较。
+       所以 `battery_charging` 为真时 `power_w_mean` 一律 None。
+    2. **`battery/power_now` 在本机单位是错的**, 读出过 777W。所以不像
+       `hwcond.rs::PowerSample::watt` 那样优先用它: 这里以 |V x I| 为准,
+       `power_now` 只作为原始值记录, 并标一个 plausible 位 —— 不合理的数不进任何均值。
+
+    另外把 `power_rail` / `battery_status` / `current_now` / `voltage_now` 原样留下,
+    停充测量做好之后可以回头核这批数据。
     """
-    watts: list[float] = []
+    vi_watts: list[float] = []
+    now_watts: list[float] = []
+    usb_watts: list[float] = []
+    currents: list[int] = []
+    voltages: list[int] = []
     temps: list[float] = []
+    status = ""
     charging = False
     fan_state = None
     n = 0
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("#battery_status="):
-            charging = line.split("=", 1)[1].strip().lower() in ("charging", "full")
+            status = line.split("=", 1)[1].strip()
+            charging = status.lower() in ("charging", "full")
             continue
         if line.startswith("#fan_state="):
             # 主动散热风扇自己耗电, 会进功耗读数。逐轮记下来, 好复核同一组对照的
@@ -105,29 +125,57 @@ def env_stats(text: str) -> dict:
         try:
             bv, bi = int(parts[2]), int(parts[3])
             bp = None if parts[4] == "NA" else int(parts[4])
+            uv, ui = int(parts[5]), int(parts[6])
             t = int(parts[8])
         except ValueError:
             continue
+        if bv:
+            voltages.append(bv)
+        currents.append(bi)
+        if bv and bi:
+            vi_watts.append(abs(bv / 1e6 * bi / 1e6))
         if bp is not None and bp != 0:
-            watts.append(abs(bp) / 1e6)
-        elif bv and bi:
-            watts.append(abs(bv / 1e6 * bi / 1e6))
+            now_watts.append(abs(bp) / 1e6)
+        if uv and ui:
+            usb_watts.append(abs(uv / 1e6 * ui / 1e6))
         if 0 < t < 100000:
             temps.append(t / 1000.0)
 
+    def avg(xs):
+        return round(sum(xs) / len(xs), 4) if xs else None
+
+    now_mean = avg(now_watts)
+    # 手机整机功耗合理区间。777W 这种读数只能说明单位不对, 不能进任何均值。
+    now_plausible = now_mean is not None and PLAUSIBLE_W[0] <= now_mean <= PLAUSIBLE_W[1]
+
     out: dict = {
         "n_samples": n,
+        "battery_status": status,
         "battery_charging": charging,
         "fan_state": fan_state,
-        "power_rail": "battery(charging)" if charging else "battery",
+        "power_rail": "battery",
+        "current_now_ua_mean": avg(currents),
+        "voltage_now_uv_mean": avg(voltages),
+        "power_now_w_mean": now_mean,
+        "power_now_plausible": now_plausible,
+        "power_vi_w_mean": avg(vi_watts),
+        "usb_input_w_mean": avg(usb_watts),
         "power_w_mean": None,
         "power_w_median": None,
+        "power_usable_reason": "",
         "soc_temp_max_c": max(temps) if temps else None,
         "soc_temp_mean_c": round(sum(temps) / len(temps), 3) if temps else None,
     }
-    if watts and not charging:
-        out["power_w_mean"] = round(sum(watts) / len(watts), 4)
-        out["power_w_median"] = round(median(watts), 4)
+    if charging:
+        out["power_usable_reason"] = (
+            f"充电态 (battery status={status or '?'}): USB 输入功率里含给电池充电的部分, "
+            "且充电电流随电量单调衰减, 量不到整机功耗")
+    elif not vi_watts:
+        out["power_usable_reason"] = "读不到 voltage_now/current_now"
+    else:
+        out["power_w_mean"] = avg(vi_watts)
+        out["power_w_median"] = round(median(vi_watts), 4)
+        out["power_usable_reason"] = "放电态, 用 |V x I| (本机 power_now 单位有误, 不采用)"
     return out
 
 
