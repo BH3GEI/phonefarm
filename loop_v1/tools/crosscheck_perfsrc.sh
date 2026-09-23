@@ -24,7 +24,7 @@ WORKLOAD="${3:-refbench}"
 
 SERIAL=91253241019A
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-. "$ROOT/loop_v1/tools/pf_bin.sh"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pf_bin.sh"
 LEAD=6          # 负载起跑后等几秒再开采 (让负载进入稳态)
 CAPDUR=30       # 采集窗口, 两条通路共用这一段
 export PATH="$PATH:/Users/mac/Library/Android/sdk/platform-tools"

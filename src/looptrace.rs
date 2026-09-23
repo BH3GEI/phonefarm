@@ -478,21 +478,34 @@ pub fn detect_fps_cap(frame_p50_ms: f64) -> Option<i64> {
     })
 }
 
-/// Python `x or 0.0` 的数字版: 缺失、null、以及 0 都落到默认值。
+/// Python `x or 0.0` 的数字版: 缺失、null、0 —— 以及 **-0.0** —— 都落到默认值。
+/// `bool(-0.0)` 在 Python 里是 False, 照搬这一条, 否则 `-0.0` 会原样写进 JSON。
 fn num_or_zero(s: &serde_json::Value, k: &str) -> f64 {
-    s.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0)
-}
-
-/// Python `float(s.get(k) or 0)`: 值是字符串时按十进制解析。
-fn str_num_or_zero(s: &serde_json::Value, k: &str) -> f64 {
-    match s.get(k) {
-        Some(serde_json::Value::String(t)) if !t.is_empty() => t.parse().unwrap_or(0.0),
-        Some(v) => v.as_f64().unwrap_or(0.0),
-        None => 0.0,
+    match s.get(k).and_then(|v| v.as_f64()) {
+        Some(v) if v != 0.0 => v,
+        _ => 0.0,
     }
 }
 
-pub fn attribute(s: &serde_json::Value) -> PyVal {
+/// Python `float(s.get(k) or 0)`: 值是字符串时按十进制解析。
+///
+/// 解析不了就是数据坏了。Python 在这里会抛 ValueError 把整轮打掉, 这边照样返回错误
+/// —— 悄悄填个 0 等于凭空造一个测量值, 比整轮失败更糟。
+fn str_num_or_zero(s: &serde_json::Value, k: &str) -> Result<f64, String> {
+    match s.get(k) {
+        Some(serde_json::Value::String(t)) if !t.is_empty() => t
+            .trim()
+            .parse()
+            .map_err(|_| format!("{k} 不是数字: {t:?}")),
+        Some(v) => Ok(match v.as_f64() {
+            Some(x) if x != 0.0 => x,
+            _ => 0.0,
+        }),
+        None => Ok(0.0),
+    }
+}
+
+pub fn attribute(s: &serde_json::Value) -> Result<PyVal, String> {
     let fp50 = num_or_zero(s, "frame_p50");
     let fp95 = num_or_zero(s, "frame_p95");
     let gpu = num_or_zero(s, "gpu_active_mean");
@@ -520,8 +533,8 @@ pub fn attribute(s: &serde_json::Value) -> PyVal {
         PyVal::Null
     };
     let bw = pyobj! {
-        "ddr_cur_khz" => str_num_or_zero(s, "ddr_cur_khz"),
-        "ddr_boost_khz" => str_num_or_zero(s, "ddr_boost_khz"),
+        "ddr_cur_khz" => str_num_or_zero(s, "ddr_cur_khz")?,
+        "ddr_boost_khz" => str_num_or_zero(s, "ddr_boost_khz")?,
         "gpu_bus_vote_median" => bw_med.map(PyVal::from).unwrap_or(PyVal::Null),
         "gpu_bus_vote_max" => bw_max.map(PyVal::from).unwrap_or(PyVal::Null),
         "bus_vote_headroom_pct" => headroom,
@@ -580,7 +593,7 @@ pub fn attribute(s: &serde_json::Value) -> PyVal {
         )
     };
 
-    pyobj! {
+    Ok(pyobj! {
         "verdict" => verdict,
         "evidence" => why,
         "actionable" => actionable,
@@ -596,7 +609,7 @@ pub fn attribute(s: &serde_json::Value) -> PyVal {
             "detected_fps_cap" => cap,
         },
         "bandwidth" => bw,
-    }
+    })
 }
 
 // ══════════════ 子命令 ══════════════
@@ -657,8 +670,16 @@ pub fn run_attribute(args: &[String]) -> i32 {
             return 1;
         }
     };
-    println!("{}", dumps(&attribute(&s)));
-    0
+    match attribute(&s) {
+        Ok(v) => {
+            println!("{}", dumps(&v));
+            0
+        }
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            1
+        }
+    }
 }
 
 #[cfg(test)]
@@ -691,7 +712,7 @@ mod tests {
                 serde_json::from_str(&std::fs::read_to_string(&summary).unwrap()).unwrap();
             let want = std::fs::read_to_string(&golden).unwrap();
             assert_eq!(
-                dumps(&attribute(&s)),
+                dumps(&attribute(&s).unwrap()),
                 want.trim_end_matches('\n'),
                 "归因输出与 {} 不一致",
                 golden.display()
@@ -716,7 +737,7 @@ mod tests {
             for (name, got) in [
                 (format!("{stem}.summary.json"), summary.clone()),
                 (format!("{stem}.full.json"), dumps(&d.to_pyval())),
-                (format!("{stem}.attr.json"), dumps(&attribute(&parsed))),
+                (format!("{stem}.attr.json"), dumps(&attribute(&parsed).unwrap())),
             ] {
                 let want = std::fs::read_to_string(dir.join(&name)).unwrap();
                 assert_eq!(got, want.trim_end_matches('\n'), "{name} 不一致");
@@ -747,6 +768,25 @@ mod tests {
         assert_eq!(pct(&xs, 1.0), Some(4.0));
         assert_eq!(pct(&[], 0.5), None);
         assert_eq!(pct(&[7.0], 0.9), Some(7.0));
+    }
+
+    /// Python 的 `or 0.0` 把 -0.0 也当假值。不照搬的话 attribution.json 里会冒出 "-0.0"。
+    #[test]
+    fn negative_zero_normalizes_like_python() {
+        let s: serde_json::Value =
+            serde_json::from_str(r#"{"frame_p50":-0.0,"n_thermal_events":0}"#).unwrap();
+        let out = dumps(&attribute(&s).unwrap());
+        assert!(out.contains("\"frame_p50_ms\": 0.0"), "{out}");
+        assert!(!out.contains("-0.0"), "{out}");
+    }
+
+    /// meta 里的 ddr 频率坏了就整轮失败, 不静默填 0 造一个假测量值。
+    #[test]
+    fn unparseable_ddr_meta_is_an_error_not_a_zero() {
+        let s: serde_json::Value =
+            serde_json::from_str(r#"{"frame_p50":33.5,"ddr_cur_khz":"N/A"}"#).unwrap();
+        let e = attribute(&s).unwrap_err();
+        assert!(e.contains("ddr_cur_khz"), "{e}");
     }
 
     #[test]

@@ -8,8 +8,16 @@
 # 顺序: PF_BIN 显式覆盖 > 仓库根已构建的 ./phonefarm > src/target 下的 cargo 产物。
 # worktree 里跑实验时 PF_BIN 最有用: 指到哪个 worktree 的二进制就用哪个。
 _pf_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PF="${PF_BIN:-}"
-if [ -z "$PF" ]; then
+PF=""
+if [ -n "${PF_BIN:-}" ]; then
+  # 显式覆盖也要验在不在、能不能跑: 写错一个字母就静默落一份空 summary.json,
+  # 那会一路伪装成"判据 5 字节不一致", 查起来比当场报错贵得多。
+  if [ ! -x "$PF_BIN" ]; then
+    echo "PF_BIN 指向的不是可执行文件: $PF_BIN" >&2
+    exit 1
+  fi
+  PF="$PF_BIN"
+else
   for _c in "$_pf_root/phonefarm" \
             "$_pf_root/src/target/release/phonefarm" \
             "$_pf_root/src/target/debug/phonefarm"; do
