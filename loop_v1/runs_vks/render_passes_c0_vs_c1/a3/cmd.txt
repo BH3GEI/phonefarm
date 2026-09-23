@@ -1,0 +1,1 @@
+sample render_passes --config 0 --stop-after-frame 6000 --hideui --force-close --vsync ON --log-fps --log-file /storage/emulated/0/Android/data/com.khronos.vulkan_samples/files/run.log

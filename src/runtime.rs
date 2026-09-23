@@ -1696,7 +1696,10 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
     };
     log.put(json!({"v": 1}));
     // 开跑标记(r=end 的对偶面): status 靠"有 start 无 end"+pid 活性区分 运行中/中断
+    // serial 进 start 记录: 事后要能按设备回溯"这台机器上一次被谁动过"。
+    // 判不出是哪一台时记 null, 不猜 (见 device::resolve_serial)。
     log.put(json!({"r": "start", "pid": std::process::id(),
+        "serial": crate::device::resolve_serial(serial.as_deref()),
         "ts": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64).unwrap_or(0)}));
     log.put(json!({"r": "goal", "t": goal}));

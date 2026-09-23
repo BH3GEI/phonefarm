@@ -79,8 +79,7 @@ tools/
   ftrace_capture.sh     ftrace 采集, 自带四项状态存档与 trap 还原
   knob_ddr_boost.sh     旋钮: DDR/LLCC 总线下限钉到硬件上限, apply/restore/status
   pf_bin.sh             解析 phonefarm 二进制路径 (供各脚本 source)
-  analyze.py            离散度 + 漂移 + 精确置换检验 + 置换反演 CI (判据 1/3)
-  report.py             五条判据汇总成一份可字节复现的 report.json
+  pybridge.py           迁移期通道: 尚未搬走的 Python 从这里转调二进制拿统计口径
   replay_test.sh        离线回放自检 (判据 5)
   run_once.sh           一轮"负载 + 采集"的编排
 scripts/
@@ -133,7 +132,7 @@ runs/<标签>/
 黄昏批次的 `gpu_active_mean` 单调比 = 1.00, 即**每一轮都比上一轮高** (21.68 → 22.66,
 +1.13%/轮)。这不是抖动, 是有外生变量在单向移动。避开光照过渡后离散度降到 1/4。
 
-所以 `analyze.py` 除了离散度还报**漂移**: 最小二乘斜率 + 相邻递增比例。
+所以 `phonefarm analyze` 除了离散度还报**漂移**: 最小二乘斜率 + 相邻递增比例。
 离散度只说"散得多开", 说不出"是不是一直往一个方向走" —— 单调比贴近 1 时,
 即使离散度达标也不算可重复。
 
@@ -161,7 +160,7 @@ for i in 1 2 3 4 5; do
 done
 
 # 出报告 + 回放自检
-python3 tools/report.py --baseline 'runs/ctrl*' --knob 'runs/knob*' \
+../phonefarm report --baseline 'runs/ctrl*' --knob 'runs/knob*' \
     --snap-before runs/snap_before.txt --snap-after runs/snap_final.txt > runs/report.json
 bash tools/replay_test.sh runs
 ```

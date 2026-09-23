@@ -116,32 +116,58 @@ cached process，`pidof` 仍然有值。拿它当结束判据会让每一轮都�
 立刻停并退 9。这台机器上同时有别的 agent 在编译，实测剩余空间会在几分钟内被别人吃掉
 数 GB，所以这个看门狗是常开的，不是调试开关。
 
-## 6. 本次落地时的实测记录(2026-09-23 · NX809J / Adreno 840v2)
+## 6. 实测记录 (2026-09-23 · NX809J / Adreno 840v2 / 风扇开 level 5)
 
-已经证实可用的：
+### 结论: 这套采集能测出这两个开关, 测出来的通道是**带宽**
+
+两组都是交错 5v5, 精确置换检验全枚举(252 种分组, 无随机种子), 证据在
+`../../runs_vks/`, 原始 ftrace 归档在 U 盘 `/Volumes/USB/phonefarm-vks-traces/`。
+
+| 样例 | A 臂 (config 0) | B 臂 (config 1) | `bw_median` A→B | 差 | p |
+|---|---|---|---|---|---|
+| `render_passes` | 颜色 loadOp=**LOAD** + 深度 storeOp=**STORE** | 颜色 loadOp=**CLEAR** + 深度 storeOp=**DONT_CARE** | 2680 → 1110 | **−58.6%** | **0.0159** |
+| `subpasses` | subpass 合并, G-buffer 留 **tile memory** | 两个独立 render pass, G-buffer 走 **DRAM** | 900 → 2300 | **+155.6%** | **0.0079** |
+
+两条都和 `docs/MOBILE_GPU_OPT_ROUTES.md` §2 A 表的预期方向一致:
+去掉多余的 loadOp/storeOp 省掉整帧色彩附件的读写; subpass 合并把 G-buffer 留在片上,
+不走 DRAM 往返。`subpasses` 那组的 p = 0.0079 是 5v5 的理论下限(2/252, 两臂完全不重叠),
+而且**两臂的臂内离散度都是 0.0%** —— 同一档跑五轮, 总线投票逐轮一模一样。
+
+### 逐帧指标这次没用上, 原因写清楚
+
+`frame_p95` / `frame_p50` / `gpu_active_mean` 这一组**都不显著**, 而且不能拿来下结论,
+因为它们在这批数据里口径就不一致。两个原因, 报告里会逐轮列出来并直接警告:
+
+1. **面板自适应刷新。** 开着 vsync 时应用帧率就是面板刷新率; 本机面板支持
+   60/90/120/144 且默认自动切换, 实测同一批里出现过 60 / 93 / 119 三档 ——
+   每轮的帧预算都不一样。现在 `run_ab.sh` 会在整批期间把它钉死(缺省 120Hz)并在
+   退出时还原, 上面两组数据是钉死之前跑的。
+2. **`submits_per_frame` 不稳定。** 所有逐帧指标都是按 `phonefarm parse-trace` 自检出的
+   "每帧几次提交"分组算的。实测 `render_passes` 那批 10 轮里它取过 1 和 6 ——
+   取 6 的那轮 fps 被算成 9.9、`frame_p50` 算成 99.9ms, 而应用一直稳在 60fps。
+   那一轮看着像离群点, 其实是分帧口径变了。
+
+`bw_median` 不经过这两层: 它是 `kgsl_buslevel` 事件的 `avg_bw` 中位数, 直接观测量。
+所以这批的结论只落在它上面。
+
+### 工程侧已经证实可用的
 
 | 项 | 结果 |
 |---|---|
-| 浅克隆 + 裁剪后占盘 | 4.2 GB → 1.6 GB(工作树)；APK 19 MB |
+| 浅克隆 + 裁剪后占盘 | 4.2 GB → 1.6 GB(工作树); APK 19 MB |
 | arm64 release APK | 出包成功(gradle 8.9 / AGP 8.7.2 / NDK 28.2.13676358 / SDK cmake 3.22.1) |
-| `--config` 钉档 | 生效，日志有 `applied configuration index N` |
+| `--config` 钉档 | 生效, 每轮日志留 `applied configuration index N` 当证据 |
 | 固定帧数自退 | 生效(`--stop-after-frame` + `--force-close`) |
-| 提交线程自动识别 | 生效，6s 窗口内 2430 次提交、占比 99.5% |
-| `render_passes` 两档的量级 | config 0 ≈ 335 fps，config 1 ≈ 360 fps(单次观测，**不是统计结论**) |
+| 提交线程自动识别 | 20 轮全部认出应用侧提交线程, 占比 0.963~0.991 |
+| 轮内有效性判定 | 20 轮全部通过(热事件 0), 无效轮机制在调试期挡下过空跑轮 |
 
-**还没做完的**：`run_ab.sh` 的交错 5v5 电池没跑完，所以还没有 p 值。
-原因是这台机器只有一台手机、多 agent 排队，本轮拿到设备的时间窗被上面 §3 的三个坑
-吃掉了，修完坑之后设备已被别的任务接管。脚本本身是完整的，拿到设备直接：
+### 还没做的
+
+- 钉死刷新率之后重跑一遍, 把 `gpu_active_mean` 也变成可用通道;
+- `msaa` 与 `afbc` 两组没跑(设备排队紧张, 本轮只排到两组);
+- `subpasses` 的 config 2/3(关 transient attachments、加大 G-buffer)没跑。
 
 ```
-bash run_ab.sh render_passes 0 1 5     # loadOp/storeOp 两臂，交错 5v5
-bash run_ab.sh subpasses    0 1 5      # subpass 合并 vs 两个 render pass
+bash run_ab.sh msaa      0 1 5      # tile 内 resolve vs writeback resolve
+bash run_ab.sh subpasses 0 2 5      # transient attachments 开/关
 ```
-
-`frames` 的缺省值已经按本机实测定为 **30000**：真实渲染约 340 fps，而每轮要先跨过
-§3(b) 的空跑段（约 20000 帧），再留出 settle 与 12s 采集窗。给少了应用会在采集开始前
-就跑完自退，采到的全是空窗 —— 这正是头几轮全判无效的原因。
-
-汇总链已用合成的 5v5 数据离线自检过（`analyze.py` → `vks_report.py` 全通，
-p = 0.007937 即 5v5 的理论下限 2/252）；`run_ab.sh` 的 `one()` 三条分支
-（有效 / 硬失败 / 三次无效放弃）也单独验过。

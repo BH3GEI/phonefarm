@@ -1,0 +1,10 @@
+{
+  "comm": "binder:29544_5",
+  "share": 0.9879,
+  "dist": {
+    "binder:29544_5": 901,
+    "RenderThread": 8,
+    "RenderEngine": 3
+  },
+  "total": 912
+}

@@ -142,6 +142,59 @@ pub fn adb_search_order(adb_bin: Option<&str>, home: Option<&str>) -> Vec<String
 }
 
 /// adb 定位: 一次定位进程级缓存。找不到返回 None——调用方给可操作警告,不 panic。
+/// `adb devices` 里**恰好一台**在线设备的序列号。
+///
+/// 只认第二列是 `device` 的行: `offline` / `unauthorized` 的机器连不上,
+/// 不能算数。零台或多台都返回 `None` —— 多台的时候 adb 自己也不知道该选谁。
+pub fn single_online_adb(text: &str) -> Option<String> {
+    let mut online = text.lines().filter_map(|l| {
+        let c: Vec<&str> = l.split_whitespace().collect();
+        (c.len() >= 2 && c[1] == "device").then(|| c[0].to_string())
+    });
+    let first = online.next()?;
+    online.next().is_none().then_some(first)
+}
+
+/// `hdc list targets` 里恰好一台设备的 connect key。
+pub fn single_online_hdc(text: &str) -> Option<String> {
+    let mut it = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "[Empty]" && !l.starts_with("[Fail"));
+    let first = it.next()?;
+    it.next().is_none().then(|| first.to_string())
+}
+
+/// 这一局实际落在哪台机器上。
+///
+/// 为什么要有它: 对局记录里只记 `--serial` 是不够的 —— 大多数局根本不给这个参数
+/// (农场上就一台在线, adb 自己就选中了它)。事后想按设备回溯"这台机器上一次被谁动过",
+/// 那些不带参数的局就全是空的。
+///
+/// `--serial` 给了就是它; 没给时 adb/hdc 只有在恰好一台在线时才工作, 那台就是答案。
+/// 判不出来 (零台 / 多台 / 工具不在 PATH) 就返回 `None` —— 记 null, 不猜。
+pub fn resolve_serial(requested: Option<&str>) -> Option<String> {
+    if let Some(s) = requested {
+        let s = s.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    if let Some(adb) = locate_adb() {
+        if let Ok(out) = Command::new(adb).arg("devices").output() {
+            if let Some(s) = single_online_adb(&String::from_utf8_lossy(&out.stdout)) {
+                return Some(s);
+            }
+        }
+    }
+    if let Ok(out) = Command::new("hdc").args(["list", "targets"]).output() {
+        if let Some(k) = single_online_hdc(&String::from_utf8_lossy(&out.stdout)) {
+            return Some(format!("hdc:{k}"));
+        }
+    }
+    None
+}
+
 pub fn locate_adb() -> Option<String> {
     static ADB: OnceLock<Option<String>> = OnceLock::new();
     ADB.get_or_init(|| {
@@ -1593,6 +1646,54 @@ pub fn parse_main_ability(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn single_online_adb_needs_exactly_one_connectable_device() {
+        let one = "List of devices attached\n91253241019A\tdevice\n";
+        assert_eq!(single_online_adb(one).as_deref(), Some("91253241019A"));
+
+        // offline / unauthorized 连不上, 不算数
+        let mixed = "List of devices attached\nA\tdevice\nB\toffline\nC\tunauthorized\n";
+        assert_eq!(single_online_adb(mixed).as_deref(), Some("A"));
+
+        // 两台都在线时 adb 自己也不知道该选谁 —— 不猜
+        assert_eq!(single_online_adb("A\tdevice\nB\tdevice\n"), None);
+        assert_eq!(single_online_adb("List of devices attached\n\n"), None);
+        assert_eq!(single_online_adb(""), None);
+    }
+
+    #[test]
+    fn single_online_hdc_filters_sentinels() {
+        assert_eq!(single_online_hdc("abc123\n").as_deref(), Some("abc123"));
+        assert_eq!(single_online_hdc("[Empty]\n"), None);
+        assert_eq!(single_online_hdc("[Fail]Connect failed\n"), None);
+        assert_eq!(single_online_hdc("a\nb\n"), None, "两台就判不出");
+    }
+
+    /// 不给 --serial 时的自动解析。
+    ///
+    /// 只跑 `adb devices` —— 那是问本机的 adb server, 不往手机上发任何命令,
+    /// 别人正占着设备跑测试时执行它也是安全的。没有设备的机器上返回 None, 照样通过。
+    #[test]
+    fn auto_resolution_either_finds_one_device_or_says_it_cannot_tell() {
+        match resolve_serial(None) {
+            None => {}
+            Some(s) => {
+                assert!(!s.trim().is_empty());
+                assert!(
+                    !s.contains(char::is_whitespace),
+                    "解析出来的序列号里不该有空白: {s:?}"
+                );
+            }
+        }
+    }
+
+    /// 显式给了 --serial 就用它, 一步都不去问设备。
+    #[test]
+    fn an_explicit_serial_wins_without_touching_any_device() {
+        assert_eq!(resolve_serial(Some("hdc:abc")).as_deref(), Some("hdc:abc"));
+        assert_eq!(resolve_serial(Some("  91253241019A  ")).as_deref(), Some("91253241019A"));
+    }
     use super::*;
 
     #[test]

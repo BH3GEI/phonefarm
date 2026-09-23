@@ -99,6 +99,12 @@ json.dump({"fan_enable": en, "fan_speed_level": lv}, sys.stdout)
 PYFAN
 echo "[$LABEL] 风扇: $(cat "$OUTDIR/fan.json")"
 
+# 4d) 面板刷新率存证。开着 vsync 时应用帧率就是它, 本机面板自适应刷新, 各轮不一样的话
+#     逐帧指标就没有可比性。run_ab.sh 会在整批期间把它钉死, 这里逐轮记下实际值。
+printf '{"min_refresh_rate":"%s","peak_refresh_rate":"%s"}\n' \
+  "$(ashell "settings get system min_refresh_rate" 2>/dev/null | tr -d '\r')" \
+  "$(ashell "settings get system peak_refresh_rate" 2>/dev/null | tr -d '\r')" > "$OUTDIR/display.json"
+
 # 5) 稳态窗口内采集 (ftrace_capture.sh 自带四项状态存档还原)
 #    采集窗的**设备墙钟**边界要记下来: 日志里的 FPS 行带的是设备本地时间, 而 trace 里
 #    的是 ftrace 时钟, 两者对不上。记下边界后 crosscheck.py 才能只拿同一段时间的

@@ -1,0 +1,23 @@
+{
+ "verdict": "限帧器封顶 @60fps",
+ "evidence": "帧周期 16.58ms 贴着 60fps 的 16.67ms (±2%), 而 GPU 只用掉 53.1%, 余量 7.77ms",
+ "actionable": "p50 被软件限帧钉死, 物理上降不下去。可动的只有: 抖动 p95-p50=0.84ms, 以及每帧 GPU 工作量 8.80ms (省功耗/热预算)",
+ "measures": {
+  "frame_p50_ms": 16.576,
+  "frame_p95_ms": 17.415,
+  "jitter_p95_minus_p50_ms": 0.839,
+  "gpu_active_mean_ms": 8.8025,
+  "gpu_share_pct": 53.1,
+  "queue_p50_ms": 0.5191,
+  "queue_share_pct": 3.13,
+  "n_thermal_events": 0,
+  "detected_fps_cap": 60
+ },
+ "bandwidth": {
+  "ddr_cur_khz": 547000.0,
+  "ddr_boost_khz": 547000.0,
+  "gpu_bus_vote_median": 900,
+  "gpu_bus_vote_max": 2000,
+  "bus_vote_headroom_pct": 55.0
+ }
+}

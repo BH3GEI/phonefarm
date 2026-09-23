@@ -10,6 +10,8 @@ runs/*.txt
 !runs/*/snap_*.txt
 !runs/report.json
 !runs/report.cmd
+# report.cmd 里点名要它, 少这 2 个字节 report.json 就不可从零复现
+!runs/replay_exit.txt
 
 # Python 字节码
 __pycache__/
