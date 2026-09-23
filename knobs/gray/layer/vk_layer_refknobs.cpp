@@ -23,6 +23,12 @@
 #include <vector>
 #include <sys/system_properties.h>
 #include <unistd.h>
+#if __has_include("copy_spv.h")
+#include "copy_spv.h"
+#else
+static const unsigned char kCopySpv[] = {0};
+static const unsigned int kCopySpvLen = 0;
+#endif
 
 // ── layer 协商接口 (来自 vk_layer.h, ABI 稳定) ──
 //
@@ -117,6 +123,28 @@ struct DevDisp {
     PFN_vkDestroyFramebuffer DestroyFramebuffer = nullptr;
     PFN_vkDestroyImage DestroyImage = nullptr;
     PFN_vkDestroyImageView DestroyImageView = nullptr;
+    // copyprobe: 建 pipeline / 显存 / 描述符 / 注入 dispatch 用
+    PFN_vkCreateShaderModule CreateShaderModule = nullptr;
+    PFN_vkDestroyShaderModule DestroyShaderModule = nullptr;
+    PFN_vkCreatePipelineLayout CreatePipelineLayout = nullptr;
+    PFN_vkDestroyPipelineLayout DestroyPipelineLayout = nullptr;
+    PFN_vkCreateComputePipelines CreateComputePipelines = nullptr;
+    PFN_vkDestroyPipeline DestroyPipeline = nullptr;
+    PFN_vkCreateDescriptorSetLayout CreateDescriptorSetLayout = nullptr;
+    PFN_vkDestroyDescriptorSetLayout DestroyDescriptorSetLayout = nullptr;
+    PFN_vkCreateDescriptorPool CreateDescriptorPool = nullptr;
+    PFN_vkDestroyDescriptorPool DestroyDescriptorPool = nullptr;
+    PFN_vkAllocateDescriptorSets AllocateDescriptorSets = nullptr;
+    PFN_vkFreeDescriptorSets FreeDescriptorSets = nullptr;
+    PFN_vkAllocateMemory AllocateMemory = nullptr;
+    PFN_vkFreeMemory FreeMemory = nullptr;
+    PFN_vkBindImageMemory BindImageMemory = nullptr;
+    PFN_vkCmdPipelineBarrier CmdPipelineBarrier = nullptr;
+    PFN_vkCmdBindPipeline CmdBindPipeline = nullptr;
+    PFN_vkCmdDispatch CmdDispatch = nullptr;
+    VkDevice dev = VK_NULL_HANDLE;
+    VkPhysicalDevice phys = VK_NULL_HANDLE;                 // 查显存类型用
+    PFN_vkGetPhysicalDeviceMemoryProperties GetPhysMemProps = nullptr;  // instance 级, CreateDevice 时经 gipa 取
 };
 
 static std::mutex g_mtx;
@@ -134,6 +162,7 @@ static std::atomic<uint64_t> g_rp{0};
 // 还把 initialLayout 设成 UNDEFINED(等于允许驱动直接丢弃旧内容), 所以本改写是白档那个
 // 答案的**真子集**; 两者效果可能不完全相等, 这一点如实记在 FEASIBILITY 里, 不含糊过去。
 static bool g_rewrite_loadop = false;
+static bool g_copyprobe = false;   // debug.knobs.copyprobe=1: 1:1 拷贝探针 (是改写, 非只读)
 static std::atomic<uint64_t> g_rp_created{0};   // 第几个被创建的 render pass (自报里的 pass 序号)
 
 struct Effective {
@@ -161,7 +190,8 @@ static uint64_t g_effective_dropped = 0;
 // 尺寸不在 VkRenderPass 上, 在 VkFramebuffer 上, 所以两边都要记, 靠 BeginRenderPass 关联。
 static bool g_dump_passes = false;
 
-struct RpInfo { uint32_t n_att = 0; std::vector<uint32_t> fmt; std::vector<uint32_t> loadop; };
+struct RpInfo { uint32_t n_att = 0; std::vector<uint32_t> fmt; std::vector<uint32_t> loadop;
+                std::vector<uint32_t> final_layout; };   // copyprobe 注 barrier 要知道源图 pass 结束后的布局
 struct FbInfo { uint32_t w = 0, h = 0; VkRenderPass rp = VK_NULL_HANDLE; };
 struct PassStat {                      // 按 (renderpass, 宽, 高) 聚合
     uint32_t w = 0, h = 0, n_att = 0;
@@ -184,6 +214,31 @@ static bool g_sampling = false;
 static bool g_seq_done = false;
 static uint32_t g_swap_w = 0, g_swap_h = 0, g_swap_fmt = 0;
 
+struct CopyProbe {
+    VkDevice dev = VK_NULL_HANDLE;
+    VkShaderModule sm = VK_NULL_HANDLE;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    VkPipelineLayout pl = VK_NULL_HANDLE;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet cset = VK_NULL_HANDLE;     // compute 自己的 set: binding0=src, binding1=dst
+    VkImage dst = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkImageView dst_view = VK_NULL_HANDLE;
+    uint32_t w = 0, h = 0, fmt = 0;
+    VkImage src_img = VK_NULL_HANDLE;          // 本帧拷贝的源 (pass 49 的颜色附件)
+    uint64_t copies = 0, subs = 0;
+    bool disabled = false;
+    // 游戏 set -> (克隆集, 克隆时的写代数)。游戏每更新一次原 set, 代数 +1, 下次克隆重建。
+    std::map<VkDescriptorSet, std::pair<VkDescriptorSet, uint64_t>> clones;
+};
+static CopyProbe g_cp;
+static std::map<VkDescriptorSet, uint64_t> g_set_gen;   // UpdateDescriptorSets 里递增
+static std::map<VkCommandBuffer, VkRenderPass> g_cb_prev_rp;  // src 图 finalLayout 的出处
+
+static void copyprobe_dispatch(VkCommandBuffer, const DevDisp&, VkRenderPass, const std::vector<VkImageView>&);
+static VkDescriptorSet copyprobe_clone(VkCommandBuffer, const DevDisp&, VkDescriptorSet);
+
 // ── 描述符溯源: 回答"送显那一笔 draw 到底采的是哪张图" ──
 // 纯观测, 不改任何渲染。链路是:
 //   VkImage(尺寸/格式/usage) <- VkImageView <- {framebuffer 附件, 描述符里绑的采样图}
@@ -193,6 +248,13 @@ struct ImgInfo { uint32_t w = 0, h = 0, fmt = 0, usage = 0; };
 static std::map<VkImage, ImgInfo> g_img;
 static std::map<VkImageView, VkImage> g_view;
 static std::map<VkFramebuffer, std::vector<VkImageView>> g_fb_att;
+// copyprobe 克隆描述符集用: 需要 layout 的完整 binding 清单 (逐个 vkCopyDescriptorSet),
+// 以及 image 写当时的 sampler (替换写要带上原采样器, 采样行为才不变)。
+struct LayoutBinding { uint32_t binding = 0, count = 0, type = 0; };
+static std::map<VkDescriptorSetLayout, std::vector<LayoutBinding>> g_layout_bindings;
+static std::map<VkDescriptorSet, VkDescriptorSetLayout> g_set_layout;
+static std::map<VkDescriptorPool, std::vector<VkDescriptorSet>> g_pool_sets;   // DestroyPool 时摘 set 表
+static std::map<VkDescriptorSet, std::map<uint32_t, VkSampler>> g_set_samplers;  // 同 g_set_views 的 key
 static std::map<VkDescriptorSet, std::map<uint32_t, VkImageView>> g_set_views;
 static std::map<VkCommandBuffer, std::vector<VkDescriptorSet>> g_cb_sets;
 static std::map<VkCommandBuffer, int> g_cb_draw_idx;          // 本 pass 内第几笔 draw
@@ -293,6 +355,14 @@ static void write_marker() {
         // 免得"空序列"和"还没采"在 harness 眼里长得一样 (评审 #5 的根因)
         json += std::string(",\"frame_seq_ready\":") + (g_seq_done ? "true" : "false");
         json += ",\"frame_seq\":[" + seq + "]";
+        if (g_copyprobe) {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            char b[256];
+            snprintf(b, sizeof b, ",\"copyprobe\":{\"copies\":%llu,\"subs\":%llu,\"dst\":[%u,%u,%u],\"disabled\":%s}",
+                     (unsigned long long)g_cp.copies, (unsigned long long)g_cp.subs,
+                     g_cp.w, g_cp.h, g_cp.fmt, g_cp.disabled ? "true" : "false");
+            json += b;
+        }
     }
     json += "}";
 
@@ -326,11 +396,14 @@ static void write_marker() {
 static PFN_vkVoidFunction dispatch_instance(VkInstance, const char*);
 static PFN_vkVoidFunction dispatch_device(VkDevice, const char*);
 
-// 记一个 render pass 的形状 (附件数 / 格式 / loadOp) 与它的创建序号
-template <typename FmtFn, typename LoadFn>
-static void record_rp(VkRenderPass rp, uint64_t seq, uint32_t n, FmtFn fmt, LoadFn load) {
+// 记一个 render pass 的形状 (附件数 / 格式 / loadOp / finalLayout) 与它的创建序号
+template <typename FmtFn, typename LoadFn, typename FinFn>
+static void record_rp(VkRenderPass rp, uint64_t seq, uint32_t n, FmtFn fmt, LoadFn load, FinFn fin) {
     RpInfo ri; ri.n_att = n;
-    for (uint32_t i = 0; i < n; i++) { ri.fmt.push_back(fmt(i)); ri.loadop.push_back(load(i)); }
+    for (uint32_t i = 0; i < n; i++) {
+        ri.fmt.push_back(fmt(i)); ri.loadop.push_back(load(i));
+        ri.final_layout.push_back(fin(i));
+    }
     std::lock_guard<std::mutex> lk(g_mtx);
     g_rp_info[rp] = std::move(ri);
     g_rp_seq[rp] = seq;
@@ -367,8 +440,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     const VkInstanceCreateInfo* ci, const VkAllocationCallbacks* a, VkInstance* pInst) {
     g_rewrite_loadop = read_bool_prop("debug.knobs.loadop");
     g_dump_passes = read_bool_prop("debug.knobs.passdump");
-    RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d",
-           self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes);
+    g_copyprobe = read_bool_prop("debug.knobs.copyprobe");
+    if (g_copyprobe) g_dump_passes = true;   // 探针的 src/dst/替换全部建立在溯源表上
+    RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d",
+           self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe);
     auto* link = reinterpret_cast<RkInstCreateInfo*>(const_cast<void*>(ci->pNext));
     while (link && !(link->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
                      link->function == RK_LAYER_LINK_INFO))
@@ -456,6 +531,27 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     d.DestroyFramebuffer = (PFN_vkDestroyFramebuffer)gdpa(*pDev, "vkDestroyFramebuffer");
     d.DestroyImage = (PFN_vkDestroyImage)gdpa(*pDev, "vkDestroyImage");
     d.DestroyImageView = (PFN_vkDestroyImageView)gdpa(*pDev, "vkDestroyImageView");
+    d.dev = *pDev;
+    d.phys = phys;
+    d.CreateShaderModule = (PFN_vkCreateShaderModule)gdpa(*pDev, "vkCreateShaderModule");
+    d.DestroyShaderModule = (PFN_vkDestroyShaderModule)gdpa(*pDev, "vkDestroyShaderModule");
+    d.CreatePipelineLayout = (PFN_vkCreatePipelineLayout)gdpa(*pDev, "vkCreatePipelineLayout");
+    d.DestroyPipelineLayout = (PFN_vkDestroyPipelineLayout)gdpa(*pDev, "vkDestroyPipelineLayout");
+    d.CreateComputePipelines = (PFN_vkCreateComputePipelines)gdpa(*pDev, "vkCreateComputePipelines");
+    d.DestroyPipeline = (PFN_vkDestroyPipeline)gdpa(*pDev, "vkDestroyPipeline");
+    d.CreateDescriptorSetLayout = (PFN_vkCreateDescriptorSetLayout)gdpa(*pDev, "vkCreateDescriptorSetLayout");
+    d.DestroyDescriptorSetLayout = (PFN_vkDestroyDescriptorSetLayout)gdpa(*pDev, "vkDestroyDescriptorSetLayout");
+    d.CreateDescriptorPool = (PFN_vkCreateDescriptorPool)gdpa(*pDev, "vkCreateDescriptorPool");
+    d.DestroyDescriptorPool = (PFN_vkDestroyDescriptorPool)gdpa(*pDev, "vkDestroyDescriptorPool");
+    d.AllocateDescriptorSets = (PFN_vkAllocateDescriptorSets)gdpa(*pDev, "vkAllocateDescriptorSets");
+    d.FreeDescriptorSets = (PFN_vkFreeDescriptorSets)gdpa(*pDev, "vkFreeDescriptorSets");
+    d.AllocateMemory = (PFN_vkAllocateMemory)gdpa(*pDev, "vkAllocateMemory");
+    d.FreeMemory = (PFN_vkFreeMemory)gdpa(*pDev, "vkFreeMemory");
+    d.BindImageMemory = (PFN_vkBindImageMemory)gdpa(*pDev, "vkBindImageMemory");
+    d.CmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)gdpa(*pDev, "vkCmdPipelineBarrier");
+    d.CmdBindPipeline = (PFN_vkCmdBindPipeline)gdpa(*pDev, "vkCmdBindPipeline");
+    d.CmdDispatch = (PFN_vkCmdDispatch)gdpa(*pDev, "vkCmdDispatch");
+    if (inst) d.GetPhysMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)gipa(inst, "vkGetPhysicalDeviceMemoryProperties");
     { std::lock_guard<std::mutex> lk(g_mtx); g_dev[key(*pDev)] = d; }
     return r;
 }
@@ -464,6 +560,13 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocat
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return; d = it->second; g_dev.erase(it); }
     write_marker();  // 收尾再落一次最终计数
+    if (g_cp.dev == dev) {   // copyprobe 自建对象随 device 一起收
+        if (g_cp.dst) { d.DestroyImageView(dev, g_cp.dst_view, nullptr); d.DestroyImage(dev, g_cp.dst, nullptr); d.FreeMemory(dev, g_cp.mem, nullptr); }
+        if (g_cp.pipe) { d.DestroyPipeline(dev, g_cp.pipe, nullptr); d.DestroyPipelineLayout(dev, g_cp.pl, nullptr);
+                         d.DestroyDescriptorPool(dev, g_cp.pool, nullptr); d.DestroyDescriptorSetLayout(dev, g_cp.dsl, nullptr);
+                         d.DestroyShaderModule(dev, g_cp.sm, nullptr); }
+        g_cp = CopyProbe{};
+    }
     if (d.DestroyDevice) d.DestroyDevice(dev, a);
 }
 
@@ -505,7 +608,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
         VkResult r0 = d.CreateRenderPass(dev, ci, a, out);
         if (r0 == VK_SUCCESS && g_dump_passes && ci) record_rp(*out, idx, ci->attachmentCount,
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; });
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
         return r0;
     }
 
@@ -521,7 +625,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
         VkResult r0 = d.CreateRenderPass(dev, ci, a, out);
         if (r0 == VK_SUCCESS && g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; });
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
         return r0;
     }
 
@@ -543,7 +648,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
     }
     if (g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
         [&](uint32_t i){ return (uint32_t)atts[i].format; },
-        [&](uint32_t i){ return (uint32_t)atts[i].loadOp; });
+        [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
+        [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
     RK_LOG("改写 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
            (unsigned long long)idx, hits.size());
     return r;
@@ -561,7 +667,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
         VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
         if (r0 == VK_SUCCESS && g_dump_passes && ci) record_rp(*out, idx, ci->attachmentCount,
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; });
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
         return r0;
     }
 
@@ -576,7 +683,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
         VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
         if (r0 == VK_SUCCESS && g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; });
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
         return r0;
     }
 
@@ -598,7 +706,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
     }
     if (g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
         [&](uint32_t i){ return (uint32_t)atts[i].format; },
-        [&](uint32_t i){ return (uint32_t)atts[i].loadOp; });
+        [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
+        [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
     RK_LOG("改写2 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
            (unsigned long long)idx, hits.size());
     return r;
@@ -669,18 +778,76 @@ static VKAPI_ATTR void VKAPI_CALL rk_UpdateDescriptorSets(
         std::lock_guard<std::mutex> lk(g_mtx);
         for (uint32_t i = 0; i < nw; i++) {
             const VkWriteDescriptorSet& ws = w[i];
+            if (ws.dstSet) g_set_gen[ws.dstSet]++;
             if (!ws.pImageInfo) continue;
             if (ws.descriptorType != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
                 ws.descriptorType != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE &&
                 ws.descriptorType != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
                 ws.descriptorType != VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) continue;
             auto& m = g_set_views[ws.dstSet];
+            auto& ms = g_set_samplers[ws.dstSet];
             for (uint32_t j = 0; j < ws.descriptorCount; j++)
-                if (ws.pImageInfo[j].imageView != VK_NULL_HANDLE)
-                    m[ws.dstArrayElement + j + (ws.dstBinding << 8)] = ws.pImageInfo[j].imageView;
+                if (ws.pImageInfo[j].imageView != VK_NULL_HANDLE) {
+                    uint32_t kk = ws.dstArrayElement + j + (ws.dstBinding << 8);
+                    m[kk] = ws.pImageInfo[j].imageView;
+                    ms[kk] = ws.pImageInfo[j].sampler;
+                }
         }
     }
     d.UpdateDescriptorSets(dev, nw, w, nc, c);
+}
+// copyprobe 克隆集需要原 layout 的 binding 清单
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDescriptorSetLayout(
+    VkDevice dev, const VkDescriptorSetLayoutCreateInfo* ci, const VkAllocationCallbacks* a, VkDescriptorSetLayout* out) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.CreateDescriptorSetLayout) {
+        RK_LOG_ONCE("CreateDescriptorSetLayout: 无下层"); return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    VkResult r = d.CreateDescriptorSetLayout(dev, ci, a, out);
+    if (r == VK_SUCCESS && ci && g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto& v = g_layout_bindings[*out];
+        for (uint32_t i = 0; i < ci->bindingCount; i++) {
+            const VkDescriptorSetLayoutBinding& b = ci->pBindings[i];
+            v.push_back({b.binding, b.descriptorCount, (uint32_t)b.descriptorType});
+        }
+    }
+    return r;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_AllocateDescriptorSets(
+    VkDevice dev, const VkDescriptorSetAllocateInfo* ai, VkDescriptorSet* out) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.AllocateDescriptorSets) {
+        RK_LOG_ONCE("AllocateDescriptorSets: 无下层"); return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    VkResult r = d.AllocateDescriptorSets(dev, ai, out);
+    if (r == VK_SUCCESS && ai && g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (uint32_t i = 0; i < ai->descriptorSetCount; i++) {
+            g_set_layout[out[i]] = ai->pSetLayouts[i];
+            g_pool_sets[ai->descriptorPool].push_back(out[i]);
+            if (g_pool_sets[ai->descriptorPool].size() > 4096)   // 兜底封顶, 防爆
+                g_pool_sets[ai->descriptorPool].erase(g_pool_sets[ai->descriptorPool].begin());
+        }
+    }
+    return r;
+}
+// 池子销毁时其中的 set 全死, 摘表防句柄复用后克隆错对象
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyDescriptorPool(
+    VkDevice dev, VkDescriptorPool pool, const VkAllocationCallbacks* a) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.DestroyDescriptorPool) { RK_LOG_ONCE("DestroyDescriptorPool: 无下层"); return; }
+    if (g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto it = g_pool_sets.find(pool);
+        if (it != g_pool_sets.end()) {
+            for (auto set : it->second) {
+                g_set_views.erase(set); g_set_samplers.erase(set); g_set_layout.erase(set);
+            }
+            g_pool_sets.erase(it);
+        }
+    }
+    d.DestroyDescriptorPool(dev, pool, a);
 }
 static VKAPI_ATTR void VKAPI_CALL rk_CmdBindDescriptorSets(
     VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout pl, uint32_t first,
@@ -692,6 +859,20 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBindDescriptorSets(
         auto& v = g_cb_sets[cb];
         for (uint32_t i = 0; i < n; i++) v.push_back(sets[i]);
         if (v.size() > 32) v.erase(v.begin(), v.end() - 32);
+    }
+    // copyprobe: 只在送显 pass 内替换 (UI draw 在别的 set 上, 不受影响)
+    if (g_copyprobe && !g_cp.disabled && sets && n > 0 && bp == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto ci = g_cb_cur_is_swap.find(cb);
+        if (ci != g_cb_cur_is_swap.end() && ci->second) {
+            std::vector<VkDescriptorSet> repl(sets, sets + n);
+            bool any = false;
+            for (uint32_t i = 0; i < n; i++) {
+                VkDescriptorSet c = copyprobe_clone(cb, d, repl[i]);
+                if (c != repl[i]) { repl[i] = c; any = true; }
+            }
+            if (any) { d.CmdBindDescriptorSets(cb, bp, pl, first, n, repl.data(), ndyn, dyn); return; }
+        }
     }
     d.CmdBindDescriptorSets(cb, bp, pl, first, n, sets, ndyn, dyn);
 }
@@ -830,9 +1011,270 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBlitImage(
     d.CmdBlitImage(cb, si, sl, di, dl, n, r, f);
 }
 
+// ══ copyprobe: 1:1 拷贝探针 (debug.knobs.copyprobe=1, 隐含打开溯源) ══
+//
+// 目的不是改画面, 是把"超分要用的全部机制"以最小形态走一遍, 探反作弊与驱动:
+//   建 compute pipeline + 建 image + 注入 dispatch + 克隆并替换那一次描述符绑定,
+//   但算子是 texelFetch 逐纹素 1:1 拷贝 —— 游戏的放大 shader 拿到的输入逐位相同,
+//   最终画面应逐像素不变。任何一步失败都记日志并整体停用探针, 不静默回退。
+//
+// 时序: 合成 pass 的 vkCmdBeginRenderPass 里 (转发之前) 往同一条命令缓冲注入
+//   barrier(src 可采样) -> dispatch(1:1 拷贝) -> barrier(dst 可采样),
+// 然后 vkCmdBindDescriptorSets 钩子里把引用了 src 的那个绑定换成 dst 的克隆集。
+// 源图 = 上一个渲染分辨率 pass 的颜色附件 (note_pass 里记的 g_cb_prev_att)。
+
+static void cp_fail(const char* what, VkResult r) {
+    RK_LOG("copyprobe 停用: %s -> %d", what, (int)r);
+    g_cp.disabled = true;
+}
+
+// 建齐 compute 那套 (幂等; 尺寸变了重建 dst)。调用方必须持 g_mtx。
+static bool copyprobe_ensure(VkDevice dev, const DevDisp& d, uint32_t w, uint32_t h, uint32_t fmt) {
+    if (g_cp.disabled) return false;
+    if (fmt != VK_FORMAT_R8G8B8A8_UNORM) {   // 算子写死 rgba8, 格式不符不猜
+        RK_LOG_ONCE("copyprobe 停用: src fmt=%u 不是 R8G8B8A8_UNORM, 算子不适用", fmt);
+        g_cp.disabled = true; return false;
+    }
+    if (kCopySpvLen == 0) { RK_LOG_ONCE("copyprobe 停用: 内嵌 SPV 为空 (构建没编 shader?)"); g_cp.disabled = true; return false; }
+    VkResult r;
+    if (g_cp.pipe == VK_NULL_HANDLE) {
+        VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        smci.codeSize = kCopySpvLen; smci.pCode = (const uint32_t*)kCopySpv;
+        r = d.CreateShaderModule(dev, &smci, nullptr, &g_cp.sm);
+        if (r != VK_SUCCESS) { cp_fail("CreateShaderModule", r); return false; }
+
+        VkDescriptorSetLayoutBinding lb[2]{};
+        lb[0].binding = 0; lb[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        lb[0].descriptorCount = 1; lb[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        lb[1].binding = 1; lb[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        lb[1].descriptorCount = 1; lb[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        VkDescriptorSetLayoutCreateInfo dlci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        dlci.bindingCount = 2; dlci.pBindings = lb;
+        r = d.CreateDescriptorSetLayout(dev, &dlci, nullptr, &g_cp.dsl);
+        if (r != VK_SUCCESS) { cp_fail("CreateDescriptorSetLayout", r); return false; }
+
+        VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        plci.setLayoutCount = 1; plci.pSetLayouts = &g_cp.dsl;
+        r = d.CreatePipelineLayout(dev, &plci, nullptr, &g_cp.pl);
+        if (r != VK_SUCCESS) { cp_fail("CreatePipelineLayout", r); return false; }
+
+        VkComputePipelineCreateInfo cpci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpci.stage.module = g_cp.sm; cpci.stage.pName = "main";
+        cpci.layout = g_cp.pl;
+        r = d.CreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, nullptr, &g_cp.pipe);
+        if (r != VK_SUCCESS) { cp_fail("CreateComputePipelines", r); return false; }
+
+        // 池子要同时装: compute set + 每帧克隆的游戏 set。克隆集里可能有游戏的任何
+        // 描述符类型, 全类型留余量; FREE_BIT 让换下来的旧克隆能还回池子 (游戏每帧
+        // 重写原 set 时代数就涨, 不还的话 60fps 下十几秒就把 maxSets 耗尽)。
+        VkDescriptorPoolSize ps[8]{};
+        ps[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; ps[0].descriptorCount = 2048;
+        ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          ps[1].descriptorCount = 256;
+        ps[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         ps[2].descriptorCount = 2048;
+        ps[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;         ps[3].descriptorCount = 512;
+        ps[4].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;          ps[4].descriptorCount = 1024;
+        ps[5].type = VK_DESCRIPTOR_TYPE_SAMPLER;                ps[5].descriptorCount = 1024;
+        ps[6].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;       ps[6].descriptorCount = 256;
+        ps[7].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; ps[7].descriptorCount = 256;
+        VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        dpci.maxSets = 1024; dpci.poolSizeCount = 8; dpci.pPoolSizes = ps;
+        r = d.CreateDescriptorPool(dev, &dpci, nullptr, &g_cp.pool);
+        if (r != VK_SUCCESS) { cp_fail("CreateDescriptorPool", r); return false; }
+
+        VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dsai.descriptorPool = g_cp.pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &g_cp.dsl;
+        r = d.AllocateDescriptorSets(dev, &dsai, &g_cp.cset);
+        if (r != VK_SUCCESS) { cp_fail("AllocateDescriptorSets(compute)", r); return false; }
+        g_cp.dev = dev;
+        RK_LOG("copyprobe: compute pipeline 建好了");
+    }
+    if (g_cp.w != w || g_cp.h != h) {   // dst 与 src 同尺寸同格式: 逐纹素拷贝, 不是放大
+        if (g_cp.dst != VK_NULL_HANDLE) {
+            d.DestroyImageView(dev, g_cp.dst_view, nullptr);
+            d.DestroyImage(dev, g_cp.dst, nullptr);
+            d.FreeMemory(dev, g_cp.mem, nullptr);
+            g_cp.dst = VK_NULL_HANDLE;
+        }
+        VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ici.imageType = VK_IMAGE_TYPE_2D; ici.format = (VkFormat)fmt;
+        ici.extent = {w, h, 1}; ici.mipLevels = 1; ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        r = d.CreateImage(dev, &ici, nullptr, &g_cp.dst);
+        if (r != VK_SUCCESS) { cp_fail("CreateImage(dst)", r); return false; }
+        VkMemoryRequirements mr{}; {   // vkGetImageMemoryRequirements 还没挂, 走 gdpa 现取
+            auto fn = (PFN_vkGetImageMemoryRequirements)d.gdpa(dev, "vkGetImageMemoryRequirements");
+            if (!fn) { cp_fail("vkGetImageMemoryRequirements 拿不到", VK_ERROR_INITIALIZATION_FAILED); return false; }
+            fn(dev, g_cp.dst, &mr);
+        }
+        VkPhysicalDeviceMemoryProperties mp{};
+        d.GetPhysMemProps(d.phys, &mp);
+        uint32_t mt = UINT32_MAX;
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+            if ((mr.memoryTypeBits & (1u << i)) &&
+                (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { mt = i; break; }
+        if (mt == UINT32_MAX) { cp_fail("没有 DEVICE_LOCAL 显存类型", VK_ERROR_INITIALIZATION_FAILED); return false; }
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = mr.size; mai.memoryTypeIndex = mt;
+        r = d.AllocateMemory(dev, &mai, nullptr, &g_cp.mem);
+        if (r != VK_SUCCESS) { cp_fail("AllocateMemory", r); return false; }
+        r = d.BindImageMemory(dev, g_cp.dst, g_cp.mem, 0);
+        if (r != VK_SUCCESS) { cp_fail("BindImageMemory", r); return false; }
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = g_cp.dst; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = (VkFormat)fmt;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        r = d.CreateImageView(dev, &vci, nullptr, &g_cp.dst_view);
+        if (r != VK_SUCCESS) { cp_fail("CreateImageView(dst)", r); return false; }
+        g_cp.w = w; g_cp.h = h; g_cp.fmt = fmt;
+        RK_LOG("copyprobe: dst image %ux%u fmt=%u 建好了", w, h, fmt);
+    }
+    return true;
+}
+
+// 合成 pass 开始时 (转发 BeginRenderPass 之前) 注入拷贝。调用方必须持 g_mtx。
+static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPass prev_rp,
+                               const std::vector<VkImageView>& prev_att) {
+    if (g_cp.disabled || prev_att.empty()) return;
+    // 源图 = 上一个渲染分辨率 pass 的颜色附件
+    auto vi = g_view.find(prev_att[0]);
+    if (vi == g_view.end()) return;
+    VkImage src = vi->second;
+    auto ii = g_img.find(src);
+    if (ii == g_img.end()) return;
+    const ImgInfo& im = ii->second;
+    if (!(im.usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { RK_LOG_ONCE("copyprobe 停用: src 不可采样"); g_cp.disabled = true; return; }
+    // src pass 结束后是什么布局 —— 采样必须用这个布局, 写死会立刻花屏/校验层报错
+    uint32_t src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    auto ri = g_rp_info.find(prev_rp);
+    if (ri != g_rp_info.end() && !ri->second.final_layout.empty()) src_layout = ri->second.final_layout[0];
+    if (src_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && src_layout != VK_IMAGE_LAYOUT_GENERAL) {
+        RK_LOG_ONCE("copyprobe 停用: src finalLayout=%u 不可采样", src_layout);
+        g_cp.disabled = true; return;
+    }
+    if (!copyprobe_ensure(d.dev, d, im.w, im.h, im.fmt)) return;
+
+    // compute set 绑上本帧的 src: view 直接用 pass 49 颜色附件的 view, sampler 从
+    // 游戏对 src 的既有描述符写里拿 (combined image sampler 必须带 sampler)。
+    VkSampler src_samp = VK_NULL_HANDLE; VkImageView src_view = prev_att[0];
+    for (auto& kv : g_set_views) {
+        for (auto& bv : kv.second)
+            if (bv.second == src_view) { auto si = g_set_samplers[kv.first].find(bv.first);
+                if (si != g_set_samplers[kv.first].end()) src_samp = si->second; }
+        if (src_samp) break;
+    }
+    if (!src_samp) return;   // 游戏还没写过引用 src 的描述符, 本帧跳过 (首帧常见)
+
+    VkDescriptorImageInfo dii[2]{};
+    dii[0] = {src_samp, src_view, (VkImageLayout)src_layout};
+    dii[1] = {VK_NULL_HANDLE, g_cp.dst_view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet wr[2]{};
+    for (int i = 0; i < 2; i++) {
+        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = g_cp.cset;
+        wr[i].dstBinding = (uint32_t)i; wr[i].descriptorCount = 1;
+        wr[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                      : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        wr[i].pImageInfo = &dii[i];
+    }
+    d.UpdateDescriptorSets(d.dev, 2, wr, 0, nullptr);
+
+    // 注入: 三条命令全走下层直调, 不再回本层钩子 (避免递归/重复计数)
+    VkImageMemoryBarrier b[2]{};
+    b[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b[0].oldLayout = (VkImageLayout)src_layout; b[0].newLayout = (VkImageLayout)src_layout;
+    b[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b[0].image = src; b[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b[1].srcAccessMask = 0; b[1].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    b[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b[1].image = g_cp.dst; b[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
+    d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pipe);
+    d.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pl, 0, 1, &g_cp.cset, 0, nullptr);
+    d.CmdDispatch(cb, (g_cp.w + 15) / 16, (g_cp.h + 15) / 16, 1);
+    VkImageMemoryBarrier b2{};
+    b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b2.oldLayout = VK_IMAGE_LAYOUT_GENERAL; b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.image = g_cp.dst; b2.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b2);
+    g_cp.src_img = src;
+    g_cp.copies++;
+}
+
+// 游戏在合成 pass 里绑描述符时: 哪个 set 引用了本帧的 src, 就换成它的克隆
+// (逐 binding 拷贝, 只把 src 那一个绑定改指 dst)。调用方必须持 g_mtx。
+static VkDescriptorSet copyprobe_clone(VkCommandBuffer, const DevDisp& d, VkDescriptorSet game_set) {
+    if (g_cp.disabled || g_cp.src_img == VK_NULL_HANDLE) return game_set;
+    // 这个 set 里哪个绑定引用了 src?
+    auto sv = g_set_views.find(game_set);
+    if (sv == g_set_views.end()) return game_set;
+    uint32_t target_key = UINT32_MAX;
+    for (auto& bv : sv->second) {
+        auto vi = g_view.find(bv.second);
+        if (vi != g_view.end() && vi->second == g_cp.src_img) { target_key = bv.first; break; }
+    }
+    if (target_key == UINT32_MAX) return game_set;
+    auto li = g_set_layout.find(game_set);
+    if (li == g_set_layout.end()) return game_set;
+    VkDescriptorSetLayout layout = li->second;
+    auto bi = g_layout_bindings.find(layout);
+    if (bi == g_layout_bindings.end()) return game_set;
+    uint64_t gen = g_set_gen[game_set];
+    auto ci = g_cp.clones.find(game_set);
+    if (ci == g_cp.clones.end() || ci->second.second != gen) {
+        VkDescriptorSet clone = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = g_cp.pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &layout;
+        VkResult r = d.AllocateDescriptorSets(d.dev, &ai, &clone);
+        if (r != VK_SUCCESS) { cp_fail("AllocateDescriptorSets(clone)", r); return game_set; }
+        // 逐 binding 全量拷贝原 set, 再单独覆写 src 那一个
+        std::vector<VkCopyDescriptorSet> copies;
+        for (auto& lb : bi->second) {
+            if ((lb.binding << 8) == (target_key & ~0xFFu)) continue;   // 目标 binding 跳过
+            VkCopyDescriptorSet c{};
+            c.sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET;
+            c.srcSet = game_set; c.srcBinding = lb.binding; c.srcArrayElement = 0;
+            c.dstSet = clone;    c.dstBinding = lb.binding; c.dstArrayElement = 0;
+            c.descriptorCount = lb.count;
+            copies.push_back(c);
+        }
+        if (!copies.empty()) d.UpdateDescriptorSets(d.dev, 0, nullptr, (uint32_t)copies.size(), copies.data());
+        // 覆写: 同 binding 的同一 arrayElem, 换 view 不换 sampler
+        VkSampler samp = VK_NULL_HANDLE;
+        auto smi = g_set_samplers.find(game_set);
+        if (smi != g_set_samplers.end()) { auto it = smi->second.find(target_key); if (it != smi->second.end()) samp = it->second; }
+        if (!samp) return game_set;
+        VkDescriptorImageInfo dii{samp, g_cp.dst_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w.dstSet = clone;
+        w.dstBinding = target_key >> 8; w.dstArrayElement = target_key & 0xFF;
+        w.descriptorCount = 1; w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &dii;
+        d.UpdateDescriptorSets(d.dev, 1, &w, 0, nullptr);
+        if (ci != g_cp.clones.end()) {
+            d.FreeDescriptorSets(d.dev, g_cp.pool, 1, &ci->second.first);
+            ci->second = {clone, gen};
+        } else g_cp.clones[game_set] = {clone, gen};
+        if (g_cp.clones.size() > 512) { RK_LOG_ONCE("copyprobe: 克隆表超 512, 停用防爆"); g_cp.disabled = true; return game_set; }
+        ci = g_cp.clones.find(game_set);
+    }
+    g_cp.subs++;
+    return ci->second.first;
+}
+
 // 把 (render pass 形状) 与 (framebuffer 宽高) 关联起来, 按 (pass, 宽, 高) 聚合计数,
 // 并在采样帧里记下有序序列 —— "第几个 pass、多大、什么格式" 就是从这儿读出来的。
-static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi) {
+static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi, const DevDisp& d) {
     if (!g_dump_passes || !bi) return;
     std::lock_guard<std::mutex> lk(g_mtx);
     uint32_t w = bi->renderArea.extent.width, h = bi->renderArea.extent.height;
@@ -852,8 +1294,15 @@ static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi) {
     g_cb_sets[cb].clear();                       // 只统计"在本 pass 内绑定"的描述符, 避免把上一个 pass 的算进来
     bool is_swap = (w == g_swap_w && h == g_swap_h);
     auto ai = g_fb_att.find(bi->framebuffer);
-    if (!is_swap && ai != g_fb_att.end()) g_cb_prev_att[cb] = ai->second;   // 记住上一个渲染分辨率 pass 的附件
-    if (is_swap) g_cb_cur_is_swap[cb] = true; else g_cb_cur_is_swap[cb] = false;
+    if (!is_swap && ai != g_fb_att.end()) {
+        g_cb_prev_att[cb] = ai->second;   // 记住上一个渲染分辨率 pass 的附件
+        g_cb_prev_rp[cb] = bi->renderPass;
+    }
+    if (is_swap) {
+        g_cb_cur_is_swap[cb] = true;
+        if (g_copyprobe) copyprobe_dispatch(cb, d, g_cb_prev_rp.count(cb) ? g_cb_prev_rp[cb] : VK_NULL_HANDLE,
+                                            g_cb_prev_att.count(cb) ? g_cb_prev_att[cb] : std::vector<VkImageView>{});
+    } else g_cb_cur_is_swap[cb] = false;
     if (g_sampling && g_frame_seq.size() < 400) {
         uint64_t seq = 0; auto si = g_rp_seq.find(bi->renderPass);
         if (si != g_rp_seq.end()) seq = si->second;
@@ -873,7 +1322,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass(
     }
     g_rp++;
     note_begin(bi ? bi->renderPass : VK_NULL_HANDLE);
-    note_pass(cb, bi);
+    note_pass(cb, bi, d);
     d.CmdBeginRenderPass(cb, bi, c);
 }
 static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass2(
@@ -887,7 +1336,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass2(
     }
     g_rp++;
     note_begin(bi ? bi->renderPass : VK_NULL_HANDLE);
-    note_pass(cb, bi);          // 与 CmdBeginRenderPass 一致, 漏了它 RenderPass2 开的 pass 就不进表
+    note_pass(cb, bi, d);       // 与 CmdBeginRenderPass 一致, 漏了它 RenderPass2 开的 pass 就不进表
     d.CmdBeginRenderPass2(cb, bi, si);
 }
 // 二级命令缓冲里的 draw 没有自己的 BeginRenderPass —— 当前 pass 从继承信息里拿 (评审 #9:
@@ -1059,6 +1508,9 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
         RK_HOOK("vkDestroyFramebuffer", rk_DestroyFramebuffer);
         RK_HOOK("vkDestroyImage", rk_DestroyImage);
         RK_HOOK("vkDestroyImageView", rk_DestroyImageView);
+        RK_HOOK("vkCreateDescriptorSetLayout", rk_CreateDescriptorSetLayout);
+        RK_HOOK("vkAllocateDescriptorSets", rk_AllocateDescriptorSets);
+        RK_HOOK("vkDestroyDescriptorPool", rk_DestroyDescriptorPool);
     }
     RK_HOOK("vkCreateRenderPass2", rk_CreateRenderPass2);
     RK_HOOK("vkCreateRenderPass2KHR", rk_CreateRenderPass2);
@@ -1095,6 +1547,9 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_HOOK("vkDestroyFramebuffer", rk_DestroyFramebuffer);
         RK_HOOK("vkDestroyImage", rk_DestroyImage);
         RK_HOOK("vkDestroyImageView", rk_DestroyImageView);
+        RK_HOOK("vkCreateDescriptorSetLayout", rk_CreateDescriptorSetLayout);
+        RK_HOOK("vkAllocateDescriptorSets", rk_AllocateDescriptorSets);
+        RK_HOOK("vkDestroyDescriptorPool", rk_DestroyDescriptorPool);
     }
     if (dev == VK_NULL_HANDLE) return nullptr;
     DevDisp d;

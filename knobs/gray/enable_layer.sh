@@ -48,6 +48,7 @@ SERIAL="${REFBENCH_SERIAL:-91253241019A}"
 LAYER_NAME="VK_LAYER_refknobs_readonly"
 LOADOP_PROP="debug.knobs.loadop"          # 1 = 层把 loadOp LOAD 改写成 DONT_CARE
 DUMP_PROP="debug.knobs.passdump"          # 1 = 层导出 render pass 形状表 (找放大那一步)
+CP_PROP="debug.knobs.copyprobe"           # 1 = 1:1 拷贝探针 (改写! 探反作弊用, 隐含 passdump 追踪)
 SO="libVkLayer_refknobs.so"
 STATE="/data/local/tmp/knobs_layer_state"       # 存"把 .so 推进了哪个包", 供 off 精确回滚
 OUT="$(cd "$(dirname "$0")" && pwd)/build/out"
@@ -159,10 +160,10 @@ done
 set -- ${ARGS[@]+"${ARGS[@]}"}
 
 case "${1:-}" in
-  probe)   ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0'"; mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
+  probe)   ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0'"; mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
   # 观测档: 只读 + 导出 pass 形状表 (尺寸/格式/次序/draw 数), 用来定位"低分辨率->放大"那一步
   passdump)
-    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1'"
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 0'"
     [ "$(ashell "getprop $DUMP_PROP" | tr -d '\r')" = "1" ] \
       || { echo "setprop $DUMP_PROP 没生效" >&2; exit 1; }
     mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
@@ -170,7 +171,7 @@ case "${1:-}" in
   loadop)
     # 必须显式把 passdump 关掉: 上一轮 passdump 留下的 1 会让 A/B 两臂都挂上观测钩子,
     # 等于给对照组凭空加开销, 而自报里看不出来
-    ashell "su -c 'setprop $LOADOP_PROP 1; setprop $DUMP_PROP 0'"
+    ashell "su -c 'setprop $LOADOP_PROP 1; setprop $DUMP_PROP 0; setprop $CP_PROP 0'"
     # 回读: 写不进就静默退化成只读档, 而自报里 knob 会变成 gray_readonly_probe、
     # unavailable_reason 还是 null, harness 根本看不出这一轮没开改写
     [ "$(ashell "getprop $LOADOP_PROP" | tr -d '\r')" = "1" ] \
@@ -178,11 +179,19 @@ case "${1:-}" in
     mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
   target)
     [ -n "${2:-}" ] || { echo "target 要给包名" >&2; exit 2; }
-    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0'"; mount_layer "$2" "$KEEP" ;;
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0'"; mount_layer "$2" "$KEEP" ;;
+  # 拷贝探针档: 1:1 拷贝算子把"建 pipeline/建 image/换描述符"全走一遍, 画面应逐像素不变。
+  # 是**改写**, 不是只读 —— 探的就是反作弊对这种侵入放不放行。
+  copyprobe)
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 1'"
+    [ "$(ashell "getprop $CP_PROP" | tr -d '\r')" = "1" ] \
+      || { echo "setprop $CP_PROP 没生效, 拒绝按探针档继续" >&2; exit 1; }
+    mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
   status)
     echo "debug.vulkan.layers = [$(ashell 'getprop debug.vulkan.layers' | tr -d '\r')]"
     echo "$LOADOP_PROP  = [$(ashell "getprop $LOADOP_PROP" | tr -d '\r')]"
     echo "$DUMP_PROP  = [$(ashell "getprop $DUMP_PROP" | tr -d '\r')]"
+    echo "$CP_PROP = [$(ashell "getprop $CP_PROP" | tr -d '\r')]"
     st=$(ashell "su -c 'cat $STATE 2>/dev/null'" | tr -d '\r')
     if [ -n "$st" ]; then
       echo "state = $st  (处于施加态)"
@@ -191,7 +200,7 @@ case "${1:-}" in
       echo "state = <无>  (未施加)"
     fi ;;
   off)
-    ashell "su -c 'setprop debug.vulkan.layers \"\"; setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0'"
+    ashell "su -c 'setprop debug.vulkan.layers \"\"; setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0'"
     st=$(ashell "su -c 'cat $STATE 2>/dev/null'" | tr -d '\r')
     if [ -n "$st" ]; then
       dir="${st#*|}"; pkg="${st%%|*}"
