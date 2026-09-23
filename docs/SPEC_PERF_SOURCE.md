@@ -328,3 +328,91 @@ HiSmartPerf 算出 3.086 W，我们算出 777 W。同一段窗口、同一块电
    说明它的帧率另有来路（二进制里同时有 `dumpsys SurfaceFlinger | grep <层名>` 与
    `GetRefresh`/`allSurfaceFlingerCmd` 几条路径），**具体走哪条没有查实**。
 4. **`refresh` / `gpuFreq` / `ddrFreq` 恒为 0** —— 未开对应采集位，还是该机型读不到，没有分辨。
+
+## 8. 停充测量（2026-09-23）
+
+### 8.1 为什么必须停充
+
+插着 USB 时，**两条轨量到的都不是整机功耗**：
+
+- **电池轨**：量到的是充电电流与系统耗电**相抵之后的余量**。实测 `0.213 W` / `3.086 W` ——
+  稳稳落在可信区间 `0.05..30 W` 里，看着像一个正常的低功耗读数。
+- **USB 输入轨**：量到的是墙上功率，**含着灌进电池的那一份**。实测同一时刻
+  usb `4.845 V × 1.487 A = 7.20 W`，而 battery `current_now=+771000 μA`（正 = 在充电），
+  即 `4.324 V × 0.771 A = 3.33 W` 是在给电池充电 —— **46 % 不是系统在吃的功率**。
+
+两个读数都"合理"，**可信区间一个都拦不住**。而一个看起来合理的错数比一个越界的错数
+危险得多：越界的会被拦下，合理的会被下游当成实测功耗拿去做 A/B 裁决。
+
+更要命的是充电电流随电量上升**自己衰减**（CC→CV），是一条单调漂移：
+跨时间比较的两个候选之间会凭空多出一个"功耗改善"。
+`game_opt_loop` 的 M1 演化 `6.26 W → 5.94 W` 就是这么来的 —— 那 −0.32 W（约 5 %）
+只需要 3.3 W 的充电分量衰减 10 % 就能造出来，而报告里**连轨别和电池状态都没记**，
+事后完全无法分辨。该结论已撤回。
+
+### 8.2 停充怎么做
+
+`--suspend-charging`（`perf` 与 `gpu-op` 都有，**默认关** —— 这是有副作用的写操作）：
+用 root 写 sysfs 让充电停下来，USB 仍连着走 adb，整机改由电池供电，功耗走
+**battery 轨 V × I**。
+
+**节点是探出来的，不是写死的。** 不同内核给的不一样，按语义明确程度排序逐个试：
+
+| 节点 | 写什么 |
+| :--- | :--- |
+| `battery/input_suspend` · `usb/input_suspend` | `1` |
+| `battery/charging_enabled` · `battery/battery_charging_enabled` | `0` |
+| `battery/charge_control_end_threshold` | 压到**当前电量以下** |
+| `usb/input_current_limit`（兜底，动的是输入侧） | `0` |
+
+每个候选都**回读确认停充真的生效**（电流转成放电方向）才算数，没生效就地还原换下一个。
+
+**本机实测结论（2026-09-23，红魔 NX809J / `pmic-glink`）**：
+
+- `power_supply` 下的候选**一个都停不了充**。出厂 `charge_control_end_threshold=80`
+  而电量 91 % 照充不误；`usb/input_current_limit=0` 同样无效 —— 写进去不代表内核认。
+- 真正管用的是 **`/sys/class/qcom-battery/charging_enabled` 写 `0`**。
+  它不在 `power_supply` class 下，而在自己的 class 里，**只看 `power_supply` 会整个错过**。
+- 停充后 `status` **立刻**翻成 `Discharging`，但电量计的 `current_now` 要**几秒**才跟上：
+  实测三秒内还在报充电方向的 `+1072000 / +982000`，第三秒才翻成 `-325000`。
+  所以 `SUSPEND_SETTLE_MS` 定在 12 秒 —— 窗口短于这个延迟，会把一个明明生效了的节点
+  判成"写进去无效"再去试下一个（第一版定 2.5 秒就是这么误判的）。
+
+### 8.3 进出快照一致
+
+纪律与锁频那套（`hwcond::Lock`）完全一致：
+
+1. **先落状态文件再动设备** —— 文件里记「改了哪个节点、原值是什么」，进程中途被杀
+   也能由下次启动回滚；
+2. `perf` / `gpu-op` **每次启动都无条件先 `recover_stale_charge_ctl`**，与本次要不要停充无关
+   —— 遗留状态的危害是「手机一直没在充电」，不该等到下次有人恰好又要停充才被清掉；
+3. 恢复充电在**打印结果之前**做，且 `gpu-op` 里用宏包住所有中途 `return`
+   —— 打印失败、门禁不通过、跑崩，都不能把手机丢在不充电的状态里；
+4. 恢复后**回读确认**，不符就留着状态文件并告警，下次启动再试一次。
+
+**电量低于 30 % 不停充**（`MIN_CAPACITY_FOR_SUSPEND_PCT`）：停充期间整机纯靠电池，
+跑一轮标尺就是几分钟满载放电，电量本来就低时再抽一把，轻则测到一半关机（这一轮白跑），
+重则把电池拖进过放。
+
+**真机验证（2026-09-23）**：`perf --suspend-charging --power-rail battery` 一轮跑完，
+
+| 验的是什么 | 结果 |
+| :--- | :--- |
+| 哪个节点真能停充 | `/sys/class/qcom-battery/charging_enabled`（`1 → 0`） |
+| 测量期间是否真在放电 | `status=Discharging`、`current_now=-358000 μA`、`on_battery=true` |
+| 量到的功耗 | `1.572 W`（充电态下同一条轨报的是 `0.213 W` 那种相抵余量） |
+| 恢复后进出快照 | 四个候选节点 + `status` **逐字一致**（`charging_enabled` 回到 `1`，`status` 回到 `Charging`） |
+| 状态文件 | 已清掉 |
+
+### 8.4 供电状态进报告，且参与判定
+
+- `perf` 的 `meta` 多了 `battery_status` / `battery_current_now_ua` /
+  `battery_capacity_pct` / `on_battery`（`power_rail` 本来就有）；
+- `gpu-op` 的 `eval_report` 多了 `power_source`（**加性**可选字段，与 `quality_reference`
+  同一套路，老消费者解析时忽略即可）：轨别、电池状态、`current_now`、电量、
+  `on_battery`、以及这轮停充用的是哪个节点。
+
+**非放电态一律把 `power_watt` 报成 `null` 并写明原因，不进判定。**
+判据是 `BatteryState::on_battery()`：`status` 不是 `Charging` **且** `current_now` 确实是负的。
+两个判据都要看，因为两个都会单独骗人 —— 停充之后有的内核仍写 `Not charging` 而不是
+`Discharging`；而 `current_now` 在充放平衡的瞬间会过零。

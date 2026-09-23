@@ -125,6 +125,34 @@ pub struct EvalReport {
     /// 31.3 dB, 会把一个比基线好 2.19 dB 的算子判成 POOR_QUALITY。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_reference: Option<QualityReference>,
+    /// `power_watt` 是在什么供电状态下量的。同样是**加性**可选字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_source: Option<PowerSource>,
+}
+
+/// 这份 `power_watt` 是在什么供电状态下量的。跟着报告走, 让瓦数可回溯。
+///
+/// **为什么必须记**: 充电态下两条轨量到的都不是整机功耗 —— 电池轨是充放相抵的余量,
+/// USB 轨含着灌进电池的那一份 —— 而两个读数都落在可信区间内, 光看数字分辨不出来。
+/// 更要命的是充电电流随电量上升自己衰减 (CC→CV), 是一条单调漂移, 跨时间比较的
+/// 两个候选之间会凭空多出一个"功耗改善"。报告里不写清楚供电状态, 这种假差异
+/// 事后完全无法分辨 —— M1 演化那轮 6.26W→5.94W 就是这么来的, 因为连轨别都没记。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PowerSource {
+    /// `usb` | `battery`
+    pub rail: String,
+    /// `/sys/class/power_supply/battery/status` 原值
+    pub battery_status: String,
+    /// `current_now` (μA)。正 = 在往电池里充, 负 = 电池在放电。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_current_now_ua: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_capacity_pct: Option<i64>,
+    /// 整机是不是真由电池供电。`false` 时 `power_watt` 必为 NaN (JSON 里是 null)。
+    pub on_battery: bool,
+    /// 这一轮有没有用 root 停充, 停的是哪个节点。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charging_suspended_via: Option<String>,
 }
 
 /// 画质真值的出处。跟着报告走, 让 dB 可回溯。
@@ -714,6 +742,8 @@ pub struct GpuOpArgs {
     pub as_json: bool,
     pub runner_bin: Option<String>,
     pub power_rail: PowerRail,
+    /// 测量期间 root 停充, 测完自动恢复。默认关 (有副作用的写操作)。
+    pub suspend_charging: bool,
     /// 评测载体。
     pub carrier: Carrier,
     /// refbench 场景的 fragment 负载强度。
@@ -758,6 +788,7 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
         as_json: false,
         runner_bin: None,
         power_rail: PowerRail::Usb,
+        suspend_charging: false,
         carrier: Carrier::Headless,
         intensity: 6,
         frames: 3000,
@@ -800,6 +831,7 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
                     .ok_or("--frames 需要正整数")?
             }
             "--unlock" => a.unlock_only = true,
+            "--suspend-charging" => a.suspend_charging = true,
             "--no-quality-pass" => a.quality_pass = false,
             "--cool-timeout-s" => {
                 a.cool_timeout_s = it
@@ -995,7 +1027,36 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     };
     let quality_pass = a.quality_pass && a.carrier == Carrier::Refbench && !runner.is_empty();
 
+    // ---- 停充 ----
+    // 先回滚上次遗留的停充状态。无条件做, 与 --suspend-charging 无关 ——
+    // 遗留状态的危害是"手机一直没在充电", 不该等到下次有人恰好又要停充才被清掉。
+    let charge_state = hwcond::lock_state_path("charge", &a.serial);
+    hwcond::recover_stale_charge_ctl(&phone, &charge_state);
+    let mut suspend = None;
+    if a.suspend_charging {
+        match hwcond::ChargeSuspend::apply(&phone, &charge_state) {
+            Ok(g) => {
+                hwcond::progress("gpu-op", &format!("测量期间停充: {}", g.node()));
+                suspend = Some(g);
+            }
+            Err(e) => {
+                eprintln!("停充失败: {e}");
+                return 2;
+            }
+        }
+    }
+    // 从这里往下任何一条 return 都必须先恢复充电 —— 宏包住, 免得漏掉哪一条
+    macro_rules! bail {
+        ($code:expr) => {{
+            if let Some(mut g) = suspend {
+                let _ = g.restore(&phone);
+            }
+            return $code;
+        }};
+    }
+
     // ---- 功耗轨可用性先探一次: 量不了就当场说, 不要跑完 10 分钟再报 0 W ----
+    let battery = hwcond::read_battery_state(&phone);
     let probe: Vec<_> = (0..3)
         .filter_map(|_| {
             let s = hwcond::read_power(&phone, a.power_rail);
@@ -1003,9 +1064,18 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             s
         })
         .collect();
-    if let Err(e) = hwcond::power_usable(a.power_rail, &probe) {
+    let power_ok = hwcond::power_usable_with_battery(a.power_rail, &probe, Some(&battery));
+    let power_source = PowerSource {
+        rail: a.power_rail.as_str().to_string(),
+        battery_status: battery.status.clone(),
+        battery_current_now_ua: battery.current_ua,
+        battery_capacity_pct: battery.capacity_pct,
+        on_battery: battery.on_battery(),
+        charging_suspended_via: suspend.as_ref().map(|g| g.node().to_string()),
+    };
+    if let Err(e) = power_ok {
         eprintln!("功耗采样不可用: {e}");
-        return 2;
+        bail!(2);
     }
 
     // ---- 部署 ----
@@ -1459,7 +1529,15 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         } else {
             Some(quality_reference)
         },
+        power_source: Some(power_source),
     };
+
+    // 打印之前先恢复充电: 打印失败也不能把手机丢在不充电的状态里
+    if let Some(mut g) = suspend {
+        if !g.restore(&phone) {
+            eprintln!("警告: 恢复充电后回读不符 ({}); 状态文件留着, 下次启动会再试一次", g.node());
+        }
+    }
 
     if a.as_json {
         println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
@@ -2330,6 +2408,7 @@ mod tests {
             source: "phonefarm".into(),
             artifacts: None,
             quality_reference: None,
+            power_source: None,
         }
     }
 
@@ -2409,6 +2488,7 @@ mod tests {
             source: "phonefarm".into(),
             artifacts: None,
             quality_reference: None,
+            power_source: None,
         };
         let v = serde_json::to_value(&rep).unwrap();
         assert_eq!(v["status"], "POOR_QUALITY");

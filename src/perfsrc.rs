@@ -129,13 +129,37 @@ impl Default for AndroidSysfs {
 /// 时间戳 (`ftrace` / `gpuop`), 由 `gpu-op` 自己填进 `eval_report`。所以这里的
 /// 帧时字段是 null 且附原因, 而不是 0。
 pub fn summarize_android(samples: &[PowerSample], rail: PowerRail) -> PerfSnapshot {
+    summarize_android_with(samples, rail, None)
+}
+
+/// 同上, 但带上这一轮的电池状态。
+///
+/// 电池状态**必须进 meta 且必须参与判定**: 充电态下两条轨量到的都不是整机功耗
+/// (电池轨是充放相抵的余量, USB 轨含着灌进电池的那一份), 而两个读数都落在可信区间内 ——
+/// 区间拦不住, 只有状态拦得住。不记下来, 下游连"这份数是在什么供电状态下量的"都无从追溯。
+pub fn summarize_android_with(
+    samples: &[PowerSample],
+    rail: PowerRail,
+    battery: Option<&hwcond::BatteryState>,
+) -> PerfSnapshot {
     let mut snap = PerfSnapshot::empty(SRC_ANDROID_SYSFS);
     snap.sample_count = samples.len();
     // 轨别必须进快照: usb 轨量的是墙上功率 (含充电与转换损耗), battery 轨量的是电池
     // 真实抽走的功率, 两者不可比。不记下来, 下游拿 usb 轨的基线对 battery 轨的候选,
     // 会凭空多出一个「功耗改善」。
-    snap.meta = Some(BTreeMap::from([("power_rail".to_string(), rail.as_str().to_string())]));
-    match hwcond::power_usable(rail, samples) {
+    let mut meta = BTreeMap::from([("power_rail".to_string(), rail.as_str().to_string())]);
+    if let Some(b) = battery {
+        meta.insert("battery_status".to_string(), b.status.clone());
+        if let Some(c) = b.current_ua {
+            meta.insert("battery_current_now_ua".to_string(), c.to_string());
+        }
+        if let Some(c) = b.capacity_pct {
+            meta.insert("battery_capacity_pct".to_string(), c.to_string());
+        }
+        meta.insert("on_battery".to_string(), b.on_battery().to_string());
+    }
+    snap.meta = Some(meta);
+    match hwcond::power_usable_with_battery(rail, samples, battery) {
         Ok(()) => {
             // power_usable 已保证 power_stats 有值
             snap.power_watt = hwcond::power_stats(samples).map(|(mean, _, _, _)| mean);
@@ -157,6 +181,7 @@ impl PerfSource for AndroidSysfs {
     }
 
     fn collect(&self, phone: &Device, rounds: u32) -> PerfSnapshot {
+        let bat = hwcond::read_battery_state(phone);
         let mut samples = Vec::new();
         for i in 0..rounds.max(1) {
             if let Some(s) = hwcond::read_power(phone, self.rail) {
@@ -168,7 +193,7 @@ impl PerfSource for AndroidSysfs {
                 std::thread::sleep(std::time::Duration::from_millis(POWER_SAMPLE_GAP_MS));
             }
         }
-        summarize_android(&samples, self.rail)
+        summarize_android_with(&samples, self.rail, Some(&bat))
     }
 }
 
@@ -368,9 +393,17 @@ impl PerfSource for AndroidSmartPerf {
             .shell("cat /sys/class/power_supply/battery/status", 8_000)
             .trim()
             .to_string();
+        let bat = hwcond::read_battery_state(phone);
         if !status.is_empty() {
             meta.insert("battery_status".to_string(), status.clone());
         }
+        if let Some(c) = bat.current_ua {
+            meta.insert("battery_current_now_ua".to_string(), c.to_string());
+        }
+        if let Some(c) = bat.capacity_pct {
+            meta.insert("battery_capacity_pct".to_string(), c.to_string());
+        }
+        meta.insert("on_battery".to_string(), bat.on_battery().to_string());
 
         let want = rounds.max(1) as usize;
         // 设备端约每秒一条: 给足 want 秒再加一截握手/启动的余量, 否则总是差最后一两条
@@ -678,6 +711,11 @@ pub struct PerfArgs {
     pub xpower_out: Option<String>,
     /// 安卓侧走哪条通路 (鸿蒙侧忽略此项)
     pub android_source: AndroidSource,
+    /// 测量期间停充 (root 写 sysfs), 测完自动恢复。
+    ///
+    /// 默认关: 这是**有副作用的写操作**。开了才谈得上量整机功耗 ——
+    /// 插着充电时两条轨量到的都不是整机在吃的功率。
+    pub suspend_charging: bool,
 }
 
 /// 参数解析是纯函数, 由单测钉死 —— 免得「换个参数顺序就采错轨」这种事只能上真机才发现。
@@ -691,6 +729,7 @@ pub fn parse_perf_args(args: &[String]) -> Result<PerfArgs, String> {
         from_csv: None,
         xpower_out: None,
         android_source: AndroidSource::Sysfs,
+        suspend_charging: false,
     };
     let mut it = args.iter().peekable();
     // 取一个值: 后面跟的若是另一个开关, 说明这个参数的值漏了 —— 报错, 别把 `--json` 当包名吞掉
@@ -730,6 +769,7 @@ pub fn parse_perf_args(args: &[String]) -> Result<PerfArgs, String> {
             }
             "--from-csv" => a.from_csv = Some(val!("--from-csv")),
             "--xpower-out" => a.xpower_out = Some(val!("--xpower-out")),
+            "--suspend-charging" => a.suspend_charging = true,
             "--json" => a.json = true,
             other if other.starts_with("--") => return Err(format!("perf: 未知参数 {other}")),
             _ => {}
@@ -776,10 +816,33 @@ pub fn run_perf(args: &[String]) -> i32 {
         eprintln!("设备无心跳 (devices 里不是在线态, 或未指定 --serial)");
         return 2;
     }
+    // 先回滚上次遗留的停充状态 (进程被杀没来得及还原)。无条件做, 与 --suspend-charging 无关 ——
+    // 遗留状态的危害是"手机一直没在充电", 不该等到下次有人恰好又要停充才被清掉。
+    let charge_state = hwcond::lock_state_path("charge", &a.serial);
+    hwcond::recover_stale_charge_ctl(&phone, &charge_state);
+
+    let mut suspend = None;
+    if a.suspend_charging {
+        match hwcond::ChargeSuspend::apply(&phone, &charge_state) {
+            Ok(g) => suspend = Some(g),
+            Err(e) => {
+                eprintln!("停充失败: {e}");
+                return 2;
+            }
+        }
+    }
+
     let src = for_device(&phone, &a);
     // 进度一律走 stderr: --json 时 stdout 只能有 JSON, 而「这次走的是哪条采集源」必须看得见
     hwcond::progress("perf", &format!("采集源 {} · {} 个采集点", src.id(), a.rounds));
     let snap = src.collect(&phone, a.rounds);
+
+    // 测完立刻恢复充电, 在打印之前 —— 打印失败也不能把手机丢在不充电的状态里
+    if let Some(mut g) = suspend {
+        if !g.restore(&phone) {
+            eprintln!("警告: 恢复充电后回读不符 ({}); 状态文件留着, 下次启动会再试一次", g.node());
+        }
+    }
 
     emit_perf(&snap, a.json);
     exit_code_of(&snap)
