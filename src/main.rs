@@ -33,6 +33,7 @@ mod gpdaemon;
 mod perfsrc;
 pub mod pyjson;
 mod pyrandom;
+mod refbenchreport;
 mod smartperf;
 mod plugins;
 mod runtime;
@@ -186,6 +187,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        analyze <A臂glob> [B臂glob] [--metric M]           (离散度 + 漂移 + 精确置换检验 + 置换反演 CI)
        frames-moving <raw1> <raw2>                        (两张 screencap 裸帧的平均逐像素差 %, 判画面动没动)
        crosscheck-report <轮目录>                         (两条采集通路并排对照表, 纯离线)
+       refbench-report --root <runs目录>                  (refbench M0 六判据汇总, 规则哈希自证)
        report --baseline <glob> [--knob <glob>] [--snap-before F] [--snap-after F]
               [--replay-result F] [--primary M]          (五条判据汇总成可字节复现的 report.json)
 载体:  vks-pick-comm <trace.txt> | vks-ready <run.log> | vks-crosscheck <run.log> <summary.json> [window.json]
@@ -688,6 +690,10 @@ fn main() {
         Some("vks-crosscheck") => {
             // 内核侧提交速率与应用侧自报帧率的对账
             std::process::exit(vks::run_crosscheck(&args[1..]));
+        }
+        Some("refbench-report") => {
+            // refbench M0 六条判据汇总 (与归档 report.json 逐字节可复现)
+            std::process::exit(refbenchreport::run_refbench_report(&args[1..]));
         }
         Some("crosscheck-report") => {
             // 同一窗口两条采集通路的产物并排成一张表。纯离线, 只读目录里已有的产物。
