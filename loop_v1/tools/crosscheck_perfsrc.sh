@@ -45,6 +45,55 @@ echo "── [$LABEL] 负载 $WORKLOAD ($PKG) · 两通路并排采集 ${CAPDUR}
 
 adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDIR/snap_at_run.txt" 2>&1 || true
 
+# ── 整个窗口停充 ──
+# 插着 USB 时两条轨量到的都不是整机功耗 (电池轨是充放相抵的余量, USB 轨含着灌进电池的
+# 那一份), 所以功耗那一格本来永远对不起来。停充之后两边量的才是同一个东西。
+#
+# 为什么在这儿统一停一次, 而不是给两个 perf 各加 --suspend-charging:
+# 它们是并排跑的, 两个进程会抢同一个节点和同一份状态文件 —— 后一个"恢复"会在
+# 前一个还在测的时候把充电打开, 而状态文件被后写的那份覆盖。停充必须是整个窗口一次。
+CHG_NODE=""
+CHG_SAVED=""
+restore_charging() {
+  if [ -n "$CHG_NODE" ]; then
+    adb -s "$SERIAL" shell "su -c 'echo $CHG_SAVED > $CHG_NODE'" >/dev/null 2>&1
+    echo "[$LABEL] 已恢复充电: $CHG_NODE ← $CHG_SAVED"
+    CHG_NODE=""
+  fi
+}
+# 任何退出路径都要恢复 —— 中途 Ctrl-C、脚本出错、被杀, 都不能把手机丢在不充电的状态
+trap restore_charging EXIT INT TERM
+
+CAP=$(adb -s "$SERIAL" shell 'cat /sys/class/power_supply/battery/capacity' 2>/dev/null | tr -d '\r')
+if [ "${CAP:-0}" -lt 30 ]; then
+  echo "[$LABEL] 电量 ${CAP}% < 30%, 不停充 (功耗那一格会因充电态而作废)"
+else
+  # 候选顺序与 hwcond::CHARGE_CTL_CANDIDATES 一致; 本机实测管用的是 qcom-battery 那条
+  for n in /sys/class/qcom-battery/charging_enabled \
+           /sys/class/power_supply/battery/input_suspend \
+           /sys/class/power_supply/battery/charging_enabled; do
+    cur=$(adb -s "$SERIAL" shell "su -c 'cat $n 2>/dev/null'" 2>/dev/null | tr -d '\r')
+    [ -z "$cur" ] && continue
+    want=0; [ "${n##*/}" = "input_suspend" ] && want=1
+    adb -s "$SERIAL" shell "su -c 'echo $want > $n'" >/dev/null 2>&1
+    # 等电量计跟上: status 立刻翻, current_now 要几秒 (实测第三秒才翻符号)
+    ok=NO
+    for _ in 1 2 3 4 5 6 7 8; do
+      sleep 1.5
+      st=$(adb -s "$SERIAL" shell 'cat /sys/class/power_supply/battery/status' 2>/dev/null | tr -d '\r')
+      cu=$(adb -s "$SERIAL" shell 'cat /sys/class/power_supply/battery/current_now' 2>/dev/null | tr -d '\r')
+      if [ "$st" != "Charging" ] && [ "${cu:-1}" -lt 0 ]; then ok=YES; break; fi
+    done
+    if [ "$ok" = YES ]; then
+      CHG_NODE="$n"; CHG_SAVED="$cur"
+      echo "[$LABEL] 已停充: $n $cur → $want (status=$st current_now=$cu)"
+      break
+    fi
+    adb -s "$SERIAL" shell "su -c 'echo $cur > $n'" >/dev/null 2>&1
+  done
+  [ -z "$CHG_NODE" ] && echo "[$LABEL] 警告: 没能停充, 功耗那一格会因充电态而作废"
+fi
+
 # 主动散热风扇的状态。红魔的风扇没有 sysfs 转速节点 (vendor HAL 里, /sys 下找不到 fan/rpm),
 # 能读到的只有这几个 settings 键 —— 但它必须记: 风扇开不开直接决定热状态,
 # 而热状态决定帧率与功耗。两条通路是并排采的, 风扇对两边的影响一致;
@@ -56,6 +105,8 @@ adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDI
   done
   printf 'battery_status=%s\n' \
     "$(adb -s "$SERIAL" shell 'cat /sys/class/power_supply/battery/status' 2>/dev/null | tr -d '\r')"
+  printf 'battery_capacity_pct=%s\n' "${CAP:-?}"
+  printf 'charging_suspended_via=%s\n' "${CHG_NODE:-(未停充)}"
 } > "$OUTDIR/test_conditions.txt" 2>&1 || true
 
 # 1) 负载后台起跑
