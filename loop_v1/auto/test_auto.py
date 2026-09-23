@@ -120,6 +120,34 @@ setting.system.refresh_rate_mode.mode1_fps=120 (readback=1)
 """))
         self.assertNotIn("setting.system.refresh_rate_mode", wl)
 
+    def test_vendor_refresh_mode_needs_real_fps_evidence(self):
+        """活动刷新率读不出来 (dumpsys 措辞不同) 时一档都不许收 —— 没证据不能按下标猜。"""
+        wl = WL.build_whitelist(WL.parse_probe(PROBE + """
+setting.system.refresh_rate_mode.cur=0
+setting.system.refresh_rate_mode.base_fps=
+setting.system.refresh_rate_mode.mode1_fps= (readback=1)
+setting.system.refresh_rate_mode.mode2_fps= (readback=2)
+"""))
+        self.assertNotIn("setting.system.refresh_rate_mode", wl)
+
+    def test_vendor_refresh_mode_readback_must_match_exactly(self):
+        """readback=10 不是 mode 1 的回读 —— 子串匹配会把它当成生效。"""
+        wl = WL.build_whitelist(WL.parse_probe(PROBE + """
+setting.system.refresh_rate_mode.cur=0
+setting.system.refresh_rate_mode.base_fps=120
+setting.system.refresh_rate_mode.mode1_fps=60 (readback=10)
+"""))
+        self.assertNotIn("setting.system.refresh_rate_mode", wl)
+
+    def test_non_numeric_refresh_mode_is_skipped_not_a_crash(self):
+        """厂商键回的是 auto 这种符号值时安静跳过, 不能让整条闭环崩在这儿。"""
+        wl = WL.build_whitelist(WL.parse_probe(PROBE + """
+setting.system.refresh_rate_mode.cur=auto
+setting.system.refresh_rate_mode.base_fps=120
+setting.system.refresh_rate_mode.mode1_fps=60 (readback=1)
+"""))
+        self.assertNotIn("setting.system.refresh_rate_mode", wl)
+
     def test_bus_uses_available_frequencies(self):
         self.assertEqual(self.wl["bus.DDR.boost_freq"]["values"],
                          ["200000", "3200000", "5333000"])
@@ -408,10 +436,6 @@ class TestPipelineEndToEnd(unittest.TestCase):
         self.assertEqual(accepted[0]["params"], {"bus.DDR.boost_freq": "3200000"})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFanIsEvidenceNotAKnob(unittest.TestCase):
     """风扇转速是系统参数的一种, 但它不进自动调参白名单 —— 只当测试条件记录。"""
 
@@ -440,3 +464,46 @@ class TestFanIsEvidenceNotAKnob(unittest.TestCase):
         s = V.env_stats("#battery_status=Discharging\n#fan_state=\n"
                         "ENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n")
         self.assertIsNone(s["fan_state"])
+
+
+# unittest.main() 必须留在文件最末: 放在中间的话, 直接 `python3 test_auto.py`
+# 会在它下面的测试类还没定义时就开跑, 那几个类一声不响地不会被收集。
+
+
+class TestOrdinalHeuristic(unittest.TestCase):
+    """「数值越大越激进」只对频率/档位成立, 对厂商枚举不成立。"""
+
+    def setUp(self):
+        self.wl = WL.build_whitelist(WL.parse_probe(PROBE + """
+setting.system.refresh_rate_mode.cur=0
+setting.system.refresh_rate_mode.base_fps=120
+setting.system.refresh_rate_mode.mode1_fps=60 (readback=1)
+setting.system.refresh_rate_mode.mode4_fps=144 (readback=4)
+"""))
+
+    def test_frequency_and_pwrlevel_are_ordinal(self):
+        self.assertTrue(LLM._is_ordinal("bus.DDR.boost_freq",
+                                        self.wl["bus.DDR.boost_freq"]))
+        self.assertTrue(LLM._is_ordinal("gpu.min_pwrlevel",
+                                        self.wl["gpu.min_pwrlevel"]))
+
+    def test_vendor_enum_and_governor_are_not_ordinal(self):
+        # refresh_rate_mode 的 1 是 60Hz 而 0 是 120Hz auto —— 数值大小无方向含义
+        self.assertFalse(LLM._is_ordinal("setting.system.refresh_rate_mode",
+                                         self.wl["setting.system.refresh_rate_mode"]))
+        self.assertFalse(LLM._is_ordinal("cpu.policy0.scaling_governor",
+                                         self.wl["cpu.policy0.scaling_governor"]))
+
+    def test_mutator_can_still_reach_every_vendor_mode(self):
+        """非序数参数要能等概率取到任何一个别的值, 不能只往一个方向走。"""
+        seen = set()
+        for seed in range(80):
+            for c in LLM.local_mutate(self.wl, [], 3, seed=seed):
+                v = c["params"].get("setting.system.refresh_rate_mode")
+                if v:
+                    seen.add(v)
+        self.assertEqual(seen, {"1", "4"})   # 当前值 0 之外的全部可达
+
+
+if __name__ == "__main__":
+    unittest.main()

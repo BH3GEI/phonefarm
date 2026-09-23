@@ -61,7 +61,7 @@ effect_test() {
   if [ "$rst" = "$old" ]; then
     printf '%s.effect_restored=yes\n' "$et_key"
   else
-    printf '%s.effect_restored=NO(want=%s got=%s)\n' "$et_key" "$et_val" "$rst"
+    printf '%s.effect_restored=NO(want=%s got=%s)\n' "$et_key" "$old" "$rst"
   fi
 }
 
@@ -128,16 +128,8 @@ printf 'gpu.num_pwrlevels=%s\n' "$(cat "$KGSL/num_pwrlevels" 2>/dev/null)"
 printf 'gpu.min_pwrlevel.cur=%s\n' "$(cat "$KGSL/min_pwrlevel" 2>/dev/null)"
 printf 'gpu.max_pwrlevel.cur=%s\n' "$(cat "$KGSL/max_pwrlevel" 2>/dev/null)"
 printf 'gpu.thermal_pwrlevel=%s\n' "$(cat "$KGSL/thermal_pwrlevel" 2>/dev/null)"
-printf 'gpu.devfreq.avail_freqs=%s\n' "$(cat "$DEVFREQ/available_frequencies" 2>/dev/null)"
-printf 'gpu.devfreq.avail_governors=%s\n' "$(cat "$DEVFREQ/available_governors" 2>/dev/null)"
-printf 'gpu.devfreq.min_freq.cur=%s\n' "$(cat "$DEVFREQ/min_freq" 2>/dev/null)"
-printf 'gpu.devfreq.max_freq.cur=%s\n' "$(cat "$DEVFREQ/max_freq" 2>/dev/null)"
-printf 'gpu.devfreq.governor.cur=%s\n' "$(cat "$DEVFREQ/governor" 2>/dev/null)"
 writable_test gpu.min_pwrlevel      "$KGSL/min_pwrlevel"
 writable_test gpu.max_pwrlevel      "$KGSL/max_pwrlevel"
-writable_test gpu.devfreq.min_freq  "$DEVFREQ/min_freq"
-writable_test gpu.devfreq.max_freq  "$DEVFREQ/max_freq"
-writable_test gpu.devfreq.governor  "$DEVFREQ/governor"
 # min_pwrlevel 语义: 0 = 最快档, 数字越大越慢。往 0 方向走 = 抬高频率下限。
 mpl=$(cat "$KGSL/min_pwrlevel" 2>/dev/null)
 if [ -n "$mpl" ] && [ "$mpl" -gt 0 ] 2>/dev/null; then
@@ -148,19 +140,34 @@ xpl=$(cat "$KGSL/max_pwrlevel" 2>/dev/null)
 if [ -n "$xpl" ] && [ -n "$mpl" ] && [ "$xpl" -lt "$mpl" ] 2>/dev/null; then
   effect_test gpu.max_pwrlevel "$KGSL/max_pwrlevel" "$((xpl + 1))"
 fi
-gmin=$(cat "$DEVFREQ/min_freq" 2>/dev/null)
-g2=$(cat "$DEVFREQ/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | tail -2 | head -1)
-if [ -n "$g2" ] && [ "$g2" != "$gmin" ]; then
-  effect_test gpu.devfreq.min_freq "$DEVFREQ/min_freq" "$g2"
+# devfreq 整块只在真找到目录时才探。一条都没匹配上 = 这台机器根本没有 kgsl
+# devfreq, 如实报 absent —— 不能拿空的 $DEVFREQ 去拼路径, 那会变成 /min_freq
+# 这种根目录路径, 最后报成 "unreadable" (节点在但读不到), 与事实相反。
+if [ -z "$DEVFREQ" ]; then
+  printf 'gpu.devfreq=absent\n'
+else
+  printf 'gpu.devfreq.avail_freqs=%s\n' "$(cat "$DEVFREQ/available_frequencies" 2>/dev/null)"
+  printf 'gpu.devfreq.avail_governors=%s\n' "$(cat "$DEVFREQ/available_governors" 2>/dev/null)"
+  printf 'gpu.devfreq.min_freq.cur=%s\n' "$(cat "$DEVFREQ/min_freq" 2>/dev/null)"
+  printf 'gpu.devfreq.max_freq.cur=%s\n' "$(cat "$DEVFREQ/max_freq" 2>/dev/null)"
+  printf 'gpu.devfreq.governor.cur=%s\n' "$(cat "$DEVFREQ/governor" 2>/dev/null)"
+  writable_test gpu.devfreq.min_freq  "$DEVFREQ/min_freq"
+  writable_test gpu.devfreq.max_freq  "$DEVFREQ/max_freq"
+  writable_test gpu.devfreq.governor  "$DEVFREQ/governor"
+  gmin=$(cat "$DEVFREQ/min_freq" 2>/dev/null)
+  g2=$(cat "$DEVFREQ/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | tail -2 | head -1)
+  if [ -n "$g2" ] && [ "$g2" != "$gmin" ]; then
+    effect_test gpu.devfreq.min_freq "$DEVFREQ/min_freq" "$g2"
+  fi
+  gmax=$(cat "$DEVFREQ/max_freq" 2>/dev/null)
+  g3=$(cat "$DEVFREQ/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | head -2 | tail -1)
+  if [ -n "$g3" ] && [ "$g3" != "$gmax" ] && [ "$g3" != "$gmin" ]; then
+    effect_test gpu.devfreq.max_freq "$DEVFREQ/max_freq" "$g3"
+  fi
+  curggov=$(cat "$DEVFREQ/governor" 2>/dev/null)
+  oggov=$(cat "$DEVFREQ/available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curggov" | head -1)
+  [ -n "$oggov" ] && effect_test gpu.devfreq.governor "$DEVFREQ/governor" "$oggov"
 fi
-gmax=$(cat "$DEVFREQ/max_freq" 2>/dev/null)
-g3=$(cat "$DEVFREQ/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | head -2 | tail -1)
-if [ -n "$g3" ] && [ "$g3" != "$gmax" ] && [ "$g3" != "$gmin" ]; then
-  effect_test gpu.devfreq.max_freq "$DEVFREQ/max_freq" "$g3"
-fi
-curggov=$(cat "$DEVFREQ/governor" 2>/dev/null)
-oggov=$(cat "$DEVFREQ/available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curggov" | head -1)
-[ -n "$oggov" ] && effect_test gpu.devfreq.governor "$DEVFREQ/governor" "$oggov"
 
 # ════ 总线 (DDR / LLCC) ════
 for n in DDR LLCC; do
@@ -187,7 +194,10 @@ printf 'setting.system.peak_refresh_rate.cur=%s\n' "$(settings get system peak_r
 printf 'setting.system.min_refresh_rate.cur=%s\n'  "$(settings get system min_refresh_rate 2>/dev/null)"
 printf 'setting.system.all_refresh_rate=%s\n' "$(settings get system all_refresh_rate 2>/dev/null)"
 printf 'setting.system.refresh_rate_mode.cur=%s\n' "$(settings get system refresh_rate_mode 2>/dev/null)"
-printf 'display.modes=%s\n' "$(dumpsys display 2>/dev/null | grep -oE 'fps=[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')"
+# 两种措辞都抓: 新版 dumpsys 写 "fps=120", 旧版写 "120.00001 fps"。
+# 只抓一种的话, 另一种机器上 display.modes 会是空的, 白名单会把 AOSP 的
+# peak/min_refresh_rate 悄悄整个丢掉 (whitelist.py 的 `not modes` 那一支)。
+printf 'display.modes=%s\n' "$(dumpsys display 2>/dev/null | grep -oE 'fps=[0-9]+(\.[0-9]+)?|[0-9]+\.[0-9]+ fps' | sort -u | tr '\n' ',' | sed 's/,$//')"
 
 active_fps() {
   dumpsys display 2>/dev/null | grep -m1 'mActiveSfDisplayMode=' \

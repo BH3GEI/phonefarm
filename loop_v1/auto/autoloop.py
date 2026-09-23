@@ -156,7 +156,7 @@ def wait_cool(cool_c: float = COOL_C_FLOOR, timeout_s: int = COOL_TIMEOUT_S) -> 
 # 所以分两层报: strict 是原样的逐行 diff (什么都不藏), ours 只看
 # 「我们写过的那类项」—— 判定用 ours, 证据里两份都留。
 # kgsl.max_gpuclk 是 thermal_pwrlevel 对应的那个频率, 同样由驱动按温度自己改:
-# 实测探测前后 7 -> 6 / 578MHz -> 646MHz, 只是设备凉了一点, 不是我们留的痕。
+# 实测探测前后 6 -> 4 / 646MHz -> 826MHz, 只是设备凉了一点, 不是我们留的痕。
 DRIVER_OWNED_PREFIXES = ("kgsl.thermal_pwrlevel", "kgsl.max_gpuclk")
 
 

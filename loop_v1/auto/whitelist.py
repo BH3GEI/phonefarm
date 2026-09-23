@@ -196,18 +196,27 @@ def build_whitelist(probe: dict) -> dict:
     # **真的把活动刷新率改掉了**的那几档 —— 探测脚本逐档写进去看 SurfaceFlinger
     # 的活动模式 fps 跟不跟着变, 结果落在 refresh_rate_mode.mode<i>_fps 行里。
     rrm_cur = probe.get("setting.system.refresh_rate_mode.cur", "")
-    if rrm_cur not in ("", "null"):
+    if rrm_cur not in ("", "null") and rrm_cur.isdigit():
+        # base_fps 必须是个真数字。探不到活动刷新率 (dumpsys 措辞不同 / 没有
+        # mActiveSfDisplayMode 那一行) 时 base_fps 与各档 fps 都是空, 这时候
+        # 一档都不能收 —— 没有 fps 证据就收下去, 等于在按下标猜, 正是这里不干的事。
         base_fps = probe.get("setting.system.refresh_rate_mode.base_fps", "")
         live = [rrm_cur]
-        for k, v in probe.items():
-            if not (k.startswith("setting.system.refresh_rate_mode.mode")
-                    and k.endswith("_fps")):
-                continue
-            mode = k[len("setting.system.refresh_rate_mode.mode"):-len("_fps")]
-            fps = v.split()[0] if v else ""
-            # 回读对得上 + 活动刷新率确实与基准不同 = 这一档真生效
-            if f"readback={mode}" in v and fps and fps != base_fps:
-                live.append(mode)
+        if base_fps.isdigit():
+            for k, v in probe.items():
+                if not (k.startswith("setting.system.refresh_rate_mode.mode")
+                        and k.endswith("_fps")):
+                    continue
+                mode = k[len("setting.system.refresh_rate_mode.mode"):-len("_fps")]
+                if not mode.isdigit():
+                    continue
+                fps = v.split()[0] if v else ""
+                # 回读整串精确比对 (不能用子串: readback=1 会命中 readback=10),
+                # 再要求活动刷新率确实是个数字且与基准不同 = 这一档真生效
+                rb = re.search(r"readback=([^)\s]*)", v)
+                if (rb and rb.group(1) == mode
+                        and fps.isdigit() and fps != base_fps):
+                    live.append(mode)
         if len(set(live)) > 1:
             add("setting.system.refresh_rate_mode", "setting",
                 "system:refresh_rate_mode", sorted(set(live), key=int), rrm_cur,

@@ -72,7 +72,8 @@ GPU `min_pwrlevel` / `max_pwrlevel` / devfreq 的 min/max/governor、DDR 与 LLC
   拿「第二高的可用频点」去试 min, 内核会直接夹回 max, 测出来的是 min>max 被夹,
   不是「这个节点写不动」。
 - **`kgsl.thermal_pwrlevel` 与 `kgsl.max_gpuclk` 由驱动按温度自己改**。实测探测
-  前后 7→6 / 578MHz→646MHz, 只是设备凉了一点。这两项归 `driver_owned`, 不算留痕。
+  前后 6→4 / 646MHz→826MHz (见 `probe3/report.json` 的 `driver_owned_diffs`),
+  只是设备凉了一点。这两项归 `driver_owned`, 不算留痕。
 
 ### 温控保护永远不进白名单
 

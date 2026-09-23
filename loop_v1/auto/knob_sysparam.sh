@@ -8,6 +8,7 @@
 # plan 文件格式 (制表符分隔, 每行一项):
 #   sysfs<TAB>/sys/...<TAB>目标值
 #   setting<TAB>system:peak_refresh_rate<TAB>目标值
+#   setting<TAB>system:refresh_rate_mode<TAB>目标值
 #
 # 安全边界 (与主机端白名单重复一遍, 故意冗余 —— 设备端是最后一道):
 #   · 路径必须命中 ALLOW 前缀
@@ -48,6 +49,9 @@ denied() {
 allowed_setting() {
   case "$1" in
     system:peak_refresh_rate|system:min_refresh_rate) return 0 ;;
+    # 厂商刷新率键 (红魔 NX809J 的 AOSP 两个键是 null, 走这个)。白名单侧
+    # whitelist.py 只在探测时真把活动 fps 改掉的那几档才收, 这里放行同一个键。
+    system:refresh_rate_mode) return 0 ;;
     *) return 1 ;;
   esac
 }
