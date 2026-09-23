@@ -117,6 +117,12 @@ pub fn verdict(a: &[u8], b: &[u8]) -> PyVal {
     }
 }
 
+/// 帧文件读不出来时的结论。形状与 [`verdict`] 的错误分支一致 —— 上游靠
+/// `spinning: false` + `error` 落证据后退出, 不靠异常。
+pub fn read_error(msg: &str) -> PyVal {
+    pyobj! { "spinning" => false, "error" => msg, "gate" => MOVED_FRAC_GATE }
+}
+
 // ══════════════ 平均逐像素差 (CLI) ══════════════
 
 /// `frames_moving.py` 的头解析: 比 [`parse_screencap`] 宽松, 头长度不限 12/16。

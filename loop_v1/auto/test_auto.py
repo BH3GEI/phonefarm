@@ -218,7 +218,7 @@ class TestPipelineEndToEnd(unittest.TestCase):
                     kind, path, _val = line.split("\t")
                     self.assertIn(kind, ("sysfs", "setting"))
                     self.assertIn(path, allowed_paths)
-                    self.assertFalse(any(k in path.lower() for k in WL.DENY_KEYWORDS))
+                    self.assertFalse(any(k in path.lower() for k in WL.deny_keywords()))
 
     def test_model_output_is_filtered_not_trusted(self):
         """模型回包里夹带越界参数时, 整组作废, 不是「剔掉违规项后凑合跑」。"""
