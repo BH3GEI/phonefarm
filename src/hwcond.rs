@@ -487,8 +487,13 @@ pub fn read_battery_state(phone: &crate::device::Device) -> BatteryState {
 /// 轻则测到一半关机 (这一轮白跑), 重则把电池拖进过放。30% 是留给「一轮测完还能撑到恢复充电」的余量。
 pub const MIN_CAPACITY_FOR_SUSPEND_PCT: i64 = 30;
 
-/// 停充等设备真的转成放电态的上限。
-pub const SUSPEND_SETTLE_MS: u64 = 2_500;
+/// 停充后等设备真的转成放电态的上限。
+///
+/// 为什么要这么久: `status` 是**立刻**翻成 `Discharging` 的, 但电量计的 `current_now`
+/// 要几秒才跟上 —— 2026-09-23 实测停充后三秒内还在报充电方向的
+/// `+1072000 / +982000`, 第三秒才翻成 `-325000`。等不够就会把一个明明生效了的节点
+/// 判成"写进去无效", 然后去试下一个候选 (本机第一版 2.5 秒就是这么误判的)。
+pub const SUSPEND_SETTLE_MS: u64 = 12_000;
 
 /// 停充用哪个 sysfs 节点 —— 不同内核给的不一样, 所以是**探出来的**, 不是写死的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,6 +517,10 @@ pub const CHARGE_CTL_CANDIDATES: &[ChargeCtlNode] = &[
     // 老 Qualcomm qpnp-smb: 语义最直接, 就是「挂起输入」
     ChargeCtlNode { path: "/sys/class/power_supply/battery/input_suspend", how: SuspendHow::WriteOne },
     ChargeCtlNode { path: "/sys/class/power_supply/usb/input_suspend", how: SuspendHow::WriteOne },
+    // 高通 qcom-battery 的厂商开关。**本机红魔 NX809J 实测能停充的就是这一条** ——
+    // 它不在 power_supply class 下, 而在自己的 class 里, 只看 power_supply 会整个错过。
+    ChargeCtlNode { path: "/sys/class/qcom-battery/charging_enabled", how: SuspendHow::WriteZero },
+    ChargeCtlNode { path: "/sys/class/qcom-battery/battery_charging_enabled", how: SuspendHow::WriteZero },
     // 各家自定义的开关
     ChargeCtlNode { path: "/sys/class/power_supply/battery/charging_enabled", how: SuspendHow::WriteZero },
     ChargeCtlNode { path: "/sys/class/power_supply/battery/battery_charging_enabled", how: SuspendHow::WriteZero },
@@ -1025,6 +1034,25 @@ mod tests {
         assert_eq!(parse_charge_ctl_state("/sys/class/power_supply/battery/x"), None);
         assert_eq!(parse_charge_ctl_state(""), None);
         assert_eq!(parse_charge_ctl_state("rm -rf /\n0"), None);
+    }
+
+    #[test]
+    fn the_candidate_that_works_on_this_device_is_in_the_list() {
+        // 本机红魔 NX809J (pmic-glink) 实测: power_supply 下的候选一个都停不了充,
+        // 真正管用的是 qcom-battery 那条。它不在 power_supply class 下,
+        // 只看 power_supply 会整个错过。
+        assert!(CHARGE_CTL_CANDIDATES
+            .iter()
+            .any(|n| n.path == "/sys/class/qcom-battery/charging_enabled"
+                && n.how == SuspendHow::WriteZero));
+    }
+
+    #[test]
+    fn settle_window_outlasts_the_fuel_gauge_lag() {
+        // status 立刻翻成 Discharging, 但 current_now 要几秒才跟上:
+        // 实测停充后三秒内还在报 +1072000/+982000, 第三秒才翻成 -325000。
+        // 窗口短于这个延迟就会把生效了的节点误判成无效。
+        assert!(SUSPEND_SETTLE_MS >= 8_000, "实得 {SUSPEND_SETTLE_MS} ms");
     }
 
     #[test]

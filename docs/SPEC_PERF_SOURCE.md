@@ -366,8 +366,17 @@ HiSmartPerf 算出 3.086 W，我们算出 777 W。同一段窗口、同一块电
 | `usb/input_current_limit`（兜底，动的是输入侧） | `0` |
 
 每个候选都**回读确认停充真的生效**（电流转成放电方向）才算数，没生效就地还原换下一个。
-这步不能省：本机红魔 NX809J 是 `pmic-glink` 充电器，出厂
-`charge_control_end_threshold=80` 而电量 91 % **照充不误** —— 写进去不代表内核认。
+
+**本机实测结论（2026-09-23，红魔 NX809J / `pmic-glink`）**：
+
+- `power_supply` 下的候选**一个都停不了充**。出厂 `charge_control_end_threshold=80`
+  而电量 91 % 照充不误；`usb/input_current_limit=0` 同样无效 —— 写进去不代表内核认。
+- 真正管用的是 **`/sys/class/qcom-battery/charging_enabled` 写 `0`**。
+  它不在 `power_supply` class 下，而在自己的 class 里，**只看 `power_supply` 会整个错过**。
+- 停充后 `status` **立刻**翻成 `Discharging`，但电量计的 `current_now` 要**几秒**才跟上：
+  实测三秒内还在报充电方向的 `+1072000 / +982000`，第三秒才翻成 `-325000`。
+  所以 `SUSPEND_SETTLE_MS` 定在 12 秒 —— 窗口短于这个延迟，会把一个明明生效了的节点
+  判成"写进去无效"再去试下一个（第一版定 2.5 秒就是这么误判的）。
 
 ### 8.3 进出快照一致
 
@@ -384,6 +393,16 @@ HiSmartPerf 算出 3.086 W，我们算出 777 W。同一段窗口、同一块电
 **电量低于 30 % 不停充**（`MIN_CAPACITY_FOR_SUSPEND_PCT`）：停充期间整机纯靠电池，
 跑一轮标尺就是几分钟满载放电，电量本来就低时再抽一把，轻则测到一半关机（这一轮白跑），
 重则把电池拖进过放。
+
+**真机验证（2026-09-23）**：`perf --suspend-charging --power-rail battery` 一轮跑完，
+
+| 验的是什么 | 结果 |
+| :--- | :--- |
+| 哪个节点真能停充 | `/sys/class/qcom-battery/charging_enabled`（`1 → 0`） |
+| 测量期间是否真在放电 | `status=Discharging`、`current_now=-358000 μA`、`on_battery=true` |
+| 量到的功耗 | `1.572 W`（充电态下同一条轨报的是 `0.213 W` 那种相抵余量） |
+| 恢复后进出快照 | 四个候选节点 + `status` **逐字一致**（`charging_enabled` 回到 `1`，`status` 回到 `Charging`） |
+| 状态文件 | 已清掉 |
 
 ### 8.4 供电状态进报告，且参与判定
 
