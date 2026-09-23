@@ -216,7 +216,7 @@ def local_mutate(wl: dict, history: list[dict], n: int, seed: int) -> list[dict]
     —— 跨项约束 (min<=max 之类) 由 validate_candidate 统一把关, 这里不重复实现。
     固定 seed 下产出确定, 所以降级路径本身也是可复现的。
     """
-    from whitelist import validate_candidate
+    from pybridge import validate_candidate   # 校验已搬进 src/sysparam.rs
 
     rng = random.Random(seed)
     tried = {json.dumps(h.get("params", {}), sort_keys=True) for h in history}

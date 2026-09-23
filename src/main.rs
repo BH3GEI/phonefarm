@@ -18,6 +18,7 @@ mod keepalive;
 mod loopreport;
 mod loopstat;
 mod looptrace;
+mod sysparam;
 mod parallel;
 mod device;
 mod fold;

@@ -74,3 +74,64 @@ def compare(a_runs: list, b_runs: list, metric: str) -> dict:
 
 def snapshot_diff(before: str, after: str) -> dict:
     return _call({"op": "snapshot_diff", "before": before, "after": after})
+
+
+# ── 系统参数闭环 (src/sysparam.rs) ──
+#
+# 白名单与候选参数都按「有序 pair 列表」过桥, 不用 JSON 对象: Rust 那边的
+# serde_json 一解析对象就按字典序排好了, 而 Python dict 是插入序 —— 候选参数的
+# 遍历顺序决定了多处违规时先报哪一条, 不能丢。
+
+def _wl_pairs(wl: dict) -> list:
+    return [[pid, spec] for pid, spec in wl.items()]
+
+
+def build_whitelist(probe_text: str) -> dict:
+    """probe_sysparam.sh 的文本 → {param_id: spec}。"""
+    return _call({"op": "build_whitelist", "probe_text": probe_text})
+
+
+def describe_whitelist(wl: dict) -> str:
+    return _call({"op": "describe_whitelist", "wl": _wl_pairs(wl)})
+
+
+def validate_candidate(cand: dict, wl: dict) -> tuple:
+    ok, why = _call({"op": "validate_candidate",
+                     "cand": [[k, str(v)] for k, v in cand.items()],
+                     "wl": _wl_pairs(wl)})
+    return ok, why
+
+
+def plan_text(cand: dict, wl: dict) -> str:
+    return _call({"op": "plan_text",
+                  "cand": [[k, str(v)] for k, v in cand.items()],
+                  "wl": _wl_pairs(wl)})
+
+
+def rule_doc(temp_cap_c: float, pairs: int, power_available: bool,
+             power_note: str = "") -> dict:
+    return _call({"op": "rule_doc", "temp_cap_c": temp_cap_c, "pairs": pairs,
+                  "power_available": power_available, "power_note": power_note})
+
+
+# 下面两张表由二进制那边定义 (src/sysparam.rs), 这里照抄一份只为调用方好写:
+# 真正的拦截与判定都在二进制里做, 改口径要改那边, 这里跟着改。
+DENY_KEYWORDS = ("thermal", "trip_point", "cooling", "fan", "tsens", "bcl", "throttl")
+# (指标, 方向) —— 方向 "lower" = 越小越好
+PRIMARY_METRICS = [
+    ("frame_p95", "lower"),
+    ("fps_mean", "higher"),
+    ("power_w_mean", "lower"),
+]
+
+
+def env_stats(text: str) -> dict:
+    return _call({"op": "env_stats", "text": text})
+
+
+def decide(comparisons: dict, *, temp_max_c, temp_cap_c: float, apply_ok: bool,
+           snapshot_identical: bool, power_available: bool) -> dict:
+    return _call({"op": "decide", "comparisons": comparisons,
+                  "temp_max_c": temp_max_c, "temp_cap_c": temp_cap_c,
+                  "apply_ok": apply_ok, "snapshot_identical": snapshot_identical,
+                  "power_available": power_available})

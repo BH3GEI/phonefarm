@@ -18,7 +18,7 @@
 //! 为什么用提交节奏而不是 vsync: vsync (encoder_vblank_callback) 是显示刷新节奏,
 //! 恒定跟着面板刷新率跳, 游戏 30fps 锁帧时它照样 60/120 次每秒; 提交节奏才反映实际出帧速度。
 
-use crate::pyjson::{dumps, median_ints, py_round, py_sum, PyVal};
+use crate::pyjson::{self, dumps, median_ints, py_round, py_sum, PyVal};
 use crate::pyobj;
 use regex::Regex;
 use std::collections::HashMap;
@@ -480,7 +480,7 @@ pub fn detect_fps_cap(frame_p50_ms: f64) -> Option<i64> {
 
 /// Python `x or 0.0` 的数字版: 缺失、null、0 —— 以及 **-0.0** —— 都落到默认值。
 /// `bool(-0.0)` 在 Python 里是 False, 照搬这一条, 否则 `-0.0` 会原样写进 JSON。
-fn num_or_zero(s: &serde_json::Value, k: &str) -> f64 {
+fn num_or_zero(s: &PyVal, k: &str) -> f64 {
     match s.get(k).and_then(|v| v.as_f64()) {
         Some(v) if v != 0.0 => v,
         _ => 0.0,
@@ -491,9 +491,9 @@ fn num_or_zero(s: &serde_json::Value, k: &str) -> f64 {
 ///
 /// 解析不了就是数据坏了。Python 在这里会抛 ValueError 把整轮打掉, 这边照样返回错误
 /// —— 悄悄填个 0 等于凭空造一个测量值, 比整轮失败更糟。
-fn str_num_or_zero(s: &serde_json::Value, k: &str) -> Result<f64, String> {
+fn str_num_or_zero(s: &PyVal, k: &str) -> Result<f64, String> {
     match s.get(k) {
-        Some(serde_json::Value::String(t)) if !t.is_empty() => t
+        Some(PyVal::Str(t)) if !t.is_empty() => t
             .trim()
             .parse()
             .map_err(|_| format!("{k} 不是数字: {t:?}")),
@@ -505,15 +505,16 @@ fn str_num_or_zero(s: &serde_json::Value, k: &str) -> Result<f64, String> {
     }
 }
 
-pub fn attribute(s: &serde_json::Value) -> Result<PyVal, String> {
+pub fn attribute(s: &PyVal) -> Result<PyVal, String> {
     let fp50 = num_or_zero(s, "frame_p50");
     let fp95 = num_or_zero(s, "frame_p95");
     let gpu = num_or_zero(s, "gpu_active_mean");
     let queue = num_or_zero(s, "queue_p50");
-    let n_thermal = s
-        .get("n_thermal_events")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let n_thermal = match s.get("n_thermal_events") {
+        Some(PyVal::Int(i)) => *i,
+        Some(PyVal::Float(f)) => *f as i64,
+        _ => 0,
+    };
 
     let gpu_share = if fp50 != 0.0 { gpu / fp50 } else { 0.0 };
     let queue_share = if fp50 != 0.0 { queue / fp50 } else { 0.0 };
@@ -535,8 +536,8 @@ pub fn attribute(s: &serde_json::Value) -> Result<PyVal, String> {
     let bw = pyobj! {
         "ddr_cur_khz" => str_num_or_zero(s, "ddr_cur_khz")?,
         "ddr_boost_khz" => str_num_or_zero(s, "ddr_boost_khz")?,
-        "gpu_bus_vote_median" => bw_med.map(PyVal::from).unwrap_or(PyVal::Null),
-        "gpu_bus_vote_max" => bw_max.map(PyVal::from).unwrap_or(PyVal::Null),
+        "gpu_bus_vote_median" => bw_med.cloned().unwrap_or(PyVal::Null),
+        "gpu_bus_vote_max" => bw_max.cloned().unwrap_or(PyVal::Null),
         "bus_vote_headroom_pct" => headroom,
     };
 
@@ -663,7 +664,7 @@ pub fn run_attribute(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let s: serde_json::Value = match serde_json::from_str(&text) {
+    let s = match pyjson::loads(&text) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{path} 不是合法 JSON: {e}");
@@ -708,8 +709,7 @@ mod tests {
             if !summary.exists() || !golden.exists() {
                 continue;
             }
-            let s: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&summary).unwrap()).unwrap();
+            let s = pyjson::loads(&std::fs::read_to_string(&summary).unwrap()).unwrap();
             let want = std::fs::read_to_string(&golden).unwrap();
             assert_eq!(
                 dumps(&attribute(&s).unwrap()),
@@ -733,7 +733,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{stem}.txt: {e}"));
             let d = parse(&text, DEFAULT_RENDER_COMM);
             let summary = dumps(&d.summarize());
-            let parsed: serde_json::Value = serde_json::from_str(&summary).unwrap();
+            let parsed = pyjson::loads(&summary).unwrap();
             for (name, got) in [
                 (format!("{stem}.summary.json"), summary.clone()),
                 (format!("{stem}.full.json"), dumps(&d.to_pyval())),
@@ -773,8 +773,7 @@ mod tests {
     /// Python 的 `or 0.0` 把 -0.0 也当假值。不照搬的话 attribution.json 里会冒出 "-0.0"。
     #[test]
     fn negative_zero_normalizes_like_python() {
-        let s: serde_json::Value =
-            serde_json::from_str(r#"{"frame_p50":-0.0,"n_thermal_events":0}"#).unwrap();
+        let s = pyjson::loads(r#"{"frame_p50":-0.0,"n_thermal_events":0}"#).unwrap();
         let out = dumps(&attribute(&s).unwrap());
         assert!(out.contains("\"frame_p50_ms\": 0.0"), "{out}");
         assert!(!out.contains("-0.0"), "{out}");
@@ -783,8 +782,7 @@ mod tests {
     /// meta 里的 ddr 频率坏了就整轮失败, 不静默填 0 造一个假测量值。
     #[test]
     fn unparseable_ddr_meta_is_an_error_not_a_zero() {
-        let s: serde_json::Value =
-            serde_json::from_str(r#"{"frame_p50":33.5,"ddr_cur_khz":"N/A"}"#).unwrap();
+        let s = pyjson::loads(r#"{"frame_p50":33.5,"ddr_cur_khz":"N/A"}"#).unwrap();
         let e = attribute(&s).unwrap_err();
         assert!(e.contains("ddr_cur_khz"), "{e}");
     }

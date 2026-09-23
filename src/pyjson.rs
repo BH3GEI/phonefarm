@@ -47,6 +47,21 @@ impl PyVal {
             _ => None,
         }
     }
+    /// 整数取值 (float 按 Python `int()` 那样截断)。
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            PyVal::Int(i) => Some(*i),
+            PyVal::Float(x) => Some(*x as i64),
+            _ => None,
+        }
+    }
+    /// 只认真正的布尔 —— 不做 Python 那种"非空即真"的泛化。
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            PyVal::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
     /// Python `str(x)` 对这几种值的写法 —— f-string 里插值用的就是它。
     /// 与 JSON 的差别只有两处: None 不是 `null`, True/False 首字母大写。
     pub fn py_str(&self) -> String {
@@ -104,25 +119,234 @@ impl<T: Into<PyVal>> From<Vec<T>> for PyVal {
     }
 }
 
-/// `serde_json::Value` → `PyVal`, 保留 int/float 之分。
-/// 归因那一步要把 summary.json 里的字段原样透传回输出, 数字是 `3150.0` 还是 `3150`
-/// 必须跟着输入走 —— 这正是 Python `json.load` 的行为。
-impl From<&serde_json::Value> for PyVal {
-    fn from(v: &serde_json::Value) -> Self {
-        match v {
-            serde_json::Value::Null => PyVal::Null,
-            serde_json::Value::Bool(b) => PyVal::Bool(*b),
-            serde_json::Value::Number(n) => match n.as_i64() {
-                Some(i) => PyVal::Int(i),
-                None => PyVal::Float(n.as_f64().unwrap_or(f64::NAN)),
-            },
-            serde_json::Value::String(s) => PyVal::Str(s.clone()),
-            serde_json::Value::Array(a) => PyVal::List(a.iter().map(PyVal::from).collect()),
-            serde_json::Value::Object(o) => {
-                PyVal::Obj(o.iter().map(|(k, v)| (k.clone(), PyVal::from(v))).collect())
+// ══════════════ 读入 ══════════════
+
+/// 把 JSON 文本读成 [`PyVal`]，语义对齐 Python 的 `json.loads`。
+///
+/// 为什么不用 `serde_json`
+/// ----------------------
+/// 两条都会破坏"逐字节一致":
+///
+/// 1. **它的浮点解析不是正确舍入的**。`-3.9348497207249924` 经 serde_json 解析再打印
+///    会变成 `-3.934849720724992` —— 差了 1 ulp。Rust 标准库的 `str::parse::<f64>()`
+///    与 CPython 用的 dtoa 都是正确舍入, 两者一致; serde_json 自己那套快速路径不是。
+///    这不是极端指数才有的事, 十七位有效数字的普通数就会踩到。
+/// 2. **它的对象是 BTreeMap, 一解析键就按字典序排好了**, 而 Python dict 保留插入序。
+///
+/// 数字按 Python 的规矩分流: 没有小数点也没有指数的按 int 收 (超出 i64 的退回 float,
+/// Python 那边是大整数, 这条闭环里不会出现)。
+pub fn loads(text: &str) -> Result<PyVal, String> {
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    let v = parse_value(b, &mut i, 0)?;
+    skip_ws(b, &mut i);
+    if i != b.len() {
+        return Err(format!("第 {i} 字节之后还有多余内容"));
+    }
+    Ok(v)
+}
+
+fn skip_ws(b: &[u8], i: &mut usize) {
+    while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\n' | b'\r') {
+        *i += 1;
+    }
+}
+
+fn expect(b: &[u8], i: &mut usize, lit: &str) -> Result<(), String> {
+    if b[*i..].starts_with(lit.as_bytes()) {
+        *i += lit.len();
+        Ok(())
+    } else {
+        Err(format!("第 {i} 字节处期望 {lit}"))
+    }
+}
+
+/// 嵌套层数上限, 与 serde_json 的默认值一致。没有这道闸, 一份几十万层的畸形
+/// 数组会把进程的栈直接撑爆 (abort), 而不是回一句"请求不合法"。
+const MAX_DEPTH: usize = 128;
+
+fn parse_value(b: &[u8], i: &mut usize, depth: usize) -> Result<PyVal, String> {
+    if depth > MAX_DEPTH {
+        return Err(format!("嵌套超过 {MAX_DEPTH} 层"));
+    }
+    skip_ws(b, i);
+    match b.get(*i) {
+        None => Err("内容为空".into()),
+        Some(b'n') => expect(b, i, "null").map(|_| PyVal::Null),
+        Some(b't') => expect(b, i, "true").map(|_| PyVal::Bool(true)),
+        Some(b'f') => expect(b, i, "false").map(|_| PyVal::Bool(false)),
+        Some(b'"') => parse_string(b, i).map(PyVal::Str),
+        Some(b'[') => {
+            *i += 1;
+            let mut out = Vec::new();
+            skip_ws(b, i);
+            if b.get(*i) == Some(&b']') {
+                *i += 1;
+                return Ok(PyVal::List(out));
+            }
+            loop {
+                out.push(parse_value(b, i, depth + 1)?);
+                skip_ws(b, i);
+                match b.get(*i) {
+                    Some(b',') => *i += 1,
+                    Some(b']') => {
+                        *i += 1;
+                        return Ok(PyVal::List(out));
+                    }
+                    _ => return Err(format!("第 {i} 字节处数组没收尾")),
+                }
+            }
+        }
+        Some(b'{') => {
+            *i += 1;
+            let mut out: Vec<(String, PyVal)> = Vec::new();
+            skip_ws(b, i);
+            if b.get(*i) == Some(&b'}') {
+                *i += 1;
+                return Ok(PyVal::Obj(out));
+            }
+            loop {
+                skip_ws(b, i);
+                let k = parse_string(b, i)?;
+                skip_ws(b, i);
+                if b.get(*i) != Some(&b':') {
+                    return Err(format!("第 {i} 字节处缺冒号"));
+                }
+                *i += 1;
+                let v = parse_value(b, i, depth + 1)?;
+                // Python dict: 重复键就地覆盖, 不改位置
+                match out.iter_mut().find(|(ek, _)| *ek == k) {
+                    Some(slot) => slot.1 = v,
+                    None => out.push((k, v)),
+                }
+                skip_ws(b, i);
+                match b.get(*i) {
+                    Some(b',') => *i += 1,
+                    Some(b'}') => {
+                        *i += 1;
+                        return Ok(PyVal::Obj(out));
+                    }
+                    _ => return Err(format!("第 {i} 字节处对象没收尾")),
+                }
+            }
+        }
+        Some(_) => parse_number(b, i),
+    }
+}
+
+fn parse_string(b: &[u8], i: &mut usize) -> Result<String, String> {
+    if b.get(*i) != Some(&b'"') {
+        return Err(format!("第 {i} 字节处期望字符串"));
+    }
+    *i += 1;
+    let mut out = String::new();
+    loop {
+        let c = *b.get(*i).ok_or("字符串没收尾")?;
+        *i += 1;
+        match c {
+            b'"' => return Ok(out),
+            b'\\' => {
+                let e = *b.get(*i).ok_or("转义没收尾")?;
+                *i += 1;
+                match e {
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'b' => out.push('\u{8}'),
+                    b'f' => out.push('\u{c}'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'u' => {
+                        let hi = hex4(b, i)?;
+                        // 代理对: 高位后面必须跟低位, 才拼得出一个真字符
+                        // 高位代理后面必须跟一个**合法的**低位, 才拼得出一个真字符。
+                        // 不验低位就直接减 0xDC00 会下溢 (debug 下 panic, release 下回绕)。
+                        // Rust 的 String 存不下孤立代理, 这里一律报错而不是造一个坏字符。
+                        let ch = if (0xD800..0xDC00).contains(&hi) {
+                            if b.get(*i) == Some(&b'\\') && b.get(*i + 1) == Some(&b'u') {
+                                let save = *i;
+                                *i += 2;
+                                let lo = hex4(b, i)?;
+                                if (0xDC00..0xE000).contains(&lo) {
+                                    char::from_u32(
+                                        0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00),
+                                    )
+                                } else {
+                                    *i = save;
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            char::from_u32(hi)
+                        };
+                        out.push(ch.ok_or("孤立的 \\u 代理项")?);
+                    }
+                    other => return Err(format!("不认识的转义 \\{}", other as char)),
+                }
+            }
+            _ => {
+                // 多字节 UTF-8 原样搬过去
+                let start = *i - 1;
+                let len = utf8_len(c);
+                *i = start + len;
+                out.push_str(
+                    std::str::from_utf8(b.get(start..*i).ok_or("字符串截断")?)
+                        .map_err(|_| "不是合法 UTF-8")?,
+                );
             }
         }
     }
+}
+
+fn utf8_len(c: u8) -> usize {
+    match c {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
+    }
+}
+
+fn hex4(b: &[u8], i: &mut usize) -> Result<u32, String> {
+    let s = std::str::from_utf8(b.get(*i..*i + 4).ok_or("\\u 后不足四位")?)
+        .map_err(|_| "\\u 后不是 ASCII")?;
+    *i += 4;
+    u32::from_str_radix(s, 16).map_err(|_| "\\u 后不是十六进制".into())
+}
+
+fn parse_number(b: &[u8], i: &mut usize) -> Result<PyVal, String> {
+    let start = *i;
+    if b.get(*i) == Some(&b'-') || b.get(*i) == Some(&b'+') {
+        *i += 1;
+    }
+    let mut is_float = false;
+    while let Some(c) = b.get(*i) {
+        match c {
+            b'0'..=b'9' => *i += 1,
+            b'.' | b'e' | b'E' => {
+                is_float = true;
+                *i += 1;
+            }
+            b'-' | b'+' if matches!(b[*i - 1], b'e' | b'E') => *i += 1,
+            _ => break,
+        }
+    }
+    let s = std::str::from_utf8(&b[start..*i]).map_err(|_| "数字不是 ASCII")?;
+    if s.is_empty() {
+        return Err(format!("第 {start} 字节处不是一个值"));
+    }
+    if !is_float {
+        if let Ok(n) = s.parse::<i64>() {
+            return Ok(PyVal::Int(n));
+        }
+    }
+    // 标准库的解析是正确舍入的 —— serde_json 那套快速路径不是, 见 loads 的注释
+    s.parse::<f64>()
+        .map(PyVal::Float)
+        .map_err(|_| format!("解析不了的数字 {s}"))
 }
 
 /// 按插入顺序建对象。`pyobj!{ "a" => 1i64, "b" => x }`
@@ -388,8 +612,49 @@ mod tests {
     }
 
     #[test]
-    fn value_passthrough_keeps_number_kind() {
-        let v: serde_json::Value = serde_json::from_str(r#"{"a":3150.0,"b":4800}"#).unwrap();
-        assert_eq!(dumps(&PyVal::from(&v)), "{\n \"a\": 3150.0,\n \"b\": 4800\n}");
+    fn loads_keeps_number_kind_and_insertion_order() {
+        let v = loads(r#"{"b":4800,"a":3150.0,"c":[1,2.5,null,true],"d":{},"b":9}"#).unwrap();
+        // int/float 之分保住; 键按插入序; 重复键就地覆盖
+        assert_eq!(
+            dumps(&v),
+            "{\n \"b\": 9,\n \"a\": 3150.0,\n \"c\": [\n  1,\n  2.5,\n  null,\n  true\n ],\n \"d\": {}\n}"
+        );
+    }
+
+    /// serde_json 的浮点解析不是正确舍入的, 这三个数经它一趟就差 1 ulp。
+    /// 标准库与 CPython 一致 —— 这正是本模块自带读入器的理由之一。
+    #[test]
+    fn loads_is_correctly_rounded_where_serde_json_is_not() {
+        for s in [
+            "-3.9348497207249924",
+            "45.872057483182004",
+            "-1.7043780545809915",
+        ] {
+            assert_eq!(dumps(&loads(s).unwrap()), s, "{s} 解析后打印不回来");
+            let via_serde: f64 = serde_json::from_str::<f64>(s).unwrap();
+            assert_ne!(py_repr_f64(via_serde), s, "{s} 上 serde_json 居然对了?");
+        }
+    }
+
+    /// 畸形输入要回错误, 不能 panic 或把栈撑爆。
+    #[test]
+    fn loads_survives_hostile_input() {
+        // 高位代理后面跟的不是低位: 减法会下溢, 必须先验
+        assert!(loads(r#""\ud83d\ud83d""#).is_err());
+        assert!(loads(r#""\ud83d""#).is_err());
+        assert!(loads(r#""\ud83dx""#).is_err());
+        // 深嵌套: 有上限就回错误, 没上限就 abort
+        let deep = format!("{}{}", "[".repeat(200_000), "]".repeat(200_000));
+        assert!(loads(&deep).is_err());
+        assert!(loads(&format!("{}{}", "[".repeat(100), "]".repeat(100))).is_ok());
+    }
+
+    #[test]
+    fn loads_handles_escapes_and_rejects_trailing_junk() {
+        let v = loads(r#""a\"b\\c\nd\te\u0001\u4e2d\ud83d\ude00""#).unwrap();
+        assert_eq!(v, PyVal::Str("a\"b\\c\nd\te\u{1}中😀".into()));
+        assert!(loads("{} junk").is_err());
+        assert!(loads("[1,2").is_err());
+        assert!(loads("").is_err());
     }
 }

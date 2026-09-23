@@ -18,11 +18,16 @@ loop_v1 验证了闭环本身成立 (手工挑一个旋钮, 跑出 p95 −1.61% 
 
 | 谁 | 决定什么 | 不决定什么 |
 |---|---|---|
-| `whitelist.py` | 准改哪些参数、准改成哪些值 | 不决定改成什么 |
+| 白名单 (`src/sysparam.rs`) | 准改哪些参数、准改成哪些值 | 不决定改成什么 |
 | `llm.py` | 这一轮改成什么 | 不决定好不好 |
-| `verdict.py` | 好不好 | 不决定改什么 |
+| 判定规则 (`src/sysparam.rs`) | 好不好 | 不决定改什么 |
 
 `autoloop.py` 只做编排与证据归档, **不含任何判定口径**。
+
+白名单与判定已经搬进 phonefarm 二进制 (`phonefarm loopstat` 的 `build_whitelist`
+/ `validate_candidate` / `plan_text` / `rule_doc` / `env_stats` / `decide`), Python
+侧经 `loop_v1/tools/pybridge.py` 转调 —— 口径只留一份。对应的单测也跟着搬成了
+Rust 测试: `cd src && cargo test sysparam`。
 
 ## 白名单怎么来的
 
@@ -79,7 +84,7 @@ GPU `min_pwrlevel` / `max_pwrlevel` / devfreq 的 min/max/governor、DDR 与 LLC
 
 关热保护、抬温控阈值能立刻换来漂亮数字, 但那是拿硬件安全换指标。
 `thermal / trip_point / cooling / fan / tsens / bcl / throttl` 这几个关键词命中即拒,
-**不看探测结果, 不看大模型怎么说**。主机端 `whitelist.py` 拦一道,
+**不看探测结果, 不看大模型怎么说**。主机端白名单 (`src/sysparam.rs`) 拦一道,
 设备端 `knob_sysparam.sh` 再拦一道 —— 故意冗余, 设备端是最后一道。
 
 另有一个温度上限: 超了这一组直接作废并还原, 不参与比较。上限 =
@@ -177,9 +182,13 @@ python3 loop_v1/auto/autoloop.py --out ... --power-in-verdict off
 # 不用大模型, 只用本地变异器 (离线也能跑通闭环)
 python3 loop_v1/auto/autoloop.py --out ... --no-llm
 
-# 纯函数单测
+# 纯函数单测 (白名单/判定那部分在 Rust 侧)
 cd loop_v1/auto && python3 -m unittest
+cd src && cargo test sysparam
 ```
+
+autoloop 需要 phonefarm 二进制在手 (统计、白名单、判定都在里面):
+先 `cd src && cargo build --release`, 或设 `PF_BIN=<路径>`。
 
 前置与 loop_v1 相同: 设备已 root, 原神已在大世界探索态, 并且在光照稳定窗口内跑
 (昼夜循环是本负载最大的不可重复性来源, 见 loop_v1/README.md)。
