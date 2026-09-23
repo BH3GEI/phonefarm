@@ -1059,7 +1059,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     let mut remote_references: Vec<String> = Vec::new();
     let mut quality_reference = QualityReference::procedural();
     if let Some(src) = ref_source.as_ref() {
-        let frames = match resolve_reference_frames(src) {
+        let mut frames = match resolve_reference_frames(src) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("参考帧不可用: {e}");
@@ -1067,6 +1067,26 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
                 return 2;
             }
         };
+        // 只准备**会被读到**的那几张。每张要解码、裁剪、写 8.3 MB 裸 RGBA
+        // 再 adb push 上去; 推一批没人读的帧既慢又平白多出一堆失败面 ——
+        // 一次推送失败会为着没人看的帧把整轮作废。
+        //   headless: 画质走主测内联, 只读第一张;
+        //   refbench + 关了画质补测: 一张都不读 (refbench 自己不碰参考帧)。
+        let wanted = if a.carrier == Carrier::Headless {
+            1
+        } else if quality_pass {
+            frames.len()
+        } else {
+            0
+        };
+        if wanted < frames.len() {
+            progress(&format!(
+                "参考帧 {} 张, 本次载体只会读到 {} 张, 其余不推",
+                frames.len(),
+                wanted
+            ));
+            frames.truncate(wanted);
+        }
         let mut names = Vec::new();
         for (i, frame) in frames.iter().enumerate() {
             let raw = std::path::Path::new(&out_dir).join(format!("reference_{i:02}.rgba"));
@@ -1115,13 +1135,6 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     // 每张参考帧都跑一遍等于把整轮真机时间乘以帧数, 而该载体的主指标是时延,
     // 不是画质。帧集平均只在画质补测里做 —— 那一步本来就只跑两次。
     let inline_reference = remote_references.first().cloned();
-    // 出处要写**实际用了哪几张**, 不是手上有哪几张 —— 否则报告会声称
-    // 一个 12 张帧集的均值, 而那个 dB 其实只来自第一张。
-    if a.carrier == Carrier::Headless && quality_reference.frames > 1 {
-        quality_reference.frames = 1;
-        quality_reference.frame_files.truncate(1);
-        progress("headless 载体: 画质内联量, 只用帧集第一张 (帧集平均只在画质补测里做)");
-    }
 
     // ---- 回滚上次异常退出遗留的锁态 ----
     let recovered = hwcond::recover_stale_lock("gpu-op", &phone, &state_path);
@@ -1505,8 +1518,43 @@ pub fn resolve_reference_frames(path: &str) -> Result<Vec<std::path::PathBuf>, S
         return Err(format!("参考帧目录 {path} 里没有 png/jpg 图片"));
     }
     frames.sort();
-    frames.truncate(MAX_REFERENCE_FRAMES);
+    if frames.len() > MAX_REFERENCE_FRAMES {
+        let n = frames.len();
+        progress(&format!(
+            "参考帧目录有 {n} 张, 超过上限 {MAX_REFERENCE_FRAMES}, 按等间隔抽取"
+        ));
+        frames = even_subset(frames, MAX_REFERENCE_FRAMES);
+    }
     Ok(frames)
+}
+
+/// 从有序帧列表里等间隔抽 `k` 张 (含首尾)。
+///
+/// 为什么不是直接取前 k 张: `capture` 的输出是按时间顺序连续编号的
+/// (`frame_00000.png`, `frame_00001.png`, ...), 取前 32 张等于把整组帧
+/// 压缩到巡航开头那一小段 —— 很可能全是同一个视角同一片场景。
+/// 那正好废掉了用帧集的理由: 要的是覆盖不同内容, 不是覆盖同一处的 32 个瞬间。
+pub fn even_subset<T>(items: Vec<T>, k: usize) -> Vec<T> {
+    let n = items.len();
+    if k == 0 {
+        return Vec::new();
+    }
+    if n <= k {
+        return items;
+    }
+    if k == 1 {
+        return items.into_iter().take(1).collect();
+    }
+    // i 从 0 到 k-1 均匀映射到 0..=n-1, 四舍五入。首尾一定取到。
+    let keep: std::collections::BTreeSet<usize> = (0..k)
+        .map(|i| (i * (n - 1) + (k - 1) / 2) / (k - 1))
+        .collect();
+    items
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| keep.contains(i))
+        .map(|(_, v)| v)
+        .collect()
 }
 
 /// 把参考帧转成 runner 吃的裸 RGBA8, 并推到设备。
@@ -1582,8 +1630,11 @@ pub struct QualitySample {
     pub psnr_db: Option<f64>,
     pub hud_ghost_db: Option<f64>,
     pub stretch_pct: Option<f64>,
-    /// 逐帧 PSNR, 与参考帧同序。均值塌掉的信息在这里留着 ——
-    /// 一组帧里某一张特别差, 均值看不出来。
+    /// 逐帧 PSNR, 与参考帧**逐位对齐** (量不到的那张记 `NaN`, 序列化成 null)。
+    ///
+    /// 均值塌掉的信息在这里留着 —— 一组帧里某一张特别差, 均值看不出来。
+    /// 对齐必须靠留空位保持: 把量不到的那张直接删掉的话, 下标就跟
+    /// `frame_files` 错开了, 报告里"第 3 张最差"会指到另一张图上。
     pub psnr_per_frame: Vec<f64>,
 }
 
@@ -1607,7 +1658,11 @@ pub fn fold_quality_frames(per_frame: &[QualitySample]) -> QualitySample {
         psnr_db: mean_of(|s| s.psnr_db),
         hud_ghost_db: mean_of(|s| s.hud_ghost_db),
         stretch_pct: mean_of(|s| s.stretch_pct),
-        psnr_per_frame: per_frame.iter().filter_map(|s| s.psnr_db).collect(),
+        // NaN 占位而不是删掉: 下标必须跟 frame_files 对得上。
+        psnr_per_frame: per_frame
+            .iter()
+            .map(|s| s.psnr_db.unwrap_or(f64::NAN))
+            .collect(),
     }
 }
 
@@ -2032,15 +2087,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 超过上限时**等间隔**抽, 不是取前 N 张。
+    ///
+    /// capture 的输出按时间连续编号, 取前 32 张等于把整组帧压缩到巡航开头
+    /// 那一小段 —— 很可能全是同一个视角。那正好废掉了用帧集的理由。
+    /// (resolve 只看文件名不解码, 所以这里用 8x8 小图就够, 不必烧时间编 1080p。)
     #[test]
-    fn a_reference_directory_is_capped() {
+    fn an_oversized_reference_directory_is_sampled_evenly() {
         let dir = scratch("cap");
-        for i in 0..(MAX_REFERENCE_FRAMES + 5) {
-            write_png(&dir.join(format!("f_{i:03}.png")), 1920, 1080);
+        let n = MAX_REFERENCE_FRAMES * 3;
+        for i in 0..n {
+            write_png(&dir.join(format!("f_{i:03}.png")), 8, 8);
         }
         let got = resolve_reference_frames(&dir.to_string_lossy()).unwrap();
         assert_eq!(got.len(), MAX_REFERENCE_FRAMES);
+        let name = |p: &std::path::Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name(&got[0]), "f_000.png", "首张必须取到");
+        assert_eq!(
+            name(got.last().unwrap()),
+            format!("f_{:03}.png", n - 1),
+            "末张必须取到 —— 否则整组还是偏在前半段"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn even_subset_spreads_across_the_whole_list() {
+        assert_eq!(even_subset((0..10).collect(), 4), vec![0, 3, 6, 9]);
+        // 要的比有的多 / 刚好一样多: 原样返回。
+        assert_eq!(even_subset(vec![1, 2, 3], 5), vec![1, 2, 3]);
+        assert_eq!(even_subset(vec![1, 2, 3], 3), vec![1, 2, 3]);
+        assert_eq!(even_subset(vec![1, 2, 3], 1), vec![1]);
+        assert!(even_subset(vec![1, 2, 3], 0).is_empty());
     }
 
     /// 帧集的 PSNR 取逐帧 dB 的算术平均, 逐帧值一并留着 ——
@@ -2055,6 +2133,13 @@ mod tests {
         let got = fold_quality_frames(&[s(Some(30.0)), s(Some(40.0)), s(Some(35.0))]);
         assert!((got.psnr_db.unwrap() - 35.0).abs() < 1e-9);
         assert_eq!(got.psnr_per_frame, vec![30.0, 40.0, 35.0]);
+
+        // 中间那张量不到时留 NaN 占位, 不塌缩 —— 否则下标跟 frame_files 错开,
+        // "第 3 张最差" 会指到另一张图上。
+        let holey = fold_quality_frames(&[s(Some(30.0)), s(None), s(Some(40.0))]);
+        assert_eq!(holey.psnr_per_frame.len(), 3);
+        assert!(holey.psnr_per_frame[1].is_nan());
+        assert!((holey.psnr_db.unwrap() - 35.0).abs() < 1e-9, "均值不该把 NaN 算进去");
     }
 
     /// 一项都没量到就如实留空, 不拿 0 顶上 —— 「没量」和「0 dB」是两回事。
@@ -2063,7 +2148,9 @@ mod tests {
         let got = fold_quality_frames(&[QualitySample::default(), QualitySample::default()]);
         assert_eq!(got.psnr_db, None);
         assert_eq!(got.hud_ghost_db, None);
-        assert!(got.psnr_per_frame.is_empty());
+        // 逐帧位置仍在 (与 frame_files 对齐), 只是每个都是 NaN → 序列化成 null。
+        assert_eq!(got.psnr_per_frame.len(), 2);
+        assert!(got.psnr_per_frame.iter().all(|v| v.is_nan()));
     }
 
     /// 报告必须写清楚 dB 是对着什么量的: 绝对 dB 不可跨参考图比较,
