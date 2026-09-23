@@ -1,8 +1,21 @@
-# knobs — 可改动面：黑盒系统旋钮 + 灰盒 API 注入层
+# knobs — 可改动面：黑档系统参数 + 灰档 Vulkan 层
 
-给本仓库的 [`../loop_v1`](../loop_v1) harness 提供**能改什么**：
-黑档是系统级开关（DVFS / 限帧 / 热 / 调度 / 刷新率），灰档是 Vulkan layer 注入
-（render pass 观测 + LoadOp/精度/分辨率/shader 改写）。跑测分离——本仓库不碰编排/采集/判定。
+回答「能改什么」这一侧的问题。黑档是系统级开关（DVFS / 限帧 / 热 / 调度 / 刷新率），
+灰档是 Vulkan layer 注入（render pass 观测，以及 LoadOp / 精度 / 分辨率 / shader 改写）。
+改动由 [`../loop_v1`](../loop_v1) 驱动施加，本目录不碰编排、采集与判定——
+能改的一方不参与判定，否则证据不成立。
+
+## 在整体里的位置
+
+整套东西是一个 harness：用户只提一种任务「把某个游戏在某台手机上优化一下」，
+内部决定开哪几层。phonefarm 是底座，本目录是底座里「应用改动」那一块。
+
+优化分三个层级：① 游戏代码（需要白盒，本目录管不到）② 图形接口 Vulkan 层（灰档）
+③ 系统参数（黑档）。闭源商用游戏上只剩 ②③，这两档就是本目录的全部内容。
+鸿蒙商用机在没有 root 的情况下两档都动不了，只能用 HiSmartPerf 测。
+
+本目录原先是独立仓库 `HGamey/knobs`，2026-09-23 并入 `phonefarm/knobs/`（保留提交历史），
+原仓库已归档。引用路径请写 `phonefarm/knobs/…`。shell 脚本正在往 Rust 内核里收，尚未完成。
 
 - 为什么、边界、判据、灰档可行性三问 → [`DESIGN.md`](DESIGN.md)
 - 旋钮接口（`apply`/`restore`/`status` + 自报）→ [`contract/knob.md`](contract/knob.md)
@@ -18,7 +31,7 @@ bash gray/build/build_layer.sh              # NDK 直编 + DT_NEEDED 自检
 bash gray/enable_layer.sh probe             # 对 refbench 挂只读层 (问题 1) ✅ 成立
 bash gray/enable_layer.sh loadop            # 同上 + 打开 LoadOp 改写 (判据 5) ✅ 成立
 bash gray/test_loadop.sh                    # 四臂对照, 证据落 evidence/05_loadop/
-bash gray/enable_layer.sh target <目标包名>  # 对目标游戏挂空层 (问题 2) ⚠ 部分成立
+bash gray/enable_layer.sh target <目标包名>  # 对目标游戏挂空层 (问题 2) ✅ 成立
 bash gray/enable_layer.sh status            # 只读看当前挂载态
 bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清扫)
 ```
@@ -49,11 +62,32 @@ bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清�
 **黑档**：`black/knob_framecap.sh` 仍是接口骨架（限帧解除，判据 6 的关键），
 控制点待真机确认再落实现——未确认前安全空转，不乱写系统状态。
 
+## 换了游戏版本之后
+
+客户端更新到 7.1.0 才通的大世界，代价是两条：
+
+- **loop_v1 已采的历史基线作废**，7.0.0 与 7.1.0 的数不能混在一起比。
+- **手柄注入在 7.1.0 上失效**。原来的手柄脚本跑出来是静止画面，而静止画面照样采得到
+  帧率、功耗、温度，报告看着一切正常——这种失败不会自己报错。现在负载改用触控版
+  [`gray/workload_spin_touch_v1.json`](gray/workload_spin_touch_v1.json)，并且用
+  `loop_v1/tools/frames_moving.py` 抓窗口内两张裸帧算逐像素差，确认画面真的在动
+  （交叉核对那一轮量到 10.458%，静止画面实测约 1%）。
+
+顺带更正一条旧说法：过去把原神封在 30fps 归因成「厂商限帧」，那是 7.0.0、当时那套
+游戏设置下的观测。7.1.0、游戏内 60 帧设置下同一台机器实测就是 60fps，
+`gpu_active_mean` 约 13.3ms/帧（`evidence/06_genshin_world/ab_report.json`）。
+当时为什么封在 30fps 还没核实。
+
 ## 下一步
 
-1. **补上大世界这一环**：原神装机版本落后，登录要求先更新客户端。要不要更新得人来定——
-   换版本会作废 loop_v1 已采的历史基线。在那之前问题 2 只能停在「部分成立」。
-2. **先在 refbench 上做 LoadOp→DONT_CARE 改写**：白档靶子有已知答案，不依赖原神能否登录，
-   可独立推进判据 5。任何改写都要配有/无层对照——只读层曾经把 refbench 的 swapchain
-   弄成 0×0 而**全程不报错**，"没报错"不等于"没弄坏"。
-3. 鸿蒙机制调研（问题 3），等设备。
+1. **换一条更直接削工作量的灰档改写**。LoadOp→DONT_CARE 在 refbench 上判据成立，
+   到了原神大世界是「命中但无效果」（p=0.325）——被改的 pass 本就不是带宽瓶颈，
+   或者 Adreno 这类 tile-based GPU 上 `LOAD` 的代价本来就小。这条不值得再投入，
+   下一条候选挑 RT 精度或分辨率。
+2. **黑档补上限帧解除**（判据 6 的关键）。`black/knob_framecap.sh` 仍是接口骨架，
+   控制点待真机确认再落实现，未确认前安全空转、不乱写系统状态。
+3. **鸿蒙机制调研**（问题 3），等设备。商用机没有 root 时灰黑两档都动不了，
+   可能的出路有工程机、官方性能接口、开发者模式下自签名应用三条，都还没核实。
+
+任何改写都要配有无层的对照——只读层曾经把 refbench 的 swapchain 弄成 0×0 而全程不报错，
+「没报错」不等于「没弄坏」。
