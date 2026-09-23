@@ -186,10 +186,10 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        analyze <A臂glob> [B臂glob] [--metric M]           (离散度 + 漂移 + 精确置换检验 + 置换反演 CI)
        frames-moving <raw1> <raw2>                        (两张 screencap 裸帧的平均逐像素差 %, 判画面动没动)
        crosscheck-report <轮目录>                         (两条采集通路并排对照表, 纯离线)
-载体:  vks-pick-comm <trace.txt> | vks-ready <run.log> | vks-crosscheck <run.log> <summary.json> [window.json]
-       (Vulkan-Samples 的三道闸: 挑提交线程 / 判渲染就绪 / 内核侧与应用侧对账, 全部纯离线)
        report --baseline <glob> [--knob <glob>] [--snap-before F] [--snap-after F]
               [--replay-result F] [--primary M]          (五条判据汇总成可字节复现的 report.json)
+载体:  vks-pick-comm <trace.txt> | vks-ready <run.log> | vks-crosscheck <run.log> <summary.json> [window.json]
+       (Vulkan-Samples 的三道闸: 挑提交线程 / 判渲染就绪 / 内核侧与应用侧对账, 全部纯离线)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]

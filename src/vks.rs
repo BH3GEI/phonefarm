@@ -161,13 +161,22 @@ pub fn fps_in_window(log_text: &str, window: &PyVal) -> Result<(Vec<f64>, bool),
 ///    中位数去比 12 秒的窗口, 遇上运行中途切换合成状态就会误杀好轮。
 pub fn crosscheck(log_text: &str, summary: &PyVal, window: &PyVal) -> Result<PyVal, String> {
     let (fps, windowed) = fps_in_window(log_text, window)?;
-    let trace_fps = summary.get("fps_mean").and_then(|v| v.as_f64());
+    let trace_fps_raw = summary.get("fps_mean").cloned().unwrap_or(PyVal::Null);
+    let trace_fps = trace_fps_raw.as_f64();
     // Python 的 `or 1`: null 与 0 都退回 1
     let spf = match summary.get("submits_per_frame").and_then(|v| v.as_f64()) {
         Some(v) if v != 0.0 => v,
         _ => 1.0,
     };
+    // Python 的 `trace_fps * spf`: 两个都是 int 就还是 int, 沾上 float 才是 float。
+    // 注意 `or 1` 兜底出来的 1 也是 int —— spf 只有在原值是个非零 float 时才是 float。
+    let spf_is_int = !matches!(summary.get("submits_per_frame"), Some(PyVal::Float(f)) if *f != 0.0);
     let submit_rate = trace_fps.map(|f| f * spf);
+    let submit_rate_val = match (&trace_fps_raw, spf_is_int, submit_rate) {
+        (PyVal::Int(a), true, _) => PyVal::Int(a * spf as i64),
+        (_, _, Some(v)) => PyVal::Float(py_round(v, 3)),
+        (_, _, None) => PyVal::Null,
+    };
     let log_fps = median_f64(&fps);
 
     let mut ratio: Option<f64> = None;
@@ -181,13 +190,13 @@ pub fn crosscheck(log_text: &str, summary: &PyVal, window: &PyVal) -> Result<PyV
     Ok(pyobj! {
         "log_fps_median" => log_fps,
         "windowed" => windowed,
-        "trace_fps_mean" => trace_fps,
+        "trace_fps_mean" => trace_fps_raw.clone(),
         // spf 原样回写: summary 里是 int 就该写 int
         "submits_per_frame" => match summary.get("submits_per_frame") {
             Some(v) if !matches!(v, PyVal::Null) && v.as_f64().is_some_and(|x| x != 0.0) => v.clone(),
             _ => PyVal::Int(1),
         },
-        "trace_submit_rate" => submit_rate.map(|v| py_round(v, 3)),
+        "trace_submit_rate" => submit_rate_val,
         "ratio_to_log_fps" => ratio.map(|v| py_round(v, 4)),
         "band" => vec![RATIO_MIN, RATIO_MAX],
         "in_band" => in_band,
@@ -217,11 +226,11 @@ pub fn run_pick_comm(args: &[String]) -> i32 {
     };
     let out = pick(&text, "adreno_cmdbatch_submitted");
     println!("{}", dumps_indent(&out, 2));
-    // 一条提交都没数到 = 这份 trace 说明不了任何事, 用退出码让调用方停下来
-    if matches!(out.get("comm"), Some(PyVal::Null)) {
-        1
-    } else {
-        0
+    // 一条提交都没数到、或者认出来的名字是空串 = 这份 trace 说明不了任何事,
+    // 用退出码让调用方停下来。Python 那边是 `0 if out["comm"] else 1`, 空串也算假。
+    match out.get("comm") {
+        Some(PyVal::Str(c)) if !c.is_empty() => 0,
+        _ => 1,
     }
 }
 
@@ -425,6 +434,39 @@ mod tests {
     #[test]
     fn malformed_fps_is_an_error() {
         assert!(crosscheck("FPS: 1.2.3\n", &PyVal::Obj(vec![]), &PyVal::Null).is_err());
+    }
+
+    /// `fps_mean` 与 `submits_per_frame` 都是 int 时, 提交速率也该是 int。
+    #[test]
+    fn crosscheck_keeps_int_ness_of_passthrough_fields() {
+        let v = crosscheck(
+            "FPS: 120.0\nFPS: 120.0\n",
+            &pyobj! { "fps_mean" => 40i64, "submits_per_frame" => 3i64 },
+            &PyVal::Null,
+        )
+        .unwrap();
+        assert_eq!(v.get("trace_fps_mean"), Some(&PyVal::Int(40)));
+        assert_eq!(v.get("trace_submit_rate"), Some(&PyVal::Int(120)));
+        assert_eq!(v.get("submits_per_frame"), Some(&PyVal::Int(3)));
+        // spf 缺失/为 0 时 `or 1` 兜底出来的也是 int
+        for spf in [PyVal::Null, PyVal::Int(0), PyVal::Float(0.0)] {
+            let v = crosscheck(
+                "FPS: 120.0\n",
+                &pyobj! { "fps_mean" => 40i64, "submits_per_frame" => spf.clone() },
+                &PyVal::Null,
+            )
+            .unwrap();
+            assert_eq!(v.get("trace_submit_rate"), Some(&PyVal::Int(40)), "{spf:?}");
+            assert_eq!(v.get("submits_per_frame"), Some(&PyVal::Int(1)), "{spf:?}");
+        }
+        // 原值是非零 float 时才是 float
+        let v = crosscheck(
+            "FPS: 120.0\n",
+            &pyobj! { "fps_mean" => 40i64, "submits_per_frame" => 2.0 },
+            &PyVal::Null,
+        )
+        .unwrap();
+        assert_eq!(v.get("trace_submit_rate"), Some(&PyVal::Float(80.0)));
     }
 
     /// 对照源: 旧 Python 版在同一份合成输入上的输出 (fixtures/vks/)。
