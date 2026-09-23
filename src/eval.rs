@@ -786,6 +786,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     // ── 设备准备 ──
     if !hwcond::root_ok(&device::Device::new(Some(serial.into()), std::env::temp_dir().to_string_lossy().into_owned())) {
         report["verdict"]["reason"] = json!("设备无 root: 系统参数与 ftrace 采集都需要 root");
+        report["evidence_dir"] = json!(evidence.display().to_string());
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
     push_tools(serial)?;
