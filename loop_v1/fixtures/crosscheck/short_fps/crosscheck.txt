@@ -1,0 +1,34 @@
+═══ 两通路并排 ═══
+  HiSmartPerf 采样点 29 条 (每秒一条)
+  sysfs 电源轨采样点 150 条 (每 200ms 一条)
+  ftrace 帧数 887 帧
+
+指标        │    HiSmartPerf │            我们的 │          差 │       相对 │ 说明
+───────────────────────────────────────────────────────────────────────────────────────
+帧率 fps    │      29.000fps │      29.556fps │     -0.556 │    -1.9% │ 口径不同: 见下
+帧时均值 ms   │       34.483ms │       33.831ms │     +0.652 │    +1.9% │ HiSmartPerf 侧是 1000/每秒fps 反推, 非逐帧测量
+帧时 p95 ms │            未测到 │       36.333ms │          — │        — │ 不可比: 安卓侧实时流没有逐帧间隔
+整机功耗 W    │         4.901W │         4.812W │     +0.089 │    +1.8% │ 同源 (battery/current_now x voltage_now), 本该对上
+SoC 温度 C  │        46.100C │        46.000C │     +0.100 │    +0.2% │ 同源 (/sys/class/thermal), 本该对上
+GPU 温度 C  │        44.000C │        44.100C │     -0.100 │    -0.2% │ 同源 (/sys/class/thermal), 本该对上
+电池温度 C    │        31.200C │        31.200C │     +0.000 │    +0.0% │ 同源 (/sys/class/thermal), 本该对上
+
+── 各通路自报的「这个字段为什么没有」 ──
+  HiSmartPerf fps_p95_ms: 实时流每秒只有一个整数 fps, 没有逐帧间隔
+  sysfs fps: sysfs 电源轨通路不出帧率
+  sysfs soc_temp_c: 这条通路只读电源轨
+
+── 窗口中点直读的热区 (非零者) ──
+  Battery: 31.2 C
+  cpu-1-0: 42.5 C
+  gpu: 44.1 C
+  soc_thermal: 46.0 C
+
+── HiSmartPerf 逐秒 fps 原始序列 ──
+  30 -1
+  首尾两秒是不完整的秒, 照样各算一条样本 —— 去掉之后均值 14.500 (全量 14.500)
+
+── HiSmartPerf 侧采集元数据 ──
+  pkg: com.miHoYo.Yuanshen
+  tool: GamePerfToolCollector
+  ver: 1.2.3

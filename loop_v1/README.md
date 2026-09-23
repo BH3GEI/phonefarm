@@ -84,7 +84,8 @@ tools/
   run_once.sh           一轮"负载 + 采集"的编排
 scripts/
   workload_spin_v1.json 定点匀速转视角负载 (手柄版, 原神 7.1.0 起已失效, 见上方说明)
-fixtures/               切片过的真实 trace + 旧 Python 版输出, Rust 侧 golden 对照用
+fixtures/               切片过的真实 trace、两通路对照的合成产物 + 旧 Python 版输出,
+                        Rust 侧 golden 对照用
 carriers/               测试载体: megacity / vulkan-samples / anki-sponza
 refbench/               白盒靶子的驱动侧 (靶子本身在同级 refbench 仓库)
 auto/                   自动挑旋钮: 白名单探测 → 冻结规则 → 大模型选参 → 逐组对照

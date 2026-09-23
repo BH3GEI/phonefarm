@@ -1,0 +1,22 @@
+{
+ "source": "android_smartperf",
+ "sample_count": 29,
+ "fps": 29,
+ "frame_time_mean_ms": 34.4828,
+ "fps_p95_ms": null,
+ "power_watt": 4.9011,
+ "soc_temp_c": 46.1,
+ "gpu_temp_c": 44.0,
+ "battery_temp_c": 31.2,
+ "meta": {
+  "tool": "GamePerfToolCollector",
+  "ver": "1.2.3",
+  "pkg": "com.miHoYo.Yuanshen"
+ },
+ "unavailable": [
+  {
+   "field": "fps_p95_ms",
+   "reason": "实时流每秒只有一个整数 fps, 没有逐帧间隔"
+  }
+ ]
+}
