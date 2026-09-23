@@ -169,29 +169,78 @@ def wait_cool(cool_c: float = COOL_C_FLOOR, timeout_s: int = COOL_TIMEOUT_S) -> 
         time.sleep(8)
 
 
-# 这几项由驱动按当前温度/负载自己改, 本闭环从不写它们。拿它们当「留痕」,
-# 会把「跑完比跑前热」误判成没还原干净, 一整组 5 对实验就白跑了。
-# 所以分两层报: strict 是原样的逐行 diff (什么都不藏), ours 只看
-# 「我们写过的那类项」—— 判定用 ours, 证据里两份都留。
-# kgsl.max_gpuclk 是 thermal_pwrlevel 对应的那个频率, 同样由驱动按温度自己改:
-# 实测探测前后 6 -> 4 / 646MHz -> 826MHz, 只是设备凉了一点, 不是我们留的痕。
-DRIVER_OWNED_PREFIXES = ("kgsl.thermal_pwrlevel", "kgsl.max_gpuclk")
+# 快照 key ←→ 设备路径的映射 (device_snapshot.sh 的命名与 sysfs 叶子名不一样)。
+# 用它把「这一组候选到底写过哪些项」翻译成快照里的 key。
+def snapshot_key_of(kind: str, path: str) -> str | None:
+    import re as _re
+    if kind == "setting":
+        return "settings." + path.split(":", 1)[-1]
+    m = _re.match(r"^/sys/devices/system/cpu/cpufreq/(policy\d+)/scaling_(min|max)_freq$", path)
+    if m:
+        return f"cpu.{m.group(1)}.scaling_{m.group(2)}"
+    m = _re.match(r"^/sys/devices/system/cpu/cpufreq/(policy\d+)/scaling_governor$", path)
+    if m:
+        return f"cpu.{m.group(1)}.governor"
+    m = _re.match(r"^/sys/class/kgsl/kgsl-3d0/(min|max)_pwrlevel$", path)
+    if m:
+        return f"kgsl.{m.group(1)}_pwrlevel"
+    m = _re.match(r"^/sys/devices/system/cpu/bus_dcvs/(\w+)/boost_freq$", path)
+    if m:
+        return f"bus.{m.group(1)}.boost_freq"
+    return None
 
 
-def classify_diff(sd: dict) -> dict:
-    """把快照 diff 拆成「我们留的痕」与「驱动自己动的」两堆。"""
-    ours, driver = [], []
+def touched_keys(cand: dict, wl: dict) -> set:
+    """这一组候选真正写过的快照 key (含回滚波及到的兄弟节点)。"""
+    out = set()
+    for pid in cand:
+        spec = wl.get(pid)
+        if not spec:
+            continue
+        paths = [spec["path"]]
+        # 与 knob_sysparam.sh 的 siblings() 同一套波及面
+        if "/cpufreq/policy" in spec["path"]:
+            d = os.path.dirname(spec["path"])
+            paths = [f"{d}/scaling_governor", f"{d}/scaling_max_freq", f"{d}/scaling_min_freq"]
+        elif spec["path"].endswith(("min_pwrlevel", "max_pwrlevel")):
+            paths = ["/sys/class/kgsl/kgsl-3d0/min_pwrlevel",
+                     "/sys/class/kgsl/kgsl-3d0/max_pwrlevel"]
+        for pth in paths:
+            k = snapshot_key_of(spec["kind"], pth)
+            if k:
+                out.add(k)
+    return out
+
+
+def classify_diff(sd: dict, ours_keys: set | None = None) -> dict:
+    """把快照 diff 拆成「我们留的痕」与「设备自己动的」两堆。
+
+    判据是**这一组候选到底写过哪些项**, 不是一张写死的 key 名单。原因是实测发现
+    红魔的厂商温控/性能管家在游戏过程中会主动改 `cpu.policyN.scaling_max` 与
+    `kgsl.max_pwrlevel`: 有一组候选只写了 DDR/LLCC 的 boost_freq, 退出时这三项
+    照样变了 (policy0 1785600->1228800, policy6 1497600->1382400, max_pwrlevel 2->0)。
+    同一轮里另一组把 policy6 的 min 写成 1497600, 回读是 1382400 —— 就是管家在压上限。
+
+    拿一张写死的名单去豁免这些 key 是不对的 (等于给自己开后门); 按「我们写没写过」
+    分类才站得住: 写过的项没回到原值 = 我们留的痕, 判 ABORT; 没写过的项变了 =
+    环境在动, 如实记进证据但不算我们的账。两层都落盘, 什么都不藏。
+    """
+    ours, env = [], []
     for d in sd.get("diffs", []) or []:
         key = (d.get("before") or "").split("=", 1)[0].strip()
-        (driver if key.startswith(DRIVER_OWNED_PREFIXES) else ours).append(d)
+        if ours_keys is None or key in ours_keys:
+            ours.append(d)
+        else:
+            env.append(d)
     return {
         "checked": sd.get("checked"),
         "n_lines": sd.get("n_lines"),
         "strict_identical": bool(sd.get("identical")),
         "strict_n_diff": sd.get("n_diff"),
         "ours_identical": not ours,
+        "ours_keys": sorted(ours_keys) if ours_keys is not None else None,
         "ours_diffs": ours,
-        "driver_owned_diffs": driver,
+        "environment_diffs": env,
     }
 
 
@@ -411,7 +460,8 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
     with open(os.path.join(outdir, "snap_after.txt"), "w") as f:
         f.write(snap_after)
     sd = classify_diff(snapshot_diff(os.path.join(outdir, "snap_before.txt"),
-                                     os.path.join(outdir, "snap_after.txt")))
+                                     os.path.join(outdir, "snap_after.txt")),
+                       touched_keys(params, wl))
 
     temps = [m.get("soc_temp_max_c") for _, m in knob_runs + ctrl_runs
              if m.get("soc_temp_max_c") is not None]
@@ -546,7 +596,7 @@ def main() -> int:
                                            os.path.join(out, "snap_after_probe.txt")))
     log(f"探测后快照一致 (我们写过的项): {probe_sd.get('ours_identical')}; "
         f"严格逐行一致: {probe_sd.get('strict_identical')} "
-        f"(驱动自己动的 {len(probe_sd.get('driver_owned_diffs') or [])} 行)")
+        f"(设备自己动的 {len(probe_sd.get('environment_diffs') or [])} 行)")
 
     if a.probe_only:
         with open(os.path.join(out, "report.json"), "w") as f:
@@ -706,8 +756,8 @@ def main() -> int:
     else:
         su(f"rm -f {DEV_TMP}/loop_v1_sysparam.state {DEV_TMP}/loop_v1_knob_ddr.state")
     # 收尾快照前先等冷: 进入前那份快照是在冷机状态下采的, 刚跑完游戏就采会让
-    # 驱动自己按温度改的那几项对不上 —— 那是热态差异, 不是留痕。等不下来也继续,
-    # classify_diff 会把这类项单独归到 driver_owned 里如实报出来。
+    # 厂商管家按温度改的那几项对不上 —— 那是热态差异, 不是留痕。等不下来也继续,
+    # classify_diff 会把这类项单独归到 environment_diffs 里如实报出来。
     fin_cool = wait_cool(cool_target)
     log(f"收尾等冷: {fin_cool}")
     snap_final = snapshot()

@@ -29,5 +29,6 @@ loop_v1/runs_sysparam/**/*.txt.gz
 loop_v1/auto/__pycache__/
 loop_v1/runs_graylayer/
 loop_v1/runs_sysparam/**/env.txt
-runs_sysparam/**/*.raw
 loop_v1/runs_sysparam/**/*.png
+# 裸帧 (负载自检用, 每张 13MB); 判定结论在 spin_check.json 里, 够作证
+loop_v1/runs_sysparam/**/*.raw
