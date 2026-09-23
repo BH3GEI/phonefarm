@@ -512,19 +512,21 @@ impl<'a> Session<'a> {
             Ok((ctl, ctl_port, data, data_port, version)) => {
                 crate::hwcond::progress(
                     "gpd",
-                    &format!("控制通道 tcp:{ctl_port} · 数据通道 tcp:{data_port} · 采集器 {}",
-                        version.as_deref().unwrap_or("?")),
+                    &format!(
+                        "控制通道 tcp:{ctl_port} · 数据通道 tcp:{data_port} · 采集器 {}",
+                        version.as_deref().unwrap_or("?")
+                    ),
                 );
                 Ok(Session {
-                phone,
-                ctl,
-                data,
-                ctl_port,
-                data_port,
-                daemon: Some(daemon),
-                version: version.or(Some(pushed)),
-                buf: String::new(),
-            })
+                    phone,
+                    ctl,
+                    data,
+                    ctl_port,
+                    data_port,
+                    daemon: Some(daemon),
+                    version: version.or(Some(pushed)),
+                    buf: String::new(),
+                })
             }
             Err(e) => {
                 // 连不上也要把刚起的常驻进程收掉, 否则它会一直挂在设备上

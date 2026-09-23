@@ -203,11 +203,7 @@ impl Default for AndroidSmartPerf {
 /// 就是拿秒级口径冒充逐帧口径 —— 一次 200 ms 的卡顿摊进那一秒的 30 帧里几乎看不见,
 /// 而 `fps_p95_ms` 正是用来抓这种卡顿的。故这里 `fps_p95_ms` 恒为 `null` 并写明原因,
 /// 逐帧 p95 只认 ftrace/Vulkan 时间戳那条路。
-pub fn summarize_android_smartperf(samples: &[gpdaemon::GpSample]) -> PerfSnapshot {
-    summarize_android_smartperf_with(samples, None)
-}
-
-/// 同上, 但额外带上 `/sys/class/power_supply/battery/status`。
+/// `battery_status` 是 `/sys/class/power_supply/battery/status` 的原值。
 ///
 /// **为什么必须带**: 可信区间 (`POWER_MIN_W..POWER_MAX_W`) 只拦得住充电时那种几千瓦的
 /// 毛刺; 拦不住「充电电流与系统耗电正好抵消」的情形 —— 2026-09-23 实测这台红魔插着 USB 时
@@ -215,7 +211,7 @@ pub fn summarize_android_smartperf(samples: &[gpdaemon::GpSample]) -> PerfSnapsh
 /// 只不过那几瓦是从 USB 来的、没走电池轨。一个「看起来合理」的错数比一个越界的错数危险得多:
 /// 越界的会被拦下, 合理的会被下游当成实测功耗拿去做 A/B 裁决。
 /// 所以充电态一律作废功耗, 不看数值大小。
-pub fn summarize_android_smartperf_with(
+pub fn summarize_android_smartperf(
     samples: &[gpdaemon::GpSample],
     battery_status: Option<&str>,
 ) -> PerfSnapshot {
@@ -388,7 +384,7 @@ impl PerfSource for AndroidSmartPerf {
                 return snap;
             }
         };
-        let mut snap = summarize_android_smartperf_with(
+        let mut snap = summarize_android_smartperf(
             &samples,
             if status.is_empty() { None } else { Some(status.as_str()) },
         );
@@ -853,7 +849,7 @@ mod tests {
             PowerRail::Usb,
         );
         let h = summarize_harmony(&parse_sp_csv(SP_CSV));
-        let g = summarize_android_smartperf(&gp_samples());
+        let g = summarize_android_smartperf(&gp_samples(), None);
         assert_eq!(keys_of(&a), keys_of(&h), "两种来源的 JSON 字段集合必须逐字相同");
         assert_eq!(keys_of(&a), keys_of(&g), "第三条通路也必须是同一份字段");
         assert_eq!(a.source, SRC_ANDROID_SYSFS);
@@ -879,7 +875,7 @@ soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
     fn android_smartperf_never_reports_a_per_frame_p95() {
         // 实时流每秒只有一个整数 fps。由它反推的秒级帧时算 p95, 会把 200 ms 的卡顿
         // 摊进那一秒的几十帧里 —— 而 fps_p95_ms 正是用来抓这种卡顿的。
-        let g = summarize_android_smartperf(&gp_samples());
+        let g = summarize_android_smartperf(&gp_samples(), None);
         assert!(g.fps.is_some());
         assert!(g.frame_time_mean_ms.is_some());
         assert_eq!(g.fps_p95_ms, None, "秒级口径不能冒充逐帧 p95");
@@ -891,7 +887,7 @@ soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
 
     #[test]
     fn android_smartperf_summarises_the_real_device_numbers() {
-        let g = summarize_android_smartperf(&gp_samples());
+        let g = summarize_android_smartperf(&gp_samples(), None);
         assert_eq!(g.sample_count, 2);
         assert!((g.fps.unwrap() - 59.5).abs() < 1e-9);
         // 1420 mA x 4.108 V 与 1502 mA x 4.103 V 的均值
@@ -909,7 +905,7 @@ soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
         let wire = "{fps:60;current:-1420000;voltage:4108000;}\
 {fps:60;current:-724805000;voltage:4212000;}";
         let (s, _) = gpdaemon::parse_stream(wire);
-        let g = summarize_android_smartperf(&s);
+        let g = summarize_android_smartperf(&s, None);
         assert_eq!(g.power_watt, None);
         assert!(g.unavailable.iter().any(|u| u.field == "power_watt" && u.reason.contains("充电")));
     }
@@ -921,18 +917,18 @@ soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
         let wire = "{fps:30;current:-66000;voltage:4207000;}{fps:30;current:-87000;voltage:4206000;}";
         let (s, _) = gpdaemon::parse_stream(wire);
         // 不带状态: 读数落在窗口内, 照常报出来
-        let free = summarize_android_smartperf(&s);
+        let free = summarize_android_smartperf(&s, None);
         assert!(free.power_watt.is_some(), "这个量级本来就在可信区间里, 区间拦不住");
         assert!(free.power_watt.unwrap() < 0.5);
         // 带上充电状态: 作废
-        let charging = summarize_android_smartperf_with(&s, Some("Charging"));
+        let charging = summarize_android_smartperf(&s, Some("Charging"));
         assert_eq!(charging.power_watt, None);
         assert!(charging
             .unavailable
             .iter()
             .any(|u| u.field == "power_watt" && u.reason.contains("Discharging")));
         // 放电态才算数
-        let ok = summarize_android_smartperf_with(&s, Some("Discharging"));
+        let ok = summarize_android_smartperf(&s, Some("Discharging"));
         assert_eq!(ok.power_watt, free.power_watt);
     }
 
