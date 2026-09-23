@@ -39,8 +39,14 @@ from report import snapshot_diff                            # noqa: E402
 import whitelist as WL                                      # noqa: E402
 import verdict as V                                         # noqa: E402
 import llm as LLM                                           # noqa: E402
+import spin_check as SPIN                                   # noqa: E402
 
 SERIAL = os.environ.get("SERIAL", "91253241019A")
+# 原神 7.1.0 之后手柄注入失效 (且失效是安静的: 脚本跑完、有帧时序, 但视角不转),
+# 所以默认负载换成触控拖拽版。旧的手柄版留在 scripts/ 里只供回溯历史证据。
+WORKLOAD = os.environ.get(
+    "WL", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "scripts", "workload_spin_touch_v1.json"))
 
 
 def _find_adb() -> str:
@@ -178,6 +184,43 @@ def classify_diff(sd: dict) -> dict:
     }
 
 
+# ── 负载自检: 视角到底转没转 ──
+
+def screencap_raw(timeout: int = 30) -> bytes:
+    r = subprocess.run([ADB, "-s", SERIAL, "exec-out", "screencap"],
+                       capture_output=True, timeout=timeout)
+    return r.stdout
+
+
+def check_spin(outdir: str) -> dict:
+    """跑一次拖拽, 中途抓两帧, 确认画面真的在动。
+
+    这一步不是可选的保险, 是必需的: 原神 7.1.0 之后手柄注入安静失效 ——
+    脚本照常跑完、ftrace 照样有帧时序, 只是采到的是静止画面。那种数据看起来
+    完全正常, 混进 A/B 比较里没有任何一处会报错。
+    """
+    os.makedirs(outdir, exist_ok=True)
+    # 拖 12 秒 (与负载同一条命令), 后台跑; 期间抓两帧
+    drag = subprocess.Popen(
+        [ADB, "-s", SERIAL, "shell", "input swipe 900 400 2000 400 12000"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(3)
+    a = screencap_raw()
+    time.sleep(5)
+    b = screencap_raw()
+    try:
+        drag.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        drag.kill()
+    for name, buf in (("spin_a.raw", a), ("spin_b.raw", b)):
+        with open(os.path.join(outdir, name), "wb") as f:
+            f.write(buf)
+    v = SPIN.verdict(a, b)
+    with open(os.path.join(outdir, "spin_check.json"), "w") as f:
+        json.dump(v, f, ensure_ascii=False, indent=1)
+    return v
+
+
 # ── 停充 (测功耗的前提) ──
 
 def charge_suspend() -> str:
@@ -204,7 +247,8 @@ def run_one(label: str, outdir: str, lead: int = 6, capdur: int = 30) -> dict:
     """跑一轮负载 + ftrace 采集 + 功耗温度采样, 返回合并后的指标。"""
     os.makedirs(outdir, exist_ok=True)
     env = dict(os.environ)
-    env.update({"SERIAL": SERIAL, "ROOT": ROOT, "LEAD": str(lead), "CAPDUR": str(capdur)})
+    env.update({"SERIAL": SERIAL, "ROOT": ROOT, "LEAD": str(lead), "CAPDUR": str(capdur),
+                "WL": WORKLOAD})
     env["PATH"] = env.get("PATH", "") + ":" + os.path.dirname(ADB)
 
     # 功耗/温度采样与 ftrace 并行: 覆盖整段负载, 间隔 2s
@@ -499,7 +543,20 @@ def main() -> int:
                       ensure_ascii=False, indent=1)
         return 0
 
-    # 3) 基线: 量基准温度与功耗可用性, 用来冻结温度上限
+    # 3) 负载自检: 视角真的在转才继续 —— 不做这一步就可能采一堆静止画面的数
+    spin = check_spin(os.path.join(out, "spin_check"))
+    log(f"负载自检: 画面变化 {spin.get('moved_fraction')} (门槛 {spin.get('gate')}) "
+        f"→ {'转起来了' if spin.get('spinning') else '没在转'}")
+    if not spin.get("spinning"):
+        log(f"负载没生效, 不采任何数据: {spin.get('note') or spin.get('error')}")
+        with open(os.path.join(out, "report.json"), "w") as f:
+            json.dump({"whitelist": wl, "probe_residue": probe_sd,
+                       "spin_check": spin,
+                       "aborted": "负载自检未通过: 视角没在转, 采到的会是静止画面"},
+                      f, ensure_ascii=False, indent=1)
+        return 3
+
+    # 4) 基线: 量基准温度与功耗可用性, 用来冻结温度上限
     log(f"跑 {a.baseline_runs} 轮基线 (不加任何参数), 用于冻结温度上限与确认功耗可测 ...")
     cool = wait_cool()
     log(f"基线前等冷: {cool}")
@@ -538,7 +595,7 @@ def main() -> int:
     cool_target = min(max(COOL_C_FLOOR, round((base_start_c or COOL_C_FLOOR) + 1.0, 1)),
                       temp_cap - 2.0)
 
-    # 4) **在看到任何候选数据之前**冻结判定规则
+    # 5) **在看到任何候选数据之前**冻结判定规则
     rule = V.rule_doc(temp_cap, a.pairs, power_available, power_note)
     rule["power_measurable"] = power_measurable
     rule["power_in_verdict_mode"] = a.power_in_verdict
@@ -578,7 +635,7 @@ def main() -> int:
         gdir = os.path.join(out, f"gen{gen}")
         os.makedirs(gdir, exist_ok=True)
 
-        # 5) 大模型挑参数 (失败降级到本地变异器)
+        # 6) 大模型挑参数 (失败降级到本地变异器)
         cands: list[dict] = []
         source = "local_mutate"
         if keys:
@@ -610,7 +667,7 @@ def main() -> int:
         with open(os.path.join(gdir, "candidates.json"), "w") as f:
             json.dump({"source": source, "candidates": valid}, f, ensure_ascii=False, indent=1)
 
-        # 6) 逐组上真机
+        # 7) 逐组上真机
         for ci, cand in enumerate(valid, 1):
             cdir = os.path.join(gdir, f"cand{ci}")
             log(f"[gen{gen}/cand{ci}] {json.dumps(cand['params'], ensure_ascii=False)}")
@@ -623,7 +680,7 @@ def main() -> int:
                             "per_metric": res.get("per_metric", {})})
             log(f"[gen{gen}/cand{ci}] 判定 {res['verdict']}: {res.get('reason')}")
 
-    # 7) 收尾: 强制还原 (旋钮 + 充电) + 全局快照比对
+    # 8) 收尾: 强制还原 (旋钮 + 充电) + 全局快照比对
     charge_restore()
     fin_restore = su(f"sh {DEV_TMP}/knob_sysparam.sh restore", want_status=True)
     if "KNOB_RESTORE_FAIL" in fin_restore or "#adb_exit=" in fin_restore:
@@ -646,6 +703,8 @@ def main() -> int:
     fan_states = sorted({m.get("fan_state") for _, m in base_runs if m.get("fan_state")})
     report = {
         "goal": "系统参数全自动闭环 (原神实测)",
+        "workload": os.path.basename(WORKLOAD),
+        "spin_check": spin,
         # 测试条件: 主动散热风扇自己耗电, 会进功耗读数。风扇开关前后的数据不能混着比,
         # 所以把当次的风扇状态原样记进报告 —— 它不是被调的参数, 是本次实验的前提条件。
         "test_conditions": {
