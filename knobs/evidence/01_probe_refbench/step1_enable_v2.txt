@@ -1,0 +1,15 @@
+### 命令: bash gray/enable_layer.sh probe   (2026-09-23 05:28:33)
+/Users/mac/projects/knobs/gray/build/out/libVkLayer_refknobs.so: 1 file pushed, 0 skipped. 375.2 MB/s (2931096 bytes in 0.007s)
+-rwxr-xr-x 1 system system u:object_r:apk_data_file:s0  2931096 2026-09-23 20:28 /data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so
+层宿主: io.github.hgamey.refbench
+落点:   /data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so
+已挂层于 io.github.hgamey.refbench (层来自 io.github.hgamey.refbench)。启动它, 然后查:
+  adb -s 91253241019A shell su -c 'cat /storage/emulated/0/Android/data/io.github.hgamey.refbench/files/knobs_layer_out.json'
+  adb -s 91253241019A shell su -c 'logcat -b main -d' | grep -i vulkan   # 加载器自己的判定
+
+### status
+enable_gpu_debug_layers      = 1
+gpu_debug_app                = io.github.hgamey.refbench
+gpu_debug_layer_app          = io.github.hgamey.refbench
+gpu_debug_layers             = VK_LAYER_refknobs_readonly
+-rwxr-xr-x 1 system system u:object_r:apk_data_file:s0  2931096 2026-09-23 20:28 /data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so

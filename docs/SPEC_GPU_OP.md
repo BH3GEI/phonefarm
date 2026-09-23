@@ -322,7 +322,7 @@ USB 轨待机读数 5.127V x 0.144A = 0.738 W, 随负载变化。
 `vkop_runner` **尚未构建**。工具链是齐的 ——
 NDK r28 (`/opt/homebrew/share/android-commandlinetools/ndk/28.2.13676358`),
 clang 19, Vulkan 头文件与 `libvulkan.so` stub 均在位;
-同级 `../refbench/build/build.sh` 与 `../knobs/gray/build/build_layer.sh`
+同级 `../refbench/build/build.sh` 与本仓库 `knobs/gray/build/build_layer.sh`
 已有零交互直编 arm64-v8a 的成例, 照搬即可。
 
 在此之前 `phonefarm gpu-op` 会走完「读契约 → 预检 SPIR-V → root 检查 → 找 runner」

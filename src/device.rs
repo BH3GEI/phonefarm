@@ -522,6 +522,32 @@ impl Adb {
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
     }
 
+    /// 端口转发: 本机 `tcp:<local>` → 设备 `tcp:<remote>`。
+    ///
+    /// 给安卓侧 HiSmartPerf 通路用 —— 设备端采集器只在设备本地监听 TCP,
+    /// 不 forward 就够不着它。失败要能看见原因 (端口被占、设备掉线),
+    /// 故走 stderr 判定而不是看 stdout 空不空: `adb forward` 成功时本来就不打印东西。
+    pub fn forward(&self, local: u16, remote: u16) -> Result<(), String> {
+        let mut cmd = Command::new(&self.bin);
+        if let Some(s) = &self.serial {
+            cmd.arg("-s").arg(s);
+        }
+        let out = cmd
+            .args(["forward", &format!("tcp:{local}"), &format!("tcp:{remote}")])
+            .output()
+            .map_err(|e| format!("起不了 adb forward: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    }
+
+    /// 撤掉一条端口转发。用完必须撤 —— 留着会占住本机端口, 下一轮换个端口就是慢性泄漏。
+    pub fn forward_remove(&self, local: u16) {
+        self.run_timeout(&["forward", "--remove", &format!("tcp:{local}")], 5_000);
+    }
+
     /// 送文件上设备(CTS 差量部署用);返回设备侧是否出现非空文件
     pub fn push_file(&self, local: &str, remote: &str) -> bool {
         self.run_timeout(&["push", local, remote], 120_000);
@@ -1124,6 +1150,20 @@ impl Device {
     /// 送文件上设备(CTS 差量部署)
     pub fn push_file(&self, local: &str, remote: &str) -> bool {
         match self { Device::Adb(d) => d.push_file(local, remote), Device::Hdc(d) => d.push_file(local, remote) }
+    }
+    /// 端口转发 本机 tcp:local → 设备 tcp:remote(安卓侧 HiSmartPerf 采集器要用)
+    pub fn forward(&self, local: u16, remote: u16) -> Result<(), String> {
+        match self {
+            Device::Adb(d) => d.forward(local, remote),
+            // hdc 有自己的 fport, 但鸿蒙侧的 HiSmartPerf 走的是 SP_daemon 落盘, 用不上转发
+            Device::Hdc(_) => Err("hdc 后端未实现端口转发".into()),
+        }
+    }
+    /// 撤掉一条端口转发
+    pub fn forward_remove(&self, local: u16) {
+        if let Device::Adb(d) = self {
+            d.forward_remove(local)
+        }
     }
     /// 拉回设备文件/目录(CTS 结果提取;单次 best-effort,产物由调用方验证)
     pub fn pull(&self, remote: &str, local: &str) -> bool {

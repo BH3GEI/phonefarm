@@ -1,0 +1,22 @@
+灰档层激活机制 四格对照 (NX809J / Android 16 / user 版 / Magisk root, 2026-09-23)
+目标应用 io.github.hgamey.refbench (非 debuggable, release 装机)
+.so 已放进 refbench 自己的 nativeLibraryDir; 判据 = 外部 files 目录出现 knobs_layer_out.json
+
+  settings global gpu_debug_* 全程保持"已设置"                     结果
+  ------------------------------------------------------------------------
+  A: ro.debuggable=1 + debug.vulkan.layers=VK_LAYER_refknobs_readonly   挂上了
+  B: ro.debuggable=0 + debug.vulkan.layers=VK_LAYER_refknobs_readonly   挂上了
+  C: ro.debuggable=1 + debug.vulkan.layers=<空>                         没挂上
+  D: ro.debuggable=0 + debug.vulkan.layers=<空>                         没挂上
+
+  E: settings global gpu_debug_* 全部删除 + debug.vulkan.layers=层名     挂上了
+
+结论:
+  - debug.vulkan.layers 是充分必要条件 (B 成立, C/D 不成立, E 成立)
+  - ro.debuggable 无关 (A vs B 同结果) —— 测完已 resetprop 还原为 0
+  - settings put global enable_gpu_debug_layers / gpu_debug_app /
+    gpu_debug_layers / gpu_debug_layer_app 这套**在本机完全不生效** (E 成立)。
+    框架侧 GraphicsEnvironment 因应用非 debuggable 且 ro.debuggable=0 直接跳过,
+    logcat 里连 "GPU debug layers enabled" / "Debug layer list" 都不打。
+  - .so 必须落在**目标应用自己的 nativeLibraryDir**; 该目录对每个应用都默认被搜
+    (实测无关系统应用 cn.nubia.gamelab 启动时同样在搜它自己的 lib 目录)

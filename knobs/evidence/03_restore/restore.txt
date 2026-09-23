@@ -1,0 +1,25 @@
+### 再跑一次 off (带残留清扫)  (2026-09-23 05:46:49)
+已清理残留 /data/app/~~-yM-SItgHTvICN6qZIoavA==/io.github.hgamey.refbench-XLIAq4hjKLyIRu-IoZ5JRQ==/lib/arm64/libVkLayer_refknobs.so
+已摘层。回读:
+  debug.vulkan.layers = []
+  state               = []
+  enable_gpu_debug_layers = null
+  gpu_debug_app        = null
+  gpu_debug_layer_app  = null
+  gpu_debug_layers     = null
+
+### 最终还原核验
+ro.debuggable       = 0
+
+debug.vulkan.layers = []
+全盘搜 libVkLayer_refknobs.so / knobs_layer_state (应为空):
+---- 以上无输出 = 设备已还原 ----
+refbench lib 目录:
+librefbench.so
+=== 还原后 refbench 基线自检 ===
+ "swapchain": {"present_mode": "MAILBOX", "format": "R8G8B8A8_UNORM", "width": 2688, "height": 1216, "image_count": 5, "pre_transform": "0x2"},
+  {"name": "present_blit", "target": "swapchain", "load_op": "DONT_CARE", "store_op": "STORE", "width": 2688, "height": 1216, "format": "R8G8B8A8_UNORM"}
+ "frames_submitted": 3600,
+ "clean_exit": true
+层的 marker 应不存在:
+ls: /storage/emulated/0/Android/data/io.github.hgamey.refbench/files/knobs_layer_out.json: No such file or directory

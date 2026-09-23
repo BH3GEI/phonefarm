@@ -1,0 +1,24 @@
+### 先清掉 refbench 的挂载 (2026-09-23 05:41:32)
+已摘层。回读:
+  debug.vulkan.layers = []
+  state               = []
+  enable_gpu_debug_layers = null
+  gpu_debug_app        = null
+  gpu_debug_layer_app  = null
+  gpu_debug_layers     = null
+
+### 对原神挂只读空层
+Failed to write while dumping service package: Broken pipe
+/Users/mac/projects/knobs/gray/build/out/libVkLayer_refknobs.so: 1 file pushed, 0 skipped. 76.4 MB/s (2932632 bytes in 0.037s)
+-rwxr-xr-x 1 system system u:object_r:apk_data_file:s0  2932632 2026-09-23 20:41 /data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/lib/arm64/libVkLayer_refknobs.so
+已挂层于 com.miHoYo.Yuanshen
+  .so:  /data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/lib/arm64/libVkLayer_refknobs.so
+  prop: debug.vulkan.layers = VK_LAYER_refknobs_readonly
+查证据:
+  adb -s 91253241019A shell su -c 'cat /storage/emulated/0/Android/data/com.miHoYo.Yuanshen/files/knobs_layer_out.json'
+  adb -s 91253241019A shell su -c 'logcat -b main -d' | grep refknobs
+
+### status
+debug.vulkan.layers = [VK_LAYER_refknobs_readonly]
+state = com.miHoYo.Yuanshen|/data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/lib/arm64  (处于施加态)
+-rwxr-xr-x 1 system system u:object_r:apk_data_file:s0  2932632 2026-09-23 20:41 /data/app/~~qroZCe3ukaRKYySNxYSAdg==/com.miHoYo.Yuanshen-fposmSy3jFCjFKoJMApXZw==/lib/arm64/libVkLayer_refknobs.so
