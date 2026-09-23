@@ -1715,11 +1715,32 @@ fn run_quality_pass(
         references.iter().map(Some).collect()
     };
 
+    // 一张跑挂不作废整臂: 16 张里第 9 张碰上一次 adb 抖动, 不该把另外 15 张
+    // 真跑出来的 dB 一起扔掉 —— 那跟"补测失败不作废主测"是同一条道理。
+    // 挂掉的那张留 NaN 占位 (下标仍与 frame_files 对齐), 全挂才算这臂失败。
     let arm = |spv: &str| -> Result<QualitySample, String> {
         let mut per_frame = Vec::with_capacity(slots.len());
+        let mut failures: Vec<String> = Vec::new();
         for (i, r) in slots.iter().enumerate() {
-            // 逐帧报错原样带上帧序号: 一组帧里坏了哪一张, 报告里要看得出来。
-            per_frame.push(one(spv, *r).map_err(|e| format!("第 {} 张参考帧: {e}", i + 1))?);
+            match one(spv, *r) {
+                Ok(s) => per_frame.push(s),
+                Err(e) => {
+                    // 报错带上帧序号: 一组帧里坏了哪一张, 日志里要看得出来。
+                    failures.push(format!("第 {} 张: {e}", i + 1));
+                    per_frame.push(QualitySample::default());
+                }
+            }
+        }
+        if failures.len() == slots.len() {
+            return Err(failures.join("; "));
+        }
+        if !failures.is_empty() {
+            progress(&format!(
+                "{spv} 画质补测有 {}/{} 张没跑出来 (该几张留空, 不参与均值): {}",
+                failures.len(),
+                slots.len(),
+                failures.join("; ")
+            ));
         }
         Ok(fold_quality_frames(&per_frame))
     };
@@ -1727,7 +1748,48 @@ fn run_quality_pass(
     // 基线先跑: 它跑不起来说明工装坏了, 候选的数字也就没有参照。
     let base = arm("baseline.spv").map_err(|e| format!("基线臂 {e}"))?;
     let cand = arm("candidate.spv").map_err(|e| format!("候选臂 {e}"))?;
-    Ok((base, cand))
+    Ok(align_arms(base, cand))
+}
+
+/// 两臂的均值必须来自**同一批**帧。
+///
+/// 一臂在第 9 张挂了而另一臂没挂时, 两个均值就落在不同的帧子集上 —— 那时候
+/// "候选比基线高 2 dB" 可能只是因为候选少算了一张高频最狠的帧。画质地板取的
+/// 就是基线臂均值, 这个偏差会直接变成误判。
+///
+/// 所以只保留两臂都量到的那些帧参与均值; 被剔掉的位置照旧留 NaN 占位,
+/// 逐帧数组仍与 `frame_files` 对齐。
+pub fn align_arms(base: QualitySample, cand: QualitySample) -> (QualitySample, QualitySample) {
+    let n = base.psnr_per_frame.len().min(cand.psnr_per_frame.len());
+    if n == 0 {
+        return (base, cand);
+    }
+    let both = |v: &[f64], i: usize| v.get(i).copied().unwrap_or(f64::NAN);
+    let keep: Vec<bool> = (0..n)
+        .map(|i| both(&base.psnr_per_frame, i).is_finite() && both(&cand.psnr_per_frame, i).is_finite())
+        .collect();
+    if keep.iter().all(|k| *k) {
+        return (base, cand);
+    }
+    let mask = |mut s: QualitySample| -> QualitySample {
+        s.psnr_per_frame = (0..n)
+            .map(|i| {
+                if keep[i] {
+                    both(&s.psnr_per_frame, i)
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect();
+        let kept: Vec<f64> = s.psnr_per_frame.iter().copied().filter(|v| v.is_finite()).collect();
+        s.psnr_db = if kept.is_empty() {
+            None
+        } else {
+            Some(gpustat::mean(&kept))
+        };
+        s
+    };
+    (mask(base), mask(cand))
 }
 
 /// 设备上不留任何残留。
@@ -2140,6 +2202,37 @@ mod tests {
         assert_eq!(holey.psnr_per_frame.len(), 3);
         assert!(holey.psnr_per_frame[1].is_nan());
         assert!((holey.psnr_db.unwrap() - 35.0).abs() < 1e-9, "均值不该把 NaN 算进去");
+    }
+
+    /// 两臂的均值必须来自同一批帧。一臂在某张上挂了, 另一臂那张也要剔掉 ——
+    /// 否则"候选比基线高 2 dB"可能只是因为候选少算了一张高频最狠的帧,
+    /// 而画质地板取的正是基线臂均值。
+    #[test]
+    fn the_two_arms_average_over_the_same_frames() {
+        let s = |v: Vec<f64>| QualitySample {
+            psnr_db: {
+                let k: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+                if k.is_empty() { None } else { Some(gpustat::mean(&k)) }
+            },
+            psnr_per_frame: v,
+            ..Default::default()
+        };
+        // 基线三张都有, 候选第 2 张挂了。
+        let (b, c) = align_arms(
+            s(vec![29.0, 20.0, 29.4]),
+            s(vec![31.0, f64::NAN, 31.4]),
+        );
+        // 剔掉第 2 张之后, 基线均值不该再被那张 20 dB 拉低。
+        assert!((b.psnr_db.unwrap() - 29.2).abs() < 1e-9, "{:?}", b.psnr_db);
+        assert!((c.psnr_db.unwrap() - 31.2).abs() < 1e-9, "{:?}", c.psnr_db);
+        // 位置留着, 仍与 frame_files 对齐。
+        assert_eq!(b.psnr_per_frame.len(), 3);
+        assert!(b.psnr_per_frame[1].is_nan());
+
+        // 两臂都齐时原样不动。
+        let (b2, c2) = align_arms(s(vec![29.0, 29.4]), s(vec![31.0, 31.4]));
+        assert_eq!(b2.psnr_per_frame, vec![29.0, 29.4]);
+        assert!((c2.psnr_db.unwrap() - 31.2).abs() < 1e-9);
     }
 
     /// 一项都没量到就如实留空, 不拿 0 顶上 —— 「没量」和「0 dB」是两回事。
