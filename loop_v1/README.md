@@ -78,14 +78,14 @@ tools/
   device_snapshot.sh    设备可变状态快照 (38 行), 进入前/退出后 diff = 判据 4
   ftrace_capture.sh     ftrace 采集, 自带四项状态存档与 trap 还原
   knob_ddr_boost.sh     旋钮: DDR/LLCC 总线下限钉到硬件上限, apply/restore/status
-  parse_trace.py        ftrace 文本 → 帧时序 + GPU 归因指标 (纯函数)
-  attribute.py          summary → "这一帧花在哪类开销上" (判据 2)
+  pf_bin.sh             解析 phonefarm 二进制路径 (供各脚本 source)
   analyze.py            离散度 + 漂移 + 精确置换检验 + 置换反演 CI (判据 1/3)
   report.py             五条判据汇总成一份可字节复现的 report.json
   replay_test.sh        离线回放自检 (判据 5)
   run_once.sh           一轮"负载 + 采集"的编排
 scripts/
   workload_spin_v1.json 定点匀速转视角负载 (手柄版, 原神 7.1.0 起已失效, 见上方说明)
+fixtures/               切片过的真实 trace + 旧 Python 版输出, Rust 侧 golden 对照用
 carriers/               测试载体: megacity / vulkan-samples / anki-sponza
 refbench/               白盒靶子的驱动侧 (靶子本身在同级 refbench 仓库)
 auto/                   自动挑旋钮: 白名单探测 → 冻结规则 → 大模型选参 → 逐组对照

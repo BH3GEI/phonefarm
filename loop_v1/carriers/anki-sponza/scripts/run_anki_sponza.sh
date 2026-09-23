@@ -24,6 +24,7 @@ SERIAL="${ANKI_SERIAL:-91253241019A}"
 PKG=org.anki.Sponza
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"   # -> phonefarm 仓库根
 TOOLS="$ROOT/loop_v1/tools"
+. "$TOOLS/pf_bin.sh"
 COOL_TO="${ANKI_COOL_MC:-40000}"
 POSTFX_SPV="${ANKI_POSTFX_SPV:-/data/local/tmp/candidate.spv}"
 
@@ -81,7 +82,7 @@ done
 # 6) 收证据: 靶子自报 JSON + 轮末快照 + 解析
 adb -s "$SERIAL" pull "$APPFILES/anki_sponza_out.json" "$OUTDIR/anki_sponza_out.json" >/dev/null
 ashell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDIR/snap_after_run.txt" 2>&1
-python3 "$TOOLS/parse_trace.py" "$OUTDIR/trace.txt" --comm AnkiDrv > "$OUTDIR/summary.json"
+"$PF" parse-trace "$OUTDIR/trace.txt" --comm AnkiDrv > "$OUTDIR/summary.json"
 
 # 7) 轮内有效性判定: 采集窗有热事件 / 非干净退出 → 无效 (证据保留, 不进样本)
 NT=$(python3 -c "import json;print(json.load(open('$OUTDIR/summary.json'))['n_thermal_events'])")

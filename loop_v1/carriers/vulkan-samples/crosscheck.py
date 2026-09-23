@@ -8,7 +8,7 @@
 其实什么都没画"。只靠"等一会儿再开采"挡不住这种轮, 因为等多久是设备/系统版本相关的。
 
 所以这里用两个**来源完全独立**的量互相对账:
-  · trace_fps  : 内核 kgsl tracepoint 的提交节奏 (parse_trace.py 算出的 fps_mean)
+  · trace_fps  : 内核 kgsl tracepoint 的提交节奏 (phonefarm parse-trace 算出的 fps_mean)
   · log_fps    : 样例自己的帧计数器 (fps_logger 每 0.5s 落一行)
 两者本该指向同一件事。差一个数量级 = 这一轮的采集窗没落在真实渲染上, 当场判无效。
 

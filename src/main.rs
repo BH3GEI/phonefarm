@@ -14,6 +14,7 @@ mod cli;
 mod cts;
 mod experiment;
 mod keepalive;
+mod looptrace;
 mod parallel;
 mod device;
 mod fold;
@@ -23,6 +24,7 @@ mod mtools;
 mod caps;
 mod gpdaemon;
 mod perfsrc;
+pub mod pyjson;
 mod smartperf;
 mod plugins;
 mod runtime;
@@ -167,6 +169,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (设备上已有 CTS/XTS 结果 → hdc file recv/adb pull 拉回 + 断言扫描 → assertions.json)
 任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神场景插件的独立长跑Agent)
 设备:  devices | keepalive [--status|--watch [秒]] [--serial S] [--json] | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
+解析:  parse-trace <trace.txt> [--full] [--comm 线程名]   (ftrace 文本 -> 帧时序/GPU 活跃/排队/带宽指标, 纯离线)
+       attribute <summary.json>                          (一轮 summary -> 主因判定 + 正交带宽维, 纯离线)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
@@ -645,6 +649,14 @@ fn main() {
             // Compute Shader 算子的真机标尺与 A/B 裁决: 等冷 + 锁频 + A/B/A/B 交替 +
             // Welch t 检验, 契约对齐 game_opt_loop/contracts。纯增量子命令。
             std::process::exit(gpuop::run_gpu_op(&args[1..]));
+        }
+        Some("parse-trace") => {
+            // ftrace 文本 → 帧时序 + GPU 归因指标。纯离线, 不碰设备, 同一份 trace 逐字节可复现。
+            std::process::exit(looptrace::run_parse_trace(&args[1..]));
+        }
+        Some("attribute") => {
+            // 一轮 summary.json → "这一帧的时间花在哪类开销上"。纯离线。
+            std::process::exit(looptrace::run_attribute(&args[1..]));
         }
         Some("perf") => {
             // 归一化性能快照: 安卓走 sysfs 电源轨, 鸿蒙走 HiSmartPerf(SP_daemon + Xpower),

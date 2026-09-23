@@ -1,0 +1,870 @@
+#loop_v1_meta capture_start_uptime=244092.11 capture_end_uptime=244104.13 duration_req=12
+#loop_v1_meta gpu_model=Adreno840v2
+#loop_v1_meta ddr_cur_khz=547000 ddr_max_khz=5333000
+#loop_v1_meta ddr_boost_khz=547000 llcc_boost_khz=282000
+#loop_v1_meta gpu_busy= 342122 1000083 gpu_clk=646000000
+#loop_v1_meta thermal_pwrlevel=4 min_pwrlevel=17
+         gmu_f2h-2494    [004] ..... 226369.800145: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686848353692
+         gmu_f2h-2494    [004] ..... 226369.800147: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686848353692
+ UnityGfxDeviceW-19679   [005] ..... 226369.801925: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1110 inflight=1 flags=CTX_SWITCH ticks=4686848420192 time=226369.801921 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [004] ..... 226369.812710: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686848595464
+         gmu_f2h-2494    [004] ..... 226369.812711: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686848595464
+         gmu_f2h-2494    [004] ..... 226369.813127: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1110 inflight=0 recovery=none flags=none start=4686848425041 retire=4686848634191 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686848424896 retired_on_gmu=4686848634668 active=209148
+         gmu_f2h-2494    [004] ..... 226369.825237: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7450 ticks=4686848675475
+ UnityGfxDeviceW-19679   [005] ..... 226369.834335: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1111 inflight=1 flags=CTX_SWITCH ticks=4686849042473 time=226369.834331 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [004] ..... 226369.834642: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686848996137
+         gmu_f2h-2494    [004] ..... 226369.834645: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686848996137
+         gmu_f2h-2494    [004] ..... 226369.845516: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1111 inflight=0 recovery=none flags=none start=4686849047335 retire=4686849256152 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686849047202 retired_on_gmu=4686849256619 active=208813
+         gmu_f2h-2494    [004] ..... 226369.845524: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686849240814
+         gmu_f2h-2494    [004] ..... 226369.845525: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686849240814
+         gmu_f2h-2494    [004] ..... 226369.845529: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7450 ticks=4686849240870
+ UnityGfxDeviceW-19679   [003] ..... 226369.866224: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1112 inflight=1 flags=CTX_SWITCH ticks=4686849654748 time=226369.866221 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [004] ..... 226369.866527: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686849639109
+         gmu_f2h-2494    [004] ..... 226369.866529: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686849639109
+         gmu_f2h-2494    [004] ..... 226369.866533: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4950 ticks=4686849639163
+         gmu_f2h-2494    [004] ..... 226369.877379: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1112 inflight=0 recovery=none flags=none start=4686849659528 retire=4686849866822 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686849659394 retired_on_gmu=4686849867291 active=207291
+         gmu_f2h-2494    [004] ..... 226369.884624: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686849880390
+         gmu_f2h-2494    [004] ..... 226369.884625: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686849880390
+         gmu_f2h-2494    [004] ..... 226369.884630: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4950 ticks=4686849880433
+ UnityGfxDeviceW-19679   [004] ..... 226369.908006: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1113 inflight=1 flags=CTX_SWITCH ticks=4686850456948 time=226369.908002 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226369.908297: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686850280989
+         gmu_f2h-2494    [001] ..... 226369.908298: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686850280989
+         gmu_f2h-2494    [000] ..... 226369.918841: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1113 inflight=0 recovery=none flags=none start=4686850461554 retire=4686850663796 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686850461427 retired_on_gmu=4686850664270 active=202236
+         gmu_f2h-2494    [000] ..... 226369.918858: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686850623032
+         gmu_f2h-2494    [000] ..... 226369.918859: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686850623032
+         gmu_f2h-2494    [000] ..... 226369.927512: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7350 ticks=4686850783363
+         gmu_f2h-2494    [000] ..... 226369.939232: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686851023983
+         gmu_f2h-2494    [000] ..... 226369.939233: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686851023983
+ UnityGfxDeviceW-19679   [004] ..... 226369.939882: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1114 inflight=1 flags=CTX_SWITCH ticks=4686851068926 time=226369.939877 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226369.951332: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1114 inflight=0 recovery=none flags=none start=4686851074152 retire=4686851287636 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686851073997 retired_on_gmu=4686851288099 active=213481
+         gmu_f2h-2494    [000] ..... 226369.951352: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686851266347
+         gmu_f2h-2494    [000] ..... 226369.951353: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686851266347
+         gmu_f2h-2494    [000] ..... 226369.951357: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7350 ticks=4686851266405
+ UnityGfxDeviceW-19679   [004] ..... 226369.974195: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1115 inflight=1 flags=CTX_SWITCH ticks=4686851727754 time=226369.974190 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226369.974516: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686851667256
+         gmu_f2h-2494    [000] ..... 226369.974518: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686851667256
+         gmu_f2h-2494    [000] ..... 226369.981893: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=5350 ticks=4686851748763
+         gmu_f2h-2494    [000] ..... 226369.985128: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1115 inflight=0 recovery=none flags=none start=4686851732606 retire=4686851936502 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686851732479 retired_on_gmu=4686851936981 active=203893
+         gmu_f2h-2494    [000] ..... 226369.985137: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686851909201
+         gmu_f2h-2494    [000] ..... 226369.985138: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686851909201
+         gmu_f2h-2494    [000] ..... 226369.985144: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5350 ticks=4686851909273
+         gmu_f2h-2494    [001] ..... 226370.006278: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686852310429
+         gmu_f2h-2494    [001] ..... 226370.006281: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686852310429
+ UnityGfxDeviceW-19679   [003] ..... 226370.008164: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1116 inflight=1 flags=CTX_SWITCH ticks=4686852379939 time=226370.8159 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.018799: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686852552222
+         gmu_f2h-2494    [000] ..... 226370.018801: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686852552222
+         gmu_f2h-2494    [000] ..... 226370.019024: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1116 inflight=0 recovery=none flags=none start=4686852385016 retire=4686852587287 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686852384890 retired_on_gmu=4686852587776 active=202268
+         gmu_f2h-2494    [000] ..... 226370.031387: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=9500 ticks=4686852713010
+         gmu_f2h-2494    [000] ..... 226370.043913: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686852953581
+         gmu_f2h-2494    [000] ..... 226370.043914: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686852953581
+ UnityGfxDeviceW-19679   [004] ..... 226370.044469: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1117 inflight=1 flags=CTX_SWITCH ticks=4686853076979 time=226370.44463 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.055605: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1117 inflight=0 recovery=none flags=none start=4686853082391 retire=4686853289624 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686853082262 retired_on_gmu=4686853290107 active=207230
+         gmu_f2h-2494    [000] ..... 226370.055621: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686853244728
+         gmu_f2h-2494    [000] ..... 226370.055622: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686853244728
+         gmu_f2h-2494    [000] ..... 226370.055629: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=9500 ticks=4686853244839
+ UnityGfxDeviceW-19679   [005] ..... 226370.074891: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1118 inflight=1 flags=CTX_SWITCH ticks=4686853661079 time=226370.74885 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.075208: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686853645008
+         gmu_f2h-2494    [000] ..... 226370.075210: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686853645008
+         gmu_f2h-2494    [000] ..... 226370.086135: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1118 inflight=0 recovery=none flags=none start=4686853666006 retire=4686853875849 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686853665869 retired_on_gmu=4686853876334 active=209840
+         gmu_f2h-2494    [000] ..... 226370.086147: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4350 ticks=4686853726575
+         gmu_f2h-2494    [001] ..... 226370.093346: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686853886659
+         gmu_f2h-2494    [001] ..... 226370.093348: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686853886659
+         gmu_f2h-2494    [001] ..... 226370.093357: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4350 ticks=4686853886696
+ UnityGfxDeviceW-19679   [005] ..... 226370.109548: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1119 inflight=1 flags=CTX_SWITCH ticks=4686854326495 time=226370.109542 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226370.109868: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686854287660
+         gmu_f2h-2494    [001] ..... 226370.109870: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686854287660
+         gmu_f2h-2494    [000] ..... 226370.120339: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1119 inflight=0 recovery=none flags=none start=4686854331529 retire=4686854531821 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686854331397 retired_on_gmu=4686854532296 active=200290
+         gmu_f2h-2494    [000] ..... 226370.120357: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686854493101
+         gmu_f2h-2494    [000] ..... 226370.120358: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686854493101
+ UnityGfxDeviceW-19679   [004] ..... 226370.140591: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1120 inflight=1 flags=CTX_SWITCH ticks=4686854922463 time=226370.140586 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.140935: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=5450 ticks=4686854734399
+         gmu_f2h-2494    [000] ..... 226370.140948: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686854894692
+         gmu_f2h-2494    [000] ..... 226370.140949: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686854894692
+         gmu_f2h-2494    [000] ..... 226370.152112: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1120 inflight=0 recovery=none flags=none start=4686854928194 retire=4686855142670 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686854928071 retired_on_gmu=4686855143143 active=214472
+         gmu_f2h-2494    [000] ..... 226370.152132: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686855137269
+         gmu_f2h-2494    [000] ..... 226370.152133: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686855137269
+         gmu_f2h-2494    [000] ..... 226370.152138: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5450 ticks=4686855137310
+ UnityGfxDeviceW-19679   [005] ..... 226370.173028: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1121 inflight=1 flags=CTX_SWITCH ticks=4686855545308 time=226370.173022 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.173369: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686855537780
+         gmu_f2h-2494    [000] ..... 226370.173370: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686855537780
+         gmu_f2h-2494    [000] ..... 226370.183868: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1121 inflight=0 recovery=none flags=none start=4686855550726 retire=4686855752243 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686855550598 retired_on_gmu=4686855752754 active=201513
+         gmu_f2h-2494    [000] ..... 226370.183888: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686855712628
+         gmu_f2h-2494    [000] ..... 226370.183889: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686855712628
+         gmu_f2h-2494    [000] ..... 226370.183896: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6450 ticks=4686855712672
+         gmu_f2h-2494    [000] ..... 226370.204360: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686856113547
+         gmu_f2h-2494    [000] ..... 226370.204361: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686856113547
+ UnityGfxDeviceW-19679   [002] ..... 226370.207737: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1122 inflight=1 flags=CTX_SWITCH ticks=4686856211739 time=226370.207732 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.218876: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1122 inflight=0 recovery=none flags=none start=4686856216788 retire=4686856424524 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686856216652 retired_on_gmu=4686856424984 active=207732
+         gmu_f2h-2494    [000] ..... 226370.218894: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686856378688
+         gmu_f2h-2494    [000] ..... 226370.218895: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686856378688
+         gmu_f2h-2494    [000] ..... 226370.218901: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6450 ticks=4686856378748
+         gmu_f2h-2494    [000] ..... 226370.238979: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=3300 ticks=4686856699293
+         gmu_f2h-2494    [000] ..... 226370.238994: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686856779483
+         gmu_f2h-2494    [000] ..... 226370.238995: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686856779483
+ UnityGfxDeviceW-19679   [005] ..... 226370.246133: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1123 inflight=1 flags=CTX_SWITCH ticks=4686856948963 time=226370.246129 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.256569: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686857115843
+         gmu_f2h-2494    [000] ..... 226370.256571: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686857115843
+         gmu_f2h-2494    [000] ..... 226370.256581: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=3300 ticks=4686857115897
+         gmu_f2h-2494    [000] ..... 226370.257385: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1123 inflight=0 recovery=none flags=none start=4686856954307 retire=4686857163866 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686856954176 retired_on_gmu=4686857164326 active=209557
+ UnityGfxDeviceW-19679   [002] ..... 226370.273770: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1124 inflight=1 flags=CTX_SWITCH ticks=4686857479556 time=226370.273764 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.281556: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686857520023
+         gmu_f2h-2494    [000] ..... 226370.281557: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686857520023
+         gmu_f2h-2494    [000] ..... 226370.284686: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1124 inflight=0 recovery=none flags=none start=4686857484388 retire=4686857688073 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686857484259 retired_on_gmu=4686857688556 active=203682
+         gmu_f2h-2494    [000] ..... 226370.284697: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686857678258
+         gmu_f2h-2494    [000] ..... 226370.284698: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686857678258
+         gmu_f2h-2494    [000] ..... 226370.294145: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7400 ticks=4686857759002
+         gmu_f2h-2494    [000] ..... 226370.306700: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686858079562
+         gmu_f2h-2494    [000] ..... 226370.306702: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686858079562
+ UnityGfxDeviceW-19679   [004] ..... 226370.307079: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1125 inflight=1 flags=CTX_SWITCH ticks=4686858119149 time=226370.307075 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.318305: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1125 inflight=0 recovery=none flags=none start=4686858124102 retire=4686858333641 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686858123961 retired_on_gmu=4686858334105 active=209537
+         gmu_f2h-2494    [000] ..... 226370.318320: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686858285851
+         gmu_f2h-2494    [000] ..... 226370.318321: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686858285851
+         gmu_f2h-2494    [000] ..... 226370.318324: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7400 ticks=4686858285896
+         gmu_f2h-2494    [001] ..... 226370.338500: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686858687070
+         gmu_f2h-2494    [001] ..... 226370.338502: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686858687070
+ UnityGfxDeviceW-19679   [002] ..... 226370.341676: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1126 inflight=1 flags=CTX_SWITCH ticks=4686858783341 time=226370.341671 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.342023: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=2550 ticks=4686858767131
+         gmu_f2h-2494    [001] ..... 226370.352906: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1126 inflight=0 recovery=none flags=none start=4686858788727 retire=4686858997103 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686858788592 retired_on_gmu=4686858997571 active=208373
+         gmu_f2h-2494    [001] ..... 226370.352925: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686858950341
+         gmu_f2h-2494    [001] ..... 226370.352926: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686858950341
+         gmu_f2h-2494    [001] ..... 226370.352932: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=2550 ticks=4686858950399
+         gmu_f2h-2494    [000] ..... 226370.372952: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686859351396
+         gmu_f2h-2494    [000] ..... 226370.372953: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686859351396
+ UnityGfxDeviceW-19679   [005] ..... 226370.374318: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1127 inflight=1 flags=CTX_SWITCH ticks=4686859410089 time=226370.374313 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.385169: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1127 inflight=0 recovery=none flags=none start=4686859415134 retire=4686859617273 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686859415008 retired_on_gmu=4686859617723 active=202136
+         gmu_f2h-2494    [000] ..... 226370.385190: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686859592953
+         gmu_f2h-2494    [000] ..... 226370.385191: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686859592953
+         gmu_f2h-2494    [000] ..... 226370.398091: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7400 ticks=4686859753619
+ UnityGfxDeviceW-19679   [002] ..... 226370.407196: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1128 inflight=1 flags=CTX_SWITCH ticks=4686860041348 time=226370.407191 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.407523: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686859994120
+         gmu_f2h-2494    [000] ..... 226370.407525: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686859994120
+         gmu_f2h-2494    [000] ..... 226370.418577: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1128 inflight=0 recovery=none flags=none start=4686860046529 retire=4686860258758 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686860046396 retired_on_gmu=4686860259203 active=212226
+         gmu_f2h-2494    [000] ..... 226370.418589: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686860236015
+         gmu_f2h-2494    [000] ..... 226370.418590: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686860236015
+         gmu_f2h-2494    [000] ..... 226370.418596: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7400 ticks=4686860236060
+         gmu_f2h-2494    [000] ..... 226370.439922: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686860637239
+         gmu_f2h-2494    [000] ..... 226370.439924: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686860637239
+ UnityGfxDeviceW-19679   [004] ..... 226370.447653: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1129 inflight=1 flags=CTX_SWITCH ticks=4686860818082 time=226370.447646 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.447991: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4950 ticks=4686860717255
+         gmu_f2h-2494    [000] ..... 226370.457454: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686860985670
+         gmu_f2h-2494    [000] ..... 226370.457456: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686860985670
+         gmu_f2h-2494    [000] ..... 226370.457463: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4950 ticks=4686860985738
+         gmu_f2h-2494    [000] ..... 226370.458816: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1129 inflight=0 recovery=none flags=none start=4686860823547 retire=4686861031272 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686860823414 retired_on_gmu=4686861031731 active=207723
+ UnityGfxDeviceW-19679   [003] ..... 226370.473737: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1130 inflight=1 flags=CTX_SWITCH ticks=4686861318933 time=226370.473732 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.483076: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686861388181
+         gmu_f2h-2494    [000] ..... 226370.483078: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686861388181
+         gmu_f2h-2494    [000] ..... 226370.483090: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686861466719
+         gmu_f2h-2494    [000] ..... 226370.483091: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686861466719
+         gmu_f2h-2494    [001] ..... 226370.484483: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1130 inflight=0 recovery=none flags=none start=4686861323836 retire=4686861521988 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686861323709 retired_on_gmu=4686861522444 active=198149
+ UnityGfxDeviceW-19679   [003] ..... 226370.506699: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1131 inflight=1 flags=CTX_SWITCH ticks=4686861951820 time=226370.506695 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.507034: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7400 ticks=4686861787901
+         gmu_f2h-2494    [000] ..... 226370.507063: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686861868041
+         gmu_f2h-2494    [000] ..... 226370.507065: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686861868041
+         gmu_f2h-2494    [000] ..... 226370.517888: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1131 inflight=0 recovery=none flags=none start=4686861957002 retire=4686862165072 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686861956863 retired_on_gmu=4686862165550 active=208067
+         gmu_f2h-2494    [000] ..... 226370.517905: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686862118600
+         gmu_f2h-2494    [000] ..... 226370.517906: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686862118600
+         gmu_f2h-2494    [000] ..... 226370.517911: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7400 ticks=4686862118643
+         gmu_f2h-2494    [000] ..... 226370.538042: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686862519438
+         gmu_f2h-2494    [000] ..... 226370.538043: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686862519438
+ UnityGfxDeviceW-19679   [002] ..... 226370.539297: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1132 inflight=1 flags=CTX_SWITCH ticks=4686862577719 time=226370.539293 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.550269: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1132 inflight=0 recovery=none flags=none start=4686862582566 retire=4686862787015 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686862582430 retired_on_gmu=4686862787508 active=204446
+         gmu_f2h-2494    [000] ..... 226370.550292: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686862761722
+         gmu_f2h-2494    [000] ..... 226370.550293: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686862761722
+         gmu_f2h-2494    [000] ..... 226370.550299: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6750 ticks=4686862761769
+         gmu_f2h-2494    [000] ..... 226370.575594: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686863162186
+         gmu_f2h-2494    [000] ..... 226370.575595: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686863162186
+ UnityGfxDeviceW-19679   [004] ..... 226370.577107: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1133 inflight=1 flags=CTX_SWITCH ticks=4686863303665 time=226370.577102 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.587881: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1133 inflight=0 recovery=none flags=none start=4686863308662 retire=4686863509434 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686863308537 retired_on_gmu=4686863509906 active=200770
+         gmu_f2h-2494    [000] ..... 226370.587971: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686863470374
+         gmu_f2h-2494    [000] ..... 226370.587971: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686863470374
+         gmu_f2h-2494    [000] ..... 226370.587977: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6750 ticks=4686863470420
+ UnityGfxDeviceW-19679   [003] ..... 226370.605934: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1134 inflight=1 flags=CTX_SWITCH ticks=4686863857154 time=226370.605930 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226370.606263: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=3000 ticks=4686863790750
+         gmu_f2h-2494    [000] ..... 226370.613323: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686863873780
+         gmu_f2h-2494    [000] ..... 226370.613325: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686863873780
+         gmu_f2h-2494    [000] ..... 226370.616666: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1134 inflight=0 recovery=none flags=none start=4686863861670 retire=4686864062098 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686863861544 retired_on_gmu=4686864062579 active=200425
+         gmu_f2h-2494    [000] ..... 226370.616675: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686864032592
+         gmu_f2h-2494    [000] ..... 226370.616676: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686864032592
+         gmu_f2h-2494    [000] ..... 226370.616682: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=3000 ticks=4686864032633
+         gmu_f2h-2494    [000] ..... 226370.637683: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686864434132
+         gmu_f2h-2494    [000] ..... 226370.637685: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686864434132
+ UnityGfxDeviceW-19679   [003] ..... 226370.643476: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1135 inflight=1 flags=CTX_SWITCH ticks=4686864577947 time=226370.643472 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.654245: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1135 inflight=0 recovery=none flags=none start=4686864583265 retire=4686864783578 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686864583136 retired_on_gmu=4686864784049 active=200309
+         gmu_f2h-2494    [000] ..... 226370.654261: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686864744941
+         gmu_f2h-2494    [000] ..... 226370.654262: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686864744941
+         gmu_f2h-2494    [000] ..... 226370.663036: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7250 ticks=4686864825377
+ UnityGfxDeviceW-19679   [005] ..... 226370.674424: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1136 inflight=1 flags=CTX_SWITCH ticks=4686865172113 time=226370.674419 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.674767: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686865146143
+         gmu_f2h-2494    [000] ..... 226370.674768: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686865146143
+         gmu_f2h-2494    [000] ..... 226370.685838: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1136 inflight=0 recovery=none flags=none start=4686865177530 retire=4686865389859 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686865177402 retired_on_gmu=4686865390719 active=212331
+         gmu_f2h-2494    [000] ..... 226370.685868: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686865388416
+         gmu_f2h-2494    [000] ..... 226370.685870: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686865388416
+         gmu_f2h-2494    [000] ..... 226370.685875: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7250 ticks=4686865388489
+ UnityGfxDeviceW-19679   [002] ..... 226370.708085: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1137 inflight=1 flags=CTX_SWITCH ticks=4686865818433 time=226370.708081 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [002] ..... 226370.708452: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686865789071
+         gmu_f2h-2494    [002] ..... 226370.708453: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686865789071
+         gmu_f2h-2494    [002] ..... 226370.708461: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4950 ticks=4686865789136
+         gmu_f2h-2494    [000] ..... 226370.719315: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1137 inflight=0 recovery=none flags=none start=4686865823692 retire=4686866031678 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686865823565 retired_on_gmu=4686866032132 active=207983
+         gmu_f2h-2494    [000] ..... 226370.719330: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686865985400
+         gmu_f2h-2494    [000] ..... 226370.719331: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686865985400
+         gmu_f2h-2494    [000] ..... 226370.719335: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4950 ticks=4686865985466
+         gmu_f2h-2494    [000] ..... 226370.739361: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686866386598
+         gmu_f2h-2494    [000] ..... 226370.739362: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686866386598
+ UnityGfxDeviceW-19679   [002] ..... 226370.740224: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1138 inflight=1 flags=CTX_SWITCH ticks=4686866435492 time=226370.740219 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.751288: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1138 inflight=0 recovery=none flags=none start=4686866440561 retire=4686866645468 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686866440430 retired_on_gmu=4686866645931 active=204904
+         gmu_f2h-2494    [000] ..... 226370.751307: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686866628650
+         gmu_f2h-2494    [000] ..... 226370.751307: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686866628650
+         gmu_f2h-2494    [000] ..... 226370.764521: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7400 ticks=4686866789035
+ UnityGfxDeviceW-19679   [004] ..... 226370.774182: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1139 inflight=1 flags=CTX_SWITCH ticks=4686867087482 time=226370.774177 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.774519: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686867029578
+         gmu_f2h-2494    [000] ..... 226370.774519: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686867029578
+         gmu_f2h-2494    [000] ..... 226370.785526: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1139 inflight=0 recovery=none flags=none start=4686867092803 retire=4686867304222 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686867092663 retired_on_gmu=4686867304685 active=211415
+         gmu_f2h-2494    [000] ..... 226370.785538: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686867271453
+         gmu_f2h-2494    [000] ..... 226370.785539: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686867271453
+         gmu_f2h-2494    [000] ..... 226370.785543: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7400 ticks=4686867271495
+         gmu_f2h-2494    [000] ..... 226370.806350: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686867672593
+         gmu_f2h-2494    [000] ..... 226370.806351: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686867672593
+ UnityGfxDeviceW-19679   [004] ..... 226370.810408: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1140 inflight=1 flags=CTX_SWITCH ticks=4686867782986 time=226370.810401 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.810734: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4950 ticks=4686867752709
+         gmu_f2h-2494    [000] ..... 226370.821585: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1140 inflight=0 recovery=none flags=none start=4686867788268 retire=4686867996372 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686867788133 retired_on_gmu=4686867996853 active=208101
+         gmu_f2h-2494    [000] ..... 226370.821604: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686867949752
+         gmu_f2h-2494    [000] ..... 226370.821605: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686867949752
+         gmu_f2h-2494    [000] ..... 226370.821610: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4950 ticks=4686867949798
+ UnityGfxDeviceW-19679   [004] ..... 226370.839767: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1141 inflight=1 flags=CTX_SWITCH ticks=4686868346727 time=226370.839762 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.840168: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686868352848
+         gmu_f2h-2494    [000] ..... 226370.840172: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686868352848
+         gmu_f2h-2494    [000] ..... 226370.850732: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1141 inflight=0 recovery=none flags=none start=4686868353177 retire=4686868556053 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686868353051 retired_on_gmu=4686868556526 active=202873
+         gmu_f2h-2494    [000] ..... 226370.850751: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686868512909
+         gmu_f2h-2494    [000] ..... 226370.850752: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686868512909
+         gmu_f2h-2494    [001] ..... 226370.871140: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7450 ticks=4686868754149
+         gmu_f2h-2494    [001] ..... 226370.871167: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686868914418
+         gmu_f2h-2494    [001] ..... 226370.871168: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686868914418
+ UnityGfxDeviceW-19679   [004] ..... 226370.873911: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1142 inflight=1 flags=CTX_SWITCH ticks=4686869002277 time=226370.873906 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [002] ..... 226370.883579: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686869169154
+         gmu_f2h-2494    [002] ..... 226370.883581: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686869169154
+         gmu_f2h-2494    [002] ..... 226370.883587: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7450 ticks=4686869169201
+         gmu_f2h-2494    [000] ..... 226370.885159: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1142 inflight=0 recovery=none flags=none start=4686869007637 retire=4686869217060 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686869007492 retired_on_gmu=4686869217536 active=209419
+ UnityGfxDeviceW-19679   [003] ..... 226370.907488: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1143 inflight=1 flags=CTX_SWITCH ticks=4686869646927 time=226370.907482 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226370.907848: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686869570433
+         gmu_f2h-2494    [000] ..... 226370.907850: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686869570433
+         gmu_f2h-2494    [000] ..... 226370.918566: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1143 inflight=0 recovery=none flags=none start=4686869652657 retire=4686869858396 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686869652530 retired_on_gmu=4686869858879 active=205737
+         gmu_f2h-2494    [000] ..... 226370.918578: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=2500 ticks=4686869733941
+         gmu_f2h-2494    [000] ..... 226370.918591: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686869814141
+         gmu_f2h-2494    [000] ..... 226370.918592: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686869814141
+         gmu_f2h-2494    [000] ..... 226370.918596: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=2500 ticks=4686869814182
+         gmu_f2h-2494    [000] ..... 226370.938821: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686870215775
+         gmu_f2h-2494    [000] ..... 226370.938823: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686870215775
+         gmu_f2h-2494    [000] ..... 226371.100366: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=15 freq=222000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686873343545
+         gmu_f2h-2494    [000] ..... 226371.100368: kgsl_gpu_frequency: gpu_freq=222000Khz gpu_id=0 ticks=4686873343545
+         gmu_f2h-2494    [000] ..... 226371.100372: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=15 bus=2 avg_bw=1321 ticks=4686873343607
+    kgsl_hwsched-1191    [005] ..... 226371.101271: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1144 inflight=1 flags=CTX_SWITCH ticks=4686873367643 time=226371.101267 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+ UnityGfxDeviceW-19679   [007] ..... 226371.105730: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1145 inflight=2 flags=CTX_SWITCH ticks=4686873453238 time=226371.105725 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.115090: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=14 freq=282000000 prev_pwrlevel=15 prev_freq=222000000 ticks=4686873531098
+         gmu_f2h-2494    [000] ..... 226371.115091: kgsl_gpu_frequency: gpu_freq=282000Khz gpu_id=0 ticks=4686873531098
+         gmu_f2h-2494    [005] ..... 226371.122751: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=13 freq=342000000 prev_pwrlevel=14 prev_freq=282000000 ticks=4686873691326
+         gmu_f2h-2494    [005] ..... 226371.122754: kgsl_gpu_frequency: gpu_freq=342000Khz gpu_id=0 ticks=4686873691326
+         gmu_f2h-2494    [005] ..... 226371.122779: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=11 freq=422000000 prev_pwrlevel=13 prev_freq=342000000 ticks=4686873772016
+         gmu_f2h-2494    [005] ..... 226371.122781: kgsl_gpu_frequency: gpu_freq=422000Khz gpu_id=0 ticks=4686873772016
+         gmu_f2h-2494    [005] ..... 226371.122792: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=11 bus=3 avg_bw=1321 ticks=4686873772085
+         gmu_f2h-2494    [000] ..... 226371.124573: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1144 inflight=0 recovery=none flags=none start=4686873375373 retire=4686873812188 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686873369970 retired_on_gmu=4686873812966 active=436803
+         gmu_f2h-2494    [000] ..... 226371.136574: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=9 freq=500000000 prev_pwrlevel=11 prev_freq=422000000 ticks=4686873853309
+         gmu_f2h-2494    [000] ..... 226371.136575: kgsl_gpu_frequency: gpu_freq=500000Khz gpu_id=0 ticks=4686873853309
+         gmu_f2h-2494    [000] ..... 226371.136591: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=7 freq=578000000 prev_pwrlevel=9 prev_freq=500000000 ticks=4686873934070
+         gmu_f2h-2494    [000] ..... 226371.136592: kgsl_gpu_frequency: gpu_freq=578000Khz gpu_id=0 ticks=4686873934070
+         gmu_f2h-2494    [000] ..... 226371.136607: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=7 prev_freq=578000000 ticks=4686874014432
+         gmu_f2h-2494    [000] ..... 226371.136608: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686874014432
+         gmu_f2h-2494    [000] ..... 226371.136615: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=5 avg_bw=1321 ticks=4686874014575
+         gmu_f2h-2494    [000] ..... 226371.140655: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1145 inflight=0 recovery=none flags=none start=4686873812309 retire=4686874122763 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686873455256 retired_on_gmu=4686874123200 active=310448
+         gmu_f2h-2494    [000] ..... 226371.140664: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686874094963
+         gmu_f2h-2494    [000] ..... 226371.140665: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686874094963
+         gmu_f2h-2494    [000] ..... 226371.140670: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=1321 ticks=4686874095033
+ UnityGfxDeviceW-19679   [004] ..... 226371.146708: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1146 inflight=1 flags=CTX_SWITCH ticks=4686874240026 time=226371.146704 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226371.154186: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=11950 ticks=4686874336532
+         gmu_f2h-2494    [000] ..... 226371.157729: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1146 inflight=0 recovery=none flags=none start=4686874244542 retire=4686874450436 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686874244417 retired_on_gmu=4686874450926 active=205891
+ UnityGfxDeviceW-19679   [005] ..... 226371.160971: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1147 inflight=1 flags=CTX_SWITCH ticks=4686874513875 time=226371.160967 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.171496: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1147 inflight=0 recovery=none flags=none start=4686874518299 retire=4686874715119 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686874518165 retired_on_gmu=4686874715549 active=196817
+ UnityGfxDeviceW-19679   [004] ..... 226371.182474: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1148 inflight=1 flags=CTX_SWITCH ticks=4686874926731 time=226371.182470 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226371.193328: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1148 inflight=0 recovery=none flags=none start=4686874931173 retire=4686875134089 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686874931045 retired_on_gmu=4686875134554 active=202915
+         gmu_f2h-2494    [001] ..... 226371.193343: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686875060784
+         gmu_f2h-2494    [001] ..... 226371.193344: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686875060784
+         gmu_f2h-2494    [001] ..... 226371.200210: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686875139933
+         gmu_f2h-2494    [001] ..... 226371.200211: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686875139933
+         gmu_f2h-2494    [001] ..... 226371.200216: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=11950 ticks=4686875139975
+         gmu_f2h-2494    [001] ..... 226371.211991: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=12000 ticks=4686875300228
+ UnityGfxDeviceW-19679   [004] ..... 226371.216090: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1149 inflight=1 flags=CTX_SWITCH ticks=4686875572176 time=226371.216087 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.216389: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686875540705
+         gmu_f2h-2494    [000] ..... 226371.216392: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686875540705
+         gmu_f2h-2494    [000] ..... 226371.227003: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1149 inflight=0 recovery=none flags=none start=4686875577102 retire=4686875780634 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686875576963 retired_on_gmu=4686875781105 active=203529
+         gmu_f2h-2494    [000] ..... 226371.227016: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686875738826
+         gmu_f2h-2494    [000] ..... 226371.227016: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686875738826
+         gmu_f2h-2494    [000] ..... 226371.227021: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=12000 ticks=4686875738868
+         gmu_f2h-2494    [000] ..... 226371.247304: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686876139328
+         gmu_f2h-2494    [000] ..... 226371.247306: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686876139328
+ UnityGfxDeviceW-19679   [004] ..... 226371.249344: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1150 inflight=1 flags=CTX_SWITCH ticks=4686876210630 time=226371.249340 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226371.259873: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=5000 ticks=4686876300681
+         gmu_f2h-2494    [001] ..... 226371.259893: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686876380760
+         gmu_f2h-2494    [001] ..... 226371.259895: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686876380760
+         gmu_f2h-2494    [001] ..... 226371.259901: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5000 ticks=4686876380799
+         gmu_f2h-2494    [001] ..... 226371.260484: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1150 inflight=0 recovery=none flags=none start=4686876215456 retire=4686876423499 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686876215321 retired_on_gmu=4686876424012 active=208040
+ UnityGfxDeviceW-19679   [006] ..... 226371.284352: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1151 inflight=1 flags=CTX_SWITCH ticks=4686876882765 time=226371.284347 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.284648: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686876781522
+         gmu_f2h-2494    [000] ..... 226371.284649: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686876781522
+         gmu_f2h-2494    [000] ..... 226371.295569: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1151 inflight=0 recovery=none flags=none start=4686876887409 retire=4686877097047 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686876887280 retired_on_gmu=4686877097537 active=209635
+         gmu_f2h-2494    [000] ..... 226371.295585: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686877049094
+         gmu_f2h-2494    [000] ..... 226371.295585: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686877049094
+         gmu_f2h-2494    [000] ..... 226371.315547: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=4750 ticks=4686877289391
+         gmu_f2h-2494    [000] ..... 226371.315562: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686877449687
+         gmu_f2h-2494    [000] ..... 226371.315563: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686877449687
+ UnityGfxDeviceW-19679   [004] ..... 226371.318421: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1152 inflight=1 flags=CTX_SWITCH ticks=4686877536911 time=226371.318417 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226371.328078: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686877703971
+         gmu_f2h-2494    [001] ..... 226371.328080: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686877703971
+         gmu_f2h-2494    [001] ..... 226371.328086: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4750 ticks=4686877704020
+         gmu_f2h-2494    [001] ..... 226371.329698: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1152 inflight=0 recovery=none flags=none start=4686877541896 retire=4686877751191 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686877541750 retired_on_gmu=4686877751666 active=209292
+ UnityGfxDeviceW-19679   [005] ..... 226371.349837: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1153 inflight=1 flags=CTX_SWITCH ticks=4686878140112 time=226371.349833 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [002] ..... 226371.350141: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686878104535
+         gmu_f2h-2494    [002] ..... 226371.350143: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686878104535
+         gmu_f2h-2494    [002] ..... 226371.358886: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=6150 ticks=4686878266361
+         gmu_f2h-2494    [002] ..... 226371.361028: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1153 inflight=0 recovery=none flags=none start=4686878144946 retire=4686878353928 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686878144768 retired_on_gmu=4686878354453 active=208977
+         gmu_f2h-2494    [002] ..... 226371.361037: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686878346721
+         gmu_f2h-2494    [002] ..... 226371.361037: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686878346721
+         gmu_f2h-2494    [002] ..... 226371.361041: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6150 ticks=4686878346764
+         gmu_f2h-2494    [001] ..... 226371.383148: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686878747400
+         gmu_f2h-2494    [001] ..... 226371.383150: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686878747400
+ UnityGfxDeviceW-19679   [004] ..... 226371.383713: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1154 inflight=1 flags=CTX_SWITCH ticks=4686878790536 time=226371.383710 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.394838: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1154 inflight=0 recovery=none flags=none start=4686878795485 retire=4686879002919 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686878795348 retired_on_gmu=4686879003434 active=207431
+         gmu_f2h-2494    [000] ..... 226371.394855: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686878957720
+         gmu_f2h-2494    [000] ..... 226371.394855: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686878957720
+         gmu_f2h-2494    [000] ..... 226371.410059: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=3650 ticks=4686879277897
+    RenderThread-24926   [001] ..... 226371.410123: adreno_cmdbatch_submitted: ctx=21 ctx_prio=4 ts=25028 inflight=1 flags=CTX_SWITCH ticks=4686879297568 time=226371.410119 rb_id=1 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226371.410584: adreno_cmdbatch_retired: ctx=21 ctx_prio=4 ts=25028 inflight=0 recovery=none flags=none start=4686879304342 retire=4686879305304 rb_id=1, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686879299590 retired_on_gmu=4686879305753 active=960
+ UnityGfxDeviceW-19679   [004] ..... 226371.419817: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1155 inflight=1 flags=CTX_SWITCH ticks=4686879483709 time=226371.419813 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.419983: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686879358436
+         gmu_f2h-2494    [000] ..... 226371.419984: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686879358436
+         gmu_f2h-2494    [000] ..... 226371.430227: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686879681117
+         gmu_f2h-2494    [000] ..... 226371.430228: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686879681117
+         gmu_f2h-2494    [000] ..... 226371.430233: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=3650 ticks=4686879681163
+         gmu_f2h-2494    [000] ..... 226371.431084: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1155 inflight=0 recovery=none flags=none start=4686879490599 retire=4686879699139 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686879485758 retired_on_gmu=4686879699589 active=208537
+         gmu_f2h-2494    [000] ..... 226371.452674: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686880081437
+         gmu_f2h-2494    [000] ..... 226371.452676: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686880081437
+ UnityGfxDeviceW-19679   [004] ..... 226371.456516: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1156 inflight=1 flags=CTX_SWITCH ticks=4686880188291 time=226371.456511 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.467541: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1156 inflight=0 recovery=none flags=none start=4686880193696 retire=4686880398923 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686880193578 retired_on_gmu=4686880399407 active=205223
+         gmu_f2h-2494    [000] ..... 226371.467550: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4950 ticks=4686880275489
+         gmu_f2h-2494    [000] ..... 226371.467560: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686880355485
+         gmu_f2h-2494    [000] ..... 226371.467561: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686880355485
+         gmu_f2h-2494    [000] ..... 226371.467565: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4950 ticks=4686880355532
+         gmu_f2h-2494    [000] ..... 226371.487813: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686880757073
+         gmu_f2h-2494    [000] ..... 226371.487815: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686880757073
+ UnityGfxDeviceW-19679   [003] ..... 226371.489910: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1157 inflight=1 flags=CTX_SWITCH ticks=4686880829493 time=226371.489906 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.500402: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686880998324
+         gmu_f2h-2494    [000] ..... 226371.500404: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686880998324
+         gmu_f2h-2494    [000] ..... 226371.500754: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1157 inflight=0 recovery=none flags=none start=4686880834291 retire=4686881036451 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686880834163 retired_on_gmu=4686881036928 active=202156
+         gmu_f2h-2494    [001] ..... 226371.512992: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7300 ticks=4686881239271
+ UnityGfxDeviceW-19679   [003] ..... 226371.523808: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1158 inflight=1 flags=CTX_SWITCH ticks=4686881480309 time=226371.523803 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [005] ..... 226371.524241: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686881399742
+         gmu_f2h-2494    [005] ..... 226371.524243: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686881399742
+         gmu_f2h-2494    [000] ..... 226371.534986: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1158 inflight=0 recovery=none flags=none start=4686881485751 retire=4686881693692 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686881485601 retired_on_gmu=4686881694161 active=207938
+         gmu_f2h-2494    [000] ..... 226371.535000: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686881647490
+         gmu_f2h-2494    [000] ..... 226371.535002: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686881647490
+         gmu_f2h-2494    [000] ..... 226371.535006: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7300 ticks=4686881647569
+         gmu_f2h-2494    [002] ..... 226371.555110: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686882048504
+         gmu_f2h-2494    [002] ..... 226371.555113: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686882048504
+ UnityGfxDeviceW-19679   [005] ..... 226371.556738: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1159 inflight=1 flags=CTX_SWITCH ticks=4686882112566 time=226371.556733 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.567639: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=5400 ticks=4686882209942
+         gmu_f2h-2494    [000] ..... 226371.567662: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686882290066
+         gmu_f2h-2494    [000] ..... 226371.567663: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686882290066
+         gmu_f2h-2494    [000] ..... 226371.567675: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5400 ticks=4686882290114
+         gmu_f2h-2494    [000] ..... 226371.567738: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1159 inflight=0 recovery=none flags=none start=4686882117845 retire=4686882322604 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686882117710 retired_on_gmu=4686882323073 active=204755
+ UnityGfxDeviceW-19679   [003] ..... 226371.590141: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1160 inflight=1 flags=CTX_SWITCH ticks=4686882753904 time=226371.590136 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [002] ..... 226371.590498: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686882691754
+         gmu_f2h-2494    [002] ..... 226371.590499: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686882691754
+         gmu_f2h-2494    [000] ..... 226371.600959: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1160 inflight=0 recovery=none flags=none start=4686882759039 retire=4686882960162 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686882758910 retired_on_gmu=4686882960635 active=201119
+         gmu_f2h-2494    [000] ..... 226371.600970: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686882933827
+         gmu_f2h-2494    [000] ..... 226371.600971: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686882933827
+         gmu_f2h-2494    [000] ..... 226371.622077: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6800 ticks=4686883174329
+         gmu_f2h-2494    [000] ..... 226371.622096: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686883334608
+         gmu_f2h-2494    [000] ..... 226371.622098: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686883334608
+         gmu_f2h-2494    [000] ..... 226371.930407: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=15 freq=222000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686889282641
+         gmu_f2h-2494    [000] ..... 226371.930408: kgsl_gpu_frequency: gpu_freq=222000Khz gpu_id=0 ticks=4686889282641
+         gmu_f2h-2494    [000] ..... 226371.930413: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=15 bus=2 avg_bw=1321 ticks=4686889282705
+    kgsl_hwsched-1191    [001] ..... 226371.931261: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1161 inflight=1 flags=CTX_SWITCH ticks=4686889303468 time=226371.931258 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+ UnityGfxDeviceW-19679   [004] ..... 226371.933724: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1162 inflight=2 flags=CTX_SWITCH ticks=4686889350749 time=226371.933721 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.945560: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=14 freq=282000000 prev_pwrlevel=15 prev_freq=222000000 ticks=4686889466584
+         gmu_f2h-2494    [000] ..... 226371.945561: kgsl_gpu_frequency: gpu_freq=282000Khz gpu_id=0 ticks=4686889466584
+         gmu_f2h-2494    [001] ..... 226371.952655: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=13 freq=342000000 prev_pwrlevel=14 prev_freq=282000000 ticks=4686889626831
+         gmu_f2h-2494    [001] ..... 226371.952656: kgsl_gpu_frequency: gpu_freq=342000Khz gpu_id=0 ticks=4686889626831
+         gmu_f2h-2494    [001] ..... 226371.952668: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=11 freq=422000000 prev_pwrlevel=13 prev_freq=342000000 ticks=4686889708039
+         gmu_f2h-2494    [001] ..... 226371.952669: kgsl_gpu_frequency: gpu_freq=422000Khz gpu_id=0 ticks=4686889708039
+         gmu_f2h-2494    [001] ..... 226371.952675: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=11 bus=3 avg_bw=1321 ticks=4686889709273
+         gmu_f2h-2494    [000] ..... 226371.954293: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1161 inflight=0 recovery=none flags=none start=4686889311028 retire=4686889744191 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686889305679 retired_on_gmu=4686889744725 active=433150
+         gmu_f2h-2494    [000] ..... 226371.966548: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=9 freq=500000000 prev_pwrlevel=11 prev_freq=422000000 ticks=4686889789976
+         gmu_f2h-2494    [000] ..... 226371.966549: kgsl_gpu_frequency: gpu_freq=500000Khz gpu_id=0 ticks=4686889789976
+         gmu_f2h-2494    [000] ..... 226371.966567: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=7 freq=578000000 prev_pwrlevel=9 prev_freq=500000000 ticks=4686889869580
+         gmu_f2h-2494    [000] ..... 226371.966568: kgsl_gpu_frequency: gpu_freq=578000Khz gpu_id=0 ticks=4686889869580
+         gmu_f2h-2494    [000] ..... 226371.966584: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=7 prev_freq=578000000 ticks=4686889949984
+         gmu_f2h-2494    [000] ..... 226371.966585: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686889949984
+         gmu_f2h-2494    [000] ..... 226371.966594: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=5 avg_bw=1321 ticks=4686889950040
+         gmu_f2h-2494    [001] ..... 226371.970027: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1162 inflight=0 recovery=none flags=none start=4686889744282 retire=4686890045904 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686889351657 retired_on_gmu=4686890046343 active=301616
+         gmu_f2h-2494    [001] ..... 226371.970054: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686890030428
+         gmu_f2h-2494    [001] ..... 226371.970055: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686890030428
+         gmu_f2h-2494    [001] ..... 226371.970061: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=1321 ticks=4686890030498
+ UnityGfxDeviceW-19679   [005] ..... 226371.975266: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1163 inflight=1 flags=CTX_SWITCH ticks=4686890148278 time=226371.975261 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226371.984125: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=12500 ticks=4686890271619
+         gmu_f2h-2494    [000] ..... 226371.985825: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1163 inflight=0 recovery=none flags=none start=4686890153199 retire=4686890349819 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686890153078 retired_on_gmu=4686890350292 active=196617
+ UnityGfxDeviceW-19679   [005] ..... 226371.990102: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1164 inflight=1 flags=CTX_SWITCH ticks=4686890432944 time=226371.990086 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.000744: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1164 inflight=0 recovery=none flags=none start=4686890437887 retire=4686890636472 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686890437752 retired_on_gmu=4686890636926 active=198582
+         gmu_f2h-2494    [000] ..... 226372.021075: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686890994999
+         gmu_f2h-2494    [000] ..... 226372.021076: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686890994999
+ UnityGfxDeviceW-19679   [004] ..... 226372.022934: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1165 inflight=1 flags=CTX_SWITCH ticks=4686891063527 time=226372.22930 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.033601: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686891236939
+         gmu_f2h-2494    [000] ..... 226372.033602: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686891236939
+         gmu_f2h-2494    [000] ..... 226372.033607: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=9950 ticks=4686891236979
+         gmu_f2h-2494    [000] ..... 226372.033984: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1165 inflight=0 recovery=none flags=none start=4686891068914 retire=4686891274764 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686891068730 retired_on_gmu=4686891275266 active=205846
+ UnityGfxDeviceW-19679   [004] ..... 226372.056746: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1166 inflight=1 flags=CTX_SWITCH ticks=4686891712714 time=226372.56741 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.057108: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686891638307
+         gmu_f2h-2494    [000] ..... 226372.057109: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686891638307
+         gmu_f2h-2494    [000] ..... 226372.067383: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1166 inflight=0 recovery=none flags=none start=4686891717842 retire=4686891915707 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686891717706 retired_on_gmu=4686891916184 active=197861
+         gmu_f2h-2494    [000] ..... 226372.067402: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686891879613
+         gmu_f2h-2494    [000] ..... 226372.067402: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686891879613
+         gmu_f2h-2494    [000] ..... 226372.088011: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=5600 ticks=4686892200757
+         gmu_f2h-2494    [000] ..... 226372.088026: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686892280849
+         gmu_f2h-2494    [000] ..... 226372.088027: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686892280849
+ UnityGfxDeviceW-19679   [005] ..... 226372.092236: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1167 inflight=1 flags=CTX_SWITCH ticks=4686892394127 time=226372.92231 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.103195: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1167 inflight=0 recovery=none flags=none start=4686892399551 retire=4686892603237 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686892399414 retired_on_gmu=4686892603736 active=203683
+         gmu_f2h-2494    [000] ..... 226372.103212: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686892561208
+         gmu_f2h-2494    [000] ..... 226372.103213: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686892561208
+         gmu_f2h-2494    [000] ..... 226372.103220: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5600 ticks=4686892561250
+         gmu_f2h-2494    [001] ..... 226372.123605: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686892962113
+         gmu_f2h-2494    [001] ..... 226372.123608: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686892962113
+ UnityGfxDeviceW-19679   [004] ..... 226372.129362: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1168 inflight=1 flags=CTX_SWITCH ticks=4686893106887 time=226372.129354 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.140094: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1168 inflight=0 recovery=none flags=none start=4686893112316 retire=4686893311923 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686893112189 retired_on_gmu=4686893312426 active=199605
+         gmu_f2h-2494    [000] ..... 226372.140107: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686893274247
+         gmu_f2h-2494    [000] ..... 226372.140108: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686893274247
+         gmu_f2h-2494    [000] ..... 226372.140112: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=3700 ticks=4686893274296
+ UnityGfxDeviceW-19679   [005] ..... 226372.149720: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1169 inflight=1 flags=CTX_SWITCH ticks=4686893497815 time=226372.149714 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.159888: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1169 inflight=0 recovery=none flags=none start=4686893502290 retire=4686893692100 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686893502165 retired_on_gmu=4686893692521 active=189807
+         gmu_f2h-2494    [000] ..... 226372.185792: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686894077536
+         gmu_f2h-2494    [000] ..... 226372.185794: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686894077536
+ UnityGfxDeviceW-19679   [004] ..... 226372.191969: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1170 inflight=1 flags=CTX_SWITCH ticks=4686894308976 time=226372.191963 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.203640: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1170 inflight=0 recovery=none flags=none start=4686894314366 retire=4686894531901 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686894314227 retired_on_gmu=4686894532390 active=217531
+         gmu_f2h-2494    [000] ..... 226372.203651: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=5 avg_bw=5600 ticks=4686894396419
+         gmu_f2h-2494    [000] ..... 226372.203661: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686894476751
+         gmu_f2h-2494    [000] ..... 226372.203662: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686894476751
+         gmu_f2h-2494    [000] ..... 226372.203668: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5600 ticks=4686894476841
+         gmu_f2h-2494    [000] ..... 226372.223288: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686894877847
+         gmu_f2h-2494    [000] ..... 226372.223290: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686894877847
+ UnityGfxDeviceW-19679   [004] ..... 226372.224315: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1171 inflight=1 flags=CTX_SWITCH ticks=4686894930005 time=226372.224309 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.235276: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1171 inflight=0 recovery=none flags=none start=4686894935142 retire=4686895139217 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686894935014 retired_on_gmu=4686895139693 active=204073
+         gmu_f2h-2494    [000] ..... 226372.235300: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686895120443
+         gmu_f2h-2494    [000] ..... 226372.235301: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686895120443
+         gmu_f2h-2494    [000] ..... 226372.248460: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7150 ticks=4686895360406
+ UnityGfxDeviceW-19679   [004] ..... 226372.257285: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1172 inflight=1 flags=CTX_SWITCH ticks=4686895563047 time=226372.257279 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.257621: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686895520705
+         gmu_f2h-2494    [000] ..... 226372.257624: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686895520705
+         gmu_f2h-2494    [000] ..... 226372.268520: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1172 inflight=0 recovery=none flags=none start=4686895568253 retire=4686895777727 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686895568121 retired_on_gmu=4686895778179 active=209470
+         gmu_f2h-2494    [000] ..... 226372.268529: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686895763389
+         gmu_f2h-2494    [000] ..... 226372.268530: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686895763389
+         gmu_f2h-2494    [000] ..... 226372.268534: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7150 ticks=4686895763574
+ UnityGfxDeviceW-19679   [005] ..... 226372.289630: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1173 inflight=1 flags=CTX_SWITCH ticks=4686896184052 time=226372.289624 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.289959: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686896163876
+         gmu_f2h-2494    [000] ..... 226372.289962: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686896163876
+         gmu_f2h-2494    [000] ..... 226372.300415: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1173 inflight=0 recovery=none flags=none start=4686896189108 retire=4686896389756 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686896188975 retired_on_gmu=4686896390269 active=200645
+         gmu_f2h-2494    [000] ..... 226372.300431: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686896351062
+         gmu_f2h-2494    [000] ..... 226372.300432: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686896351062
+         gmu_f2h-2494    [000] ..... 226372.300438: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6200 ticks=4686896351110
+         gmu_f2h-2494    [000] ..... 226372.320898: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686896751990
+         gmu_f2h-2494    [000] ..... 226372.320900: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686896751990
+ UnityGfxDeviceW-19679   [004] ..... 226372.322235: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1174 inflight=1 flags=CTX_SWITCH ticks=4686896810105 time=226372.322230 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.333370: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1174 inflight=0 recovery=none flags=none start=4686896815335 retire=4686897022634 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686896815191 retired_on_gmu=4686897023112 active=207296
+         gmu_f2h-2494    [000] ..... 226372.333408: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686896993597
+         gmu_f2h-2494    [000] ..... 226372.333409: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686896993597
+         gmu_f2h-2494    [000] ..... 226372.333414: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6200 ticks=4686896993644
+ UnityGfxDeviceW-19679   [004] ..... 226372.355979: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1175 inflight=1 flags=CTX_SWITCH ticks=4686897457990 time=226372.355974 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.356327: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=5650 ticks=4686897315016
+         gmu_f2h-2494    [000] ..... 226372.356353: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686897395020
+         gmu_f2h-2494    [000] ..... 226372.356354: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686897395020
+         gmu_f2h-2494    [000] ..... 226372.367149: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1175 inflight=0 recovery=none flags=none start=4686897463313 retire=4686897668749 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686897463188 retired_on_gmu=4686897669220 active=205433
+         gmu_f2h-2494    [000] ..... 226372.367161: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686897636866
+         gmu_f2h-2494    [000] ..... 226372.367162: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686897636866
+         gmu_f2h-2494    [000] ..... 226372.367166: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5650 ticks=4686897636909
+         gmu_f2h-2494    [000] ..... 226372.387861: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686898037902
+         gmu_f2h-2494    [000] ..... 226372.387862: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686898037902
+ UnityGfxDeviceW-19679   [005] ..... 226372.388973: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1176 inflight=1 flags=CTX_SWITCH ticks=4686898091489 time=226372.388968 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226372.399770: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1176 inflight=0 recovery=none flags=none start=4686898096280 retire=4686898297114 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686898096151 retired_on_gmu=4686898297577 active=200830
+         gmu_f2h-2494    [001] ..... 226372.399793: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686898280275
+         gmu_f2h-2494    [001] ..... 226372.399794: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686898280275
+         gmu_f2h-2494    [001] ..... 226372.399798: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=9100 ticks=4686898280334
+ UnityGfxDeviceW-19679   [004] ..... 226372.422407: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1177 inflight=1 flags=CTX_SWITCH ticks=4686898733388 time=226372.422401 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.422752: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686898681202
+         gmu_f2h-2494    [000] ..... 226372.422753: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686898681202
+         gmu_f2h-2494    [000] ..... 226372.433544: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1177 inflight=0 recovery=none flags=none start=4686898738659 retire=4686898946106 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686898738522 retired_on_gmu=4686898946577 active=207444
+         gmu_f2h-2494    [000] ..... 226372.433555: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686898922779
+         gmu_f2h-2494    [000] ..... 226372.433556: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686898922779
+         gmu_f2h-2494    [000] ..... 226372.433563: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=9100 ticks=4686898922823
+         gmu_f2h-2494    [000] ..... 226372.454852: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=5350 ticks=4686899244006
+         gmu_f2h-2494    [000] ..... 226372.454868: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686899324046
+         gmu_f2h-2494    [000] ..... 226372.454869: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686899324046
+ UnityGfxDeviceW-19679   [005] ..... 226372.455752: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1178 inflight=1 flags=CTX_SWITCH ticks=4686899373641 time=226372.455748 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.466938: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1178 inflight=0 recovery=none flags=none start=4686899378867 retire=4686899587220 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686899378743 retired_on_gmu=4686899587681 active=208350
+         gmu_f2h-2494    [000] ..... 226372.466963: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686899565895
+         gmu_f2h-2494    [000] ..... 226372.466964: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686899565895
+         gmu_f2h-2494    [000] ..... 226372.466969: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5350 ticks=4686899565939
+ UnityGfxDeviceW-19679   [004] ..... 226372.489640: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1179 inflight=1 flags=CTX_SWITCH ticks=4686900024297 time=226372.489635 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.489954: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686899967127
+         gmu_f2h-2494    [000] ..... 226372.489955: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686899967127
+         gmu_f2h-2494    [000] ..... 226372.500436: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1179 inflight=0 recovery=none flags=none start=4686900029163 retire=4686900230402 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686900029028 retired_on_gmu=4686900230870 active=201236
+         gmu_f2h-2494    [000] ..... 226372.500448: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686900208948
+         gmu_f2h-2494    [000] ..... 226372.500449: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686900208948
+         gmu_f2h-2494    [000] ..... 226372.500454: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=9000 ticks=4686900209000
+         gmu_f2h-2494    [000] ..... 226372.521847: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686900610317
+         gmu_f2h-2494    [000] ..... 226372.521849: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686900610317
+ UnityGfxDeviceW-19679   [004] ..... 226372.529012: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1180 inflight=1 flags=CTX_SWITCH ticks=4686900780199 time=226372.529006 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.539383: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686900947447
+         gmu_f2h-2494    [000] ..... 226372.539385: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686900947447
+         gmu_f2h-2494    [000] ..... 226372.539394: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=9000 ticks=4686900947497
+         gmu_f2h-2494    [000] ..... 226372.539999: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1180 inflight=0 recovery=none flags=none start=4686900785651 retire=4686900990130 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686900785505 retired_on_gmu=4686900990615 active=204477
+ UnityGfxDeviceW-19679   [005] ..... 226372.556893: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1181 inflight=1 flags=CTX_SWITCH ticks=4686901315511 time=226372.556888 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.557210: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=2900 ticks=4686901268194
+         gmu_f2h-2494    [000] ..... 226372.564450: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686901351853
+         gmu_f2h-2494    [000] ..... 226372.564452: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686901351853
+         gmu_f2h-2494    [000] ..... 226372.567981: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1181 inflight=0 recovery=none flags=none start=4686901320467 retire=4686901527301 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686901320347 retired_on_gmu=4686901527775 active=206831
+         gmu_f2h-2494    [000] ..... 226372.567990: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686901510844
+         gmu_f2h-2494    [000] ..... 226372.567991: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686901510844
+         gmu_f2h-2494    [000] ..... 226372.567997: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=2900 ticks=4686901510917
+         gmu_f2h-2494    [000] ..... 226372.589639: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686901911560
+         gmu_f2h-2494    [000] ..... 226372.589640: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686901911560
+ UnityGfxDeviceW-19679   [003] ..... 226372.590283: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1182 inflight=1 flags=CTX_SWITCH ticks=4686901956623 time=226372.590278 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.601085: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1182 inflight=0 recovery=none flags=none start=4686901961710 retire=4686902162833 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686901961574 retired_on_gmu=4686902163274 active=201120
+         gmu_f2h-2494    [000] ..... 226372.601107: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686902153236
+         gmu_f2h-2494    [000] ..... 226372.601108: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686902153236
+         gmu_f2h-2494    [000] ..... 226372.614753: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=9600 ticks=4686902233323
+ UnityGfxDeviceW-19679   [003] ..... 226372.626220: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1183 inflight=1 flags=CTX_SWITCH ticks=4686902646592 time=226372.626215 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.626560: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686902554188
+         gmu_f2h-2494    [000] ..... 226372.626562: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686902554188
+         gmu_f2h-2494    [000] ..... 226372.637231: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1183 inflight=0 recovery=none flags=none start=4686902652099 retire=4686902856806 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686902651957 retired_on_gmu=4686902857296 active=204703
+         gmu_f2h-2494    [000] ..... 226372.637249: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686902814149
+         gmu_f2h-2494    [000] ..... 226372.637250: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686902814149
+         gmu_f2h-2494    [000] ..... 226372.637257: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=9600 ticks=4686902814195
+ UnityGfxDeviceW-19679   [005] ..... 226372.655227: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1184 inflight=1 flags=CTX_SWITCH ticks=4686903203529 time=226372.655221 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.662515: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686903217709
+         gmu_f2h-2494    [000] ..... 226372.662519: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686903217709
+         gmu_f2h-2494    [000] ..... 226372.662543: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=5100 ticks=4686903296534
+         gmu_f2h-2494    [000] ..... 226372.666049: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1184 inflight=0 recovery=none flags=none start=4686903208409 retire=4686903410323 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686903208269 retired_on_gmu=4686903410805 active=201911
+         gmu_f2h-2494    [000] ..... 226372.666057: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686903376607
+         gmu_f2h-2494    [000] ..... 226372.666058: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686903376607
+         gmu_f2h-2494    [000] ..... 226372.666062: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5100 ticks=4686903376688
+         gmu_f2h-2494    [000] ..... 226372.686838: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686903778018
+         gmu_f2h-2494    [000] ..... 226372.686840: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686903778018
+ UnityGfxDeviceW-19679   [005] ..... 226372.689050: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1185 inflight=1 flags=CTX_SWITCH ticks=4686903852925 time=226372.689044 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.699377: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686904019405
+         gmu_f2h-2494    [000] ..... 226372.699378: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686904019405
+         gmu_f2h-2494    [000] ..... 226372.699758: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1185 inflight=0 recovery=none flags=none start=4686903858401 retire=4686904056373 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686903858279 retired_on_gmu=4686904056849 active=197968
+         gmu_f2h-2494    [000] ..... 226372.711971: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6850 ticks=4686904260263
+ UnityGfxDeviceW-19679   [005] ..... 226372.723255: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1186 inflight=1 flags=CTX_SWITCH ticks=4686904509669 time=226372.723249 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.723595: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686904420656
+         gmu_f2h-2494    [000] ..... 226372.723598: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686904420656
+         gmu_f2h-2494    [000] ..... 226372.734183: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1186 inflight=0 recovery=none flags=none start=4686904514959 retire=4686904718432 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686904514821 retired_on_gmu=4686904718878 active=203469
+         gmu_f2h-2494    [000] ..... 226372.734200: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686904676749
+         gmu_f2h-2494    [000] ..... 226372.734201: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686904676749
+         gmu_f2h-2494    [000] ..... 226372.734206: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6850 ticks=4686904676795
+         gmu_f2h-2494    [005] ..... 226372.754518: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686905077595
+         gmu_f2h-2494    [005] ..... 226372.754520: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686905077595
+ UnityGfxDeviceW-19679   [003] ..... 226372.755158: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1187 inflight=1 flags=CTX_SWITCH ticks=4686905122249 time=226372.755154 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.766028: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1187 inflight=0 recovery=none flags=none start=4686905127128 retire=4686905329866 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686905126996 retired_on_gmu=4686905330369 active=202735
+         gmu_f2h-2494    [000] ..... 226372.766041: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=5800 ticks=4686905239041
+         gmu_f2h-2494    [000] ..... 226372.766049: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686905319617
+         gmu_f2h-2494    [000] ..... 226372.766050: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686905319617
+         gmu_f2h-2494    [000] ..... 226372.766053: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=5800 ticks=4686905319659
+ UnityGfxDeviceW-19679   [004] ..... 226372.788961: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1188 inflight=1 flags=CTX_SWITCH ticks=4686905771141 time=226372.788955 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.789341: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686905720827
+         gmu_f2h-2494    [000] ..... 226372.789342: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686905720827
+         gmu_f2h-2494    [000] ..... 226372.799607: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1188 inflight=0 recovery=none flags=none start=4686905776844 retire=4686905974584 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686905776718 retired_on_gmu=4686905975083 active=197737
+         gmu_f2h-2494    [000] ..... 226372.799620: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686905938087
+         gmu_f2h-2494    [000] ..... 226372.799621: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686905938087
+         gmu_f2h-2494    [000] ..... 226372.820239: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=3500 ticks=4686906259217
+         gmu_f2h-2494    [000] ..... 226372.820254: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686906339242
+         gmu_f2h-2494    [000] ..... 226372.820255: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686906339242
+ UnityGfxDeviceW-19679   [004] ..... 226372.821847: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1189 inflight=1 flags=CTX_SWITCH ticks=4686906402628 time=226372.821841 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.832821: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686906581120
+         gmu_f2h-2494    [000] ..... 226372.832822: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686906581120
+         gmu_f2h-2494    [000] ..... 226372.832827: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=3500 ticks=4686906581160
+         gmu_f2h-2494    [000] ..... 226372.832868: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1189 inflight=0 recovery=none flags=none start=4686906407639 retire=4686906613291 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686906407503 retired_on_gmu=4686906613766 active=205650
+ UnityGfxDeviceW-19679   [004] ..... 226372.855187: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1190 inflight=1 flags=CTX_SWITCH ticks=4686907042773 time=226372.855182 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.855513: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686906982371
+         gmu_f2h-2494    [000] ..... 226372.855515: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686906982371
+         gmu_f2h-2494    [000] ..... 226372.866007: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1190 inflight=0 recovery=none flags=none start=4686907047901 retire=4686907249389 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686907047761 retired_on_gmu=4686907249858 active=201484
+         gmu_f2h-2494    [000] ..... 226372.866019: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686907224267
+         gmu_f2h-2494    [000] ..... 226372.866021: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686907224267
+         gmu_f2h-2494    [000] ..... 226372.866026: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=8950 ticks=4686907224315
+         gmu_f2h-2494    [003] ..... 226372.887225: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686907625122
+         gmu_f2h-2494    [003] ..... 226372.887228: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686907625122
+ UnityGfxDeviceW-19679   [004] ..... 226372.890714: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1191 inflight=1 flags=CTX_SWITCH ticks=4686907724890 time=226372.890709 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.901785: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1191 inflight=0 recovery=none flags=none start=4686907730271 retire=4686907936302 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686907730137 retired_on_gmu=4686907936770 active=206028
+         gmu_f2h-2494    [000] ..... 226372.901814: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686907891952
+         gmu_f2h-2494    [000] ..... 226372.901815: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686907891952
+         gmu_f2h-2494    [000] ..... 226372.901821: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=8950 ticks=4686907891997
+ UnityGfxDeviceW-19679   [002] ..... 226372.921744: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1192 inflight=1 flags=CTX_SWITCH ticks=4686908320703 time=226372.921740 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.922088: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=3050 ticks=4686908212678
+         gmu_f2h-2494    [000] ..... 226372.922114: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686908292816
+         gmu_f2h-2494    [000] ..... 226372.922115: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686908292816
+         gmu_f2h-2494    [000] ..... 226372.933112: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1192 inflight=0 recovery=none flags=none start=4686908325882 retire=4686908537939 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686908325750 retired_on_gmu=4686908538413 active=212054
+         gmu_f2h-2494    [000] ..... 226372.933131: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686908535282
+         gmu_f2h-2494    [000] ..... 226372.933132: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686908535282
+         gmu_f2h-2494    [000] ..... 226372.933136: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=3050 ticks=4686908535328
+ UnityGfxDeviceW-19679   [002] ..... 226372.950887: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1193 inflight=1 flags=CTX_SWITCH ticks=4686908880259 time=226372.950883 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.959605: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686908938245
+         gmu_f2h-2494    [000] ..... 226372.959606: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686908938245
+         gmu_f2h-2494    [000] ..... 226372.961766: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1193 inflight=0 recovery=none flags=none start=4686908884679 retire=4686909088158 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686908884554 retired_on_gmu=4686909088635 active=203477
+         gmu_f2h-2494    [000] ..... 226372.972180: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686909096720
+         gmu_f2h-2494    [000] ..... 226372.972181: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686909096720
+         gmu_f2h-2494    [000] ..... 226372.972192: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=9600 ticks=4686909177005
+ UnityGfxDeviceW-19679   [005] ..... 226372.980605: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1194 inflight=1 flags=CTX_SWITCH ticks=4686909450826 time=226372.980600 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226372.989718: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686909500370
+         gmu_f2h-2494    [000] ..... 226372.989719: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686909500370
+         gmu_f2h-2494    [000] ..... 226372.991416: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1194 inflight=0 recovery=none flags=none start=4686909455730 retire=4686909657486 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686909455603 retired_on_gmu=4686909657977 active=201754
+         gmu_f2h-2494    [000] ..... 226373.001487: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686909659490
+         gmu_f2h-2494    [000] ..... 226373.001488: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686909659490
+         gmu_f2h-2494    [000] ..... 226373.001495: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=9600 ticks=4686909659530
+         gmu_f2h-2494    [000] ..... 226373.014054: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686910060495
+         gmu_f2h-2494    [000] ..... 226373.014056: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686910060495
+ UnityGfxDeviceW-19679   [002] ..... 226373.021405: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1195 inflight=1 flags=CTX_SWITCH ticks=4686910234168 time=226373.21400 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.032339: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1195 inflight=0 recovery=none flags=none start=4686910239425 retire=4686910442351 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686910239291 retired_on_gmu=4686910442836 active=202922
+         gmu_f2h-2494    [000] ..... 226373.032350: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4800 ticks=4686910320745
+         gmu_f2h-2494    [000] ..... 226373.032362: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686910401160
+         gmu_f2h-2494    [000] ..... 226373.032364: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686910401160
+         gmu_f2h-2494    [000] ..... 226373.032368: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4800 ticks=4686910401204
+         gmu_f2h-2494    [000] ..... 226373.052722: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686910802558
+         gmu_f2h-2494    [000] ..... 226373.052723: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686910802558
+ UnityGfxDeviceW-19679   [004] ..... 226373.060681: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1196 inflight=1 flags=CTX_SWITCH ticks=4686910988165 time=226373.60675 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226373.070270: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686911155036
+         gmu_f2h-2494    [001] ..... 226373.070272: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686911155036
+         gmu_f2h-2494    [000] ..... 226373.071446: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1196 inflight=0 recovery=none flags=none start=4686910993838 retire=4686911193411 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686910993712 retired_on_gmu=4686911193899 active=199570
+         gmu_f2h-2494    [000] ..... 226373.083583: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=4400 ticks=4686911395895
+ UnityGfxDeviceW-19679   [003] ..... 226373.086830: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1197 inflight=1 flags=CTX_SWITCH ticks=4686911490353 time=226373.86825 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.096107: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686911558707
+         gmu_f2h-2494    [000] ..... 226373.096108: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686911558707
+         gmu_f2h-2494    [000] ..... 226373.096120: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686911637332
+         gmu_f2h-2494    [000] ..... 226373.096121: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686911637332
+         gmu_f2h-2494    [000] ..... 226373.096127: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4400 ticks=4686911637390
+         gmu_f2h-2494    [000] ..... 226373.097299: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1197 inflight=0 recovery=none flags=none start=4686911494945 retire=4686911690401 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686911494806 retired_on_gmu=4686911690863 active=195454
+ UnityGfxDeviceW-19679   [003] ..... 226373.120921: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1198 inflight=1 flags=CTX_SWITCH ticks=4686912144873 time=226373.120916 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.121268: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686912038560
+         gmu_f2h-2494    [000] ..... 226373.121271: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686912038560
+         gmu_f2h-2494    [000] ..... 226373.131633: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1198 inflight=0 recovery=none flags=none start=4686912150141 retire=4686912349292 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686912150008 retired_on_gmu=4686912349768 active=199147
+         gmu_f2h-2494    [000] ..... 226373.131649: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686912311645
+         gmu_f2h-2494    [000] ..... 226373.131651: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686912311645
+         gmu_f2h-2494    [001] ..... 226373.140456: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7000 ticks=4686912392280
+ UnityGfxDeviceW-19679   [003] ..... 226373.148761: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1199 inflight=1 flags=CTX_SWITCH ticks=4686912679465 time=226373.148758 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.157171: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686912715857
+         gmu_f2h-2494    [000] ..... 226373.157172: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686912715857
+         gmu_f2h-2494    [000] ..... 226373.159441: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1199 inflight=0 recovery=none flags=none start=4686912683960 retire=4686912883438 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686912683826 retired_on_gmu=4686912883921 active=199476
+         gmu_f2h-2494    [000] ..... 226373.159450: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686912874911
+         gmu_f2h-2494    [000] ..... 226373.159450: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686912874911
+         gmu_f2h-2494    [000] ..... 226373.159455: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7000 ticks=4686912874977
+         gmu_f2h-2494    [000] ..... 226373.181545: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686913275894
+         gmu_f2h-2494    [000] ..... 226373.181548: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686913275894
+ UnityGfxDeviceW-19679   [004] ..... 226373.192933: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1200 inflight=1 flags=CTX_SWITCH ticks=4686913527538 time=226373.192929 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.203517: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1200 inflight=0 recovery=none flags=none start=4686913532117 retire=4686913729528 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686913531982 retired_on_gmu=4686913730021 active=197408
+         gmu_f2h-2494    [000] ..... 226373.203528: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4700 ticks=4686913613791
+         gmu_f2h-2494    [000] ..... 226373.203540: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686913693935
+         gmu_f2h-2494    [000] ..... 226373.203541: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686913693935
+         gmu_f2h-2494    [000] ..... 226373.203546: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4700 ticks=4686913693991
+ UnityGfxDeviceW-19679   [005] ..... 226373.221241: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1201 inflight=1 flags=CTX_SWITCH ticks=4686914071015 time=226373.221236 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.229151: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686914097535
+         gmu_f2h-2494    [000] ..... 226373.229151: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686914097535
+         gmu_f2h-2494    [000] ..... 226373.231824: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1201 inflight=0 recovery=none flags=none start=4686914075892 retire=4686914273233 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686914075761 retired_on_gmu=4686914273702 active=197339
+         gmu_f2h-2494    [000] ..... 226373.231833: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686914257060
+         gmu_f2h-2494    [000] ..... 226373.231834: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686914257060
+         gmu_f2h-2494    [000] ..... 226373.253502: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6850 ticks=4686914578160
+         gmu_f2h-2494    [000] ..... 226373.253516: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686914658219
+         gmu_f2h-2494    [000] ..... 226373.253518: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686914658219
+ UnityGfxDeviceW-19679   [005] ..... 226373.255606: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1202 inflight=1 flags=CTX_SWITCH ticks=4686914730795 time=226373.255600 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.266063: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686914899657
+         gmu_f2h-2494    [000] ..... 226373.266064: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686914899657
+         gmu_f2h-2494    [000] ..... 226373.266074: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6850 ticks=4686914899704
+         gmu_f2h-2494    [000] ..... 226373.266551: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1202 inflight=0 recovery=none flags=none start=4686914735992 retire=4686914939181 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686914735859 retired_on_gmu=4686914939622 active=203185
+ UnityGfxDeviceW-19679   [005] ..... 226373.288216: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1203 inflight=1 flags=CTX_SWITCH ticks=4686915356976 time=226373.288212 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.288551: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686915300871
+         gmu_f2h-2494    [000] ..... 226373.288553: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686915300871
+         gmu_f2h-2494    [001] ..... 226373.299039: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1203 inflight=0 recovery=none flags=none start=4686915361501 retire=4686915560114 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686915361365 retired_on_gmu=4686915560574 active=198611
+         gmu_f2h-2494    [001] ..... 226373.299178: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686915543195
+         gmu_f2h-2494    [001] ..... 226373.299179: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686915543195
+         gmu_f2h-2494    [001] ..... 226373.299184: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=8850 ticks=4686915543283
+         gmu_f2h-2494    [000] ..... 226373.320478: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686915943878
+         gmu_f2h-2494    [000] ..... 226373.320479: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686915943878
+ UnityGfxDeviceW-19679   [005] ..... 226373.328260: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1204 inflight=1 flags=CTX_SWITCH ticks=4686916125764 time=226373.328254 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.337982: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686916292488
+         gmu_f2h-2494    [000] ..... 226373.337983: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686916292488
+         gmu_f2h-2494    [000] ..... 226373.337991: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=8850 ticks=4686916292531
+         gmu_f2h-2494    [000] ..... 226373.339073: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1204 inflight=0 recovery=none flags=none start=4686916131201 retire=4686916332436 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686916131062 retired_on_gmu=4686916332914 active=201232
+ UnityGfxDeviceW-19679   [004] ..... 226373.354459: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1205 inflight=1 flags=CTX_SWITCH ticks=4686916628797 time=226373.354454 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.354775: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=2750 ticks=4686916613346
+         gmu_f2h-2494    [000] ..... 226373.363674: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686916696120
+         gmu_f2h-2494    [000] ..... 226373.363674: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686916696120
+         gmu_f2h-2494    [000] ..... 226373.363687: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686916774454
+         gmu_f2h-2494    [000] ..... 226373.363688: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686916774454
+         gmu_f2h-2494    [000] ..... 226373.363697: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=2750 ticks=4686916774495
+         gmu_f2h-2494    [000] ..... 226373.365226: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1205 inflight=0 recovery=none flags=none start=4686916633716 retire=4686916834410 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686916633591 retired_on_gmu=4686916834881 active=200690
+         gmu_f2h-2494    [005] ..... 226373.388819: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686917176098
+         gmu_f2h-2494    [005] ..... 226373.388822: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686917176098
+ UnityGfxDeviceW-19679   [004] ..... 226373.389712: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1206 inflight=1 flags=CTX_SWITCH ticks=4686917305654 time=226373.389707 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.400258: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1206 inflight=0 recovery=none flags=none start=4686917310869 retire=4686917506964 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686917310746 retired_on_gmu=4686917507432 active=196091
+         gmu_f2h-2494    [000] ..... 226373.400299: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686917472458
+         gmu_f2h-2494    [000] ..... 226373.400300: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686917472458
+         gmu_f2h-2494    [000] ..... 226373.409261: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6850 ticks=4686917633201
+ UnityGfxDeviceW-19679   [003] ..... 226373.419924: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1207 inflight=1 flags=CTX_SWITCH ticks=4686917885763 time=226373.419920 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.420260: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686917873563
+         gmu_f2h-2494    [000] ..... 226373.420263: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686917873563
+         gmu_f2h-2494    [000] ..... 226373.430616: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1207 inflight=0 recovery=none flags=none start=4686917890609 retire=4686918089902 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686917890475 retired_on_gmu=4686918090312 active=199291
+         gmu_f2h-2494    [000] ..... 226373.450299: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=7 freq=578000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686918276102
+         gmu_f2h-2494    [000] ..... 226373.450301: kgsl_gpu_frequency: gpu_freq=578000Khz gpu_id=0 ticks=4686918276102
+ UnityGfxDeviceW-19679   [003] ..... 226373.455532: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1208 inflight=1 flags=CTX_SWITCH ticks=4686918569385 time=226373.455526 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.468983: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1208 inflight=0 recovery=none flags=none start=4686918574729 retire=4686918825809 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686918574593 retired_on_gmu=4686918826587 active=251076
+         gmu_f2h-2494    [000] ..... 226373.468997: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=7 bus=5 avg_bw=4700 ticks=4686918656640
+         gmu_f2h-2494    [000] ..... 226373.469013: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=6 freq=646000000 prev_pwrlevel=7 prev_freq=578000000 ticks=4686918737001
+         gmu_f2h-2494    [000] ..... 226373.469015: kgsl_gpu_frequency: gpu_freq=646000Khz gpu_id=0 ticks=4686918737001
+         gmu_f2h-2494    [000] ..... 226373.469030: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=6 prev_freq=646000000 ticks=4686918817601
+         gmu_f2h-2494    [000] ..... 226373.469031: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686918817601
+ UnityGfxDeviceW-19679   [002] ..... 226373.488722: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1209 inflight=1 flags=CTX_SWITCH ticks=4686919206651 time=226373.488717 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.495199: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=6 freq=646000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686919220942
+         gmu_f2h-2494    [000] ..... 226373.495202: kgsl_gpu_frequency: gpu_freq=646000Khz gpu_id=0 ticks=4686919220942
+         gmu_f2h-2494    [000] ..... 226373.502166: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1209 inflight=0 recovery=none flags=none start=4686919211756 retire=4686919463608 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686919211579 retired_on_gmu=4686919464081 active=251848
+         gmu_f2h-2494    [000] ..... 226373.502177: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=6 prev_freq=646000000 ticks=4686919380184
+         gmu_f2h-2494    [000] ..... 226373.502179: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686919380184
+         gmu_f2h-2494    [000] ..... 226373.502190: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686919460824
+         gmu_f2h-2494    [000] ..... 226373.502191: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686919460824
+         gmu_f2h-2494    [000] ..... 226373.502197: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4700 ticks=4686919460919
+         gmu_f2h-2494    [000] ..... 226373.516194: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=7150 ticks=4686919621242
+ UnityGfxDeviceW-19679   [004] ..... 226373.526787: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1210 inflight=1 flags=CTX_SWITCH ticks=4686919937500 time=226373.526782 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.527125: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686919861855
+         gmu_f2h-2494    [000] ..... 226373.527126: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686919861855
+         gmu_f2h-2494    [000] ..... 226373.537689: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1210 inflight=0 recovery=none flags=none start=4686919942939 retire=4686920145534 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686919942809 retired_on_gmu=4686920145989 active=202592
+         gmu_f2h-2494    [000] ..... 226373.537706: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686920104227
+         gmu_f2h-2494    [000] ..... 226373.537707: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686920104227
+         gmu_f2h-2494    [000] ..... 226373.537712: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=7150 ticks=4686920104273
+ UnityGfxDeviceW-19679   [003] ..... 226373.553051: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1211 inflight=1 flags=CTX_SWITCH ticks=4686920441775 time=226373.553046 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.563029: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686920507253
+         gmu_f2h-2494    [000] ..... 226373.563030: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686920507253
+         gmu_f2h-2494    [000] ..... 226373.563041: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686920585725
+         gmu_f2h-2494    [000] ..... 226373.563043: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686920585725
+         gmu_f2h-2494    [000] ..... 226373.563321: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1211 inflight=0 recovery=none flags=none start=4686920446260 retire=4686920637905 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686920446135 retired_on_gmu=4686920638377 active=191643
+         gmu_f2h-2494    [000] ..... 226373.574791: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6900 ticks=4686920666184
+         gmu_f2h-2494    [002] ..... 226373.587327: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686920987217
+         gmu_f2h-2494    [002] ..... 226373.587329: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686920987217
+ UnityGfxDeviceW-19679   [004] ..... 226373.588215: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1212 inflight=1 flags=CTX_SWITCH ticks=4686921116920 time=226373.588210 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.599013: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1212 inflight=0 recovery=none flags=none start=4686921122029 retire=4686921322987 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686921121896 retired_on_gmu=4686921323449 active=200955
+         gmu_f2h-2494    [000] ..... 226373.599031: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686921283299
+         gmu_f2h-2494    [000] ..... 226373.599032: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686921283299
+         gmu_f2h-2494    [000] ..... 226373.599038: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6900 ticks=4686921283345
+         gmu_f2h-2494    [000] ..... 226373.619475: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686921684582
+         gmu_f2h-2494    [000] ..... 226373.619477: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686921684582
+         gmu_f2h-2494    [000] ..... 226373.619484: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=2200 ticks=4686921684648
+ UnityGfxDeviceW-19679   [005] ..... 226373.621928: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1213 inflight=1 flags=CTX_SWITCH ticks=4686921764198 time=226373.621923 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.632020: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686921930658
+         gmu_f2h-2494    [000] ..... 226373.632021: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686921930658
+         gmu_f2h-2494    [000] ..... 226373.632031: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=2200 ticks=4686921930701
+         gmu_f2h-2494    [000] ..... 226373.632832: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1213 inflight=0 recovery=none flags=none start=4686921769496 retire=4686921972467 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686921769365 retired_on_gmu=4686921972942 active=202967
+ UnityGfxDeviceW-19679   [005] ..... 226373.655042: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1214 inflight=1 flags=CTX_SWITCH ticks=4686922399970 time=226373.655036 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.655379: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686922331998
+         gmu_f2h-2494    [000] ..... 226373.655381: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686922331998
+         gmu_f2h-2494    [000] ..... 226373.665697: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1214 inflight=0 recovery=none flags=none start=4686922405206 retire=4686922602616 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686922405072 retired_on_gmu=4686922603076 active=197407
+         gmu_f2h-2494    [000] ..... 226373.665710: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686922573951
+         gmu_f2h-2494    [000] ..... 226373.665711: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686922573951
+         gmu_f2h-2494    [000] ..... 226373.674137: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6900 ticks=4686922654549
+         gmu_f2h-2494    [000] ..... 226373.686707: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686922975262
+         gmu_f2h-2494    [000] ..... 226373.686708: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686922975262
+ UnityGfxDeviceW-19679   [005] ..... 226373.687689: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1215 inflight=1 flags=CTX_SWITCH ticks=4686923026825 time=226373.687684 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [001] ..... 226373.698762: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1215 inflight=0 recovery=none flags=none start=4686923031977 retire=4686923237993 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686923031840 retired_on_gmu=4686923238456 active=206013
+         gmu_f2h-2494    [001] ..... 226373.698788: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686923217121
+         gmu_f2h-2494    [001] ..... 226373.698789: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686923217121
+         gmu_f2h-2494    [001] ..... 226373.698794: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6900 ticks=4686923217205
+ UnityGfxDeviceW-19679   [002] ..... 226373.721767: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1216 inflight=1 flags=CTX_SWITCH ticks=4686923681114 time=226373.721762 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.722103: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686923618245
+         gmu_f2h-2494    [000] ..... 226373.722105: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686923618245
+         gmu_f2h-2494    [000] ..... 226373.722116: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4700 ticks=4686923618311
+         gmu_f2h-2494    [000] ..... 226373.732808: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1216 inflight=0 recovery=none flags=none start=4686923686375 retire=4686923891940 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686923686237 retired_on_gmu=4686923892431 active=205561
+         gmu_f2h-2494    [000] ..... 226373.732820: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686923859870
+         gmu_f2h-2494    [000] ..... 226373.732821: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686923859870
+         gmu_f2h-2494    [000] ..... 226373.732826: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4700 ticks=4686923859915
+         gmu_f2h-2494    [000] ..... 226373.753638: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686924261135
+         gmu_f2h-2494    [000] ..... 226373.753639: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686924261135
+ UnityGfxDeviceW-19679   [004] ..... 226373.758119: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1217 inflight=1 flags=CTX_SWITCH ticks=4686924379088 time=226373.758114 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.768653: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1217 inflight=0 recovery=none flags=none start=4686924384098 retire=4686924580054 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686924383961 retired_on_gmu=4686924580521 active=195952
+         gmu_f2h-2494    [000] ..... 226373.768671: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686924545675
+         gmu_f2h-2494    [000] ..... 226373.768672: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686924545675
+         gmu_f2h-2494    [000] ..... 226373.777624: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6850 ticks=4686924625646
+ UnityGfxDeviceW-19679   [005] ..... 226373.784200: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1218 inflight=1 flags=CTX_SWITCH ticks=4686924879824 time=226373.784194 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.794353: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686924949119
+         gmu_f2h-2494    [000] ..... 226373.794355: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686924949119
+         gmu_f2h-2494    [000] ..... 226373.794373: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686925027512
+         gmu_f2h-2494    [000] ..... 226373.794375: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686925027512
+         gmu_f2h-2494    [000] ..... 226373.794384: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6850 ticks=4686925027551
+         gmu_f2h-2494    [000] ..... 226373.794634: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1218 inflight=0 recovery=none flags=none start=4686924884345 retire=4686925079074 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686924884225 retired_on_gmu=4686925079549 active=194726
+         gmu_f2h-2494    [000] ..... 226373.818653: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686925428994
+         gmu_f2h-2494    [000] ..... 226373.818654: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686925428994
+ UnityGfxDeviceW-19679   [002] ..... 226373.821019: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1219 inflight=1 flags=CTX_SWITCH ticks=4686925586753 time=226373.821014 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.831754: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1219 inflight=0 recovery=none flags=none start=4686925591796 retire=4686925791588 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686925591671 retired_on_gmu=4686925792057 active=199788
+         gmu_f2h-2494    [000] ..... 226373.831766: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=4700 ticks=4686925673273
+         gmu_f2h-2494    [000] ..... 226373.831776: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686925753346
+         gmu_f2h-2494    [000] ..... 226373.831777: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686925753346
+         gmu_f2h-2494    [000] ..... 226373.831782: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4700 ticks=4686925753395
+         gmu_f2h-2494    [000] ..... 226373.852294: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686926154688
+         gmu_f2h-2494    [000] ..... 226373.852296: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686926154688
+ UnityGfxDeviceW-19679   [005] ..... 226373.855199: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1220 inflight=1 flags=CTX_SWITCH ticks=4686926243009 time=226373.855194 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.864823: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686926409985
+         gmu_f2h-2494    [000] ..... 226373.864825: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686926409985
+         gmu_f2h-2494    [000] ..... 226373.865726: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1220 inflight=0 recovery=none flags=none start=4686926248415 retire=4686926444064 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686926248283 retired_on_gmu=4686926444527 active=195645
+         gmu_f2h-2494    [001] ..... 226373.878163: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=4300 ticks=4686926650833
+         gmu_f2h-2494    [000] ..... 226373.890674: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686926811270
+         gmu_f2h-2494    [000] ..... 226373.890675: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686926811270
+ UnityGfxDeviceW-19679   [002] ..... 226373.894530: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1221 inflight=1 flags=CTX_SWITCH ticks=4686926998154 time=226373.894524 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.905483: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1221 inflight=0 recovery=none flags=none start=4686927003621 retire=4686927207405 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686927003463 retired_on_gmu=4686927207875 active=203781
+         gmu_f2h-2494    [000] ..... 226373.905499: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686927165013
+         gmu_f2h-2494    [000] ..... 226373.905500: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686927165013
+         gmu_f2h-2494    [000] ..... 226373.905506: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=4300 ticks=4686927165068
+ UnityGfxDeviceW-19679   [002] ..... 226373.919547: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1222 inflight=1 flags=CTX_SWITCH ticks=4686927478474 time=226373.919541 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.925775: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686927568433
+         gmu_f2h-2494    [000] ..... 226373.925776: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686927568433
+         gmu_f2h-2494    [000] ..... 226373.929962: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1222 inflight=0 recovery=none flags=none start=4686927483434 retire=4686927677065 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686927483302 retired_on_gmu=4686927677540 active=193628
+         gmu_f2h-2494    [000] ..... 226373.929973: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686927646643
+         gmu_f2h-2494    [000] ..... 226373.929973: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686927646643
+         gmu_f2h-2494    [001] ..... 226373.938364: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6900 ticks=4686927727267
+         gmu_f2h-2494    [000] ..... 226373.950938: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686928048121
+         gmu_f2h-2494    [000] ..... 226373.950939: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686928048121
+ UnityGfxDeviceW-19679   [005] ..... 226373.956113: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1223 inflight=1 flags=CTX_SWITCH ticks=4686928180579 time=226373.956108 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.966622: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1223 inflight=0 recovery=none flags=none start=4686928185584 retire=4686928381209 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686928185457 retired_on_gmu=4686928381691 active=195623
+         gmu_f2h-2494    [000] ..... 226373.966638: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686928347316
+         gmu_f2h-2494    [000] ..... 226373.966639: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686928347316
+         gmu_f2h-2494    [000] ..... 226373.966644: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6900 ticks=4686928347358
+         gmu_f2h-2494    [000] ..... 226373.987367: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686928748307
+         gmu_f2h-2494    [000] ..... 226373.987369: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686928748307
+         gmu_f2h-2494    [000] ..... 226373.987380: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=2150 ticks=4686928748377
+ UnityGfxDeviceW-19679   [004] ..... 226373.988050: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1224 inflight=1 flags=CTX_SWITCH ticks=4686928793745 time=226373.988045 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226373.999000: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1224 inflight=0 recovery=none flags=none start=4686928799016 retire=4686929002792 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686928798883 retired_on_gmu=4686929003259 active=203773
+         gmu_f2h-2494    [000] ..... 226373.999049: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686928990698
+         gmu_f2h-2494    [000] ..... 226373.999050: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686928990698
+         gmu_f2h-2494    [000] ..... 226373.999055: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=2150 ticks=4686928990765
+ UnityGfxDeviceW-19679   [005] ..... 226374.020935: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1225 inflight=1 flags=CTX_SWITCH ticks=4686929425069 time=226374.20930 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226374.021287: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686929391287
+         gmu_f2h-2494    [000] ..... 226374.021288: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686929391287
+         gmu_f2h-2494    [000] ..... 226374.031357: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1225 inflight=0 recovery=none flags=none start=4686929430808 retire=4686929624118 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686929430683 retired_on_gmu=4686929624579 active=193306
+         gmu_f2h-2494    [000] ..... 226374.031373: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686929592292
+         gmu_f2h-2494    [000] ..... 226374.031374: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686929592292
+         gmu_f2h-2494    [000] ..... 226374.040538: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=6 avg_bw=6750 ticks=4686929753180
+         gmu_f2h-2494    [000] ..... 226374.052247: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686929993711
+         gmu_f2h-2494    [000] ..... 226374.052249: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686929993711
+ UnityGfxDeviceW-19679   [003] ..... 226374.054733: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1226 inflight=1 flags=CTX_SWITCH ticks=4686930074069 time=226374.54728 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226374.064789: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686930241107
+         gmu_f2h-2494    [000] ..... 226374.064791: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686930241107
+         gmu_f2h-2494    [000] ..... 226374.064801: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=6750 ticks=4686930241149
+         gmu_f2h-2494    [000] ..... 226374.065486: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1226 inflight=0 recovery=none flags=none start=4686930079411 retire=4686930279535 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686930079277 retired_on_gmu=4686930279972 active=200121
+ UnityGfxDeviceW-19679   [003] ..... 226374.087274: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1227 inflight=1 flags=CTX_SWITCH ticks=4686930698830 time=226374.87268 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1
+         gmu_f2h-2494    [000] ..... 226374.087600: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686930642074
+         gmu_f2h-2494    [000] ..... 226374.087602: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686930642074
+         gmu_f2h-2494    [000] ..... 226374.095156: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=5 bus=6 avg_bw=2700 ticks=4686930723276
+         gmu_f2h-2494    [000] ..... 226374.098163: adreno_cmdbatch_retired: ctx=45 ctx_prio=8 ts=1227 inflight=0 recovery=none flags=none start=4686930703961 retire=4686930906699 rb_id=2, r/w=0/0, q_inflight=0, dq_id=4294967295, submitted_to_rb=4686930703826 retired_on_gmu=4686930907255 active=202735
+         gmu_f2h-2494    [000] ..... 226374.098172: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=4 freq=826000000 prev_pwrlevel=5 prev_freq=726000000 ticks=4686930883658
+         gmu_f2h-2494    [000] ..... 226374.098173: kgsl_gpu_frequency: gpu_freq=826000Khz gpu_id=0 ticks=4686930883658
+         gmu_f2h-2494    [000] ..... 226374.098179: kgsl_buslevel: d_name=kgsl-3d0 pwrlevel=4 bus=7 avg_bw=2700 ticks=4686930883700
+         gmu_f2h-2494    [000] ..... 226374.119525: kgsl_pwrlevel: d_name=kgsl-3d0 pwrlevel=5 freq=726000000 prev_pwrlevel=4 prev_freq=826000000 ticks=4686931284928
+         gmu_f2h-2494    [000] ..... 226374.119527: kgsl_gpu_frequency: gpu_freq=726000Khz gpu_id=0 ticks=4686931284928
+ UnityGfxDeviceW-19679   [005] ..... 226374.127729: adreno_cmdbatch_submitted: ctx=45 ctx_prio=8 ts=1228 inflight=1 flags=CTX_SWITCH ticks=4686931475532 time=226374.127721 rb_id=2 r/w=0/0, q_inflight=0 dq_id=-1

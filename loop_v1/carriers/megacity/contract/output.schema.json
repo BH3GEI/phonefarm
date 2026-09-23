@@ -143,7 +143,7 @@
     },
     "render_thread_comm": {
       "type": "string",
-      "description": "实测到的图形提交线程 comm 名 (harness 扫 /proc/self/task/*/comm 得到)。给 parse_trace.py --comm 用, 不靠猜。"
+      "description": "实测到的图形提交线程 comm 名 (harness 扫 /proc/self/task/*/comm 得到)。给 phonefarm parse-trace --comm 用, 不靠猜。"
     },
     "frames_rendered": {
       "type": "integer",

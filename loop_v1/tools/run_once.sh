@@ -21,6 +21,8 @@ ROOT="${ROOT:-/Users/mac/projects/phonefarm}"
 WL="${WL:-$ROOT/loop_v1/scripts/workload_spin_v1.json}"
 LEAD="${LEAD:-6}"       # 负载起跑后等几秒再开采 (让转镜头进入稳态)
 CAPDUR="${CAPDUR:-30}"  # 采集时长, 必须 < 负载剩余时长
+# 按脚本自身位置解析二进制: ROOT 可被环境变量指到别处, 那边不一定有这个文件
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pf_bin.sh"
 export PATH="$PATH:/Users/mac/Library/Android/sdk/platform-tools"
 
 mkdir -p "$OUTDIR"
@@ -53,7 +55,7 @@ wait "$WL_PID" || echo "[$LABEL] 警告: 负载脚本非零退出"
 adb -s "$SERIAL" pull "/data/local/tmp/loop_v1_$LABEL.txt" "$OUTDIR/trace.txt" >/dev/null 2>&1
 adb -s "$SERIAL" shell "rm -f /data/local/tmp/loop_v1_$LABEL.txt" >/dev/null 2>&1
 
-python3 "$ROOT/loop_v1/tools/parse_trace.py" "$OUTDIR/trace.txt" > "$OUTDIR/summary.json"
+"$PF" parse-trace "$OUTDIR/trace.txt" > "$OUTDIR/summary.json"
 
 # 5) 轮末快照 (与轮内对比, 确认采集器自己没留痕)
 adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDIR/snap_after_run.txt" 2>&1
