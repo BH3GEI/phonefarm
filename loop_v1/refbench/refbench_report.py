@@ -11,7 +11,7 @@
   declared=bandwidth → 主因「GPU 计算受限」且 bus vote 显著高 (≥ frag 的 3 倍)
   declared=fragment  → 主因「GPU 计算受限」且 bus vote 显著低 (上式另一端)
   declared=none      → 主因「限帧器封顶 @面板刷新率」(vsync, 不得无中生有)
-带宽维在 attribute.py 里是正交维不是主因 —— 访存停顿在 kgsl active 里同样计忙,
+带宽维在归因 (phonefarm attribute) 里是正交维不是主因 —— 访存停顿在 kgsl active 里同样计忙,
 所以 bandwidth 与 fragment 靠 bus vote 分离, 不靠主因字符串。
 """
 from __future__ import annotations

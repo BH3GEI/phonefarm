@@ -119,7 +119,7 @@ pub struct FrameStats {
 ///
 /// **前提: 被测应用每帧只提交一次。** refbench 的契约里写死了 `submits_per_frame: 1`,
 /// 所以这里直接把提交间隔当帧间隔。原神那种每帧两次提交的必须先做自检
-/// (见 `loop_v1/tools/parse_trace.py` 的 `detect_submits_per_frame`),
+/// (见 `looptrace.rs` 的 `detect_submits_per_frame`),
 /// 直接拿提交间隔当帧间隔会得出"帧率翻倍"的错误结论。
 pub fn frame_stats(trace: &str, comm: &str) -> FrameStats {
     let mut submit_ts: Vec<f64> = Vec::new();

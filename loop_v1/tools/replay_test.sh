@@ -10,6 +10,7 @@ set -uo pipefail
 
 ROOT="${1:?用法: replay_test.sh <runs根目录>}"
 TOOLS="$(cd "$(dirname "$0")" && pwd)"
+. "$TOOLS/pf_bin.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -24,7 +25,7 @@ for d in "$ROOT"/*/; do
   [ -f "$d/summary.json" ] || continue
   n=$((n+1))
   label=$(basename "$d")
-  python3 "$TOOLS/parse_trace.py" "$d/trace.txt" > "$TMP/$label.json" 2>"$TMP/$label.err"
+  "$PF" parse-trace "$d/trace.txt" > "$TMP/$label.json" 2>"$TMP/$label.err"
   if cmp -s "$TMP/$label.json" "$d/summary.json"; then
     echo "  ✓ $label  summary 字节一致"
   else
@@ -38,7 +39,7 @@ done
 for d in "$ROOT"/*/; do
   [ -f "$d/attribution.json" ] || continue
   label=$(basename "$d")
-  python3 "$TOOLS/attribute.py" "$d/summary.json" > "$TMP/$label.attr.json" 2>/dev/null
+  "$PF" attribute "$d/summary.json" > "$TMP/$label.attr.json" 2>/dev/null
   if cmp -s "$TMP/$label.attr.json" "$d/attribution.json"; then
     echo "  ✓ $label  attribution 字节一致"
   else

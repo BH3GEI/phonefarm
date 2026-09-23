@@ -13,11 +13,47 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from analyze import load_runs, describe, compare, drift          # noqa: E402
-from attribute import attribute                                   # noqa: E402
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
+
+
+def _pf_bin() -> str:
+    """phonefarm 二进制路径, 与 pf_bin.sh 同一套顺序 (PF_BIN > 仓库根 > cargo 产物)。"""
+    override = os.environ.get("PF_BIN")
+    if override:
+        if not os.access(override, os.X_OK):
+            raise SystemExit(f"PF_BIN 指向的不是可执行文件: {override}")
+        return override
+    for c in (os.path.join(_ROOT, "phonefarm"),
+              os.path.join(_ROOT, "src/target/release/phonefarm"),
+              os.path.join(_ROOT, "src/target/debug/phonefarm")):
+        if os.access(c, os.X_OK):
+            return c
+    raise SystemExit(f"找不到 phonefarm 二进制: 先 (cd {_ROOT}/src && cargo build --release), 或设 PF_BIN=<路径>")
+
+
+def attribute(summary: dict) -> dict:
+    """归因已搬进 phonefarm 二进制 (src/looptrace.rs), 这里只转调, 不留第二份实现。
+
+    两份实现哪怕只差一个舍入位, report.json 的字节就对不上了, 判据 5 的回放自检
+    会直接把它报成失败 —— 所以宁可多起一个进程, 也不在 Python 侧复制一遍口径。
+    """
+    fd, tmp = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(summary, fh, ensure_ascii=False)
+        out = subprocess.run([_pf_bin(), "attribute", tmp],
+                             capture_output=True, text=True, check=True)
+    finally:
+        os.unlink(tmp)
+    return json.loads(out.stdout)
 
 DISPERSION_GATE_PCT = 5.0      # 判据 1
 MONOTONIC_GATE = 0.90          # 单调比超过这个值就认定为系统性漂移而非抖动

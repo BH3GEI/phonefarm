@@ -226,7 +226,7 @@ adb shell am start -W -n com.unity.megacity.metro/com.unity.megacity.MegacityMet
    观测不到。轮的有效性一律看 `clean_exit`。
 2. **提交线程名不写死**。refbench 能自己 rename `/proc/self/task/<tid>/comm`, 这里不改
    上游引擎线程名, 所以 harness 自己扫一遍 `/proc/self/task/*/comm` 把实测名字写进
-   `render_thread_comm`, `run_megacity.sh` 再把它传给 `parse_trace.py --comm`。
+   `render_thread_comm`, `run_megacity.sh` 再把它传给 `phonefarm parse-trace --comm`。
    定位不到就报 `UNRESOLVED[...]` 并把所有线程名列出来, 不返回一个猜的值。
    同理 `submits_per_frame` 也不写死, 交给 loop_v1 的自相关自检。
 

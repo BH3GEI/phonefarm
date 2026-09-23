@@ -32,6 +32,7 @@ VSYNC="${MEGACITY_VSYNC:-off}"
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 TOOLS="$ROOT/loop_v1/tools"
+. "$TOOLS/pf_bin.sh"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 COOL_TO="${MEGACITY_COOL_MC:-45000}"   # 45°C。refbench 用的 40000 在这台设备上够不到:
                                        # 连续测试烤过之后风扇下空闲底温就在 42-44°C,
@@ -110,8 +111,8 @@ case "$COMM" in
 esac
 echo "[$LABEL] comm=$COMM"
 
-python3 "$TOOLS/parse_trace.py" "$OUTDIR/trace.txt" --comm "$COMM" > "$OUTDIR/summary.json"
-python3 "$TOOLS/attribute.py" "$OUTDIR/summary.json" > "$OUTDIR/attribution.json"
+"$PF" parse-trace "$OUTDIR/trace.txt" --comm "$COMM" > "$OUTDIR/summary.json"
+"$PF" attribute "$OUTDIR/summary.json" > "$OUTDIR/attribution.json"
 
 # 8) 轮内有效性判定
 EXPECT_SHA="$EXPECT_SHA" python3 - "$OUTDIR" "$LABEL" <<'PYEOF'

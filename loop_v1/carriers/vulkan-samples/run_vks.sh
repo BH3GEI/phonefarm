@@ -26,6 +26,7 @@ PKG=com.khronos.vulkan_samples
 ACT="$PKG/.SampleLauncherActivity"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TOOLS="$(cd "$HERE/../../tools" && pwd)"
+. "$TOOLS/pf_bin.sh"
 APPFILES="/storage/emulated/0/Android/data/$PKG/files"
 COOL_TO="${VKS_COOL_MC:-40000}"
 COMM_SHARE_MIN="${VKS_COMM_SHARE_MIN:-0.80}"
@@ -129,8 +130,8 @@ if [ "$OK" != "1" ]; then
   echo "[$LABEL] 无效轮: 提交线程不唯一, 分布见 comm.json"
   exit 3
 fi
-python3 "$TOOLS/parse_trace.py" "$OUTDIR/trace.txt" --comm "$COMM" > "$OUTDIR/summary.json"
-python3 "$TOOLS/attribute.py" "$OUTDIR/summary.json" > "$OUTDIR/attribution.json"
+"$PF" parse-trace "$OUTDIR/trace.txt" --comm "$COMM" > "$OUTDIR/summary.json"
+"$PF" attribute "$OUTDIR/summary.json" > "$OUTDIR/attribution.json"
 
 # 8) 交叉校验: 内核侧提交节奏 vs 应用侧自报帧率 (两个独立来源对账, 细节见 crosscheck.py)
 python3 "$HERE/crosscheck.py" "$OUTDIR/run.log" "$OUTDIR/summary.json" > "$OUTDIR/crosscheck.json"
