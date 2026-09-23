@@ -4,10 +4,14 @@
 //! 只做一件事: 把 `phonefarm analyze` 已经算好的统计量, 对上**这个开关在上游源码里
 //! 到底改了什么**, 然后如实说"测出来了 / 没测出来", 不做二次统计。
 //!
-//! KNOBS 是从上游样例构造函数里逐行读出来的映射, 连同判读源码的 sha256 一起写进
-//! 报告 —— 事后改了判读口径, 哈希对不上 (和 refbench 报告的纪律一致)。哈希钉的是
-//! 生成过现存证据的那份源码, 冻在 `rules_frozen.py` (见 src/refbenchreport.rs 的
-//! 模块注释, 同一套办法)。
+//! KNOBS / METRIC_MEANING 抽成了 `loop_v1/carriers/vulkan-samples/rules.json`
+//! (数据, 不是代码), 报告头里的判读哈希就是**这份文件的 sha256** —— 改任何一条
+//! 档位语义, 新报告的哈希跟着变。
+//!
+//! **口径切换点**: 生成过现存 report.txt 的旧判读源码 (2edf058 版) 原封留在
+//! `rules_frozen.py`, 归档 report.txt 里的哈希 (ef6202a5…) 对应**它**而不对应
+//! rules.json —— 切换点之前的归档在重算时会恰好差哈希一行, 这是记录在案的口径
+//! 切换, 不是重算坏了 (见 src/refbenchreport.rs 的模块注释, 同一套办法)。
 
 use crate::pyjson::{loads, PyVal};
 use crate::pyobj;
@@ -15,8 +19,9 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-/// 生成过现存证据的那份判读源码, 原封冻着。
-const RULES_TEXT: &str = include_str!("../loop_v1/carriers/vulkan-samples/rules_frozen.py");
+/// 判读规则冻结在 `loop_v1/carriers/vulkan-samples/rules.json`。
+/// 报告头里的判读哈希就是**这份文件的 sha256**。
+const RULES_TEXT: &str = include_str!("../loop_v1/carriers/vulkan-samples/rules.json");
 
 fn sha256_self() -> String {
     let mut h = Sha256::new();
@@ -24,58 +29,23 @@ fn sha256_self() -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 开关语义: 逐条来自 Vulkan-Samples 上游源码, 不是推测。
-/// (档位, 人话描述)。方向是相对 config A → config B 的变化, 上游没给预期的不预判。
-const KNOBS: &[(&str, &[(i64, &str)])] = &[
-    (
-        "render_passes",
-        &[
-            (0, "颜色附件 loadOp=LOAD + 深度附件 storeOp=STORE, 不用 vkCmdClearAttachments"),
-            (1, "颜色附件 loadOp=CLEAR + 深度附件 storeOp=DONT_CARE, 用 vkCmdClearAttachments"),
-        ],
-    ),
-    (
-        "subpasses",
-        &[
-            (0, "subpass 合并: G-buffer 留在 tile memory (上游注释 Good settings)"),
-            (1, "两个独立 render pass: G-buffer 走 DRAM 往返"),
-            (2, "关掉 transient attachments: G-buffer 附件变成真实显存分配"),
-            (3, "加大 G-buffer 格式精度"),
-        ],
-    ),
-    (
-        "msaa",
-        &[
-            (0, "单 render pass, MSAA 在 tile 内 resolve"),
-            (1, "开后处理 → 两个 render pass, 走 writeback resolve"),
-        ],
-    ),
-    (
-        "afbc",
-        &[
-            // Arm AFBC; 在 Adreno 上对应 UBWC 被 VK_IMAGE_USAGE_STORAGE_BIT 顶掉,
-            // 所以这一项在本机的语义要靠实测说话, 不预判方向
-            (0, "交换链 image 额外带 STORAGE usage → 压制帧缓冲压缩"),
-            (1, "交换链 image 只带 COLOR_ATTACHMENT usage → 允许帧缓冲压缩"),
-        ],
-    ),
-];
+/// 从冻结的规则文件取判读规则 (键序保序, afbc 里的 `_note` 这类非档位键自然跳过)。
+fn load_rules() -> PyVal {
+    crate::pyjson::loads(RULES_TEXT).unwrap_or(PyVal::Null)
+}
 
-/// 主指标与它在这套采集里的口径 (见 src/looptrace.rs 文件头)。
-const METRIC_MEANING: &[(&str, &str)] = &[
-    ("frame_p95", "帧时间 p95 (ms), 提交节奏推出来的真实出帧"),
-    ("frame_p50", "帧时间中位数 (ms)"),
-    ("gpu_active_mean", "每帧 GPU 真正在跑命令的时间 (ms), 不含排队"),
-    ("bw_median", "kgsl_buslevel 的 avg_bw 中位数, GPU 侧总线带宽投票 (直接观测量)"),
-];
-
-fn knob_desc(sample: &str, cfg: i64) -> &'static str {
-    KNOBS
-        .iter()
-        .find(|(s, _)| *s == sample)
-        .and_then(|(_, opts)| opts.iter().find(|(k, _)| *k == cfg))
-        .map(|(_, d)| *d)
-        .unwrap_or("<未登记>")
+fn knob_desc(rules: &PyVal, sample: &str, cfg: i64) -> String {
+    rules
+        .get("knobs")
+        .and_then(|k| k.get(sample))
+        .and_then(|opts| match opts {
+            PyVal::Obj(kvs) => kvs
+                .iter()
+                .find(|(k, _)| k.parse::<i64>().map(|x| x == cfg).unwrap_or(false))
+                .map(|(_, v)| v.py_str()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "<未登记>".into())
 }
 
 /// Adreno 驱动发提交的那个线程叫 binder:<pid>_<槽位>: pid 每次启动都不一样, 槽位是
@@ -235,11 +205,12 @@ pub fn report(root: &Path, sample: &str, cfg_a: i64, cfg_b: i64) -> Result<Strin
     }
     let an = load_json(&apath).unwrap_or(PyVal::Obj(vec![]));
 
+    let rules_v = load_rules();
     let mut l: Vec<String> = Vec::new();
     l.push("═".repeat(78));
     l.push(format!("Vulkan-Samples 两臂对照 · sample={sample}"));
-    l.push(format!("  A 臂 (--config {cfg_a}): {}", knob_desc(sample, cfg_a)));
-    l.push(format!("  B 臂 (--config {cfg_b}): {}", knob_desc(sample, cfg_b)));
+    l.push(format!("  A 臂 (--config {cfg_a}): {}", knob_desc(&rules_v, sample, cfg_a)));
+    l.push(format!("  B 臂 (--config {cfg_b}): {}", knob_desc(&rules_v, sample, cfg_b)));
     l.push(format!("  判读脚本 sha256: {}", sha256_self()));
     l.push("═".repeat(78));
 
@@ -397,8 +368,10 @@ pub fn report(root: &Path, sample: &str, cfg_a: i64, cfg_b: i64) -> Result<Strin
     }
 
     l.push("\n指标口径:".into());
-    for (m, why) in METRIC_MEANING {
-        l.push(format!("  {m}: {why}"));
+    if let Some(PyVal::Obj(mm)) = rules_v.get("metric_meaning") {
+        for (m, why) in mm {
+            l.push(format!("  {m}: {}", why.py_str()));
+        }
     }
 
     l.push("\n结论口径: 本文件只判'这套采集有没有把开关的差异测出来', 不判'这个优化值不值得做'。".into());
@@ -468,13 +441,25 @@ mod tests {
             .join("loop_v1/runs_vks/render_passes_c0_vs_c1")
     }
 
-    /// 冻结文本就是生成过现存 report.txt 的那份。
+    /// 判读哈希 = 冻结的 rules.json 文件本身的哈希 (口径切换点之后的自证对象)。
     #[test]
-    fn frozen_rules_hash_matches_the_archived_attestation() {
-        assert_eq!(
+    fn rules_hash_is_the_rules_file() {
+        let want: String = Sha256::new()
+            .chain_update(include_str!("../loop_v1/carriers/vulkan-samples/rules.json"))
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(sha256_self(), want);
+        // 与切换点前归档的哈希 (对应 rules_frozen.py) 刻意不同
+        assert_ne!(
             sha256_self(),
             "ef6202a5d3aa7b5d9596a4978f8a40ac64bffcd36bbf70aff59ab7ca830003d5"
         );
+        // 档位语义真的从 JSON 里读出来了
+        let rules_v = load_rules();
+        assert!(knob_desc(&rules_v, "render_passes", 1).contains("vkCmdClearAttachments"));
+        assert_eq!(knob_desc(&rules_v, "render_passes", 9), "<未登记>");
     }
 
     /// 对照源: 归档的 report.txt 整份重算 (与判读哈希一起逐字节比)。
@@ -487,9 +472,17 @@ mod tests {
             eprintln!("跳过: 归档证据不在 {} (异机/新 clone 属正常)", want.display());
             return;
         }
+        // 口径切换点: 归档哈希对应切换前判读源码, 新报告哈希对应 rules.json ——
+        // 除哈希一行外必须逐字节一致
+        let mask = |t: &str| -> String {
+            t.lines()
+                .filter(|l| !l.contains("判读脚本 sha256"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         assert_eq!(
-            report(&root, "render_passes", 0, 1).unwrap(),
-            std::fs::read_to_string(&want).unwrap().trim_end_matches('\n')
+            mask(&report(&root, "render_passes", 0, 1).unwrap()),
+            mask(std::fs::read_to_string(&want).unwrap().trim_end_matches('\n'))
         );
     }
 
