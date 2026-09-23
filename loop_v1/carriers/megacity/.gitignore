@@ -1,0 +1,8 @@
+# 构建产物与实跑证据不进仓库
+out/
+upstream_commit.txt
+
+# 标定出来的真实路线先不进仓库: 坐标依赖上游某个 commit 的场景,
+# 等首轮实跑验证过、确认稳定了再决定要不要固化。
+routes/*.json
+!routes/*.example.json
