@@ -22,6 +22,7 @@ mod framecheck;
 mod llm;
 mod looptrace;
 mod sysparam;
+mod vksreport;
 mod parallel;
 mod device;
 mod fold;
@@ -192,6 +193,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
               [--replay-result F] [--primary M]          (五条判据汇总成可字节复现的 report.json)
 载体:  vks-pick-comm <trace.txt> | vks-ready <run.log> | vks-crosscheck <run.log> <summary.json> [window.json]
        (Vulkan-Samples 的三道闸: 挑提交线程 / 判渲染就绪 / 内核侧与应用侧对账, 全部纯离线)
+       vks-report --root <A/B目录> --sample S --config-a N --config-b N   (两臂判读面, 判读哈希自证)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
@@ -678,6 +680,10 @@ fn main() {
         Some("parse-trace") => {
             // ftrace 文本 → 帧时序 + GPU 归因指标。纯离线, 不碰设备, 同一份 trace 逐字节可复现。
             std::process::exit(looptrace::run_parse_trace(&args[1..]));
+        }
+        Some("vks-report") => {
+            // Vulkan-Samples 两臂对照的判读面 (与归档 report.txt 逐字节可复现)
+            std::process::exit(vksreport::run_vks_report(&args[1..]));
         }
         Some("vks-pick-comm") => {
             // 从 ftrace 里数出发 GPU 提交的线程名 (Vulkan-Samples 的线程名不是稳定契约)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """vks_report.py — Vulkan-Samples 两臂对照的判读面 (纯函数链, 不碰设备)
 
-只做一件事: 把 phonefarm analyze 已经算好的统计量, 对上**这个开关在上游源码里
+只做一件事: 把 ../tools/analyze.py 已经算好的统计量, 对上**这个开关在上游源码里
 到底改了什么**, 然后如实说"测出来了 / 没测出来", 不做二次统计。
 
 KNOBS 是从上游样例构造函数里逐行读出来的映射, 连同本文件的 sha256 一起写进报告 ——
@@ -163,7 +163,7 @@ def main() -> int:
     print("═" * 78)
 
     comms = collect_comms(args.root)
-    print(f"\n提交线程 (由 phonefarm vks-pick-comm 从 trace 里认出, 非写死):")
+    print(f"\n提交线程 (由 pick_comm.py 从 trace 里认出, 非写死):")
     for c, rounds in comms.items():
         shares = sorted(s for _, s in rounds if s is not None)
         print(f"  {c}: {len(rounds)} 轮, 占比 {min(shares):.3f}~{max(shares):.3f}" if shares
