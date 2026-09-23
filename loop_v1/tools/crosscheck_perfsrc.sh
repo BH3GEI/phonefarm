@@ -190,4 +190,4 @@ adb -s "$SERIAL" shell "rm -f /data/local/tmp/xcheck_$LABEL.txt" >/dev/null 2>&1
 [ "$WORKLOAD" = refbench ] && adb -s "$SERIAL" shell "am force-stop $PKG" >/dev/null 2>&1 || true
 
 # 4) 并排成一张表
-python3 "$ROOT/loop_v1/tools/crosscheck_report.py" "$OUTDIR" | tee "$OUTDIR/crosscheck.txt"
+"$PF" crosscheck-report "$OUTDIR" | tee "$OUTDIR/crosscheck.txt"

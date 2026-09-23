@@ -20,8 +20,9 @@
 白盒靶子的驱动侧在 [`refbench/`](refbench/), 靶子本身在同级的 refbench 仓库。
 白盒载体用来验机制, 闭源真游戏用来验效果。
 
-> **进行中**: 本目录的 Python 工具链正在往 Rust 内核里收, 目标形态是不再需要宿主机上
-> 另装解释器。下面写的跑法在收完之前仍然有效。
+> **进行中**: 本目录的判定口径（解析→归因→统计→判据收口→白名单→判定→画面判据→
+> 模型交互/本地变异器）已经全部收进 Rust 内核, 剩下 `autoloop.py`（编排与设备驱动）、
+> 报告类与设备端 shell 脚本还没收。下面写的跑法在收完之前仍然有效。
 
 ## 本轮的设备与负载
 
@@ -84,7 +85,8 @@ tools/
   run_once.sh           一轮"负载 + 采集"的编排
 scripts/
   workload_spin_v1.json 定点匀速转视角负载 (手柄版, 原神 7.1.0 起已失效, 见上方说明)
-fixtures/               切片过的真实 trace + 旧 Python 版输出, Rust 侧 golden 对照用
+fixtures/               切片过的真实 trace、两通路对照的合成产物 + 旧 Python 版输出,
+                        Rust 侧 golden 对照用
 carriers/               测试载体: megacity / vulkan-samples / anki-sponza
 refbench/               白盒靶子的驱动侧 (靶子本身在同级 refbench 仓库)
 auto/                   自动挑旋钮: 白名单探测 → 冻结规则 → 大模型选参 → 逐组对照
