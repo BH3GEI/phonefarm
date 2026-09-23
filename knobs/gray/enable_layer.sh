@@ -182,6 +182,7 @@ case "${1:-}" in
   status)
     echo "debug.vulkan.layers = [$(ashell 'getprop debug.vulkan.layers' | tr -d '\r')]"
     echo "$LOADOP_PROP  = [$(ashell "getprop $LOADOP_PROP" | tr -d '\r')]"
+    echo "$DUMP_PROP  = [$(ashell "getprop $DUMP_PROP" | tr -d '\r')]"
     st=$(ashell "su -c 'cat $STATE 2>/dev/null'" | tr -d '\r')
     if [ -n "$st" ]; then
       echo "state = $st  (处于施加态)"

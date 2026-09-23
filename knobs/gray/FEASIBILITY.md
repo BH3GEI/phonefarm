@@ -182,9 +182,45 @@ C 成立：改了、改的那个 pass 真被绑了 14400 次（= 1800 帧 × 8�
 合理解释：被改的 pass 本就不是带宽瓶颈，或 Adreno 这类 tile-based GPU 上 `LOAD`
 的代价本来就小。**这条不值得再投入**，下一条候选应挑更直接削减工作量的。
 
+## 灰档改写 #2 候选：低分辨率渲染 + 我们的超分算子（可行性已验，未实现）
+
+只读观测两轮，结论：**可行，且放大那一步已精确定位**。
+证据 [`evidence/07_sr_feasibility/RESULT.md`](../evidence/07_sr_feasibility/RESULT.md)。
+
+- swapchain **2141×969 / `R8G8B8A8_UNORM`**；把游戏内「渲染精度」从 `极高` 调到 `低`，
+  整条 3D 管线跟着缩（主场景 2140×968 → 1134×514），**唯独帧内最后一个 pass 恒等于 swapchain**。
+- 那个 pass 每帧约 56 笔 draw = **一笔全屏放大 draw + 约 50 笔 UI draw**，
+  即 **UI 与放大在同一个 pass 内**，UI 紧跟在放大之后 →
+  **不能把整个 pass 换成 compute dispatch**。
+- 描述符溯源确认：该 pass 内**只绑 1 个 descriptor set**，第一笔 draw **只采样 1 张图**，
+  且这张图**就是**上一个渲染分辨率 pass 的颜色附件。
+- 这张图 `usage = 151` = `TRANSFER_SRC | TRANSFER_DST | SAMPLED | COLOR_ATTACHMENT | INPUT_ATTACHMENT`。
+  **`SAMPLED` 在 → 我们能读**（compute 里当 `sampler2D`，超分本来就要多抽头采样）；
+  `STORAGE` 不在，但我们不写它，写的是自己建的图，**不构成障碍**。
+
+实现路径：`BeginRenderPass` 前插 compute dispatch → 写我们自己的送显分辨率图 →
+拦那一次 `vkCmdBindDescriptorSets`，用同一个 layout 另建 set（拷贝原内容、只换那张图的 binding）
+→ 绑我们的 set。算子按既有契约装 `candidate.spv`（binding 0 低分辨率只读 / binding 1
+送显分辨率只写 / 16×16），装不上硬失败。
+
+**下一步建议先探反作弊**：做一个「建 pipeline + 建 image + 替换描述符，但算子是 1:1 拷贝」
+的最小改写，画面应逐像素不变 —— 把「反作弊放不放行」与「算子好不好」分开验，
+免得一上来投 500+ 行再卡在反作弊上。
+
+passdump 观测工具已按评审加固（rust-port 评审 11 条中余下的 8 条全部修掉）：
+RP2 创建的 pass 现在也进形状表；pass_table 过滤改用「按提交折算的 frames_seen」，
+预录命令缓冲的 pass 不再被误滤，且每行多一个 `frames` 字段；采样窗挪到第 1750 帧
+（不再是 300 的倍数，落盘帧不再必为空序列），marker 新增 `frame_seq_ready` 布尔，
+「空序列」与「还没采」可分；描述符采样图条目带 `binding` 号；二级命令缓冲的 draw
+计入（继承信息取 pass，CmdExecuteCommands 并入主缓冲录制清单）；image/view/fb/cb
+销毁即摘表，长跑不再只增不减；swapchain 尺寸读写同锁；passdump 模式 logcat 只打
+摘要（全文超单条 4KB 上限必被截），全文只走文件通道。**消费方兼容**：harness 只读
+`readonly_stats` 与文件全文，本次全部是新增字段，无破坏。
+
 ## 下一步（按性价比排）
 
-1. 下一条改写候选：**RT 精度降级 / 格式替换**（A 类）或**分辨率缩放**（D 类）——
-   比 LoadOp 更直接地削工作量。每条仍走 A/B + `begins` 自洽检查。
+1. 超分算子：先做上面那个最小改写探反作弊，过了再投真算子。
+2. 备选改写候选：**RT 精度降级 / 格式替换**（A 类）—— 比 LoadOp 更直接地削工作量。
+   每条仍走 A/B + `begins` 自洽检查。
 2. 功耗那一栏补齐（要跟帧数据一样跑满 5 对）。
 3. 鸿蒙机制调研（问题 3），等设备。

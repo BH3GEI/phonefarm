@@ -31,6 +31,7 @@ bash gray/build/build_layer.sh              # NDK 直编 + DT_NEEDED 自检
 bash gray/enable_layer.sh probe             # 对 refbench 挂只读层 (问题 1) ✅ 成立
 bash gray/enable_layer.sh loadop            # 同上 + 打开 LoadOp 改写 (判据 5) ✅ 成立
 bash gray/test_loadop.sh                    # 四臂对照, 证据落 evidence/05_loadop/
+bash gray/enable_layer.sh passdump <pkg>    # 只读观测: 导出 pass 形状表 + 描述符溯源
 bash gray/enable_layer.sh target <目标包名>  # 对目标游戏挂空层 (问题 2) ✅ 成立
 bash gray/enable_layer.sh status            # 只读看当前挂载态
 bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清扫)
@@ -43,6 +44,7 @@ bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清�
 | 3 鸿蒙等价机制 | ⏸ 无设备 | |
 | 灰档改写 #1 LoadOp→DONT_CARE（refbench） | ✅ 成立 | 四臂对照；改写被绑 14400 次、应用仍自报 LOAD、四臂 `clean_exit=true` |
 | 同上，在原神大世界的效果 | ⚠ 命中但无效果 | 5 对 A/B：改写真被绑 4.4–5.2 万次，但 p95 / GPU / 带宽 p 值全 > 0.05 |
+| 超分算子可行性（只读观测） | ✅ 可行 | 放大 = 帧内最后一个 pass 的第一笔 draw；**UI 在同一 pass 内紧跟其后**；该 draw 采的确认就是上一个渲染分辨率 pass 的输出（`usage=151` 含 `SAMPLED`，可读） |
 
 **层对宿主是透明的**（有无层对照：swapchain、`frames_submitted=3600`、`clean_exit=true` 全相等）。
 

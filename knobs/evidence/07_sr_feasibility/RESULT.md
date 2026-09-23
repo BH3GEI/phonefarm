@@ -52,16 +52,47 @@ pass 50 每帧约 **56 笔 draw**（`极高` 时约 50 笔），而它的尺寸*
 descriptor set layout / pool、compute pipeline、以及 SPIR-V 直接 `vkCreateShaderModule`
 （裸 spv，不需要任何 shader 编译器上设备，比 AnKi 那条路还简单 —— 它还得先做反射）。
 
-### 三个还没验的风险（step 2 第一件事就是逐个排掉）
+### 风险 1 已排掉：确认了，那笔 draw 采的就是上一个 pass 的输出
 
-1. **那笔 draw 到底采的是哪个 image**：我是从「尺寸随渲染精度缩 + draw 数」推断 pass 49→50
-   是放大，**还没确认**第一笔 draw 的 descriptor 里绑的就是 pass 49 的输出。得先用层把
-   `vkCmdBindDescriptorSets` 的内容打出来对上号。
-2. **反作弊**：目前只验过只读层与 loadOp 改写放行。建 pipeline / 改描述符比那两者侵入性大得多，
+2026-09-23 12:25 纯观测复核（`composite_draw_probe.json`）：
+
+```json
+{"sets_bound_in_pass": 1, "confirmed": true,
+ "hit":                   {"w":2140,"h":968,"fmt":37,"usage":151},
+ "prev_pass_attachments":[{"w":2140,"h":968,"fmt":37,"usage":151}],
+ "sampled_by_first_draw":[{"w":2140,"h":968,"fmt":37,"usage":151,"is_prev_pass_output":true}]}
+```
+
+证据很干净：送显分辨率 pass 里**只绑了 1 个 descriptor set**，它的第一笔 draw
+**只采样 1 张图**，而这张图正是上一个（渲染分辨率）pass 的颜色附件。
+不是"有一张碰巧对上"，是"只有这一张，而且就是它"。
+
+**`usage = 151` 拆开**（`VkImageUsageFlagBits`）：
+
+| 位 | 含义 | 有无 |
+|---|---|---|
+| `0x01` | TRANSFER_SRC | ✅ |
+| `0x02` | TRANSFER_DST | ✅ |
+| `0x04` | **SAMPLED** | ✅ |
+| `0x08` | STORAGE | ❌ |
+| `0x10` | COLOR_ATTACHMENT | ✅ |
+| `0x80` | INPUT_ATTACHMENT | ✅ |
+
+→ **我们能读它**：`SAMPLED` 在，compute 里当 `sampler2D` 采样即可（超分本来就要做双线性/多抽头采样，
+采样器正是想要的形式）；`TRANSFER_SRC` 也在，必要时还能直接 copy 出来。
+`STORAGE` 不在，所以**不能把它当 storage image 直接写** —— 但我们本来也不写它，
+写的是我们自己建的送显分辨率图，usage 自己定。**这条不构成障碍。**
+
+### 剩下两个还没验的风险
+1. **反作弊**：目前只验过只读层与 loadOp 改写放行。建 pipeline / 改描述符比那两者侵入性大得多，
    得单独探。
-3. **pass 49 的输出是否带 `SAMPLED` 以外的 usage**：我们要用 compute 读它，需要
-   `VK_IMAGE_USAGE_SAMPLED_BIT`（采样读即可，够用）；写目标是我们自己的 image，
-   usage 自己定，不碰 swapchain 的 usage flags（`DESIGN_COMPUTE_HOOK.md` §2(a) 踩过这个坑）。
+2. **描述符替换怎么做得准**：`sets_bound_in_pass = 1` 是个好消息 —— 目标很集中。
+   做法是拦 `vkCmdBindDescriptorSets`（在送显 pass 内、第一笔 draw 之前那次），
+   用同一个 `VkDescriptorSetLayout` 另建一个 set，把原 set 的内容拷过来
+   （`vkUpdateDescriptorSets` 的 copy 形式），只把那张图的 binding 换成我们的 view，
+   然后绑我们的 set。**不要直接改原 set** —— 同一个 set 可能别处还在用。
+   还差一个小信息：那张图具体在第几个 binding（层里已经按 `(set, binding)` 存了，
+   下一轮把 binding 号一起打出来即可，不用再上机专门跑一次）。
 
 ## 画质真值怎么拿
 
@@ -79,15 +110,16 @@ descriptor set layout / pool、compute pipeline、以及 SPIR-V 直接 `vkCreate
 
 | 项 | 量级 |
 |---|---|
-| 确认那笔 draw 的 descriptor（风险 1） | 小，半天，纯观测 |
+| ~~确认那笔 draw 的 descriptor（风险 1）~~ | ✅ **已完成**，结论见上 |
 | 层里的 compute 注入（image/pipeline/barrier/spv 装载） | ~500–700 行，是这个仓库目前最大的一块 |
 | 描述符替换 | 小但最容易出错，得能精确命中"那一笔" |
 | 画质真值链路（dump + 对齐 + 指标） | 中等，可复用 real-frame-psnr 那条线 |
 | A/B（帧时 + 停充功耗 + 画质） | 与 LoadOp 那轮同构，driver 现成 |
 
-合计比 LoadOp 那条大一个量级。**建议 step 2 先只做风险 1**（确认 descriptor），
-确认了再投 compute 注入；确认不了就说明这条路要换方式（例如改走 pass 49 的 framebuffer
-尺寸 + 让游戏自己的放大 draw 去采我们的图）。
+合计比 LoadOp 那条大一个量级。风险 1 已排掉且结果比预期好（只有 1 个 set、1 张采样图），
+**下一步建议先探反作弊**：做一个"建 pipeline + 建 image + 替换描述符但算子是 1:1 拷贝"
+的最小改写，画面应当与原来逐像素相同 —— 这样能把"反作弊放不放行"和"算子好不好"
+两件事分开验，不至于一上来就投 500+ 行然后卡在反作弊上。
 
 ## 证据
 
@@ -95,5 +127,6 @@ descriptor set layout / pool、compute pipeline、以及 SPIR-V 直接 `vkCreate
 |---|---|
 | `passdump_render_extreme.json` | 渲染精度 `极高` 的 pass 形状表 + 一帧有序序列 |
 | `passdump_render_low.json` | 渲染精度 `低` 的同上，对比用 |
+| `composite_draw_probe.json` | 送显那一笔 draw 的描述符溯源（含 `usage`），风险 1 的判据 |
 
 两份都含 `swapchain` 尺寸、`pass_table`（每帧都在跑的 pass）、`frame_seq`（稳态一帧的有序序列）。
