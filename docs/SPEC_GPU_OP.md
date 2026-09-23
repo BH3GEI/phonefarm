@@ -8,6 +8,10 @@
 > 代码分工: 本仓库提供 `phonefarm gpu-op` 一个独立 CLI 子命令 (`src/gpuop.rs`),
 > 共享的设备条件化与功耗遥测在 `src/hwcond.rs`, 统计在 `src/gpustat.rs`。
 > 基因组、变异、门禁、Pareto 归档全部在 `~/projects/game_opt_loop` (Rust)。
+>
+> **统一入口**: v2 起 (contract 加了 kind 信封) 上层只打 `phonefarm eval`
+> (`src/eval.rs`) —— v1 扁平请求原样转交 gpu-op, v2 shader 降级成 v1 转交,
+> sysparam / gray 由 eval 直接实现。gpu-op 仍是 shader 通路的实现本体。
 
 ## 0. 铁律
 

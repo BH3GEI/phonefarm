@@ -25,6 +25,7 @@ mod sysparam;
 mod vksreport;
 mod parallel;
 mod device;
+mod eval;
 mod fold;
 mod gamepad;
 mod hypo;
@@ -196,6 +197,9 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        vks-report --root <A/B目录> --sample S --config-a N --config-b N   (两臂判读面, 判读哈希自证)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
+评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
+       (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
+        shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
        (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
 性能:  perf [--serial S] [--app 包名] [--rounds 10] [--source sysfs|smartperf] [--power-rail usb|battery] [--xpower-out 目录] [--json]
@@ -671,6 +675,10 @@ fn main() {
         Some("bench") => {
             // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
             std::process::exit(bench::run_bench(&args[1..]));
+        }
+        Some("eval") => {
+            // game_opt_loop 评测请求的唯一入口 (v2 信封 shader/sysparam/gray; v1 扁平兼容)
+            std::process::exit(eval::run_eval(&args[1..]));
         }
         Some("gpu-op") => {
             // Compute Shader 算子的真机标尺与 A/B 裁决: 等冷 + 锁频 + A/B/A/B 交替 +

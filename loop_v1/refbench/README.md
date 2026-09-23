@@ -19,10 +19,14 @@ phonefarm refbench-report --root ../runs_refbench                            # �
 - **无效轮纪律**：采集窗内出现热事件或非干净退出 → 该轮标 `INVALID`，证据保留、
   样本不计、就地重试（至多 2 次）。每轮起跑前有 GPU 温度回落轮询；跑测期间开
   设备风扇、结束还原（风扇不在 38 行快照内，单独存取还原）。
-- **判据 4 的映射**（归因结论 vs 靶子自报瓶颈）冻结在 `rules_frozen.py`
-  （生成过现存证据的那份判读源码，原封不动）里，其 sha256 连同 `RULES`（现于
-  `src/refbenchreport.rs`）写进报告——事后改规则哈希对不上（harness v2 判据 5
-  的种子）。报告本体由 `phonefarm refbench-report --root <runs目录>` 产出。
+- **判据 4 的映射**（归因结论 vs 靶子自报瓶颈）与全部阈值冻结在 `rules.json`
+  （数据，不是代码），报告里的 `rules_sha256` 就是**这份文件的 sha256**——改任何
+  一个值，新报告的哈希跟着变（harness v2 判据 5 的种子）。报告本体由
+  `phonefarm refbench-report --root <runs目录>` 产出。
+- **口径切换点（2026-09-23）**：切换前的报告哈希对应当时的判读源码（原封留在
+  `rules_frozen.py`，生成过 `runs_refbench/report.json` 的那份）。因此切换点之前
+  的归档在 replay 时会恰好差 `rules_sha256` 一行——记录在案的口径切换，不是回放
+  坏了；切换点之后新产的证据哈希互相一致。
 - **harness v2 衔接**：`run_refbench.sh` 是刻意收窄的负载专属面；负载插件接口
   落地后本文件整体即插件实现，编排一行不用改。
 

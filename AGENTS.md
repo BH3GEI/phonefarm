@@ -36,8 +36,8 @@
 画面判据→模型交互/本地变异器）、两通路对照、Vulkan-Samples 三道闸与两臂判读面、refbench/vks
 报告都已经收进 Rust，剩下 `autoloop.py`（编排与设备驱动）、载体构建/路线工具、
 设备端 shell 与 `knobs/` 那批还没收。上层的 `game_opt_loop` 那边，`optimize` 总入口、agent skill 与
-可视化前端都已经落地，还差的只是系统参数与画面流程改写两层的真机评测（等本仓库的
-`eval --request`）。写目标形态时要标明状态。
+可视化前端都已经落地，还差的只是系统参数与画面流程改写两层的真机评测——`eval --request`
+入口已经落地（离线验证，真机未跑），首次真机跑按 `probe_only` 起步。写目标形态时要标明状态。
 
 ## 能力族与常用命令
 
@@ -108,7 +108,8 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 **Compute Shader 算子标尺**（零 Token，需 root）
 
 ```bash
-./phonefarm gpu-op --request <eval_request.json> --serial S --json   # 等冷+锁频+A/B/A/B+Welch t 检验
+./phonefarm eval --request <eval_request.json> --serial S --json      # 评测唯一入口: v1 转交 gpu-op; v2 按 kind 路由 shader/sysparam/gray
+./phonefarm gpu-op --request <eval_request.json> --serial S --json   # shader 通路的实现本体 (等冷+锁频+A/B/A/B+Welch t 检验)
 ./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
 ```
 
