@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -40,7 +41,20 @@ import verdict as V                                         # noqa: E402
 import llm as LLM                                           # noqa: E402
 
 SERIAL = os.environ.get("SERIAL", "91253241019A")
-ADB = os.environ.get("ADB", "/Users/mac/Library/Android/sdk/platform-tools/adb")
+
+
+def _find_adb() -> str:
+    """adb 的位置因装法而异 (homebrew / Android SDK), 别写死一条路径。"""
+    env = os.environ.get("ADB")
+    if env:
+        return env
+    found = shutil.which("adb")
+    if found:
+        return found
+    return "/Users/mac/Library/Android/sdk/platform-tools/adb"
+
+
+ADB = _find_adb()
 DEV_TMP = "/data/local/tmp"
 DEV_SCRIPTS = ["device_snapshot.sh", "ftrace_capture.sh"]
 AUTO_SCRIPTS = ["probe_sysparam.sh", "knob_sysparam.sh", "sample_env.sh"]
@@ -141,7 +155,9 @@ def wait_cool(cool_c: float = COOL_C_FLOOR, timeout_s: int = COOL_TIMEOUT_S) -> 
 # 会把「跑完比跑前热」误判成没还原干净, 一整组 5 对实验就白跑了。
 # 所以分两层报: strict 是原样的逐行 diff (什么都不藏), ours 只看
 # 「我们写过的那类项」—— 判定用 ours, 证据里两份都留。
-DRIVER_OWNED_PREFIXES = ("kgsl.thermal_pwrlevel",)
+# kgsl.max_gpuclk 是 thermal_pwrlevel 对应的那个频率, 同样由驱动按温度自己改:
+# 实测探测前后 7 -> 6 / 578MHz -> 646MHz, 只是设备凉了一点, 不是我们留的痕。
+DRIVER_OWNED_PREFIXES = ("kgsl.thermal_pwrlevel", "kgsl.max_gpuclk")
 
 
 def classify_diff(sd: dict) -> dict:
@@ -434,9 +450,11 @@ def main() -> int:
     snap_after_probe = snapshot()
     with open(os.path.join(out, "snap_after_probe.txt"), "w") as f:
         f.write(snap_after_probe)
-    probe_sd = snapshot_diff(os.path.join(out, "snap_before.txt"),
-                             os.path.join(out, "snap_after_probe.txt"))
-    log(f"探测后快照一致: {probe_sd.get('identical')} (差异 {probe_sd.get('n_diff')} 行)")
+    probe_sd = classify_diff(snapshot_diff(os.path.join(out, "snap_before.txt"),
+                                           os.path.join(out, "snap_after_probe.txt")))
+    log(f"探测后快照一致 (我们写过的项): {probe_sd.get('ours_identical')}; "
+        f"严格逐行一致: {probe_sd.get('strict_identical')} "
+        f"(驱动自己动的 {len(probe_sd.get('driver_owned_diffs') or [])} 行)")
 
     if a.probe_only:
         with open(os.path.join(out, "report.json"), "w") as f:

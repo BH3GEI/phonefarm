@@ -39,8 +39,40 @@ write 的返回码会得出"能改"的假结论。探测脚本每次改动都在
 
 候选覆盖: CPU 各簇 `scaling_min_freq` / `scaling_max_freq` / `scaling_governor`、
 GPU `min_pwrlevel` / `max_pwrlevel` / devfreq 的 min/max/governor、DDR 与 LLCC 的
-`boost_freq`、刷新率 `peak_refresh_rate` / `min_refresh_rate`。厂商限帧控制点只做
-只读扫描并记进 `probe.txt` —— 没在真机确认之前不进白名单, 不乱写。
+`boost_freq`、刷新率。厂商限帧控制点只做只读扫描并记进 `probe.txt` ——
+没在真机确认之前不进白名单, 不乱写。
+
+### NX809J 上实际探出来的 11 项
+
+证据在 `runs_sysparam/probe3/`。10 项 sysfs 全部 `effect=live` (写进去、等 1s、
+值稳住没被退回), 刷新率那项靠活动模式 fps 真变了才算数:
+
+| 参数 | 探测时原值 | 档数 |
+|---|---|---|
+| `cpu.policy0.scaling_min_freq` / `_max_freq` | 787200 / 1785600 | 28 |
+| `cpu.policy0.scaling_governor` | walt | 5 (walt/conservative/powersave/performance/schedutil) |
+| `cpu.policy6.scaling_min_freq` / `_max_freq` | 883200 / 1497600 | 27 |
+| `cpu.policy6.scaling_governor` | walt | 5 |
+| `gpu.min_pwrlevel` / `gpu.max_pwrlevel` | 17 / 3 | 18 |
+| `bus.DDR.boost_freq` | 547000 | 11 |
+| `bus.LLCC.boost_freq` | 282000 | 9 |
+| `setting.system.refresh_rate_mode` | 0 | 4 |
+
+几条只有上机才知道的事:
+
+- **GPU devfreq 不在 `$KGSL/devfreq`**, 在 `/sys/class/devfreq/3d00000.qcom,kgsl-3d0`。
+  即便如此那几个节点在本机读不到, 所以没进白名单 —— GPU 频率边界走 `min/max_pwrlevel`。
+- **AOSP 的 `peak_refresh_rate` / `min_refresh_rate` 在本机是 `null`**。红魔走自己的
+  `refresh_rate_mode`, 取值表在 `system:all_refresh_rate` (`auto,60,90,120,144`)。
+  厂商键的语义没有文档, 所以不按下标猜: 逐档写进去看 SurfaceFlinger 的活动模式
+  fps 跟不跟着变。实测 1→60Hz、2→90Hz、3→120Hz、4→144Hz, 0 是 auto (当时也是 120Hz)。
+  mode3 因为和当时的基准 fps 一样, 区分不出来, 按规矩不收。
+- **CPU 频率上限被厂商压着**: policy0 的 `scaling_max_freq` 是 1785600, 而硬件
+  上限有 3628800。所以生效测试的试写值必须落在 `[当前 min, 当前 max]` 里 ——
+  拿「第二高的可用频点」去试 min, 内核会直接夹回 max, 测出来的是 min>max 被夹,
+  不是「这个节点写不动」。
+- **`kgsl.thermal_pwrlevel` 与 `kgsl.max_gpuclk` 由驱动按温度自己改**。实测探测
+  前后 7→6 / 578MHz→646MHz, 只是设备凉了一点。这两项归 `driver_owned`, 不算留痕。
 
 ### 温控保护永远不进白名单
 

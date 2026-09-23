@@ -13,6 +13,12 @@
 set -u
 
 KGSL=/sys/class/kgsl/kgsl-3d0
+# kgsl 的 devfreq 在本机不是 $KGSL/devfreq, 而是挂在 /sys/class/devfreq 下。
+# 别写死一条路径 —— 换个芯片或内核版本名字就变了, 探不到就如实报 absent。
+DEVFREQ=""
+for d in "$KGSL/devfreq" /sys/class/devfreq/*kgsl-3d0 /sys/class/devfreq/*kgsl*; do
+  if [ -d "$d" ]; then DEVFREQ="$d"; break; fi
+done
 BUS=/sys/devices/system/cpu/bus_dcvs
 CPU=/sys/devices/system/cpu/cpufreq
 
@@ -24,106 +30,114 @@ echo "# probe_sysparam v1"
 #   rejected : 被退回原值
 #   nowrite  : write 本身失败
 # 无论结果如何都把原值写回去, 并再回读确认还原成功。
+# 变量名一律加 et_ 前缀: sh 的函数没有局部作用域, 用 p/key 这种短名会把调用方
+# `for p in .../policy*` 的循环变量当场改掉, 之后每一项读的都是拼错的路径
+# (而且失败得很安静 —— 只会看到一串 unreadable)。
 effect_test() {
-  key="$1"; p="$2"; probe_val="$3"
-  old=$(cat "$p" 2>/dev/null)
+  et_key="$1"; et_p="$2"; et_val="$3"
+  old=$(cat "$et_p" 2>/dev/null)
   if [ -z "$old" ]; then
-    printf '%s.effect=unreadable\n' "$key"
+    printf '%s.effect=unreadable\n' "$et_key"
     return
   fi
-  if [ "$old" = "$probe_val" ]; then
-    printf '%s.effect=skipped_same_value\n' "$key"
+  if [ "$old" = "$et_val" ]; then
+    printf '%s.effect=skipped_same_value\n' "$et_key"
     return
   fi
-  if ! echo "$probe_val" > "$p" 2>/dev/null; then
-    printf '%s.effect=nowrite\n' "$key"
+  if ! echo "$et_val" > "$et_p" 2>/dev/null; then
+    printf '%s.effect=nowrite\n' "$et_key"
     return
   fi
   sleep 1
-  back=$(cat "$p" 2>/dev/null)
-  echo "$old" > "$p" 2>/dev/null
+  back=$(cat "$et_p" 2>/dev/null)
+  echo "$old" > "$et_p" 2>/dev/null
   sleep 1
-  rst=$(cat "$p" 2>/dev/null)
-  if [ "$back" = "$probe_val" ]; then
-    printf '%s.effect=live\n' "$key"
+  rst=$(cat "$et_p" 2>/dev/null)
+  if [ "$back" = "$et_val" ]; then
+    printf '%s.effect=live\n' "$et_key"
   else
-    printf '%s.effect=rejected(wrote=%s readback=%s)\n' "$key" "$probe_val" "$back"
+    printf '%s.effect=rejected(wrote=%s readback=%s)\n' "$et_key" "$et_val" "$back"
   fi
   if [ "$rst" = "$old" ]; then
-    printf '%s.effect_restored=yes\n' "$key"
+    printf '%s.effect_restored=yes\n' "$et_key"
   else
-    printf '%s.effect_restored=NO(want=%s got=%s)\n' "$key" "$old" "$rst"
+    printf '%s.effect_restored=NO(want=%s got=%s)\n' "$et_key" "$et_val" "$rst"
   fi
 }
 
 # ── writable_test: 把当前值原样写回, 不改变状态 ──
 writable_test() {
-  key="$1"; p="$2"
-  cur=$(cat "$p" 2>/dev/null)
-  if [ -z "$cur" ]; then printf '%s.writable=unreadable\n' "$key"; return; fi
-  if echo "$cur" > "$p" 2>/dev/null; then
-    printf '%s.writable=yes\n' "$key"
+  wt_key="$1"; wt_p="$2"
+  cur=$(cat "$wt_p" 2>/dev/null)
+  if [ -z "$cur" ]; then printf '%s.writable=unreadable\n' "$wt_key"; return; fi
+  if echo "$cur" > "$wt_p" 2>/dev/null; then
+    printf '%s.writable=yes\n' "$wt_key"
   else
-    printf '%s.writable=no\n' "$key"
+    printf '%s.writable=no\n' "$wt_key"
   fi
 }
 
 # ════ CPU 各簇 ════
 pols=""
-for p in "$CPU"/policy*; do
-  [ -d "$p" ] || continue
-  n=$(basename "$p" | sed 's/policy//')
+for pol_dir in "$CPU"/policy*; do
+  [ -d "$pol_dir" ] || continue
+  n=$(basename "$pol_dir" | sed 's/policy//')
   pols="$pols$n,"
 done
 printf 'cpu.policies=%s\n' "$(echo "$pols" | sed 's/,$//')"
 
-for p in "$CPU"/policy*; do
-  [ -d "$p" ] || continue
-  n=$(basename "$p" | sed 's/policy//')
+for pol_dir in "$CPU"/policy*; do
+  [ -d "$pol_dir" ] || continue
+  n=$(basename "$pol_dir" | sed 's/policy//')
   k="cpu.policy$n"
-  printf '%s.cpus=%s\n'       "$k" "$(cat "$p/related_cpus" 2>/dev/null)"
-  printf '%s.avail_freqs=%s\n' "$k" "$(cat "$p/scaling_available_frequencies" 2>/dev/null)"
-  printf '%s.avail_governors=%s\n' "$k" "$(cat "$p/scaling_available_governors" 2>/dev/null)"
-  printf '%s.cpuinfo_min=%s\n' "$k" "$(cat "$p/cpuinfo_min_freq" 2>/dev/null)"
-  printf '%s.cpuinfo_max=%s\n' "$k" "$(cat "$p/cpuinfo_max_freq" 2>/dev/null)"
-  printf '%s.scaling_min_freq.cur=%s\n' "$k" "$(cat "$p/scaling_min_freq" 2>/dev/null)"
-  printf '%s.scaling_max_freq.cur=%s\n' "$k" "$(cat "$p/scaling_max_freq" 2>/dev/null)"
-  printf '%s.scaling_governor.cur=%s\n' "$k" "$(cat "$p/scaling_governor" 2>/dev/null)"
-  printf '%s.scaling_cur_freq=%s\n' "$k" "$(cat "$p/scaling_cur_freq" 2>/dev/null)"
-  writable_test "$k.scaling_min_freq" "$p/scaling_min_freq"
-  writable_test "$k.scaling_max_freq" "$p/scaling_max_freq"
-  writable_test "$k.scaling_governor" "$p/scaling_governor"
-  # 生效测试: 把 min 抬到第二高的可用频点 (不用最高点, 免得与 max 撞上被夹)
-  f2=$(cat "$p/scaling_available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | tail -2 | head -1)
-  [ -n "$f2" ] && effect_test "$k.scaling_min_freq" "$p/scaling_min_freq" "$f2"
-  # max 往下试第二低的频点 (同样避开端点, 免得撞上当前 min 被夹回去)
-  g2=$(cat "$p/scaling_available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | head -2 | tail -1)
-  cmin=$(cat "$p/scaling_min_freq" 2>/dev/null)
-  if [ -n "$g2" ] && [ "$g2" != "$cmin" ]; then
-    effect_test "$k.scaling_max_freq" "$p/scaling_max_freq" "$g2"
-  fi
+  printf '%s.cpus=%s\n'       "$k" "$(cat "$pol_dir/related_cpus" 2>/dev/null)"
+  printf '%s.avail_freqs=%s\n' "$k" "$(cat "$pol_dir/scaling_available_frequencies" 2>/dev/null)"
+  printf '%s.avail_governors=%s\n' "$k" "$(cat "$pol_dir/scaling_available_governors" 2>/dev/null)"
+  printf '%s.cpuinfo_min=%s\n' "$k" "$(cat "$pol_dir/cpuinfo_min_freq" 2>/dev/null)"
+  printf '%s.cpuinfo_max=%s\n' "$k" "$(cat "$pol_dir/cpuinfo_max_freq" 2>/dev/null)"
+  printf '%s.scaling_min_freq.cur=%s\n' "$k" "$(cat "$pol_dir/scaling_min_freq" 2>/dev/null)"
+  printf '%s.scaling_max_freq.cur=%s\n' "$k" "$(cat "$pol_dir/scaling_max_freq" 2>/dev/null)"
+  printf '%s.scaling_governor.cur=%s\n' "$k" "$(cat "$pol_dir/scaling_governor" 2>/dev/null)"
+  printf '%s.scaling_cur_freq=%s\n' "$k" "$(cat "$pol_dir/scaling_cur_freq" 2>/dev/null)"
+  writable_test "$k.scaling_min_freq" "$pol_dir/scaling_min_freq"
+  writable_test "$k.scaling_max_freq" "$pol_dir/scaling_max_freq"
+  writable_test "$k.scaling_governor" "$pol_dir/scaling_governor"
+  # 生效测试的试写值必须落在内核允许的区间里。本机 policy0 的 scaling_max_freq
+  # 只有 1785600 (上限 3628800 的一半, 厂商自己压的), 拿「第二高的可用频点」去试
+  # min, 内核会直接夹回 max —— 那测出来的是 min>max 被夹, 不是「这个节点写不动」。
+  #   min 试: <= 当前 max 的最高档, 且 != 当前 min
+  #   max 试: >= 当前 min 的最低档, 且 != 当前 max
+  avail=$(cat "$pol_dir/scaling_available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n)
+  cmin=$(cat "$pol_dir/scaling_min_freq" 2>/dev/null)
+  cmax=$(cat "$pol_dir/scaling_max_freq" 2>/dev/null)
+  f2=$(echo "$avail" | awk -v hi="$cmax" -v cur="$cmin" '$1<=hi && $1!=cur' | tail -1)
+  [ -n "$f2" ] && effect_test "$k.scaling_min_freq" "$pol_dir/scaling_min_freq" "$f2"
+  g2=$(echo "$avail" | awk -v lo="$cmin" -v cur="$cmax" '$1>=lo && $1!=cur' | head -1)
+  [ -n "$g2" ] && effect_test "$k.scaling_max_freq" "$pol_dir/scaling_max_freq" "$g2"
   # governor 试一个与当前不同的可用值
-  curgov=$(cat "$p/scaling_governor" 2>/dev/null)
-  othergov=$(cat "$p/scaling_available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curgov" | head -1)
-  [ -n "$othergov" ] && effect_test "$k.scaling_governor" "$p/scaling_governor" "$othergov"
+  curgov=$(cat "$pol_dir/scaling_governor" 2>/dev/null)
+  othergov=$(cat "$pol_dir/scaling_available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curgov" | head -1)
+  [ -n "$othergov" ] && effect_test "$k.scaling_governor" "$pol_dir/scaling_governor" "$othergov"
 done
 
 # ════ GPU (kgsl) ════
+printf 'gpu.devfreq_path=%s\n' "$DEVFREQ"
+printf 'gpu.available_frequencies=%s\n' "$(cat "$KGSL/gpu_available_frequencies" 2>/dev/null)"
 printf 'gpu.model=%s\n'        "$(cat "$KGSL/gpu_model" 2>/dev/null)"
 printf 'gpu.num_pwrlevels=%s\n' "$(cat "$KGSL/num_pwrlevels" 2>/dev/null)"
 printf 'gpu.min_pwrlevel.cur=%s\n' "$(cat "$KGSL/min_pwrlevel" 2>/dev/null)"
 printf 'gpu.max_pwrlevel.cur=%s\n' "$(cat "$KGSL/max_pwrlevel" 2>/dev/null)"
 printf 'gpu.thermal_pwrlevel=%s\n' "$(cat "$KGSL/thermal_pwrlevel" 2>/dev/null)"
-printf 'gpu.devfreq.avail_freqs=%s\n' "$(cat "$KGSL/devfreq/available_frequencies" 2>/dev/null)"
-printf 'gpu.devfreq.avail_governors=%s\n' "$(cat "$KGSL/devfreq/available_governors" 2>/dev/null)"
-printf 'gpu.devfreq.min_freq.cur=%s\n' "$(cat "$KGSL/devfreq/min_freq" 2>/dev/null)"
-printf 'gpu.devfreq.max_freq.cur=%s\n' "$(cat "$KGSL/devfreq/max_freq" 2>/dev/null)"
-printf 'gpu.devfreq.governor.cur=%s\n' "$(cat "$KGSL/devfreq/governor" 2>/dev/null)"
+printf 'gpu.devfreq.avail_freqs=%s\n' "$(cat "$DEVFREQ/available_frequencies" 2>/dev/null)"
+printf 'gpu.devfreq.avail_governors=%s\n' "$(cat "$DEVFREQ/available_governors" 2>/dev/null)"
+printf 'gpu.devfreq.min_freq.cur=%s\n' "$(cat "$DEVFREQ/min_freq" 2>/dev/null)"
+printf 'gpu.devfreq.max_freq.cur=%s\n' "$(cat "$DEVFREQ/max_freq" 2>/dev/null)"
+printf 'gpu.devfreq.governor.cur=%s\n' "$(cat "$DEVFREQ/governor" 2>/dev/null)"
 writable_test gpu.min_pwrlevel      "$KGSL/min_pwrlevel"
 writable_test gpu.max_pwrlevel      "$KGSL/max_pwrlevel"
-writable_test gpu.devfreq.min_freq  "$KGSL/devfreq/min_freq"
-writable_test gpu.devfreq.max_freq  "$KGSL/devfreq/max_freq"
-writable_test gpu.devfreq.governor  "$KGSL/devfreq/governor"
+writable_test gpu.devfreq.min_freq  "$DEVFREQ/min_freq"
+writable_test gpu.devfreq.max_freq  "$DEVFREQ/max_freq"
+writable_test gpu.devfreq.governor  "$DEVFREQ/governor"
 # min_pwrlevel 语义: 0 = 最快档, 数字越大越慢。往 0 方向走 = 抬高频率下限。
 mpl=$(cat "$KGSL/min_pwrlevel" 2>/dev/null)
 if [ -n "$mpl" ] && [ "$mpl" -gt 0 ] 2>/dev/null; then
@@ -134,19 +148,19 @@ xpl=$(cat "$KGSL/max_pwrlevel" 2>/dev/null)
 if [ -n "$xpl" ] && [ -n "$mpl" ] && [ "$xpl" -lt "$mpl" ] 2>/dev/null; then
   effect_test gpu.max_pwrlevel "$KGSL/max_pwrlevel" "$((xpl + 1))"
 fi
-gmin=$(cat "$KGSL/devfreq/min_freq" 2>/dev/null)
-g2=$(cat "$KGSL/devfreq/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | tail -2 | head -1)
+gmin=$(cat "$DEVFREQ/min_freq" 2>/dev/null)
+g2=$(cat "$DEVFREQ/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | tail -2 | head -1)
 if [ -n "$g2" ] && [ "$g2" != "$gmin" ]; then
-  effect_test gpu.devfreq.min_freq "$KGSL/devfreq/min_freq" "$g2"
+  effect_test gpu.devfreq.min_freq "$DEVFREQ/min_freq" "$g2"
 fi
-gmax=$(cat "$KGSL/devfreq/max_freq" 2>/dev/null)
-g3=$(cat "$KGSL/devfreq/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | head -2 | tail -1)
+gmax=$(cat "$DEVFREQ/max_freq" 2>/dev/null)
+g3=$(cat "$DEVFREQ/available_frequencies" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | head -2 | tail -1)
 if [ -n "$g3" ] && [ "$g3" != "$gmax" ] && [ "$g3" != "$gmin" ]; then
-  effect_test gpu.devfreq.max_freq "$KGSL/devfreq/max_freq" "$g3"
+  effect_test gpu.devfreq.max_freq "$DEVFREQ/max_freq" "$g3"
 fi
-curggov=$(cat "$KGSL/devfreq/governor" 2>/dev/null)
-oggov=$(cat "$KGSL/devfreq/available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curggov" | head -1)
-[ -n "$oggov" ] && effect_test gpu.devfreq.governor "$KGSL/devfreq/governor" "$oggov"
+curggov=$(cat "$DEVFREQ/governor" 2>/dev/null)
+oggov=$(cat "$DEVFREQ/available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curggov" | head -1)
+[ -n "$oggov" ] && effect_test gpu.devfreq.governor "$DEVFREQ/governor" "$oggov"
 
 # ════ 总线 (DDR / LLCC) ════
 for n in DDR LLCC; do
@@ -164,10 +178,40 @@ for n in DDR LLCC; do
   fi
 done
 
-# ════ 刷新率 (settings) ════
+# ════ 刷新率 ════
+# AOSP 的 peak_refresh_rate / min_refresh_rate 在本机是 null —— 红魔用自己的
+# refresh_rate_mode (取值表在 system:all_refresh_rate 里, 形如 auto,60,90,120,144)。
+# 厂商键的取值语义没有文档, 所以不能凭 all_refresh_rate 的下标猜: 逐个写进去,
+# 看 SurfaceFlinger 的活动模式 fps 到底有没有跟着变, 变了才算数, 完了写回原值。
 printf 'setting.system.peak_refresh_rate.cur=%s\n' "$(settings get system peak_refresh_rate 2>/dev/null)"
 printf 'setting.system.min_refresh_rate.cur=%s\n'  "$(settings get system min_refresh_rate 2>/dev/null)"
-printf 'display.modes=%s\n' "$(dumpsys display 2>/dev/null | grep -oE '[0-9]+\.[0-9]+ fps' | sort -u | tr '\n' ',' | sed 's/,$//')"
+printf 'setting.system.all_refresh_rate=%s\n' "$(settings get system all_refresh_rate 2>/dev/null)"
+printf 'setting.system.refresh_rate_mode.cur=%s\n' "$(settings get system refresh_rate_mode 2>/dev/null)"
+printf 'display.modes=%s\n' "$(dumpsys display 2>/dev/null | grep -oE 'fps=[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')"
+
+active_fps() {
+  dumpsys display 2>/dev/null | grep -m1 'mActiveSfDisplayMode=' \
+    | grep -oE 'peakRefreshRate=[0-9]+' | head -1 | cut -d= -f2
+}
+rrm_old=$(settings get system refresh_rate_mode 2>/dev/null)
+rrm_vals=$(settings get system all_refresh_rate 2>/dev/null | tr ',' '\n' | grep -c .)
+printf 'setting.system.refresh_rate_mode.base_fps=%s\n' "$(active_fps)"
+if [ -n "$rrm_old" ] && [ "$rrm_old" != "null" ] && [ "$rrm_vals" -gt 1 ] 2>/dev/null; then
+  i=0
+  while [ "$i" -lt "$rrm_vals" ]; do
+    if [ "$i" != "$rrm_old" ]; then
+      settings put system refresh_rate_mode "$i" 2>/dev/null
+      sleep 2
+      printf 'setting.system.refresh_rate_mode.mode%s_fps=%s (readback=%s)\n' \
+        "$i" "$(active_fps)" "$(settings get system refresh_rate_mode 2>/dev/null)"
+    fi
+    i=$((i + 1))
+  done
+  settings put system refresh_rate_mode "$rrm_old" 2>/dev/null
+  sleep 2
+  printf 'setting.system.refresh_rate_mode.restored=%s fps=%s\n' \
+    "$(settings get system refresh_rate_mode 2>/dev/null)" "$(active_fps)"
+fi
 
 # ════ 限帧 / 游戏空间相关控制点 (只读扫描, 不写) ════
 for key in game_driver_all_apps ANGLE_gl_driver_all_angle; do

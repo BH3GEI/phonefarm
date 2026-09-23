@@ -12,6 +12,7 @@ DENY_KEYWORDS 在这里拦一道, `knob_sysparam.sh` 在设备端再拦一道。
 全部是纯函数: 输入 probe 文本, 输出白名单与校验结论, 不读设备、不读时钟。
 """
 from __future__ import annotations
+import re
 
 # 温控保护关键词。命中即拒, 不看探测结果, 不看大模型怎么说。
 DENY_KEYWORDS = ("thermal", "trip_point", "cooling", "fan", "tsens", "bcl", "throttl")
@@ -45,6 +46,16 @@ def _ints(s: str) -> list[int]:
         except ValueError:
             pass
     return sorted(set(vals))
+
+
+def _fps_list(s: str) -> list[int]:
+    """从 dumpsys 抓来的刷新率文本里取出档位。
+
+    不同 Android 版本的措辞不一样 ("120.00001 fps" / "fps=120" / "60.000004"),
+    所以只认数字本身, 四舍五入到整数再去重 —— 120.00001 与 120 是同一档。
+    """
+    out = {int(round(float(m))) for m in re.findall(r"\d+(?:\.\d+)?", s or "")}
+    return sorted(v for v in out if v > 0)
 
 
 def _denied(path: str) -> bool:
@@ -171,14 +182,36 @@ def build_whitelist(probe: dict) -> dict:
             probe.get(f"bus.{n}.boost_freq.cur", ""), probe_key=key)
 
     # ── 刷新率 ──
-    modes = sorted({int(float(x.split()[0]))
-                    for x in (probe.get("display.modes") or "").split(",") if x.strip()})
+    # 两条路都试: AOSP 的 peak/min_refresh_rate, 以及厂商自己的 refresh_rate_mode。
+    # 本机 (红魔 NX809J) AOSP 那两个键是 null, 走的是 refresh_rate_mode。
+    modes = _fps_list(probe.get("display.modes") or "")
     for pid, skey in (("setting.system.peak_refresh_rate", "peak_refresh_rate"),
                       ("setting.system.min_refresh_rate", "min_refresh_rate")):
         cur = probe.get(f"setting.system.{skey}.cur", "")
         if cur in ("", "null") or not modes:
             continue
         add(pid, "setting", f"system:{skey}", modes, cur, group="refresh")
+
+    # 厂商键的取值语义没有文档, 所以不按 all_refresh_rate 的下标猜, 只认探测时
+    # **真的把活动刷新率改掉了**的那几档 —— 探测脚本逐档写进去看 SurfaceFlinger
+    # 的活动模式 fps 跟不跟着变, 结果落在 refresh_rate_mode.mode<i>_fps 行里。
+    rrm_cur = probe.get("setting.system.refresh_rate_mode.cur", "")
+    if rrm_cur not in ("", "null"):
+        base_fps = probe.get("setting.system.refresh_rate_mode.base_fps", "")
+        live = [rrm_cur]
+        for k, v in probe.items():
+            if not (k.startswith("setting.system.refresh_rate_mode.mode")
+                    and k.endswith("_fps")):
+                continue
+            mode = k[len("setting.system.refresh_rate_mode.mode"):-len("_fps")]
+            fps = v.split()[0] if v else ""
+            # 回读对得上 + 活动刷新率确实与基准不同 = 这一档真生效
+            if f"readback={mode}" in v and fps and fps != base_fps:
+                live.append(mode)
+        if len(set(live)) > 1:
+            add("setting.system.refresh_rate_mode", "setting",
+                "system:refresh_rate_mode", sorted(set(live), key=int), rrm_cur,
+                group="refresh")
 
     return wl
 

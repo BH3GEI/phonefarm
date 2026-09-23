@@ -52,7 +52,7 @@ bus.DDR.boost_freq.writable=yes
 bus.DDR.boost_freq.effect=live
 setting.system.peak_refresh_rate.cur=120
 setting.system.min_refresh_rate.cur=60
-display.modes=60.0 fps,120.0 fps
+display.modes=fps=60,fps=120
 thermal.cpu-1-0=42000
 """
 
@@ -90,6 +90,35 @@ class TestWhitelist(unittest.TestCase):
     def test_refresh_rate_values_come_from_display_modes(self):
         self.assertEqual(self.wl["setting.system.peak_refresh_rate"]["values"], ["60", "120"])
         self.assertEqual(self.wl["setting.system.peak_refresh_rate"]["kind"], "setting")
+
+    def test_fps_parser_takes_both_dumpsys_wordings(self):
+        # 不同 Android 版本措辞不同, 且 120.00001 与 120 必须归成同一档
+        self.assertEqual(WL._fps_list("60.000004 fps,144.00002 fps,120.00001 fps"),
+                         [60, 120, 144])
+        self.assertEqual(WL._fps_list("fps=60,fps=120,fps=120"), [60, 120])
+        self.assertEqual(WL._fps_list(""), [])
+
+    def test_vendor_refresh_mode_only_takes_modes_that_really_changed_fps(self):
+        """厂商键的取值语义没文档, 只认探测时真把活动刷新率改掉的那几档。"""
+        wl = WL.build_whitelist(WL.parse_probe(PROBE + """
+setting.system.refresh_rate_mode.cur=0
+setting.system.refresh_rate_mode.base_fps=120
+setting.system.refresh_rate_mode.mode1_fps=60 (readback=1)
+setting.system.refresh_rate_mode.mode2_fps=120 (readback=2)
+setting.system.refresh_rate_mode.mode3_fps=144 (readback=9)
+"""))
+        spec = wl["setting.system.refresh_rate_mode"]
+        # mode1 真的把 120 变成了 60 → 收; mode2 fps 没变 → 不收;
+        # mode3 fps 变了但回读对不上 (写 3 读回 9) → 不收
+        self.assertEqual(spec["values"], ["0", "1"])
+
+    def test_vendor_refresh_mode_absent_when_nothing_took_effect(self):
+        wl = WL.build_whitelist(WL.parse_probe(PROBE + """
+setting.system.refresh_rate_mode.cur=0
+setting.system.refresh_rate_mode.base_fps=120
+setting.system.refresh_rate_mode.mode1_fps=120 (readback=1)
+"""))
+        self.assertNotIn("setting.system.refresh_rate_mode", wl)
 
     def test_bus_uses_available_frequencies(self):
         self.assertEqual(self.wl["bus.DDR.boost_freq"]["values"],
