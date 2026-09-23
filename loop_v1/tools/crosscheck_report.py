@@ -165,6 +165,27 @@ def main() -> int:
         for k in sorted(zones):
             L.append(f"  {k}: {zones[k]:.1f} C")
 
+    raw = os.path.join(d, "gp_realtime.txt")
+    if os.path.exists(raw):
+        fps = []
+        with open(raw, errors="replace") as fh:
+            for rec in fh.read().split("}"):
+                i = rec.find("fps:")
+                if i < 0:
+                    continue
+                v = rec[i + 4:].split(";")[0].strip()
+                if v.lstrip("-").isdigit():
+                    fps.append(int(v))
+        if fps:
+            L.append("")
+            L.append("── HiSmartPerf 逐秒 fps 原始序列 ──")
+            L.append("  " + " ".join(str(v) for v in fps))
+            body = fps[1:-1] if len(fps) > 2 else fps
+            L.append(
+                f"  首尾两秒是不完整的秒, 照样各算一条样本 —— 去掉之后均值 "
+                f"{sum(body) / len(body):.3f} (全量 {sum(fps) / len(fps):.3f})"
+            )
+
     meta = sp.get("meta") or {}
     if meta:
         L.append("")

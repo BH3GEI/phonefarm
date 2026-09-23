@@ -386,6 +386,13 @@ pub const LOCAL_PORT_TRIES: u16 = 8;
 /// 采集器起来到能应答握手之间的等待上限。
 pub const DAEMON_READY_MS: u64 = 12_000;
 
+/// 设了这个环境变量就把实时数据通道的**原始字节**追加落盘。
+///
+/// 不是调试残留: 两条通路的读数对不上时, 唯一能把「口径差异」与「窗口边缘效应」
+/// 分开的证据就是逐秒原始序列 —— 设备端每秒吐一个**整数** fps, 窗口首尾那两个
+/// 不完整的秒照样各算一条样本, 会把均值系统性地往下拉。
+pub const RAW_DUMP_ENV: &str = "PHONEFARM_GPD_RAW";
+
 /// 等一条控制命令回执的上限。
 pub const CMD_ACK_MS: u64 = 2_000;
 
@@ -720,7 +727,18 @@ impl<'a> Session<'a> {
                 Ok(0) => break,
                 Ok(n) => {
                     got_bytes += n;
-                    self.buf.push_str(&String::from_utf8_lossy(&raw[..n]));
+                    let chunk = String::from_utf8_lossy(&raw[..n]);
+                    // 原始线格式落盘 (可选)。交叉对比要能解释「两边差的这几个百分点
+                    // 到底是口径差异还是窗口边缘效应」—— 没有逐秒原始序列就只能猜。
+                    if let Some(p) = std::env::var_os(RAW_DUMP_ENV) {
+                        use std::io::Write as _;
+                        if let Ok(mut f) =
+                            std::fs::OpenOptions::new().create(true).append(true).open(&p)
+                        {
+                            let _ = f.write_all(chunk.as_bytes());
+                        }
+                    }
+                    self.buf.push_str(&chunk);
                     let (mut got, rest) = parse_stream(&self.buf);
                     self.buf = rest;
                     out.append(&mut got);

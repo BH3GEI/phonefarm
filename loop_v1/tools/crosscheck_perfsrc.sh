@@ -91,8 +91,10 @@ FT_PID=$!
     > "$OUTDIR/perf_sysfs.json" 2>"$OUTDIR/perf_sysfs.err" &
 SYS_PID=$!
 
-#    B: HiSmartPerf 通路 (设备端每秒一条)
-( cd "$ROOT" && ./phonefarm perf --serial "$SERIAL" --source smartperf \
+#    B: HiSmartPerf 通路 (设备端每秒一条)。同时把原始线格式落盘 ——
+#       两边差几个百分点时, 逐秒原始序列是唯一能把「口径差异」与「窗口边缘效应」分开的证据。
+( cd "$ROOT" && PHONEFARM_GPD_RAW="$OUTDIR/gp_realtime.txt" \
+  ./phonefarm perf --serial "$SERIAL" --source smartperf \
     --app "$PKG" --rounds "$CAPDUR" --json ) \
     > "$OUTDIR/perf_smartperf.json" 2>"$OUTDIR/perf_smartperf.err" &
 SP_PID=$!

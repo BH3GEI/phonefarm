@@ -863,7 +863,7 @@ mod tests {
 
     /// 安卓 HiSmartPerf 通路的样本夹具。线格式与字段名取自 `GamePerfToolCollector`
     /// 二进制里的格式串; **数值是构造的, 不是实测抓取**, 只用来钉住归一化行为本身。
-    /// 真机实测的线格式样本见 `src/testdata/gp_realtime.txt`。
+    /// (实测的原始线格式在 `gpdaemon` 的 `real_sample` 夹具里, 逐字节照抄。)
     fn gp_samples() -> Vec<gpdaemon::GpSample> {
         // 裸 {…}, 无 value= 前缀无 ;end; 帧尾; 电流/电压是 sysfs 原值 (μA/μV), 温度是毫摄氏度
         let wire = "{fps:59;refresh:120;gpuUsage:71;current:-1420000;voltage:4108000;\
