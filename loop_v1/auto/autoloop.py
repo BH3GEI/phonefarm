@@ -45,8 +45,10 @@ DEV_TMP = "/data/local/tmp"
 DEV_SCRIPTS = ["device_snapshot.sh", "ftrace_capture.sh"]
 AUTO_SCRIPTS = ["probe_sysparam.sh", "knob_sysparam.sh", "sample_env.sh"]
 
-# 等冷门槛: 每组候选开跑前必须降到这个温度以下, 否则前一组的余热会污染这一组。
-COOL_C = 40.0
+# 等冷门槛的下界。真正的门槛在基线之后定 (见 main): 目标是「回到基线是在什么
+# 热态下量的」, 而不是一个拍脑袋的绝对温度 —— 连跑几十轮游戏之后设备根本降不到
+# 40C, 用绝对值当门槛会把每一组候选都卡死在等冷超时上。
+COOL_C_FLOOR = 40.0
 COOL_TIMEOUT_S = 420
 # 温度上限的下界。真正的上限 = max(这个值, 基线实测最高温 + 余量), 在看候选数据前冻结。
 TEMP_CAP_FLOOR_C = 45.0
@@ -118,7 +120,7 @@ def read_soc_temp() -> tuple[str, float] | None:
     return (best[0], best[1] / 1000.0) if best else None
 
 
-def wait_cool(cool_c: float = COOL_C, timeout_s: int = COOL_TIMEOUT_S) -> dict:
+def wait_cool(cool_c: float = COOL_C_FLOOR, timeout_s: int = COOL_TIMEOUT_S) -> dict:
     t0 = time.time()
     while True:
         cur = read_soc_temp()
@@ -217,7 +219,7 @@ BAD_APPLY_TOKENS = ("KNOB_FAIL", "KNOB_REFUSE", "KNOB_PLAN_REJECTED",
 
 
 def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: float,
-                  power_available: bool) -> dict:
+                  power_available: bool, cool_c: float = COOL_C_FLOOR) -> dict:
     """等冷 → A/B 交替 pairs 轮 → 置换检验 → 判定 → 还原。
 
     A/B **交替**而不是先跑完一臂再跑另一臂: 温度、光照、内存压力这些外生变量都在
@@ -241,9 +243,12 @@ def run_candidate(cand: dict, wl: dict, outdir: str, pairs: int, temp_cap_c: flo
     with open(os.path.join(outdir, "snap_before.txt"), "w") as f:
         f.write(snap_before)
 
-    cool = wait_cool()
+    # 等冷超时不作废本组: 组内 ABBA 交替已经让两臂承受同样的残余热漂移, 起跑温度
+    # 偏高会同等地影响两臂, 不构成偏向。安全由温度上限单独把关。这里只如实记录,
+    # 证据里看得出哪几组是热起跑的。
+    cool = wait_cool(cool_c)
     if not cool.get("ok"):
-        return _abort(outdir, cand, f"等冷失败: {cool.get('reason')}", temp_cap_c)
+        log(f"等冷未达标 ({cool.get('reason')}), 仍按 ABBA 交替继续, 已记进证据")
 
     knob_runs, ctrl_runs = [], []
     apply_logs: list[str] = []
@@ -439,7 +444,8 @@ def main() -> int:
     # 3) 基线: 量基准温度与功耗可用性, 用来冻结温度上限
     log(f"跑 {a.baseline_runs} 轮基线 (不加任何参数), 用于冻结温度上限与确认功耗可测 ...")
     cool = wait_cool()
-    log(f"等冷: {cool}")
+    log(f"基线前等冷: {cool}")
+    base_start_c = cool.get("c")
     base_runs = []
     for i in range(1, a.baseline_runs + 1):
         m = run_one(f"sp_base{i}", os.path.join(out, "baseline", f"base{i}"))
@@ -452,6 +458,10 @@ def main() -> int:
                    round(max(base_temps) + TEMP_CAP_MARGIN_C, 1)) if base_temps \
         else TEMP_CAP_FLOOR_C
     power_available = any(m.get("power_w_mean") is not None for _, m in base_runs)
+    # 每组候选的等冷目标 = 「回到基线是在什么热态下量的」, 而不是一个绝对温度。
+    # 取基线起跑温度 + 1C, 下界 40C, 上界比温度上限低 2C —— 也在看候选数据前冻结。
+    cool_target = min(max(COOL_C_FLOOR, round((base_start_c or COOL_C_FLOOR) + 1.0, 1)),
+                      temp_cap - 2.0)
 
     # 4) **在看到任何候选数据之前**冻结判定规则
     rule = V.rule_doc(temp_cap, a.pairs, power_available)
@@ -460,10 +470,16 @@ def main() -> int:
         "baseline_max_c": max(base_temps) if base_temps else None,
         "formula": "max(floor, baseline_max + margin)",
     }
+    rule["cooldown_target_c"] = cool_target
+    rule["cooldown_derivation"] = {
+        "floor_c": COOL_C_FLOOR, "baseline_start_c": base_start_c,
+        "formula": "min(max(floor, baseline_start + 1), temp_cap - 2)",
+        "on_timeout": "如实记录后继续 (组内 ABBA 交替已让两臂承受同样的残余热漂移), 不作废本组",
+    }
     rule["baseline"] = describe(base_runs, "baseline")
     with open(os.path.join(out, "rule.json"), "w") as f:
         json.dump(rule, f, ensure_ascii=False, indent=1)
-    log(f"判定规则已冻结: 温度上限 {temp_cap}C, 指标 {rule['n_metrics']} 个, "
+    log(f"判定规则已冻结: 温度上限 {temp_cap}C, 等冷目标 {cool_target}C, 指标 {rule['n_metrics']} 个, "
         f"alpha_win={rule['alpha_win_bonferroni']}, "
         f"{a.pairs}v{a.pairs} 最小可达 p={rule['min_reachable_p']}, "
         f"可达={rule['reachable']}, 功耗可测={power_available}")
@@ -517,7 +533,8 @@ def main() -> int:
         for ci, cand in enumerate(valid, 1):
             cdir = os.path.join(gdir, f"cand{ci}")
             log(f"[gen{gen}/cand{ci}] {json.dumps(cand['params'], ensure_ascii=False)}")
-            res = run_candidate(cand, wl, cdir, a.pairs, temp_cap, power_available)
+            res = run_candidate(cand, wl, cdir, a.pairs, temp_cap, power_available,
+                                cool_c=cool_target)
             res["gen"], res["cand"] = gen, ci
             all_results.append(res)
             history.append({"params": cand["params"], "verdict": res["verdict"],
@@ -535,7 +552,7 @@ def main() -> int:
     # 收尾快照前先等冷: 进入前那份快照是在冷机状态下采的, 刚跑完游戏就采会让
     # 驱动自己按温度改的那几项对不上 —— 那是热态差异, 不是留痕。等不下来也继续,
     # classify_diff 会把这类项单独归到 driver_owned 里如实报出来。
-    fin_cool = wait_cool()
+    fin_cool = wait_cool(cool_target)
     log(f"收尾等冷: {fin_cool}")
     snap_final = snapshot()
     with open(os.path.join(out, "snap_final.txt"), "w") as f:
