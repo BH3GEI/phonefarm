@@ -3,6 +3,8 @@
 #
 #   probe            对 refbench 挂只读层并启动, 验"机制能挂上非 debuggable 应用" (问题 1)
 #   loadop [pkg]     同上, 但打开 LoadOp LOAD->DONT_CARE 改写 (判据 5)
+#   passdump [pkg]   只读 + 导出 render pass 形状表: 每个 pass 的宽高/格式/次序/draw 数,
+#                    外加 swapchain 尺寸与一帧的有序 pass 序列。用来定位"低分辨率->放大"那一步。
 #   target <pkg>     对目标游戏挂空层并启动, 看能否正常进游戏 (问题 2 反作弊)
 #   --keep-prop      挂完保留全局属性 (默认是层一加载就清掉, 见下面的误伤警告)
 #   status           只读打印当前挂载状态
@@ -45,6 +47,7 @@ set -uo pipefail
 SERIAL="${REFBENCH_SERIAL:-91253241019A}"
 LAYER_NAME="VK_LAYER_refknobs_readonly"
 LOADOP_PROP="debug.knobs.loadop"          # 1 = 层把 loadOp LOAD 改写成 DONT_CARE
+DUMP_PROP="debug.knobs.passdump"          # 1 = 层导出 render pass 形状表 (找放大那一步)
 SO="libVkLayer_refknobs.so"
 STATE="/data/local/tmp/knobs_layer_state"       # 存"把 .so 推进了哪个包", 供 off 精确回滚
 OUT="$(cd "$(dirname "$0")" && pwd)/build/out"
@@ -156,7 +159,13 @@ done
 set -- ${ARGS[@]+"${ARGS[@]}"}
 
 case "${1:-}" in
-  probe)   ashell "su -c 'setprop $LOADOP_PROP 0'"; mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
+  probe)   ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0'"; mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
+  # 观测档: 只读 + 导出 pass 形状表 (尺寸/格式/次序/draw 数), 用来定位"低分辨率->放大"那一步
+  passdump)
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1'"
+    [ "$(ashell "getprop $DUMP_PROP" | tr -d '\r')" = "1" ] \
+      || { echo "setprop $DUMP_PROP 没生效" >&2; exit 1; }
+    mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
   # 改写档: 与 probe 唯一的差别就是这个属性, A/B 两臂只切它一个
   loadop)
     ashell "su -c 'setprop $LOADOP_PROP 1'"
@@ -167,7 +176,7 @@ case "${1:-}" in
     mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
   target)
     [ -n "${2:-}" ] || { echo "target 要给包名" >&2; exit 2; }
-    ashell "su -c 'setprop $LOADOP_PROP 0'"; mount_layer "$2" "$KEEP" ;;
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0'"; mount_layer "$2" "$KEEP" ;;
   status)
     echo "debug.vulkan.layers = [$(ashell 'getprop debug.vulkan.layers' | tr -d '\r')]"
     echo "$LOADOP_PROP  = [$(ashell "getprop $LOADOP_PROP" | tr -d '\r')]"
@@ -179,7 +188,7 @@ case "${1:-}" in
       echo "state = <无>  (未施加)"
     fi ;;
   off)
-    ashell "su -c 'setprop debug.vulkan.layers \"\"; setprop $LOADOP_PROP 0'"
+    ashell "su -c 'setprop debug.vulkan.layers \"\"; setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0'"
     st=$(ashell "su -c 'cat $STATE 2>/dev/null'" | tr -d '\r')
     if [ -n "$st" ]; then
       dir="${st#*|}"; pkg="${st%%|*}"
@@ -211,6 +220,6 @@ case "${1:-}" in
       printf '  %-20s = %s\n' "$K" "$(ashell "settings get global $K" | tr -d '\r')"
     done ;;
   *)
-    echo "用法: enable_layer.sh {probe|loadop [pkg]|target <pkg>|status|off} [--keep-prop]" >&2
+    echo "用法: enable_layer.sh {probe|loadop [pkg]|passdump [pkg]|target <pkg>|status|off} [--keep-prop]" >&2
     exit 2 ;;
 esac
