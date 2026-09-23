@@ -71,9 +71,20 @@ AUTO_SCRIPTS = ["probe_sysparam.sh", "knob_sysparam.sh", "sample_env.sh",
 # 40C, 用绝对值当门槛会把每一组候选都卡死在等冷超时上。
 COOL_C_FLOOR = 40.0
 COOL_TIMEOUT_S = 420
-# 温度上限的下界。真正的上限 = max(这个值, 基线实测最高温 + 余量), 在看候选数据前冻结。
-TEMP_CAP_FLOOR_C = 45.0
-TEMP_CAP_MARGIN_C = 3.0
+# 温度上限是**安全上限** —— 它的职责是「别把机器烤坏」, 不是「保证两臂热态一样」。
+# 热态的可比性由组内 ABBA 交替 + 等冷目标负责, 不靠温度上限。
+#
+# 第一版把上限定成 max(45C, 基线最高温+3C), 是把这两件事混为一谈了, 结果:
+# 本机原神 60fps + 风扇全开时基线就有 55.2C, 上限算出来 58.2C, 第一组候选
+# 第一轮量到 58.7C —— 超了 0.5C, 一组数据直接作废。0.5C 是同一场连跑里
+# 再正常不过的热漂移, 拿它当安全事故是荒谬的。
+#
+# 现在按安全含义定: 骁龙的结温保护在 95C 上下开始降频, 70C 留足余量;
+# 再加一条 +10C 的失控护栏 (真出热失控时它才会触发, 正常漂移不会)。
+# 注: 任务书原话建议 "比如 SoC 45C" —— 那个数在这台机器上跑原神根本达不到
+# (基线就 55C), 照搬只会让每一组都作废。
+TEMP_CAP_FLOOR_C = 70.0
+TEMP_CAP_MARGIN_C = 10.0
 
 
 def log(msg: str) -> None:
@@ -675,8 +686,14 @@ def main() -> int:
                                 cool_c=cool_target)
             res["gen"], res["cand"] = gen, ci
             all_results.append(res)
+            # 把 KNOB_FAIL 原文喂回模型: 实测 gpu.min_pwrlevel 写 0 会被内核夹到 2
+            # (热限档位)。探测只验过一个试写值, 不代表每个合法值都写得进去 ——
+            # 不把这条反馈回去, 模型下一代还会再提一次同样写不进的值。
+            clamped = [l for lg in res.get("apply_log", []) for l in lg.splitlines()
+                       if "KNOB_FAIL" in l or "KNOB_REFUSE" in l]
             history.append({"params": cand["params"], "verdict": res["verdict"],
                             "reason": res.get("reason", ""),
+                            "clamped": clamped,
                             "per_metric": res.get("per_metric", {})})
             log(f"[gen{gen}/cand{ci}] 判定 {res['verdict']}: {res.get('reason')}")
 

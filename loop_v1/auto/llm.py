@@ -78,7 +78,9 @@ SYSTEM_PROMPT = (
     "2. 绝不提出任何与温控保护相关的改动 (关热保护、抬温控阈值), 提了会被直接拒绝。\n"
     "3. 每组 1-4 个参数。参数少一点容易归因, 别一次全改。\n"
     "4. 各组之间要有明显差异, 不要提交几乎一样的组。\n"
-    "5. 只输出 JSON, 不要解释、不要 markdown 代码块以外的任何文字。\n"
+    "5. 历史里标了「写不进去 (被内核夹回)」的值, 不要再提 —— 取值表列出的是"
+    "合法值, 但内核会按当下的热限/上下限把某些值夹回去, 那一组会整组作废。\n"
+    "6. 只输出 JSON, 不要解释、不要 markdown 代码块以外的任何文字。\n"
     "输出格式 (顶层是数组):\n"
     '[{"why":"一句话说明这组想验证什么","params":{"参数名":"值"}}, ...]'
 )
@@ -108,6 +110,8 @@ def build_prompt(whitelist_desc: str, history: list[dict], n: int,
         for h in history:
             lines.append(f"- 参数 {json.dumps(h.get('params', {}), ensure_ascii=False)}")
             lines.append(f"  判定 {h.get('verdict')} — {h.get('reason', '')}")
+            for c in (h.get("clamped") or []):
+                lines.append(f"  ⚠ 这个值写不进去 (被内核夹回): {c.strip()}")
             for m, d in (h.get("per_metric") or {}).items():
                 if isinstance(d, dict) and d.get("diff_pct") is not None:
                     lines.append(f"  {m}: {d.get('diff_pct')}% (p={d.get('p')}) {d.get('status')}")

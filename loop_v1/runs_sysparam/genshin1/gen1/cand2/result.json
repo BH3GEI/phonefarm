@@ -1,0 +1,66 @@
+{
+ "params": {
+  "gpu.min_pwrlevel": "0"
+ },
+ "why": "单独验证把 GPU 最低档位锁到最高档能否压低帧时，单参数便于归因功耗代价",
+ "plan": "# loop_v1 sysparam plan\nsysfs\t/sys/class/kgsl/kgsl-3d0/min_pwrlevel\t0\n",
+ "pairs_completed": 0,
+ "apply_ok": false,
+ "apply_log": [
+  "KNOB_FAIL /sys/class/kgsl/kgsl-3d0/min_pwrlevel: 想写 0, 回读 2 (原值 17)\n"
+ ],
+ "restore_ok": true,
+ "restore_fail": null,
+ "restore_log": [
+  "KNOB_NOT_APPLIED (无 /data/local/tmp/loop_v1_sysparam.state, 无需回滚)"
+ ],
+ "knob_state_after": [
+  "state: 未施加"
+ ],
+ "cooldown": {
+  "ok": true,
+  "zone": "cpu-0-5-1",
+  "c": 46.1,
+  "waited_s": 370.5
+ },
+ "charge_suspend_log": [
+  "CHARGE_SUSPENDED /sys/class/qcom-battery/charging_enabled: 1 -> 0",
+  "CHARGE_STATE status=Discharging current_now=-836000 capacity=100 on_battery=yes"
+ ],
+ "charge_restore_log": [
+  "CHARGE_RESTORED /sys/class/qcom-battery/charging_enabled: -> 1",
+  "CHARGE_STATE status=Charging current_now=-836000 capacity=100 on_battery=no"
+ ],
+ "on_battery_uniform": true,
+ "snapshot_check": {
+  "checked": true,
+  "n_lines": 39,
+  "strict_identical": false,
+  "strict_n_diff": 2,
+  "ours_identical": false,
+  "ours_diffs": [
+   {
+    "line": 7,
+    "before": "kgsl.max_pwrlevel=0",
+    "after": "kgsl.max_pwrlevel=1"
+   },
+   {
+    "line": 29,
+    "before": "cpu.policy0.scaling_max=1228800",
+    "after": "cpu.policy0.scaling_max=1785600"
+   }
+  ],
+  "driver_owned_diffs": []
+ },
+ "temp_max_c": null,
+ "temp_cap_c": 58.2,
+ "arms": {
+  "ctrl": null,
+  "knob": null
+ },
+ "env_per_run": {},
+ "fan_state_uniform": true,
+ "comparisons": {},
+ "verdict": "ABORT",
+ "reason": "旋钮未全部生效"
+}

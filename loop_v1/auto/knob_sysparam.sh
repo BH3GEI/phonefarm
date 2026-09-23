@@ -56,6 +56,31 @@ allowed_setting() {
   esac
 }
 
+# ── 回滚的「波及面」 ──
+# 写一个节点会把兄弟节点一起改掉: 实测把 cpufreq 的 scaling_governor 切成
+# performance 再切回 walt, scaling_max_freq 从 1785600 变成了 1228800 并且再也没回来
+# —— 只回滚「我们写过的那几个路径」根本不够, 判据 4 当场报留痕, 一组本来干净的
+# 数据 (p95 -7.2%) 就这么作废了。
+# 所以每碰一个节点, 就把它整组兄弟节点的原值一起存下来。
+siblings() {
+  case "$1" in
+    /sys/devices/system/cpu/cpufreq/policy*/scaling_min_freq|\
+    /sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq|\
+    /sys/devices/system/cpu/cpufreq/policy*/scaling_governor)
+      d=$(dirname "$1")
+      # 顺序就是回滚顺序: governor 会重设 min/max, 所以它必须排在最前
+      echo "$d/scaling_governor"
+      echo "$d/scaling_max_freq"
+      echo "$d/scaling_min_freq"
+      ;;
+    /sys/class/kgsl/kgsl-3d0/min_pwrlevel|/sys/class/kgsl/kgsl-3d0/max_pwrlevel)
+      echo "/sys/class/kgsl/kgsl-3d0/max_pwrlevel"
+      echo "/sys/class/kgsl/kgsl-3d0/min_pwrlevel"
+      ;;
+    *) echo "$1" ;;
+  esac
+}
+
 read_one() {  # read_one <kind> <path>
   if [ "$1" = "setting" ]; then
     ns=$(echo "$2" | cut -d: -f1); key=$(echo "$2" | cut -d: -f2)
@@ -115,18 +140,28 @@ case "${1:-status}" in
       exit 3
     fi
 
+    # 先把回滚依据存齐 (含兄弟节点), **再**动设备 —— 中途被杀也能回滚
     : > "$STATE"
-    # 两遍写: 第一遍可能被 min>max 之类的顺序约束夹回, 第二遍补齐。
-    # 原值只在第一遍记录, 所以重复写不会污染回滚依据。
+    while IFS="$(printf '\t')" read -r kind path val; do
+      [ -n "${kind:-}" ] || continue
+      case "$kind" in \#*) continue ;; esac
+      if [ "$kind" = "sysfs" ]; then
+        for sp in $(siblings "$path"); do
+          grep -qF "	$sp	" "$STATE" 2>/dev/null && continue   # 已经存过
+          printf '%s\t%s\t%s\n' sysfs "$sp" "$(cat "$sp" 2>/dev/null)" >> "$STATE"
+        done
+      else
+        grep -qF "	$path	" "$STATE" 2>/dev/null && continue
+        printf '%s\t%s\t%s\n' "$kind" "$path" "$(read_one "$kind" "$path")" >> "$STATE"
+      fi
+    done < "$PLAN"
+
+    # 两遍写: 第一遍可能被 min>max 之类的顺序约束夹回, 第二遍补齐
     pass=1
     while [ "$pass" -le 2 ]; do
       while IFS="$(printf '\t')" read -r kind path val; do
         [ -n "${kind:-}" ] || continue
         case "$kind" in \#*) continue ;; esac
-        if [ "$pass" = "1" ]; then
-          cur=$(read_one "$kind" "$path")
-          printf '%s\t%s\t%s\n' "$kind" "$path" "$cur" >> "$STATE"
-        fi
         write_one "$kind" "$path" "$val"
       done < "$PLAN"
       pass=$((pass + 1))
@@ -152,7 +187,7 @@ case "${1:-status}" in
       exit 0
     fi
     ok=1
-    # 同样两遍, 处理 min/max 的顺序约束
+    # STATE 里已经按回滚顺序排好 (governor 在 min/max 之前), 仍走两遍兜住夹取
     pass=1
     while [ "$pass" -le 2 ]; do
       while IFS="$(printf '\t')" read -r kind path val; do
