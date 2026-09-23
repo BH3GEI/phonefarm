@@ -15,7 +15,7 @@ bash build_vks.sh                                   # 浅克隆 + 裁剪 + 打�
 bash install_vks.sh                                 # 装 APK + 推场景/纹理/shader 到设备
 bash run_vks.sh <label> <outdir> <sample> <config> <frames> [capdur]   # 单轮
 bash run_ab.sh <sample> <config_A> <config_B> [rounds]                 # 交错 NvN + 统计判定
-python3 vks_report.py --root <outdir> --sample S --config-a A --config-b B
+phonefarm vks-report --root <outdir> --sample S --config-a A --config-b B
 ```
 
 ---
@@ -33,7 +33,7 @@ python3 vks_report.py --root <outdir> --sample S --config-a A --config-b B
 运行日志里会留一行 `sample_config: applied configuration index N to "<sample>"`，
 **这一行就是「这一轮确实跑在哪一档」的证据**，每轮都收进 `run.log`。
 
-各样例的档位语义(逐行读自上游源码，冻结在 `vks_report.py` 的 `KNOBS` 里)：
+各样例的档位语义(逐行读自上游源码，冻结在 `rules_frozen.py` + `src/vksreport.rs` 的 `KNOBS` 里)：
 
 | sample | config 0 | config 1 | 2 / 3 |
 |---|---|---|---|
@@ -43,7 +43,7 @@ python3 vks_report.py --root <outdir> --sample S --config-a A --config-b B
 | `afbc` | 交换链额外带 STORAGE usage(压制帧缓冲压缩) | 只带 COLOR_ATTACHMENT(允许压缩) | — |
 
 `afbc` 是 Arm AFBC 的样例；在 Adreno 上对应的是 UBWC，语义要靠实测说话，
-所以 `vks_report.py` 对它不预设方向。
+所以 `vks-report` 对它不预设方向。
 
 ## 2. 启动契约
 
@@ -94,7 +94,7 @@ cached process，`pidof` 仍然有值。拿它当结束判据会让每一轮都�
 的 38 行快照里。所以：
 
 - `run_vks.sh` 每轮把 `fan_enable` / `fan_speed_level` 单独存成 `fan.json`；
-- `vks_report.py` 跨轮比对，各轮不一致就打警告 —— 风扇开/关不能混进臂间差异；
+- `vks-report` 跨轮比对，各轮不一致就打警告 —— 风扇开/关不能混进臂间差异；
 - `run_ab.sh` 保证整批对照期间风扇状态恒定：**已经开着就原样不动**（挡位可能是用户手动选的），
   只有关着时才由我们打开并在结束时还原。要的是"恒定"，不是某个特定挡位。
 
