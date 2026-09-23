@@ -36,6 +36,10 @@ case "$WORKLOAD" in
   genshin)
     PKG=com.miHoYo.Yuanshen
     COMM=UnityGfxDeviceW
+    # 触控版负载。原神 7.1.0 上**手柄注入已失效** ——
+    # loop_v1/scripts/workload_spin_v1.json 跑出来是静止画面, 而静止画面照样能采到
+    # 帧率/功耗/温度, 报告看着一切正常, 只是量的根本不是"定点转视角"那个负载。
+    WL="$ROOT/knobs/gray/workload_spin_touch_v1.json"
     ;;
   *) echo "负载只能是 refbench 或 genshin, 给的是 $WORKLOAD" >&2; exit 2 ;;
 esac
@@ -122,7 +126,7 @@ if [ "$WORKLOAD" = refbench ]; then
       --es intensity 1.0 --es knob.postfx off" ) > "$OUTDIR/workload.log" 2>&1
   WL_PID=""
 else
-  WL="$ROOT/loop_v1/scripts/workload_spin_v1.json"
+  [ -f "$WL" ] || { echo "找不到负载脚本 $WL" >&2; exit 2; }
   ( cd "$ROOT" && ./phonefarm script --task "xcheck_$LABEL" --serial "$SERIAL" \
       --app "$PKG" --no-screen "$WL" ) > "$OUTDIR/workload.log" 2>&1 &
   WL_PID=$!
@@ -150,8 +154,18 @@ SYS_PID=$!
     > "$OUTDIR/perf_smartperf.json" 2>"$OUTDIR/perf_smartperf.err" &
 SP_PID=$!
 
+#    负载真的在动吗: 窗口内抓两帧比像素差。
+#    静止画面照样能采到帧率/功耗/温度, 报告看着一切正常 —— 只有这个差异值能把
+#    "负载真的在转视角"钉死。抓在窗口前段, 离中点热区读取远一点, 别互相挤。
+adb -s "$SERIAL" exec-out screencap > "$OUTDIR/frame_a.raw" 2>/dev/null
+sleep 3
+adb -s "$SERIAL" exec-out screencap > "$OUTDIR/frame_b.raw" 2>/dev/null
+MOVED=$(python3 "$ROOT/loop_v1/tools/frames_moving.py" "$OUTDIR/frame_a.raw" "$OUTDIR/frame_b.raw" 2>/dev/null || echo "?")
+echo "[$LABEL] 画面逐像素差 ${MOVED}% (静止画面会接近 0)"
+printf 'frame_diff_pct=%s\n' "$MOVED" >> "$OUTDIR/test_conditions.txt"
+
 #    参考: 窗口中点直读一次热区, 用来对 HiSmartPerf 报的温度
-sleep $((CAPDUR / 2))
+sleep $((CAPDUR / 2 - 3))
 adb -s "$SERIAL" shell "su -c 'for z in /sys/class/thermal/thermal_zone*; do \
   printf \"%s %s\n\" \"\$(cat \$z/type)\" \"\$(cat \$z/temp)\"; done'" \
     > "$OUTDIR/thermal_mid.txt" 2>&1 || true
