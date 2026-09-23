@@ -135,3 +135,42 @@ def decide(comparisons: dict, *, temp_max_c, temp_cap_c: float, apply_ok: bool,
                   "temp_max_c": temp_max_c, "temp_cap_c": temp_cap_c,
                   "apply_ok": apply_ok, "snapshot_identical": snapshot_identical,
                   "power_available": power_available})
+
+
+# ── 模型侧 (src/llm.rs) ──
+
+def parse_secrets(text: str) -> dict:
+    return _call({"op": "parse_secrets", "text": text})
+
+
+def build_prompt(whitelist_desc: str, history: list, n: int, goal_note: str = "") -> str:
+    return _call({"op": "build_prompt", "whitelist_desc": whitelist_desc,
+                  "history": history, "n": n, "goal_note": goal_note})
+
+
+def parse_candidates(text: str, n: int) -> list:
+    return _call({"op": "parse_candidates", "text": text, "n": n})
+
+
+def local_mutate(wl: dict, history: list, n: int, seed: int) -> list:
+    return _call({"op": "local_mutate", "wl": _wl_pairs(wl),
+                  "history": history, "n": n, "seed": seed})
+
+
+def chat(prompt: str, keys: dict, log=print, tmp_dir: str = "") -> tuple | None:
+    """按优先级依次试 provider。返回 (provider 名, 回包文本), 全挂返回 None。
+
+    密钥只用于 Authorization 头 —— 过桥也只过 keys 字典本身, 不进日志、不进 prompt。
+    二进制那边的日志行随结果一起回来, 在这里重放 (过桥回调不了)。
+    """
+    r = _call({"op": "llm_chat", "prompt": prompt, "keys": keys, "tmp_dir": tmp_dir})
+    for line in r.get("log") or []:
+        log(line)
+    if r.get("provider") is None or r.get("content") is None:
+        return None
+    return r["provider"], r["content"]
+
+
+def load_keys(paths: list) -> dict:
+    """第一个读得到的文件就用它。挑文件这一步也放在二进制里, 免得两边各有一套顺序。"""
+    return _call({"op": "load_keys", "paths": list(paths)})

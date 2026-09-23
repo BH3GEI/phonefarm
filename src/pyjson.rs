@@ -62,15 +62,57 @@ impl PyVal {
             _ => None,
         }
     }
-    /// Python `str(x)` 对这几种值的写法 —— f-string 里插值用的就是它。
-    /// 与 JSON 的差别只有两处: None 不是 `null`, True/False 首字母大写。
+    /// Python `str(x)` —— f-string 里插值用的就是它。
+    /// 顶层字符串不带引号; 其余都走 [`PyVal::py_repr`]。
     pub fn py_str(&self) -> String {
+        match self {
+            PyVal::Str(s) => s.clone(),
+            other => other.py_repr(),
+        }
+    }
+
+    /// Python `repr(x)`: `None` / `True` / `False`, 字符串单引号, 容器里套 repr。
+    /// `str(dict)` 与 `str(list)` 走的就是这一套, 与 JSON 的写法不一样。
+    pub fn py_repr(&self) -> String {
         match self {
             PyVal::Null => "None".to_string(),
             PyVal::Bool(true) => "True".to_string(),
             PyVal::Bool(false) => "False".to_string(),
-            PyVal::Str(s) => s.clone(),
-            other => dumps(other),
+            PyVal::Int(i) => i.to_string(),
+            PyVal::Float(f) => py_repr_f64(*f),
+            PyVal::Str(s) => {
+                // Python 优先用单引号; 串里有单引号且没有双引号时才换双引号
+                let (q, esc) = if s.contains('\'') && !s.contains('"') {
+                    ('"', false)
+                } else {
+                    ('\'', s.contains('\''))
+                };
+                let mut out = String::new();
+                out.push(q);
+                for c in s.chars() {
+                    match c {
+                        '\\' => out.push_str("\\\\"),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        '\'' if esc => out.push_str("\\'"),
+                        c => out.push(c),
+                    }
+                }
+                out.push(q);
+                out
+            }
+            PyVal::List(xs) => format!(
+                "[{}]",
+                xs.iter().map(|x| x.py_repr()).collect::<Vec<_>>().join(", ")
+            ),
+            PyVal::Obj(kvs) => format!(
+                "{{{}}}",
+                kvs.iter()
+                    .map(|(k, v)| format!("{}: {}", PyVal::Str(k.clone()).py_repr(), v.py_repr()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -474,6 +516,61 @@ pub fn dumps(v: &PyVal) -> String {
     let mut out = String::new();
     write_val(&mut out, v, 0);
     out
+}
+
+/// `json.dumps(v, ensure_ascii=False)` —— 不带 indent 时的紧凑写法,
+/// 分隔符是 `", "` 与 `": "` (这是 Python 不给 separators 时的默认值)。
+pub fn dumps_compact(v: &PyVal) -> String {
+    match v {
+        PyVal::List(xs) => format!(
+            "[{}]",
+            xs.iter().map(dumps_compact).collect::<Vec<_>>().join(", ")
+        ),
+        PyVal::Obj(kvs) => format!(
+            "{{{}}}",
+            kvs.iter()
+                .map(|(k, x)| {
+                    let mut key = String::new();
+                    write_str(&mut key, k);
+                    format!("{key}: {}", dumps_compact(x))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => {
+            let mut out = String::new();
+            write_val(&mut out, other, 0);
+            out
+        }
+    }
+}
+
+/// `json.dumps(v, sort_keys=True)` 的紧凑版 —— 只用来当去重的键, 所以 ASCII 转义
+/// 与否无所谓, 要紧的是**同一组参数出同一串**。
+pub fn dumps_sorted_key(v: &PyVal) -> String {
+    match v {
+        PyVal::Obj(kvs) => {
+            let mut sorted: Vec<&(String, PyVal)> = kvs.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            format!(
+                "{{{}}}",
+                sorted
+                    .iter()
+                    .map(|(k, x)| {
+                        let mut key = String::new();
+                        write_str(&mut key, k);
+                        format!("{key}: {}", dumps_sorted_key(x))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        PyVal::List(xs) => format!(
+            "[{}]",
+            xs.iter().map(dumps_sorted_key).collect::<Vec<_>>().join(", ")
+        ),
+        other => dumps_compact(other),
+    }
 }
 
 // ══════════════ Python 语义的统计小件 ══════════════
