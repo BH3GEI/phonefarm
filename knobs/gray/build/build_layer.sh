@@ -18,8 +18,25 @@ mkdir -p "$OUT"
 #   dlopen failed: library "libc++_shared.so" not found
 # (2026-09-23 refbench 实测过这个失败)。静态进去 → .so 自包含, 任意目标都能挂。
 # --exclude-libs ALL 把静态进来的 STL 符号藏起来, 不污染宿主的符号表。
+# copyprobe 的 1:1 拷贝算子编成 SPIR-V 并内嵌成 C 头 —— 层要自包含, 不能把 .spv
+# 当运行时文件发进去 (宿主应用的沙箱里读不到我们的路径)。
+GLSLC="$NDK/shader-tools/$HOST_TAG/glslc"
+[ -x "$GLSLC" ] || { echo "缺 glslc: $GLSLC" >&2; exit 1; }
+"$GLSLC" -O "$ROOT/layer/copyprobe_copy.comp" -o "$OUT/copyprobe_copy.spv"
+python3 - "$OUT/copyprobe_copy.spv" > "$OUT/copy_spv.h" <<'PYEOF'
+import sys
+d = open(sys.argv[1], "rb").read()
+print("static const unsigned char kCopySpv[] = {")
+for i in range(0, len(d), 16):
+    print("  " + ",".join(str(b) for b in d[i:i+16]) + ",")
+print("};")
+print(f"static const unsigned int kCopySpvLen = {len(d)};")
+PYEOF
+echo "shader: $OUT/copyprobe_copy.spv ($(wc -c < "$OUT/copyprobe_copy.spv" | tr -d ' ') B) -> copy_spv.h"
+
 "$CXX" -O2 -Wall -fPIC -std=c++17 -fno-exceptions -fno-rtti \
     -static-libstdc++ -Wl,--exclude-libs,ALL \
+    -I"$OUT" \
     -shared -o "$OUT/libVkLayer_refknobs.so" "$ROOT/layer/vk_layer_refknobs.cpp" \
     -llog
 cp "$ROOT/layer/VkLayer_refknobs.json" "$OUT/"
