@@ -2,7 +2,8 @@
 out/
 upstream_commit.txt
 
-# 标定出来的真实路线先不进仓库: 坐标依赖上游某个 commit 的场景,
-# 等首轮实跑验证过、确认稳定了再决定要不要固化。
+# route_a.json 是 make_route_a.py 从上游场景推导的产物, 必须进仓库 ——
+# 每台机器上的 sha256 要一致, 否则跨机器的轮之间没法比。手工临时路线才不进。
 routes/*.json
+!routes/route_a.json
 !routes/*.example.json

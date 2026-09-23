@@ -156,18 +156,37 @@ powershell.exe -ExecutionPolicy Bypass -File build_megacity.ps1 -ProjDir C:\thir
 
 第三方工程克隆到 `C:\thirdparty\`, **不进本仓库**。产物在 `out\megacity.apk`。
 
-### 2. 路线标定
+### 2. 路线
 
-`routes/` 里现在只有 `route_a.example.json`, 坐标是占位的 —— 故意不给一条能直接
-跑的假路线, 否则会悄悄测出一堆穿过虚空的数。标定办法:
+`routes/route_a.json` 是**从上游场景数据推导出来的**, 不是谁在编辑器里拖出来的一串数字。
+生成脚本 `routes/make_route_a.py` 读 `Assets/Scenes/Main/MegacityMetroLevelBounds.unity`,
+按下面三步算出航点:
 
-1. 在编辑器里打开 `Assets/Scenes/Main.unity`, 等 subscene 加载完;
-2. 把 Scene 视角摆到想要的机位, 用 GameObject > Align With View 记下 Transform;
-3. 取 8–16 个航点, 覆盖城市里密度差异明显的几段(空中开阔段 / 楼间峡谷段 / 广告牌密集段);
-4. 按 example 的格式写成 `routes/route_a.json`。
+1. 城市中心 C = 66 个边界 `Point` 的形心, 实测 `(-6.9, -3.7, -5.1)`
+2. 城市半径 R = C 到各 Point 的最大水平距离, 实测 `130.8`; 城市顶 `y = 110.7`
+3. 相机绕 C 走一段下降圆弧: 水平半径 `1.8R = 235.4`, 高度从 5 个出生点的平均高度
+   `425.2` 降到 `城市顶 + 40 = 150.7`, 扫 270°, 全程朝向 C
+
+**这条路线不可能穿进楼里**: 水平半径 235.4 > 城市半径 130.8, 且高度全程 > 城市顶 110.7 ——
+确定性不依赖"运气好没撞到东西"。同时整座城一直在视野里, 渲染负载是满的, 且随距离和
+角度连续变化, 不是一段死板的平移。
+
+重新生成(上游场景变了才需要):
+
+```bash
+python3 routes/make_route_a.py \
+  /path/to/megacity-metro/Assets/Scenes/Main/MegacityMetroLevelBounds.unity \
+  routes/route_a.json
+```
+
+脚本输出固定键序与缩进, 同一份输入每次生成**逐字节一致** —— 否则输出 json 里那个
+sha256 就没有意义了。上游场景结构变到解析不出 66 个 Point 或 5 个 SpawnPoint 时,
+脚本会直接报错退出, 不会猜着往下算。
 
 航点之间 Catmull-Rom 插值, 朝向 Slerp。**航点顺序和数量一旦定下就不要再改** ——
-改了 sha256 就变, 跨轮不可比。要新路线就起个新名字。
+改了 sha256 就变, 跨轮不可比。要新路线就起个新名字, 别覆盖 route_a。
+
+`route_a.example.json` 留着只作格式说明, 不参与实跑。
 
 ### 3. 采集(采集机)
 
@@ -193,7 +212,9 @@ unity/                 注入上游工程的胶水 (只新增, 不改上游既�
   UpstreamCommit.cs            Assets/Scripts/Refbench/  构建时被重写, 把上游 commit 钉进包
   MegacityRefbenchBuild.cs     Assets/Editor/            批处理出包 + 构建后自检
 routes/
-  route_a.example.json 路线样例(占位坐标, 需标定)
+  make_route_a.py      从上游场景推导航点(可复现, 逐字节确定)
+  route_a.json         推导出的实跑路线
+  route_a.example.json 格式样例, 不参与实跑
 setup_on_magicbook.ps1 构建机: 克隆上游 + 注入胶水 + 版本核对
 build_megacity.ps1     构建机: 零交互出 arm64/Vulkan/IL2CPP 的 apk
 run_megacity.sh        采集机: 跑一轮并收证据
@@ -204,7 +225,7 @@ run_megacity.sh        采集机: 跑一轮并收证据
 - [ ] 用户在 magicbook 登录 Unity 激活许可证 **(人工, 卡在这)**
 - [ ] 装 Unity 6000.1.0f1 + Android 模块
 - [ ] 让三个 .cs 过编译 —— 现在一行都没编译过
-- [ ] 标定 `route_a.json`
+- [x] ~~标定 `route_a.json`~~ 已改为从上游场景推导, 见「路线」一节
 - [ ] 出第一个 APK, 核对图形 API 真的落在 Vulkan
 - [ ] 实测 `render_thread_comm` 到底是不是 `UnityGfxDeviceW`, 固化进 contract
 - [ ] 3 轮基线, 报 frame_p95 离散度, 与 refbench 的 0.45% / 原神的 1.37% 对齐着看
