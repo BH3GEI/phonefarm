@@ -160,9 +160,23 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ./phonefarm keepalive                      # 对全部在线设备巡检一轮：唤醒 + 解锁 + 不息屏
 ./phonefarm keepalive --status             # 只读报告：连接/亮屏/不息屏是否生效
 ./phonefarm keepalive --watch              # 常驻守护（默认 300s 一轮，新上线设备自动纳入）
+./phonefarm fleet                          # 农场只读快照：每台手机一张卡片（人读的一屏）
+./phonefarm fleet --json                   # 同一份数据的 JSON，供上层面板消费
 ./phonefarm probe --serial <S> "只读命令"   # 只读调试通道
 ./phonefarm exec --serial <S> "命令" --yes  # 写操作通道，高危，必须显式 --yes
 ```
+
+`fleet` 一趟 shell 把每台手机的在线状态、型号与系统版本、root、电量与充放电、
+电池与 GPU 温度、风扇、亮屏、前台应用、保活策略、开机时长读齐，再附上农场共用的设备锁
+（谁持有、排队名单、最近的取锁与释放）。采不到的字段一律是 `null`，并在 `unknown` 里
+写明是哪一项、为什么——不拿 0 顶替。
+
+**别人占着手机时它会自动降档**：只 `cat` sysfs（温度、电量、风扇、uptime），不跑任何
+`dumpsys`。一次 `dumpsys window` 会在设备上拉起一个进程，而对面可能正在量 30 秒的帧时，
+一个 CPU 尖峰就够多出一帧 jank。降档时 `probe_depth` 记 `light`，拿不到的字段照常留空
+并写明原因。真要完整读，`--probe-while-locked` 强制——那就是明知会干扰对面。
+
+可选的截图（`--screenshot-dir`）默认关闭，开了也受设备锁与最小间隔（默认 300s）双重约束。
 
 `keepalive` 补的是**农场级**待命期：只要设备挂在农场里，就该醒着、解着锁、不息屏。
 任务级的生命周期（进任务常亮、退出锁屏保电池）由各上层通路自己管。规格见 `docs/SPEC_KEEPALIVE.md`。
