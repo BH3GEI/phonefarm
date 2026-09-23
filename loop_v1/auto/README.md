@@ -19,15 +19,21 @@ loop_v1 验证了闭环本身成立 (手工挑一个旋钮, 跑出 p95 −1.61% 
 | 谁 | 决定什么 | 不决定什么 |
 |---|---|---|
 | 白名单 (`src/sysparam.rs`) | 准改哪些参数、准改成哪些值 | 不决定改成什么 |
-| `llm.py` | 这一轮改成什么 | 不决定好不好 |
+| 模型交互 (`src/llm.rs`) | 这一轮改成什么 | 不决定好不好 |
 | 判定规则 (`src/sysparam.rs`) | 好不好 | 不决定改什么 |
 
 `autoloop.py` 只做编排与证据归档, **不含任何判定口径**。
 
-白名单与判定已经搬进 phonefarm 二进制 (`phonefarm loopstat` 的 `build_whitelist`
-/ `validate_candidate` / `plan_text` / `rule_doc` / `env_stats` / `decide`), Python
-侧经 `loop_v1/tools/pybridge.py` 转调 —— 口径只留一份。对应的单测也跟着搬成了
-Rust 测试: `cd src && cargo test sysparam`。
+白名单、判定、模型交互都已搬进 phonefarm 二进制 (`phonefarm loopstat` 的
+`build_whitelist` / `validate_candidate` / `plan_text` / `rule_doc` / `env_stats` /
+`decide` / `build_prompt` / `parse_candidates` / `local_mutate` / `llm_chat` 等),
+Python 侧经 `loop_v1/tools/pybridge.py` 转调 —— 口径只留一份。
+`autoloop.py` 现在只剩编排与证据归档。
+
+对应的单测也跟着搬成了 Rust 测试:
+`cd src && cargo test sysparam`(白名单/判定)、`cargo test llm`(模型侧)、
+`cargo test framecheck`(画面动没动)、`cargo test pyrandom`(局部变异的可复现性
+靠 CPython random 的逐位复刻)。
 
 ## 白名单怎么来的
 

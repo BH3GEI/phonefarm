@@ -663,14 +663,21 @@ pub fn whitelist_to_pyval(wl: &Whitelist) -> PyVal {
 // ══════════════ 判定规则 ══════════════
 
 /// n v n 精确置换检验能取到的最小双侧 p 值 = 2 / C(2n, n)。
+///
+/// pairs 大到 C(2n, n) 超出 double 时, Python 那边是 `2.0 / comb(...)` 抛
+/// OverflowError 把整局打掉 (约 pairs >= 515)。这里返回 None 并让调用方据此把
+/// reachable 判成假 —— 绝不能把它算成 0.0, 那会让"最小可达 p 值"看着好得离谱。
+/// 实际用的 pairs 是个位数, 这条只为别让一个荒唐的入参把进程卡死或骗过判据。
 fn min_reachable_p(pairs: i64) -> Option<f64> {
     if pairs < 2 {
         return None;
     }
-    // C(2n, n) 用乘除交替算, 不会溢出到需要大整数的量级 (pairs 实际 <= 10)
     let mut c: f64 = 1.0;
     for i in 1..=pairs {
         c = c * (pairs + i) as f64 / i as f64;
+        if !c.is_finite() {
+            return None;
+        }
     }
     Some(2.0 / c)
 }
@@ -698,6 +705,7 @@ pub fn rule_doc(temp_cap_c: &PyVal, pairs: &PyVal, power_available: bool, power_
         "metrics" => PyVal::List(metrics.iter().map(|(m, d)| pyobj!{ "id" => *m, "better" => *d }).collect()),
         "pairs_per_candidate" => pairs.clone(),
         "min_reachable_p" => minp,
+        // 算不出最小可达 p (对数太少, 或大到 C(2n,n) 溢出) 就是"够不着"
         "reachable" => minp.unwrap_or(1.0) < if k > 0 { ALPHA / k as f64 } else { 0.0 },
         "temp_cap_c" => temp_cap_c.clone(),
         "power_in_verdict" => power_available,
@@ -1505,6 +1513,11 @@ ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
         assert_eq!(r.get("reachable"), Some(&PyVal::Bool(true)));
         assert!((r.get("min_reachable_p").unwrap().as_f64().unwrap() - 2.0 / 252.0).abs() < 1e-12);
         assert_eq!(rule_doc(&PyVal::Float(46.0), &PyVal::Int(1), true, "").get("min_reachable_p"), Some(&PyVal::Null));
+        // 对数荒唐地大时 C(2n,n) 溢出 double: 报不出最小可达 p, 也不许判成"够得着"
+        // (Python 那边是 OverflowError 把整局打掉)
+        let r = rule_doc(&PyVal::Float(46.0), &PyVal::Int(100_000), true, "");
+        assert_eq!(r.get("min_reachable_p"), Some(&PyVal::Null));
+        assert_eq!(r.get("reachable"), Some(&PyVal::Bool(false)));
         // 整数入参原样回写, 不该被提成浮点
         let r = rule_doc(&PyVal::Int(46), &PyVal::Int(5), true, "");
         assert_eq!(r.get("temp_cap_c"), Some(&PyVal::Int(46)));

@@ -114,12 +114,6 @@ def rule_doc(temp_cap_c: float, pairs: int, power_available: bool,
                   "power_available": power_available, "power_note": power_note})
 
 
-def deny_keywords() -> tuple:
-    """温控保护关键词表。**不在这里写死** —— 抄一份就会有两份口径, 迟早只改一边。
-    真正的拦截在 src/sysparam.rs 里做, 这个函数只是把那张表取回来给调用方自检。"""
-    return tuple(_call({"op": "deny_keywords"}))
-
-
 def spin_verdict(frame_a: str, frame_b: str) -> dict:
     """两张裸帧 → 「视角是否在转」。传路径而不是字节: 一张 13MB, base64 过桥不划算。"""
     return _call({"op": "spin_verdict", "frame_a": frame_a, "frame_b": frame_b})
@@ -135,3 +129,38 @@ def decide(comparisons: dict, *, temp_max_c, temp_cap_c: float, apply_ok: bool,
                   "temp_max_c": temp_max_c, "temp_cap_c": temp_cap_c,
                   "apply_ok": apply_ok, "snapshot_identical": snapshot_identical,
                   "power_available": power_available})
+
+
+# ── 模型侧 (src/llm.rs) ──
+
+def build_prompt(whitelist_desc: str, history: list, n: int, goal_note: str = "") -> str:
+    return _call({"op": "build_prompt", "whitelist_desc": whitelist_desc,
+                  "history": history, "n": n, "goal_note": goal_note})
+
+
+def parse_candidates(text: str, n: int) -> list:
+    return _call({"op": "parse_candidates", "text": text, "n": n})
+
+
+def local_mutate(wl: dict, history: list, n: int, seed: int) -> list:
+    return _call({"op": "local_mutate", "wl": _wl_pairs(wl),
+                  "history": history, "n": n, "seed": seed})
+
+
+def chat(prompt: str, keys: dict, log=print, tmp_dir: str = "") -> tuple | None:
+    """按优先级依次试 provider。返回 (provider 名, 回包文本), 全挂返回 None。
+
+    密钥只用于 Authorization 头 —— 过桥也只过 keys 字典本身, 不进日志、不进 prompt。
+    二进制那边的日志行随结果一起回来, 在这里重放 (过桥回调不了)。
+    """
+    r = _call({"op": "llm_chat", "prompt": prompt, "keys": keys, "tmp_dir": tmp_dir})
+    for line in r.get("log") or []:
+        log(line)
+    if r.get("provider") is None or r.get("content") is None:
+        return None
+    return r["provider"], r["content"]
+
+
+def load_keys(paths: list) -> dict:
+    """第一个读得到的文件就用它。挑文件这一步也放在二进制里, 免得两边各有一套顺序。"""
+    return _call({"op": "load_keys", "paths": list(paths)})

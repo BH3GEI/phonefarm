@@ -7,7 +7,7 @@
 每一层的职责边界
 ----------------
 - 白名单 (src/sysparam.rs) 决定「准改什么」, 不决定改成什么
-- `llm.py`       决定「改成什么」, 不决定好不好
+- 模型交互 (src/llm.rs) 决定「改成什么」, 不决定好不好
 - 判定规则 (src/sysparam.rs) 决定「好不好」, 规则在看数据之前冻结
 - 本文件只做编排与证据归档, 不含任何判定口径
 
@@ -34,12 +34,12 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, TOOLS)
 sys.path.insert(0, HERE)
 
-# 统计、白名单、判定都已搬进 phonefarm 二进制, 经 pybridge 转调 ——
-# 不在 Python 侧留第二份实现。llm 还是本地模块。
+# 统计、白名单、判定、模型交互都已搬进 phonefarm 二进制, 经 pybridge 转调 ——
+# 不在 Python 侧留第二份实现。本文件只剩编排与证据归档。
 import pybridge as WL                                       # noqa: E402
 import pybridge as V                                        # noqa: E402
+import pybridge as LLM                                      # noqa: E402
 from pybridge import compare, describe, snapshot_diff       # noqa: E402
-import llm as LLM                                           # noqa: E402
 
 SERIAL = os.environ.get("SERIAL", "91253241019A")
 # 原神 7.1.0 之后手柄注入失效 (且失效是安静的: 脚本跑完、有帧时序, 但视角不转),

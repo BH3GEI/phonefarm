@@ -24,6 +24,7 @@
 //! 落在字节上, 所以这一层的算术全走 [`Num`], 不能一律当 f64。
 
 use crate::pyjson::{self, dumps, py_round, py_sum, PyVal};
+use crate::llm;
 use crate::sysparam;
 use crate::pyobj;
 use std::path::Path;
@@ -753,8 +754,48 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
             req.get("power_available").and_then(|v| v.as_bool()).unwrap_or(false),
             &s("power_note")),
         "env_stats" => sysparam::env_stats(&s("text")),
-        "deny_keywords" => PyVal::List(
-            sysparam::DENY_KEYWORDS.iter().map(|k| PyVal::Str(k.to_string())).collect()),
+        // ── 模型侧 (src/llm.rs) ──
+        "load_keys" => {
+            match llm::load_keys(&arr("paths").iter().map(|p| p.py_str()).collect::<Vec<_>>()) {
+                Ok(kv) => PyVal::Obj(kv.into_iter().map(|(k, v)| (k, PyVal::Str(v))).collect()),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            }
+        }
+        "build_prompt" => PyVal::Str(llm::build_prompt(
+            &s("whitelist_desc"),
+            match req.get("history") { Some(PyVal::List(h)) => h, _ => &[] },
+            req.get("n").and_then(|v| v.as_i64()).unwrap_or(0) as usize,
+            &s("goal_note"))),
+        "parse_candidates" => PyVal::List(
+            llm::parse_candidates(&s("text"), req.get("n").and_then(|v| v.as_i64()).unwrap_or(0) as usize)
+                .iter().map(|c| c.to_pyval()).collect()),
+        "local_mutate" => PyVal::List(
+            llm::local_mutate(
+                &wl_arg(&req),
+                match req.get("history") { Some(PyVal::List(h)) => h, _ => &[] },
+                req.get("n").and_then(|v| v.as_i64()).unwrap_or(0) as usize,
+                req.get("seed").and_then(|v| v.as_i64()).unwrap_or(0),
+            ).iter().map(|c| c.to_pyval()).collect()),
+        "llm_chat" => {
+            let keys: Vec<(String, String)> = match req.get("keys") {
+                Some(PyVal::Obj(kvs)) => kvs.iter().map(|(k, v)| (k.clone(), v.py_str())).collect(),
+                _ => Vec::new(),
+            };
+            let tmp = if s("tmp_dir").is_empty() {
+                std::env::temp_dir().to_string_lossy().to_string()
+            } else {
+                s("tmp_dir")
+            };
+            let (got, log) = llm::chat_with_log(&s("prompt"), &keys, &tmp);
+            pyobj! {
+                "provider" => got.as_ref().map(|(p, _)| p.clone()),
+                "content" => got.as_ref().map(|(_, c)| c.clone()),
+                "log" => log,
+            }
+        }
         // 画面动没动: 裸帧走文件路径, 不塞进 JSON (13MB 一张, base64 过桥不划算)
         // 读不到裸帧也按"没在转"回一个带 error 的结论, 而不是非零退出 ——
         // 上游 autoloop 靠这个 dict 落证据再退出 3, 抛异常会把那条路绕掉。
