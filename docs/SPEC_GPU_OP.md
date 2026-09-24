@@ -12,6 +12,10 @@
 > **统一入口**: v2 起 (contract 加了 kind 信封) 上层只打 `phonefarm eval`
 > (`src/eval.rs`) —— v1 扁平请求原样转交 gpu-op, v2 shader 降级成 v1 转交,
 > sysparam / gray 由 eval 直接实现。gpu-op 仍是 shader 通路的实现本体。
+> 真机验证状态 (2026-09-23): sysparam 的 probe_only 与候选路径已在原神上端到端
+> 跑通 (game_opt_loop optimize --budget 30m 走完 1 候选, 出统计判定);
+> gray 的机械链路已通 (施加/测量/还原/ABORT), 但命中计数与 knobs-layer 的
+> marker 口径未对齐, hits 恒 0 时按 require_hit 如实 ABORT。
 
 ## 0. 铁律
 
