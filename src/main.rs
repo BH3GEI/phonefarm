@@ -29,6 +29,9 @@ mod device;
 mod eval;
 mod fold;
 mod gamepad;
+mod grayab;
+mod graylayer;
+mod shotdiff;
 mod hypo;
 mod mtools;
 mod caps;
@@ -204,6 +207,10 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 闭环:  autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]
               [--no-llm] [--probe-only] [--baseline-runs N] [--power-in-verdict auto|on|off]
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
+灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop [pkg] | target <pkg> | status | off} [--keep-prop]
+       (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
+       gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
+       (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
        (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
 性能:  perf [--serial S] [--app 包名] [--rounds 10] [--source sysfs|smartperf] [--power-rail usb|battery] [--xpower-out 目录] [--json]
@@ -679,6 +686,18 @@ fn main() {
         Some("bench") => {
             // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
             std::process::exit(bench::run_bench(&args[1..]));
+        }
+        Some("shot-diff") => {
+            // copyprobe 验收 ②: 截帧逐像素比对 (控制对基线)
+            std::process::exit(shotdiff::run_shot_diff(&args[1..]));
+        }
+        Some("gray-ab") => {
+            // 灰档 A/B 采集编排 (两臂都挂层只切属性; 每臂重启原神)
+            std::process::exit(grayab::run_gray_ab(&args[1..]));
+        }
+        Some("gray-layer") => {
+            // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)
+            std::process::exit(graylayer::run_gray_layer(&args[1..]));
         }
         Some("autoloop") => {
             // 系统参数全自动闭环 (probe -> 基线 -> 冻结规则 -> 提名 -> ABBA -> 判定 -> 报告)
