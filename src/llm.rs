@@ -220,7 +220,7 @@ impl Candidate {
                 .map(|(k, v)| (k.clone(), PyVal::Str(v.clone()))).collect()),
         }
     }
-    fn params_pyval(&self) -> PyVal {
+    pub fn params_pyval(&self) -> PyVal {
         PyVal::Obj(
             self.params
                 .iter()

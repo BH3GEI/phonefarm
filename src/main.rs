@@ -3,6 +3,7 @@
 //!       phonefarm devices
 //! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
+mod autoloop;
 mod bench;
 mod ftrace;
 mod gpuop;
@@ -200,6 +201,9 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
        (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
         shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
+闭环:  autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]
+              [--no-llm] [--probe-only] [--baseline-runs N] [--power-in-verdict auto|on|off]
+       (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
        (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
 性能:  perf [--serial S] [--app 包名] [--rounds 10] [--source sysfs|smartperf] [--power-rail usb|battery] [--xpower-out 目录] [--json]
@@ -675,6 +679,10 @@ fn main() {
         Some("bench") => {
             // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
             std::process::exit(bench::run_bench(&args[1..]));
+        }
+        Some("autoloop") => {
+            // 系统参数全自动闭环 (probe -> 基线 -> 冻结规则 -> 提名 -> ABBA -> 判定 -> 报告)
+            std::process::exit(autoloop::run_autoloop(&args[1..]));
         }
         Some("eval") => {
             // game_opt_loop 评测请求的唯一入口 (v2 信封 shader/sysparam/gray; v1 扁平兼容)
