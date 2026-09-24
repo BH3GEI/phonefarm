@@ -443,7 +443,7 @@ fn run_with_timeout(cmd: &mut Command, timeout: u64) -> String {
 
 /// 找到 phonefarm 仓库根 (含 loop_v1/tools 的目录)。
 /// 顺序: PF_REPO_ROOT > 二进制所在目录向上找 (装在仓库根的 ./phonefarm 一击即中)
-/// > cwd 向上找 > 编译期路径 (本机开发布局兜底)。eval 常被 game_opt_loop 以
+/// 然后 cwd 向上找, 最后编译期路径 (本机开发布局兜底)。eval 常被 game_opt_loop 以
 /// 相对路径 ``../phonefarm/phonefarm`` 调起, cwd 在别人家, 所以二进制位置最可靠。
 fn repo_root() -> PathBuf {
     if let Ok(r) = std::env::var("PF_REPO_ROOT") {
