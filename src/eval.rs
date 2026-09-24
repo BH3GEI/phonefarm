@@ -1176,9 +1176,6 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
-    // 命中证据: 层自报的改写绑定 (knobs_layer_out.json)
-    let hits = layer_hits(serial, pkg, evidence);
-
     // 测量与 sysparam 同一套 ABBA (负载必须触控版)
     let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(1).max(1) as u32;
     let seconds = req["workload"]["seconds"].as_i64().unwrap_or(30).max(1) as u64;
@@ -1206,7 +1203,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                 break;
             }
             if arm == "knob" {
-                let out = layer("loadop", "");
+                let out = layer("loadop", pkg);
                 if out.contains("#adb_exit=") && !out.ends_with("#adb_exit=0") {
                     abort_reason = Some("候选臂挂层失败".into());
                     break;
@@ -1214,8 +1211,14 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
             }
             let res = run_one(serial, &format!("gray_{arm}{i}"), &evidence.join(format!("{arm}{i}")), seconds, &workload_path, pkg);
             match res {
-                Ok(m) => match arm {
-                    "knob" => knob_runs.push(m),
+                Ok(mut m) => match arm {
+                    "knob" => {
+                        // 命中 marker 要在**这一臂跑完后立刻**采: 下一次 mount_layer
+                        // 会把三个落点全删了重写, 拖到循环外读到的就是初始化的空表
+                        let hits_now = layer_hits(serial, pkg, evidence);
+                        m["layer_hits"] = json!(hits_now);
+                        knob_runs.push(m);
+                    }
                     _ => ctrl_runs.push(m),
                 },
                 Err(e) => {
@@ -1234,7 +1237,12 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let restore_log = layer("off", pkg);
     std::fs::write(evidence.join("restore.log"), &restore_log).ok();
 
-    let hits = hits.unwrap_or(0);
+    // 各 knob 臂采到的命中取最大 (require_hit 判的是"改写到底有没有真生效过一次")
+    let hits = knob_runs
+        .iter()
+        .filter_map(|r| r["layer_hits"].as_u64())
+        .max()
+        .unwrap_or(0);
     report["conditions_observed"] = json!({
         "hits": hits,
         "apply_ok": hits > 0,
@@ -1261,7 +1269,12 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
 }
 
-/// 层自报的改写命中数: 从 knobs_layer_out.json (三个候选落点) 拉 effective 数组长度。
+/// 层自报的改写命中数 (契约 verdict 口径: "改写被绑定的次数")。
+///
+/// markers 在 knobs/gray/layer 的三个候选落点; su() 输出尾部带 #adb_exit=N 要剥掉。
+/// 命中的口径: **sum(effective[].begins)** —— 改写了但一次都没被绑定的 pass 不算命中
+/// (层自报 unavailable_reason = "rewritten pass never bound")。readonly 探针变体
+/// 没有改写, 退回 render_pass_begins (层确实看到了帧)。多个落点取最大。
 fn layer_hits(serial: &str, pkg: &str, evidence: &Path) -> Option<u64> {
     if pkg.is_empty() {
         return None;
@@ -1271,21 +1284,36 @@ fn layer_hits(serial: &str, pkg: &str, evidence: &Path) -> Option<u64> {
         format!("/data/data/{pkg}/knobs_layer_out.json"),
         format!("{DEV_TMP}/knobs_layer_out.{pkg}.json"),
     ];
+    let mut best: Option<u64> = None;
     for (i, path) in candidates.iter().enumerate() {
         let out = su(serial, &format!("cat {path} 2>/dev/null"), 30);
-        if out.contains("\"effective\"") {
-            std::fs::write(evidence.join(format!("knobs_layer_out.{i}.json")), &out).ok();
-            // su() 恒在尾部追 #adb_exit=N, 不剥掉 JSON 永远解析不出来
-            let body = match out.rfind("#adb_exit=") {
-                Some(i) => &out[..i],
-                None => &out[..],
-            };
-            if let Ok(v) = serde_json::from_str::<Value>(body.trim()) {
-                return v["effective"].as_array().map(|a| a.len() as u64);
-            }
+        if !out.contains("\"effective\"") {
+            continue;
         }
+        std::fs::write(evidence.join(format!("knobs_layer_out.{i}.json")), &out).ok();
+        // su() 恒在尾部追 #adb_exit=N, 不剥掉 JSON 永远解析不出来
+        let body = match out.rfind("#adb_exit=") {
+            Some(i) => &out[..i],
+            None => &out[..],
+        };
+        let Ok(v) = serde_json::from_str::<Value>(body.trim()) else {
+            continue;
+        };
+        let begins: u64 = v["effective"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.get("begins").and_then(|b| b.as_u64()))
+                    .sum()
+            })
+            .unwrap_or(0);
+        let fallback = v["readonly_stats"]["render_pass_begins"]
+            .as_u64()
+            .unwrap_or(0);
+        let hits = if begins > 0 { begins } else { fallback };
+        best = Some(best.unwrap_or(0).max(hits));
     }
-    None
+    best
 }
 
 #[cfg(test)]
