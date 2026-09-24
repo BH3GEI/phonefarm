@@ -37,7 +37,7 @@
 报告都已经收进 Rust，剩下 `autoloop.py`（编排与设备驱动）、载体构建/路线工具、
 设备端 shell 与 `knobs/` 那批还没收。上层的 `game_opt_loop` 那边，`optimize` 总入口、agent skill 与
 可视化前端都已经落地，还差的只是系统参数与画面流程改写两层的真机评测——`eval --request`
-入口已经落地并真机验证（③ 系统参数端到端已出报告，② 灰档机械链路已通、命中计数与 knobs-layer 的 marker 口径待对齐）。写目标形态时要标明状态。
+入口已经落地并真机验证（③ 系统参数端到端已出报告，② 灰档机械链路已通、命中口径已对齐——真机实测命中 27 处 / begins 9195）。写目标形态时要标明状态。
 
 ## 能力族与常用命令
 
@@ -110,7 +110,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ```bash
 ./phonefarm eval --request <eval_request.json> --serial S --json      # 评测唯一入口: v1 转交 gpu-op; v2 按 kind 路由 shader/sysparam/gray
                                                                      # sysparam 真机已验证 (probe + 1 候选端到端, optimize 可直连);
-                                                                     # gray 命中计数与 knobs-layer 的 marker 口径待对齐 (hits 读数恒 0 时按 require_hit ABORT)
+                                                                     # gray 命中口径已对齐 (hits = effective[].begins 之和, 真机实测 9195); 注意游戏必须先进入渲染态, 否则 require_hit 如实 ABORT
 ./phonefarm gpu-op --request <eval_request.json> --serial S --json   # shader 通路的实现本体 (等冷+锁频+A/B/A/B+Welch t 检验)
 ./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
 ```

@@ -14,8 +14,8 @@
 > sysparam / gray 由 eval 直接实现。gpu-op 仍是 shader 通路的实现本体。
 > 真机验证状态 (2026-09-23): sysparam 的 probe_only 与候选路径已在原神上端到端
 > 跑通 (game_opt_loop optimize --budget 30m 走完 1 候选, 出统计判定);
-> gray 的机械链路已通 (施加/测量/还原/ABORT), 但命中计数与 knobs-layer 的
-> marker 口径未对齐, hits 恒 0 时按 require_hit 如实 ABORT。
+> gray 已端到端验证: 命中口径 = 层自报 effective[].begins 之和 (原神实测 9195);
+> 游戏未进入渲染态时层看不到帧, require_hit 如实 ABORT (先预热游戏再发请求)。
 
 ## 0. 铁律
 
