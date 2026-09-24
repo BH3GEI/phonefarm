@@ -51,7 +51,7 @@
 
 ### 3.1 现状（2026-09-23 真机实测，NX809J）
 
-编排与判定在 `phonefarm/loop_v1/auto/`（`autoloop.py`），本节只记「能改什么」的实测结论。
+编排在 `phonefarm autoloop`（`src/autoloop.rs`），判定口径在 `src/sysparam.rs` / `src/llm.rs`，本节只记「能改什么」的实测结论。
 证据：`phonefarm/loop_v1/runs_sysparam/`。
 
 **测试条件**：红魔 NX809J，Android 16 / Adreno 840v2，已 root；原神 7.1.0 大世界探索态；
