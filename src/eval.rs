@@ -375,12 +375,12 @@ fn validate_v2(req: &Value) -> Result<(), String> {
 /// su()/adb() 的输出以 `#adb_exit=N` 结尾, N=0 才算成功。
 /// (autoloop 的 `#adb_exit=` 令牌写法依赖"成功时不追加", 这边的 helper 恒追加,
 /// 判断必须区分退出码 —— 实测把成功 apply 判成了 FAIL, 白白施加又还原一次。)
-fn adb_ok(out: &str) -> bool {
+pub(crate) fn adb_ok(out: &str) -> bool {
     out.ends_with("#adb_exit=0")
 }
 
 /// 调用方视角的路径解析: 绝对/相对 cwd 先试, 再试相对仓库根。
-fn resolve_path(p: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_path(p: &str) -> Option<PathBuf> {
     let as_given = Path::new(p);
     if as_given.exists() {
         return Some(as_given.to_path_buf());
@@ -392,17 +392,17 @@ fn resolve_path(p: &str) -> Option<PathBuf> {
     None
 }
 
-fn adb_path() -> String {
+pub(crate) fn adb_path() -> String {
     device::locate_adb().unwrap_or_else(|| "adb".into())
 }
 
-fn adb(serial: &str, args: &[&str], timeout: u64) -> String {
+pub(crate) fn adb(serial: &str, args: &[&str], timeout: u64) -> String {
     let mut cmd = Command::new(adb_path());
     cmd.arg("-s").arg(serial).args(args);
     run_with_timeout(&mut cmd, timeout)
 }
 
-fn su(serial: &str, cmd_str: &str, timeout: u64) -> String {
+pub(crate) fn su(serial: &str, cmd_str: &str, timeout: u64) -> String {
     adb(serial, &["shell", &format!("su -c '{cmd_str}'")], timeout)
 }
 
@@ -445,7 +445,7 @@ fn run_with_timeout(cmd: &mut Command, timeout: u64) -> String {
 /// 顺序: PF_REPO_ROOT > 二进制所在目录向上找 (装在仓库根的 ./phonefarm 一击即中)
 /// 然后 cwd 向上找, 最后编译期路径 (本机开发布局兜底)。eval 常被 game_opt_loop 以
 /// 相对路径 ``../phonefarm/phonefarm`` 调起, cwd 在别人家, 所以二进制位置最可靠。
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     if let Ok(r) = std::env::var("PF_REPO_ROOT") {
         if !r.is_empty() {
             return PathBuf::from(r);
@@ -474,8 +474,8 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
-const DEV_TMP: &str = "/data/local/tmp";
-const DEV_SCRIPTS: [&str; 6] = [
+pub(crate) const DEV_TMP: &str = "/data/local/tmp";
+pub(crate) const DEV_SCRIPTS: [&str; 6] = [
     "device_snapshot.sh",
     "ftrace_capture.sh",
     "knob_sysparam.sh",
@@ -484,7 +484,7 @@ const DEV_SCRIPTS: [&str; 6] = [
     "charge_suspend.sh",
 ];
 
-fn push_tools(serial: &str) -> Result<(), String> {
+pub(crate) fn push_tools(serial: &str) -> Result<(), String> {
     let root = repo_root();
     for f in DEV_SCRIPTS {
         let p = root.join("loop_v1").join(match f {
@@ -502,7 +502,7 @@ fn push_tools(serial: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn snapshot(serial: &str) -> String {
+pub(crate) fn snapshot(serial: &str) -> String {
     su(serial, &format!("sh {DEV_TMP}/device_snapshot.sh"), 60)
 }
 
@@ -636,7 +636,7 @@ fn probe_whitelist(serial: &str, evidence: &Path) -> Result<sysparam::Whitelist,
 
 /// 跑一轮负载 + ftrace 采集 + 功耗温度采样 (与 autoloop.run_one 同一编排:
 /// sample_env 与 run_once 并行, 覆盖整段负载)。
-fn run_one(
+pub(crate) fn run_one(
     serial: &str,
     label: &str,
     outdir: &Path,

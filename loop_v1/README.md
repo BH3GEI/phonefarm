@@ -22,8 +22,8 @@
 
 > **进行中**: 本目录的判定口径（解析→归因→统计→判据收口→白名单→判定→画面判据→
 > 模型交互/本地变异器）、两通路对照、Vulkan-Samples 三道闸与两臂判读面、refbench/vks 报告
-> 都已经收进 Rust 内核, 剩下 `autoloop.py`（编排与设备驱动）、载体构建/路线工具、
-> 设备端 shell 与 `knobs/` 那批还没收。下面写的跑法在收完之前仍然有效。
+> 都已经收进 Rust 内核（含 `autoloop` 编排），剩下载体构建/路线工具、
+> 设备端 shell（按约定保持设备端）与 `knobs/` 那批还没收。下面写的跑法在收完之前仍然有效。
 
 ## 本轮的设备与负载
 
@@ -177,7 +177,7 @@ bash tools/replay_test.sh runs
 逐组「等冷 → A/B 交替 → 置换检验 → 保留/淘汰 → 还原」→ 结果喂回模型挑下一组。
 
 ```bash
-python3 auto/autoloop.py --out runs_sysparam/<标签> --generations 2 --children 3 --pairs 5
+phonefarm autoloop --out runs_sysparam/<标签> --generations 2 --children 3 --pairs 5
 cd auto && python3 -m unittest      # 纯函数单测
 ```
 

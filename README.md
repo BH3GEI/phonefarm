@@ -332,8 +332,9 @@ bash tools/replay_test.sh runs      # 离线回放自检
 
 > **进行中**：`loop_v1/` 的判定口径（解析→归因→统计→判据收口→白名单→判定→画面判据→
 > 模型交互/本地变异器）、两通路对照、Vulkan-Samples 三道闸与两臂判读面、refbench/vks 报告
-> 都已经收进 Rust 内核；剩下 `autoloop.py`（编排与设备驱动）、载体构建/路线工具、
-> 设备端 shell 与 `knobs/` 那批还没收。上面的跑法在收完之前仍然有效。
+> 都已经收进 Rust 内核；`autoloop` 编排也已收进（`phonefarm autoloop`）。剩下
+> 载体构建/路线工具、设备端 shell（按约定保持设备端）与 `knobs/` 那批还没收。
+> 上面的跑法在收完之前仍然有效。
 
 ## 假设—实验—证据闭环
 

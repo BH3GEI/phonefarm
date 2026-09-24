@@ -22,13 +22,13 @@ loop_v1 验证了闭环本身成立 (手工挑一个旋钮, 跑出 p95 −1.61% 
 | 模型交互 (`src/llm.rs`) | 这一轮改成什么 | 不决定好不好 |
 | 判定规则 (`src/sysparam.rs`) | 好不好 | 不决定改什么 |
 
-`autoloop.py` 只做编排与证据归档, **不含任何判定口径**。
+编排本体已搬进 `src/autoloop.rs` (`phonefarm autoloop`), **不含任何判定口径**; 判定口径全在 `src/sysparam.rs`。
 
 白名单、判定、模型交互都已搬进 phonefarm 二进制 (`phonefarm loopstat` 的
 `build_whitelist` / `validate_candidate` / `plan_text` / `rule_doc` / `env_stats` /
 `decide` / `build_prompt` / `parse_candidates` / `local_mutate` / `llm_chat` 等),
 Python 侧经 `loop_v1/tools/pybridge.py` 转调 —— 口径只留一份。
-`autoloop.py` 现在只剩编排与证据归档。
+autoloop 已全量在 Rust 侧。
 
 对应的单测也跟着搬成了 Rust 测试:
 `cd src && cargo test sysparam`(白名单/判定)、`cargo test llm`(模型侧)、
@@ -176,25 +176,22 @@ apply 前全量校验, 有任何一项越界就**整份拒绝, 一个字节都�
 
 ```bash
 # 只探白名单, 不跑实验 (几分钟, 会短暂改写几个节点并立刻还原)
-python3 loop_v1/auto/autoloop.py --out loop_v1/runs_sysparam/probe --probe-only
+phonefarm autoloop --out loop_v1/runs_sysparam/probe --probe-only
 
 # 完整闭环: 2 代 × 3 组, 每组 5 对 A/B (测量期间自动停充, 测完恢复)
-python3 loop_v1/auto/autoloop.py --out loop_v1/runs_sysparam/<标签> \
+phonefarm autoloop --out loop_v1/runs_sysparam/<标签> \
     --generations 2 --children 3 --pairs 5
 
 # 功耗强制不进判定 (例如电量低停不了充时)
-python3 loop_v1/auto/autoloop.py --out ... --power-in-verdict off
+phonefarm autoloop --out ... --power-in-verdict off
 
 # 不用大模型, 只用本地变异器 (离线也能跑通闭环)
-python3 loop_v1/auto/autoloop.py --out ... --no-llm
+phonefarm autoloop --out ... --no-llm
 
-# 纯函数单测 (白名单/判定那部分在 Rust 侧)
-cd loop_v1/auto && python3 -m unittest
-cd src && cargo test sysparam
+# 纯函数单测 (编排与口径都在 Rust 侧)
+cd src && cargo test autoloop sysparam llm
 ```
 
-autoloop 需要 phonefarm 二进制在手 (统计、白名单、判定都在里面):
-先 `cd src && cargo build --release`, 或设 `PF_BIN=<路径>`。
 
 前置与 loop_v1 相同: 设备已 root, 原神已在大世界探索态, 并且在光照稳定窗口内跑
 (昼夜循环是本负载最大的不可重复性来源, 见 loop_v1/README.md)。
