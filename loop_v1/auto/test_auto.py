@@ -13,9 +13,8 @@ auto/ 下的判定口径已经全部搬进 Rust, 对应的用例也跟着搬过�
 | 模型回包解析、密钥解析、局部变异、序数启发 | `cargo test llm` |
 | CPython random 的逐位复刻 (局部变异靠它才可复现) | `cargo test pyrandom` |
 
-这里剩下的是 `autoloop.py` 自己的东西: 快照差异分类 (留痕判据)、温度上限常量,
-以及 `knob_sysparam.sh` 的回滚波及面 (那是设备端 shell, 直接抠出来在真 sh 里跑)。
-白名单只是拿来造一份测试用的表, 经 pybridge 转调二进制。
+autoloop 的编排已搬进 `src/autoloop.rs` (`cargo test autoloop`), test_auto 只剩
+`knob_sysparam.sh` 的回滚波及面 (设备端 shell, 直接抠出来在真 sh 里跑)。
 
 涉及设备的部分不在这里测 —— 那部分由真机跑出来的 report.json 作证。
 """

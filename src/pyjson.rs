@@ -588,6 +588,48 @@ pub fn dumps_compact(v: &PyVal) -> String {
     }
 }
 
+/// `json.dumps(v, sort_keys=True, indent=n)` —— 递归排序键后的缩进输出。
+/// autoloop 的 whitelist.json / metrics.json 用的就是这一种 (sort_keys=True)。
+pub fn dumps_indent_sorted(v: &PyVal, n: usize) -> String {
+    let pad = |d: usize| " ".repeat(d * n);
+    fn go(v: &PyVal, d: usize, n: usize, pad: &dyn Fn(usize) -> String) -> String {
+        match v {
+            PyVal::Obj(kvs) => {
+                let mut sorted: Vec<&(String, PyVal)> = kvs.iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                if sorted.is_empty() {
+                    return "{}".into();
+                }
+                let body: Vec<String> = sorted
+                    .iter()
+                    .map(|(k, x)| {
+                        let mut key = String::new();
+                        write_str(&mut key, k);
+                        format!("{}{}: {}", pad(d + 1), key, go(x, d + 1, n, pad))
+                    })
+                    .collect();
+                format!("{{\n{}\n{}}}", body.join(",\n"), pad(d))
+            }
+            PyVal::List(xs) => {
+                if xs.is_empty() {
+                    return "[]".into();
+                }
+                let body: Vec<String> = xs
+                    .iter()
+                    .map(|x| format!("{}{}", pad(d + 1), go(x, d + 1, n, pad)))
+                    .collect();
+                format!("[\n{}\n{}]", body.join(",\n"), pad(d))
+            }
+            other => {
+                let mut out = String::new();
+                write_val(&mut out, other, 0, n);
+                out
+            }
+        }
+    }
+    go(v, 0, n, &pad)
+}
+
 /// `json.dumps(v, sort_keys=True)` 的紧凑版 —— 只用来当去重的键, 所以 ASCII 转义
 /// 与否无所谓, 要紧的是**同一组参数出同一串**。
 pub fn dumps_sorted_key(v: &PyVal) -> String {
@@ -763,6 +805,20 @@ mod tests {
 
     /// serde_json 的浮点解析不是正确舍入的, 这三个数经它一趟就差 1 ulp。
     /// 标准库与 CPython 一致 —— 这正是本模块自带读入器的理由之一。
+    /// sort_keys + indent=1: autoloop 的 whitelist.json / metrics.json 的形状。
+    #[test]
+    fn dumps_indent_sorted_matches_python() {
+        let v = pyobj! {
+            "wl" => pyobj!{ "b" => vec![PyVal::Int(1), PyVal::Int(2)],
+                            "a" => pyobj!{ "z" => PyVal::Null, "y" => 1.5 } },
+        };
+        // python3: json.dumps({'wl':{'b':[1,2],'a':{'z':None,'y':1.5}}}, sort_keys=True, indent=1)
+        assert_eq!(
+            dumps_indent_sorted(&v, 1),
+            "{\n \"wl\": {\n  \"a\": {\n   \"y\": 1.5,\n   \"z\": null\n  },\n  \"b\": [\n   1,\n   2\n  ]\n }\n}"
+        );
+    }
+
     #[test]
     fn loads_is_correctly_rounded_where_serde_json_is_not() {
         for s in [
