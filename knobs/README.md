@@ -15,7 +15,7 @@
 鸿蒙商用机在没有 root 的情况下两档都动不了，只能用 HiSmartPerf 测。
 
 本目录原先是独立仓库 `HGamey/knobs`，2026-09-23 并入 `phonefarm/knobs/`（保留提交历史），
-原仓库已归档。引用路径请写 `phonefarm/knobs/…`。shell 脚本正在往 Rust 内核里收，尚未完成。
+原仓库已归档。引用路径请写 `phonefarm/knobs/…`。灰档主机侧编排（`phonefarm gray-layer` / `gray-ab` / `shot-diff`）已收进 Rust 内核，剩超分那批实验脚本（genshin_quality.sh / genshin_upop_ab.sh）、`test_loadop.sh`（refbench 三臂对照配方）与设备端 shell 还没收。
 
 - 为什么、边界、判据、灰档可行性三问 → [`DESIGN.md`](DESIGN.md)
 - 旋钮接口（`apply`/`restore`/`status` + 自报）→ [`contract/knob.md`](contract/knob.md)
