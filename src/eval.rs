@@ -1130,34 +1130,15 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         return Err("kind=gray 需要真机: 请加 --serial".into());
     };
     let require_hit = req["payload"]["require_hit"].as_bool().unwrap_or(true);
+    let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen").to_string();
 
-    // knobs/gray 的调用层: 只调 enable_layer.sh, 不改它的文件
-    let script = repo_root().join("knobs/gray/enable_layer.sh");
-    if !script.exists() {
-        return Err(format!("找不到 knobs/gray/enable_layer.sh: {}", script.display()));
-    }
-    let pkg = req["package"].as_str().unwrap_or("");
-    let layer = |mode: &str, arg: &str| -> String {
-        let mut cmd = Command::new("bash");
-        cmd.arg(&script).arg(mode);
-        if !arg.is_empty() {
-            cmd.arg(arg);
-        }
-        // enable_layer.sh 从 REFBENCH_SERIAL 读设备 (缺省写死 91253241019A) ——
-        // 不传的话 --serial 指哪台都白搭, 层会挂到别人的机器上
-        cmd.env("REFBENCH_SERIAL", serial)
-            .env("PF_BIN", std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm")))
-            .output()
-            .map(|o| {
-                format!(
-                    "{}{}#adb_exit={}",
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr),
-                    o.status.code().unwrap_or(-1)
-                )
-            })
-            .unwrap_or_else(|e| format!("#adb_exit=spawn_err {e}"))
-    };
+    // knobs/gray 的调用层: src/graylayer.rs (enable_layer.sh 的 Rust 移植)。
+    // A/B 方法论与 knobs/gray/genshin_loadop_ab.sh 一致: **两臂都挂层**, 唯一差别
+    // 是 debug.knobs.loadop 属性 —— ctrl = 层+改写关, knob = 层+改写开。
+    // 要判的是"这条改写"值不值, 不是"挂层这件事"值不值; 两臂都挂层才能把层本身的
+    // 开销消掉, 差值才干净地对应改写这一个改动。
+    let gl = crate::graylayer::GrayLayer::new(serial);
+    let layer = |mode: &str| -> Result<(), String> { gl.mount_mode(mode, &pkg, false) };
 
     // 改写先落盘再动设备 (证据纪律), 然后施加
     let _ = std::fs::create_dir_all(evidence);
@@ -1166,13 +1147,11 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         serde_json::to_string_pretty(&req["payload"]["rewrites"]).unwrap_or_default(),
     )
     .map_err(|e| e.to_string())?;
-    let out = layer("loadop", pkg);
-    std::fs::write(evidence.join("enable_layer.log"), &out).map_err(|e| e.to_string())?;
-    if out.contains("#adb_exit=") && !out.ends_with("#adb_exit=0") {
+    if let Err(e) = layer("loadop") {
         // 施加失败也可能已经动了全局属性: 尽力摘干净再回报, 绝不把设备留在挂层态
-        let off = layer("off", pkg);
-        std::fs::write(evidence.join("restore.log"), &off).ok();
-        report["verdict"]["reason"] = json!(format!("enable_layer loadop 施加失败: {out}"));
+        let off_log = gl.off();
+        std::fs::write(evidence.join("restore.log"), off_log).ok();
+        report["verdict"]["reason"] = json!(format!("loadop 施加失败: {e}"));
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
@@ -1193,29 +1172,30 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let mut knob_runs: Vec<Value> = Vec::new();
     let mut ctrl_runs: Vec<Value> = Vec::new();
     let mut abort_reason: Option<String> = None;
-    // gray 的候选臂是「层已挂上」的那几轮; 对照臂把层摘掉
     for i in 1..=rounds {
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
-            // 候选臂: 层在 (loadop 已施加); 对照臂: 层摘掉
-            let off = if arm == "ctrl" { layer("off", pkg) } else { String::new() };
-            if arm == "ctrl" && (off.contains("#adb_exit=") && !off.ends_with("#adb_exit=0")) {
-                abort_reason = Some("对照臂摘层失败".into());
+            // 两臂都挂层只切属性; 层是 CreateInstance 时读的, 切属性必须重启目标
+            // —— force-stop 是两臂切换的一部分, 不是异常处理
+            let _ = gl.off();
+            let mount = if arm == "knob" { "loadop" } else { "probe" };
+            if let Err(e) = layer(mount) {
+                abort_reason = Some(format!("{arm} 臂挂层失败: {e}"));
                 break;
             }
-            if arm == "knob" {
-                let out = layer("loadop", pkg);
-                if out.contains("#adb_exit=") && !out.ends_with("#adb_exit=0") {
-                    abort_reason = Some("候选臂挂层失败".into());
-                    break;
-                }
-            }
-            let res = run_one(serial, &format!("gray_{arm}{i}"), &evidence.join(format!("{arm}{i}")), seconds, &workload_path, pkg);
+            let res = run_one(
+                serial,
+                &format!("gray_{arm}{i}"),
+                &evidence.join(format!("{arm}{i}")),
+                seconds,
+                &workload_path,
+                &pkg,
+            );
             match res {
                 Ok(mut m) => match arm {
                     "knob" => {
                         // 命中 marker 要在**这一臂跑完后立刻**采: 下一次 mount_layer
                         // 会把三个落点全删了重写, 拖到循环外读到的就是初始化的空表
-                        let hits_now = layer_hits(serial, pkg, evidence);
+                        let hits_now = layer_hits(serial, &pkg, evidence);
                         m["layer_hits"] = json!(hits_now);
                         knob_runs.push(m);
                     }
@@ -1234,7 +1214,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         }
     }
     // 还原
-    let restore_log = layer("off", pkg);
+    let restore_log = gl.off();
     std::fs::write(evidence.join("restore.log"), &restore_log).ok();
 
     // 各 knob 臂采到的命中取最大 (require_hit 判的是"改写到底有没有真生效过一次")
@@ -1243,10 +1223,11 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         .filter_map(|r| r["layer_hits"].as_u64())
         .max()
         .unwrap_or(0);
+    let restore_clean = gl_off_clean(&restore_log);
     report["conditions_observed"] = json!({
         "hits": hits,
         "apply_ok": hits > 0,
-        "restored": !restore_log.contains("#adb_exit=1"),
+        "restored": restore_clean,
     });
 
     if let Some(reason) = abort_reason {
@@ -1267,6 +1248,11 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     report["metrics"] = m;
     report["evidence_dir"] = json!(evidence.display().to_string());
     Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
+}
+
+/// 摘层回包是否干净 (无 KNOB/RESTORE 失败标记, 无非零退出)。
+fn gl_off_clean(restore_log: &str) -> bool {
+    !restore_log.contains("#adb_exit=1") && !restore_log.contains("警告")
 }
 
 /// 层自报的改写命中数 (契约 verdict 口径: "改写被绑定的次数")。
