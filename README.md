@@ -330,11 +330,13 @@ bash tools/replay_test.sh runs      # 离线回放自检
 细节、测帧手段的选型排除过程、以及「一帧不等于一次 GPU 提交」这个坑，见 [`loop_v1/README.md`](loop_v1/README.md)。
 候选改动从 [`docs/MOBILE_GPU_OPT_ROUTES.md`](docs/MOBILE_GPU_OPT_ROUTES.md) 里挑。
 
-> **进行中**：`loop_v1/` 的判定口径（解析→归因→统计→判据收口→白名单→判定→画面判据→
-> 模型交互/本地变异器）、两通路对照、Vulkan-Samples 三道闸与两臂判读面、refbench/vks 报告
-> 都已经收进 Rust 内核；`autoloop` 编排也已收进（`phonefarm autoloop`）。剩下
-> 载体构建/路线工具、设备端 shell（按约定保持设备端）与 `knobs/` 那批还没收。
-> 上面的跑法在收完之前仍然有效。
+> **现状**：`loop_v1/` 的判定口径与编排**全部收进 Rust 内核**——解析→归因→统计→
+> 判据收口→白名单→判定→画面判据→模型交互/本地变异器→两通路对照→
+> Vulkan-Samples 三道闸与两臂判读面→refbench/vks 报告→`autoloop` 编排→
+> 灰档层挂/摘（`gray-layer`）/灰档 A/B（`gray-ab`）/截帧比对（`shot-diff`）→
+> 统一评测入口（`eval`）。剩余：设备端 shell（按约定保持设备端，风险是
+> 翻译损失；trap 回滚纪律不动）、载体构建工具（gradle/ndk 包装层）、
+> `knobs/` 超分那一批实验脚本。上面的跑法仍然有效。
 
 ## 假设—实验—证据闭环
 
