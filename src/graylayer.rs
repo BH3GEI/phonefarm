@@ -72,6 +72,9 @@ pub struct GrayLayer {
     so: Option<String>,
     /// storeop 改写规则与是否现场切换; None = 显式关掉 (每一档都写一遍, 不留上一轮的残值)
     storeop: Option<(String, bool)>,
+    /// 启动目标时附加的 intent extras (例: Megacity 的 `--es scene city_static ...`)。
+    /// 层只在挂层后**第一次**启动时载入 (随后全局属性就清了), 所以 extras 必须在这次启动里带上。
+    launch_extras: Option<String>,
 }
 
 impl GrayLayer {
@@ -80,11 +83,17 @@ impl GrayLayer {
             serial: serial.to_string(),
             so: None,
             storeop: None,
+            launch_extras: None,
         }
     }
 
     pub fn with_so(mut self, so: Option<String>) -> Self {
         self.so = so;
+        self
+    }
+
+    pub fn with_launch_extras(mut self, extras: Option<String>) -> Self {
+        self.launch_extras = extras.filter(|e| !e.trim().is_empty());
         self
     }
 
@@ -223,7 +232,11 @@ impl GrayLayer {
             .map(|l| l.trim().to_string())
             .unwrap_or_default();
         if act.contains('/') {
-            let _ = adb(&self.serial, &["shell", &format!("am start -n {act}")], 30);
+            let cmd = match &self.launch_extras {
+                Some(x) => format!("am start -n {act} {x}"),
+                None => format!("am start -n {act}"),
+            };
+            let _ = adb(&self.serial, &["shell", &cmd], 30);
         } else {
             eprintln!("  解析不到 {pkg} 的启动 activity, 请手动启动它");
         }
