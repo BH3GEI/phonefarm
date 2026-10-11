@@ -206,6 +206,9 @@ static std::atomic<uint64_t> g_rp_created{0};   // 第几个被创建的 render 
 struct Effective {
     uint64_t pass;        // render pass 创建序号
     uint32_t attachment;  // 该 pass 里的第几个 attachment
+    const char* field;    // "loadOp" / "storeOp" / "stencilStoreOp"
+    const char* from;
+    const char* to;
     // 这个被改写的 pass 被 vkCmdBeginRenderPass **录制**了多少次。
     // 注意是录制不是提交: 应用若预录命令缓冲反复提交, 这个数会偏小(录一次提交五千次);
     // 录了却没提交则会偏大。refbench 每帧重录, 所以那里的数字精确。
@@ -213,6 +216,85 @@ struct Effective {
     uint64_t begins;
 };
 static std::vector<Effective> g_effective;
+
+// ── 改写: StoreOp STORE → DONT_CARE（阶段 2「去掉多余写回」开关）──
+// 分块 GPU 上，一个 pass 结束时把附件从 tile 写回显存要花带宽；之后没人再读的附件（典型是深度/模板）
+// 写回纯属浪费。属性 debug.knobs.storeop 取值：
+//   "ds"                  所有被 subpass 当深度/模板用的附件，storeOp 与 stencilStoreOp 的 STORE → DONT_CARE
+//   "<sig>:<i>[,<sig>:<i>…]"  只改特征码以 <sig> 开头（≥ 8 位十六进制，取自 frame-audit 的 "sig"）的 pass 的第 i 个附件
+//   空 / "0"               关
+// 送显的附件（finalLayout = PRESENT_SRC）永远不改。是否真被用上照旧看 effective[].begins。
+// 风险：之后若有 pass 采样了被改的附件，画面会出错 —— 所以阶段 2 必须配画面比对，不能只看帧时。
+static int g_storeop_mode = 0;                                  // 0 关 / 1 ds / 2 指定
+static std::vector<std::pair<std::string, uint32_t>> g_storeop_pick;   // (sig 前缀, 附件下标)
+static std::map<VkRenderPass, uint64_t> g_rp_sig;               // 改写前原始描述的特征码
+
+// pass 特征码：附件个数、subpass 个数、每个附件的格式/采样/load/store/stencil load/store/初末布局 的 FNV-1a。
+// 用原始（改写前）描述算，所以和不挂改写时 frame-audit 报出来的 sig 一致，可以直接拿来写规则。
+template <typename Att>
+static uint64_t rp_sig(uint32_t n_att, const Att* a, uint32_t n_sub) {
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&](uint32_t v) { for (int k = 0; k < 4; k++) { h ^= (v >> (8 * k)) & 0xFF; h *= 1099511628211ULL; } };
+    mix(n_att); mix(n_sub);
+    for (uint32_t i = 0; i < n_att; i++) {
+        mix(a[i].format); mix(a[i].samples); mix(a[i].loadOp); mix(a[i].storeOp);
+        mix(a[i].stencilLoadOp); mix(a[i].stencilStoreOp); mix(a[i].initialLayout); mix(a[i].finalLayout);
+    }
+    return h;
+}
+static std::string sig_hex(uint64_t s) { char b[17]; snprintf(b, sizeof b, "%016llx", (unsigned long long)s); return b; }
+
+static void parse_storeop_prop(const char* v) {
+    g_storeop_mode = 0; g_storeop_pick.clear();
+    if (!v || !v[0] || !strcmp(v, "0")) return;
+    if (!strcmp(v, "ds")) { g_storeop_mode = 1; return; }
+    std::string all(v);
+    size_t pos = 0;
+    while (pos <= all.size()) {
+        size_t comma = all.find(',', pos);
+        std::string tok = all.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        size_t colon = tok.find(':');
+        if (colon != std::string::npos && colon >= 8)
+            g_storeop_pick.push_back({tok.substr(0, colon), (uint32_t)strtoul(tok.c_str() + colon + 1, nullptr, 10)});
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    if (!g_storeop_pick.empty()) g_storeop_mode = 2;
+}
+
+// 一个 pass 里哪些附件被当深度/模板用（两种 CreateInfo 的 subpass 结构字段名相同）
+template <typename CI>
+static std::vector<bool> ds_roles(const CI* ci) {
+    std::vector<bool> ds(ci->attachmentCount, false);
+    for (uint32_t s = 0; s < ci->subpassCount; s++) {
+        auto* r = ci->pSubpasses[s].pDepthStencilAttachment;
+        if (r && r->attachment != VK_ATTACHMENT_UNUSED && r->attachment < ds.size()) ds[r->attachment] = true;
+    }
+    return ds;
+}
+
+// 对拷出来的附件数组施加 storeOp 改写，命中的记进 hits
+template <typename CI, typename Att>
+static void apply_storeop(const CI* ci, Att* atts, uint64_t idx, uint64_t sig, std::vector<Effective>& hits) {
+    if (!g_storeop_mode) return;
+    std::vector<bool> ds = ds_roles(ci);
+    std::string sh = sig_hex(sig);
+    for (uint32_t i = 0; i < ci->attachmentCount; i++) {
+        if (atts[i].finalLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) continue;
+        bool pick = false;
+        if (g_storeop_mode == 1) pick = ds[i];
+        else for (auto& p : g_storeop_pick) if (p.second == i && sh.compare(0, p.first.size(), p.first) == 0) pick = true;
+        if (!pick) continue;
+        if (atts[i].storeOp == VK_ATTACHMENT_STORE_OP_STORE) {
+            atts[i].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            hits.push_back({idx, i, "storeOp", "STORE", "DONT_CARE", 0});
+        }
+        if (atts[i].stencilStoreOp == VK_ATTACHMENT_STORE_OP_STORE) {
+            atts[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            hits.push_back({idx, i, "stencilStoreOp", "STORE", "DONT_CARE", 0});
+        }
+    }
+}
 // 被改写过的 VkRenderPass 句柄 -> 它对应的**全部** g_effective 下标。
 // 一个 pass 可能有多个 attachment 被改, 只记最后一个会让其余条目永远 begins=0,
 // harness 会把它们误读成"没生效"。
@@ -343,6 +425,7 @@ struct FaEv {
     uint8_t kind = 0;
     bool dyn = false, sec = false, indirect = false;
     uint64_t rp = 0; uint32_t w = 0, h = 0;
+    uint64_t sig = 0;                         // pass 特征码（改写前描述），storeop 指定规则用
     std::vector<FaAtt> att;
     uint32_t draws = 0, draws_idx = 0, draws_ind = 0, clear_att = 0, clear_att_full = 0, subpasses = 1, binds = 0;
     uint64_t prims = 0;                       // 直接 draw 的 (顶点或索引数 × 实例数) 之和
@@ -530,12 +613,12 @@ static void write_marker() {
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         for (const auto& e : g_effective) {
-            char one[160];
+            char one[200];
             snprintf(one, sizeof one,
-                     "%s{\"pass\":%llu,\"attachment\":%u,\"field\":\"loadOp\","
-                     "\"from\":\"LOAD\",\"to\":\"DONT_CARE\",\"begins\":%llu}",
+                     "%s{\"pass\":%llu,\"attachment\":%u,\"field\":\"%s\","
+                     "\"from\":\"%s\",\"to\":\"%s\",\"begins\":%llu}",
                      eff.empty() ? "" : ",", (unsigned long long)e.pass, e.attachment,
-                     (unsigned long long)e.begins);
+                     e.field, e.from, e.to, (unsigned long long)e.begins);
             eff += one;
             if (e.begins) used = true;
         }
@@ -543,11 +626,16 @@ static void write_marker() {
     // harness 据此判断该轮算不算数。两种"没生效"要分开报:
     //   没找到 LOAD 可改 vs 改了但应用根本没用那个 pass 对象
     const char* unavail = "null";
-    if (g_rewrite_loadop && eff.empty())      unavail = "\"no LOAD attachment seen\"";
-    else if (g_rewrite_loadop && !used)       unavail = "\"rewritten pass never bound\"";
+    const bool rewriting = g_rewrite_loadop || g_storeop_mode;
+    if (rewriting && eff.empty())
+        unavail = g_storeop_mode ? "\"no matching STORE attachment seen\"" : "\"no LOAD attachment seen\"";
+    else if (rewriting && !used)              unavail = "\"rewritten pass never bound\"";
+    std::string knob = g_rewrite_loadop ? "gray_loadop_dontcare" : "";
+    if (g_storeop_mode) knob += std::string(knob.empty() ? "" : "+") + (g_storeop_mode == 1 ? "gray_storeop_ds" : "gray_storeop_pick");
+    if (knob.empty()) knob = "gray_readonly_probe";
 
     std::string json =
-        std::string("{\"knob\":\"") + (g_rewrite_loadop ? "gray_loadop_dontcare" : "gray_readonly_probe")
+        std::string("{\"knob\":\"") + knob
         + "\",\"layer_loaded\":true,\"pkg\":\"" + pkg
         + "\",\"effective\":[" + eff + "],\"failed\":[],\"unavailable_reason\":" + unavail
         + ",\"readonly_stats\":{\"frames\":" + std::to_string(g_frames.load())
@@ -670,6 +758,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_EnumerateDeviceExtensionProperties(
 static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     const VkInstanceCreateInfo* ci, const VkAllocationCallbacks* a, VkInstance* pInst) {
     g_rewrite_loadop = read_bool_prop("debug.knobs.loadop");
+    {
+        char v[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.knobs.storeop", v);
+        parse_storeop_prop(v);
+        if (g_storeop_mode) RK_LOG("storeop 改写开: mode=%d 指定 %zu 条", g_storeop_mode, g_storeop_pick.size());
+    }
     g_dump_passes = read_bool_prop("debug.knobs.passdump");
     g_copyprobe = read_bool_prop("debug.knobs.copyprobe");
     g_upop = read_bool_prop("debug.knobs.upop");
@@ -884,7 +978,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     uint64_t idx = g_rp_created++;
-    if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0) {
+    const uint64_t sig = ci ? rp_sig(ci->attachmentCount, ci->pAttachments, ci->subpassCount) : 0;
+    struct SigRec { VkRenderPass* o; uint64_t s; ~SigRec() { if (o && *o) { std::lock_guard<std::mutex> lk(g_mtx); g_rp_sig[*o] = s; } } } sig_rec{out, sig};
+    if ((!g_rewrite_loadop && !g_storeop_mode) || !ci || ci->attachmentCount == 0) {
         VkResult r0 = d.CreateRenderPass(dev, ci, a, out);
         if (r0 == VK_SUCCESS) fa_record_rp(*out, ci);
         if (r0 == VK_SUCCESS && g_dump_passes && ci) record_rp(*out, idx, ci->attachmentCount,
@@ -897,11 +993,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
     // pAttachments 是 const, 必须整份拷出来再改
     std::vector<VkAttachmentDescription> atts(ci->pAttachments, ci->pAttachments + ci->attachmentCount);
     std::vector<Effective> hits;
-    for (uint32_t i = 0; i < atts.size(); i++) {
+    for (uint32_t i = 0; g_rewrite_loadop && i < atts.size(); i++) {
         if (atts[i].loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) continue;
         atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        hits.push_back({idx, i, 0});
+        hits.push_back({idx, i, "loadOp", "LOAD", "DONT_CARE", 0});
     }
+    apply_storeop(ci, atts.data(), idx, sig, hits);
     if (hits.empty()) {
         VkResult r0 = d.CreateRenderPass(dev, ci, a, out);
         if (r0 == VK_SUCCESS) fa_record_rp(*out, ci);
@@ -933,7 +1030,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
         [&](uint32_t i){ return (uint32_t)atts[i].format; },
         [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
         [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
-    RK_LOG("改写 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
+    RK_LOG("改写 pass=%llu: %zu 处 load/store -> DONT_CARE",
            (unsigned long long)idx, hits.size());
     return r;
 }
@@ -946,7 +1043,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     uint64_t idx = g_rp_created++;
-    if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0) {
+    const uint64_t sig = ci ? rp_sig(ci->attachmentCount, ci->pAttachments, ci->subpassCount) : 0;
+    struct SigRec { VkRenderPass* o; uint64_t s; ~SigRec() { if (o && *o) { std::lock_guard<std::mutex> lk(g_mtx); g_rp_sig[*o] = s; } } } sig_rec{out, sig};
+    if ((!g_rewrite_loadop && !g_storeop_mode) || !ci || ci->attachmentCount == 0) {
         VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
         if (r0 == VK_SUCCESS) fa_record_rp2(*out, ci);
         if (r0 == VK_SUCCESS && g_dump_passes && ci) record_rp(*out, idx, ci->attachmentCount,
@@ -958,11 +1057,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
 
     std::vector<VkAttachmentDescription2> atts(ci->pAttachments, ci->pAttachments + ci->attachmentCount);
     std::vector<Effective> hits;
-    for (uint32_t i = 0; i < atts.size(); i++) {
+    for (uint32_t i = 0; g_rewrite_loadop && i < atts.size(); i++) {
         if (atts[i].loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) continue;
         atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        hits.push_back({idx, i, 0});
+        hits.push_back({idx, i, "loadOp", "LOAD", "DONT_CARE", 0});
     }
+    apply_storeop(ci, atts.data(), idx, sig, hits);
     if (hits.empty()) {
         VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
         if (r0 == VK_SUCCESS) fa_record_rp2(*out, ci);
@@ -994,7 +1094,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
         [&](uint32_t i){ return (uint32_t)atts[i].format; },
         [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
         [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
-    RK_LOG("改写2 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
+    RK_LOG("改写2 pass=%llu: %zu 处 load/store -> DONT_CARE",
            (unsigned long long)idx, hits.size());
     return r;
 }
@@ -1647,6 +1747,7 @@ static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi, const
     if (g_frameaudit) {
         FaEv e; e.kind = FA_PASS; e.w = w; e.h = h;
         auto si = g_rp_seq.find(bi->renderPass); if (si != g_rp_seq.end()) e.rp = si->second;
+        { auto gi = g_rp_sig.find(bi->renderPass); if (gi != g_rp_sig.end()) e.sig = gi->second; }
         std::vector<VkImageView> views;
         if (ai != g_fb_att.end()) views = ai->second;
         for (auto* p = reinterpret_cast<const VkBaseInStructure*>(bi->pNext); p; p = p->pNext)
@@ -1821,6 +1922,7 @@ static std::string fa_ev_json(const FaEv& e) {
                  (unsigned long long)e.rp, e.w, e.h, e.dyn ? "true" : "false", e.subpasses, e.draws, e.draws_idx,
                  e.draws_ind, (unsigned long long)e.prims, e.clear_att, e.clear_att_full, e.binds, e.ts0, e.ts1);
         o += b;
+        if (e.sig) o += ",\"sig\":\"" + sig_hex(e.sig) + "\"";
         o += ",\"att\":[";
         for (size_t i = 0; i < e.att.size(); i++) {
             const FaAtt& a = e.att[i];
