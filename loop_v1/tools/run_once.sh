@@ -38,7 +38,7 @@ fi
 adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDIR/snap_at_run.txt" 2>&1
 
 # 1) 负载后台起跑
-( cd "$ROOT" && ./phonefarm script --task "loop_v1_$LABEL" --serial "$SERIAL" \
+( cd "$ROOT" && "$PF" script --task "loop_v1_$LABEL" --serial "$SERIAL" \
     --app "$PKG" --no-screen "$WL" ) > "$OUTDIR/workload.log" 2>&1 &
 WL_PID=$!
 

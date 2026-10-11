@@ -12,7 +12,7 @@
 //! → 逐代: 提名 (大模型, 挂了退回本地变异器) → 校验 → ABBA 真机评测 → 判定
 //! → 收尾: 强制还原 + 等冷 + 全局快照按「我们写过什么」判留痕。
 
-use crate::eval::{adb, adb_ok, push_tools, run_one, snapshot, su, DEV_TMP};
+use crate::eval::{adb, adb_ok, push_tools, run_one, run_soc_temp_max, run_view, snapshot, su, DEV_TMP, RUN_ENV_KEYS};
 use crate::framecheck;
 use crate::llm::{self, Candidate};
 use crate::loopreport::snapshot_diff;
@@ -331,24 +331,7 @@ fn charge_restore(serial: &str) -> String {
 
 // ══════════════ 单轮指标 (与 autoloop.run_one 同形: summary 与 env 展平合并) ══════════════
 
-const ENV_KEYS: [&str; 16] = [
-    "power_w_mean",
-    "power_w_median",
-    "power_now_w_mean",
-    "power_now_plausible",
-    "power_vi_w_mean",
-    "usb_input_w_mean",
-    "current_now_ua_mean",
-    "voltage_now_uv_mean",
-    "power_rail",
-    "battery_status",
-    "battery_charging",
-    "power_usable_reason",
-    "soc_temp_max_c",
-    "soc_temp_mean_c",
-    "n_samples",
-    "fan_state",
-];
+
 
 fn metrics_json(m: &Value, outdir: &Path) -> PyVal {
     let mut obj: Vec<(String, PyVal)> = Vec::new();
@@ -360,7 +343,7 @@ fn metrics_json(m: &Value, outdir: &Path) -> PyVal {
         }
     }
     if let Some(e) = m["env"].as_object() {
-        for k in ENV_KEYS {
+        for k in RUN_ENV_KEYS {
             if let Some(v) = e.get(k) {
                 obj.push((k.to_string(), to_pyval(v)));
             }
@@ -397,26 +380,8 @@ mod serde_pyval {
 
 fn runs_as_pyval(runs: &[(String, Value)]) -> Vec<Run> {
     runs.iter()
-        .map(|(l, m)| (l.clone(), metrics_json_view(m)))
+        .map(|(l, m)| (l.clone(), run_view(m)))
         .collect()
-}
-
-/// 判定/统计用的视图: summary 字段展平 (与 Python 侧 dict 合并后同形)。
-fn metrics_json_view(m: &Value) -> PyVal {
-    let mut obj: Vec<(String, PyVal)> = Vec::new();
-    if let Some(s) = m["summary"].as_object() {
-        for (k, v) in s {
-            obj.push((k.clone(), to_pyval(v)));
-        }
-    }
-    if let Some(e) = m["env"].as_object() {
-        for k in ENV_KEYS {
-            if let Some(v) = e.get(k) {
-                obj.push((k.to_string(), to_pyval(v)));
-            }
-        }
-    }
-    PyVal::Obj(obj)
 }
 
 // ══════════════ 候选评测 (ABBA) ══════════════
@@ -519,7 +484,7 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
                 }
             }
             let t = match &res {
-                Ok(m) => m["summary"]["soc_temp_max_c"].as_f64(),
+                Ok(m) => run_soc_temp_max(m),
                 Err(_) => None,
             };
             match res {
@@ -576,7 +541,7 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
     let all_runs: Vec<&(String, Value)> = knob_runs.iter().chain(ctrl_runs.iter()).collect();
     let temps: Vec<f64> = all_runs
         .iter()
-        .filter_map(|(_, m)| m["summary"]["soc_temp_max_c"].as_f64())
+        .filter_map(|(_, m)| run_soc_temp_max(m))
         .collect();
     let temp_max = temps.iter().cloned().reduce(f64::max);
 
@@ -629,7 +594,7 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
     };
     let env_pick = |m: &Value| -> PyVal {
         let mut kvs: Vec<(String, PyVal)> = Vec::new();
-        for k in ENV_KEYS {
+        for k in RUN_ENV_KEYS {
             if let Some(v) = m["env"].get(k) {
                 kvs.push((k.to_string(), to_pyval(v)));
             }
@@ -875,7 +840,7 @@ pub fn run_autoloop(args: &[String]) -> i32 {
                     m["summary"]["frame_p95"],
                     m["summary"]["fps_mean"],
                     m["env"]["power_w_mean"],
-                    m["summary"]["soc_temp_max_c"]
+                    m["env"]["soc_temp_max_c"]
                 ));
                 base_runs.push((label, m));
             }
@@ -885,7 +850,7 @@ pub fn run_autoloop(args: &[String]) -> i32 {
     let base_charge_restore_log = charge_restore(&serial);
     let base_temps: Vec<f64> = base_runs
         .iter()
-        .filter_map(|(_, m)| m["summary"]["soc_temp_max_c"].as_f64())
+        .filter_map(|(_, m)| run_soc_temp_max(m))
         .collect();
     let temp_cap = if base_temps.is_empty() {
         TEMP_CAP_FLOOR_C

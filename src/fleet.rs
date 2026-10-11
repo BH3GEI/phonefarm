@@ -1001,7 +1001,8 @@ pub fn run_fleet(args: &[String]) -> i32 {
     let mut json = false;
     let mut screenshot_dir: Option<PathBuf> = None;
     let mut every_s = DEFAULT_SCREENSHOT_EVERY_S;
-    let mut own_label: Option<String> = None;
+    // 自己这一侧持锁时 (外层 devlock run / optimize 会传 DEVLOCK_LABEL) 不该把自己当成"别人"降级
+    let mut own_label: Option<String> = std::env::var("DEVLOCK_LABEL").ok().filter(|s| !s.is_empty());
 
     let mut it = args.iter();
     while let Some(a) = it.next() {

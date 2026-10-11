@@ -128,7 +128,7 @@ if [ "$WORKLOAD" = refbench ]; then
   WL_PID=""
 else
   [ -f "$WL" ] || { echo "找不到负载脚本 $WL" >&2; exit 2; }
-  ( cd "$ROOT" && ./phonefarm script --task "xcheck_$LABEL" --serial "$SERIAL" \
+  ( cd "$ROOT" && "$PF" script --task "xcheck_$LABEL" --serial "$SERIAL" \
       --app "$PKG" --no-screen "$WL" ) > "$OUTDIR/workload.log" 2>&1 &
   WL_PID=$!
 fi
