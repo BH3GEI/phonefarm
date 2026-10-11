@@ -364,6 +364,28 @@ bash tools/replay_test.sh runs      # 离线回放自检
 > 翻译损失；trap 回滚纪律不动）、载体构建工具（gradle/ndk 包装层）、
 > `knobs/` 超分那一批实验脚本。上面的跑法仍然有效。
 
+## 新游戏接入（`onboard`）
+
+给一个没见过的包名，自己把游戏带进一个可重复的测试场景，产出一份游戏档案（`profile.json`，
+契约见 game_opt_loop 的 `contracts/game_profile.schema.json`），`game_opt_loop optimize --game <包名>` 读它。
+
+```bash
+phonefarm onboard --package <包名> --lock-label <名字> [--out 目录] [--rounds 5] [--seconds 30]
+phonefarm onboard --package <包名> --enter-only     # 只把游戏带进游戏场景: 退出码 0 在游戏里 / 3 需要人 / 1 失败
+# 手机在节点上时: pf-node --exe <本机构建> phonefarm onboard --package <包名> --ocr ./ocr --out @out/ob
+```
+
+流程：冷启动 → 截图 + OCR（`ocr.swift`）认画面 → 只点白名单（关公告、点击进入、拒权限、同意协议、
+游客）→ 进游戏探针（静置 / 拖过去 / 拖回来三帧：视角跟手指转、拖回来明显回到原样才算在游戏里）→
+生成只转视角的触控负载（右拖左拖成对，净转角为零）→ 从 ftrace 数出渲染线程 → 停充跑 N 轮 →
+frame_p95 变异系数 ≤ 3% 且每轮帧数够、温度没超才判 PASS。
+
+纪律：碰到更新确认、登录表单、实名、验证码、付费画面一律停下，原因写进档案 `needs_human`，不假装成功；
+带 设置 / 退出 / 账号 / 商店 / 下载 / 多人 等字样的控件一律不点；大模型（`--vlm-calls` 封顶，缺省 4）
+只在 OCR 和探针都认不出时才问，给出的点击同样要过白名单。评测请求带 `workload.enter = "onboard"` 时，
+`eval` 的 gray 每臂重启游戏后用同一套状态机走回游戏场景，走不回去整次作废；`workload.render_comm`
+指定解析帧时用的渲染线程（非 Unity 游戏必需）。
+
 ## 假设—实验—证据闭环
 
 局内发生重复失败或 done 复核未达时，系统让模型给出 2~4 个**竞争解释**和一份能区分它们的检验；
