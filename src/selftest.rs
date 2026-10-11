@@ -917,6 +917,7 @@ fn fan_state_path(serial: &str) -> PathBuf {
     hwcond::lock_state_path("selftest-fan", &Some(serial.to_string()))
 }
 
+const KGSL: &str = "/sys/class/kgsl/kgsl-3d0";
 const FAN_EN: &str = "/sys/kernel/fan/fan_enable";
 const FAN_LV: &str = "/sys/kernel/fan/fan_speed_level";
 const CHARGE_STATE: &str = "/data/local/tmp/loop_v1_charge.state";
@@ -959,6 +960,14 @@ impl Session {
         }
         push_tools(&c.serial)?;
         sh(&c.serial, "input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard", 15);
+        // 前台若留着别的应用 (实测: 原神留在前台 60 fps 持续提交), 等冷期间它一直在发热、
+        // refbench 退出后它又回到前台。回桌面让它进后台暂停渲染; 不杀进程、不动它的任何设置
+        let top = sh(&c.serial, "dumpsys activity activities | grep -m1 topResumedActivity", 15);
+        let top = strip_exit(&top).trim().to_string();
+        if !top.is_empty() && !top.contains(rb::PACKAGE) && !top.to_lowercase().contains("launcher") {
+            sh(&c.serial, "input keyevent KEYCODE_HOME", 15);
+            log(&format!("前台原是 {top} —— 回桌面 (不杀进程)"));
+        }
         let mut s = Session {
             serial: c.serial.clone(),
             dev,
@@ -986,6 +995,17 @@ impl Session {
             log(&format!("发现上次遗留的停充态, 先恢复充电: {}", strip_exit(&out).trim().lines().last().unwrap_or("")));
         }
         log(&format!("开场设备状态: {}", device_state(&c.serial)));
+        // 不锁频时的测量条件是「GPU 频率上限为缺省 0 档」。别的通路被打断会把 max_pwrlevel
+        // 留在中间档 (10-11 实测见过 17 / 12 / 3), 不归位的话整组都在降频下量。
+        if !c.lock_freq {
+            let mp = su(&c.serial, &format!("cat {KGSL}/max_pwrlevel"), 15);
+            let mp = strip_exit(&mp).trim().to_string();
+            if adb_ok(&su(&c.serial, "true", 10)) && !mp.is_empty() && mp != "0" {
+                su(&c.serial, &format!("echo 0 > {KGSL}/max_pwrlevel"), 15);
+                let now = su(&c.serial, &format!("cat {KGSL}/max_pwrlevel"), 15);
+                log(&format!("GPU max_pwrlevel 遗留为 {mp}, 归位到 0 (回读 {})", strip_exit(&now).trim()));
+            }
+        }
 
         if c.fan_on {
             let en = su(&c.serial, &format!("cat {FAN_EN}"), 15);
