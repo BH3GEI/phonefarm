@@ -215,7 +215,7 @@ pub fn frame_evidence(summary: &Value) -> Value {
         "display_verified":false})
 }
 
-fn runs_checks(checks: &mut Vec<Check>, runs: &[Value], label: &str, policy: &Policy) {
+pub(crate) fn runs_checks(checks: &mut Vec<Check>, runs: &[Value], label: &str, policy: &Policy) {
     for (i, run) in runs.iter().enumerate() {
         let prefix = format!("{label}.{}", i + 1);
         for m in &policy.required_metrics {
