@@ -350,6 +350,11 @@ fn load_arm(case_dir: &Path, label: &str) -> Option<ArmRec> {
     Some((label.to_string(), json!({ "summary": summary, "env": env, "arm": arm })))
 }
 
+/// 判定视图: summary 展平再并上 env 的功耗/温度 (eval / autoloop 同一个 run_view)。
+fn runs_view(rs: &[ArmRec]) -> Vec<loopstat::Run> {
+    rs.iter().map(|(l, m)| (l.clone(), crate::eval::run_view(m))).collect()
+}
+
 const JUDGE_METRICS: [&str; 3] = ["frame_p95", "fps_mean", "power_w_mean"];
 
 /// 前 `n` 轮的两臂 (ctrl = A 对照, knob = B 考题臂)。缺任何一臂返回 Err(缺的标签)。
@@ -400,7 +405,7 @@ pub fn judge_arms(
             &scaled
         }
     };
-    let (ap, bp) = (autoloop::runs_as_pyval(a), autoloop::runs_as_pyval(b));
+    let (ap, bp) = ((runs_view(a), runs_view(b)));
     let comparisons = PyVal::Obj(
         JUDGE_METRICS
             .iter()
@@ -698,7 +703,7 @@ pub fn report(root: &Path, ns: &[usize]) -> Value {
         let p = completed_pairs(dir);
         if let Ok((a, b)) = arms_prefix(dir, p) {
             let all: Vec<ArmRec> = a.into_iter().chain(b).collect();
-            let runs = autoloop::runs_as_pyval(&all);
+            let runs = runs_view(&all);
             let d = loopstat::describe(&runs, &dir.file_name().unwrap_or_default().to_string_lossy());
             let pick = |m: &str| {
                 let x = d.get("metrics").and_then(|ms| ms.get(m)).map(pv).unwrap_or(Value::Null);
