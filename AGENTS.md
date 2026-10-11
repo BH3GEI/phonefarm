@@ -13,7 +13,8 @@
 整套东西是一个 harness。用户只提一种任务——「把某个游戏在某台手机上优化一下」，
 内部自动决定用哪几层。本仓库是底座那一层，四件事：
 
-- 设备：adb / hdc 两族的连接、保活、确定性脚本回放。
+- 设备：adb / hdc 两族的连接、保活、确定性脚本回放。新增一种设备/平台 = 实现 `platform::Backend`
+  并登记 serial 前缀，各平台能开哪几层及原因见 `docs/DEVICES.md`。
 - 应用改动（`knobs/`）：黑档系统参数，灰档 Vulkan layer 注入。
 - 测量：安卓 sysfs 电源轨加 raw ftrace kgsl，鸿蒙 HiSmartPerf，上层拿同一份 JSON；
   测功耗期间停充。
@@ -234,7 +235,7 @@ VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`de
 ```
 loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（Python 工具链，正在往 Rust 收）
   carriers/            测试载体：megacity / vulkan-samples / anki-sponza
-  refbench/            白盒靶子的驱动侧（靶子本身在同级 refbench 仓库）
+  refbench/            白盒靶子的驱动侧（靶子本身在同级 refbench 仓库）；判定链已知答案自检 phonefarm selftest 的用法也在这里
   auto/                自动挑旋钮：白名单探测 → 冻结规则 → 大模型选参 → 逐组对照
 knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，
                        说明见 knobs/README.md；原 HGamey/knobs 仓库已归档并入，shell 正在往 Rust 收）
@@ -245,6 +246,7 @@ src/                   Rust 内核源码
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
   hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测
+  platform.rs          设备接口 Backend（Adb / Hdc 两个实现）+ 各平台三层可行性声明
   perfsrc.rs smartperf.rs  性能数据来源抽象：安卓 sysfs 与鸿蒙 HiSmartPerf(SP_daemon/Xpower) 同一份 JSON
   hypo.rs caps.rs mtools.rs experiment.rs   假设—实验—证据闭环
   keepalive.rs serve.rs script.rs parallel.rs telemetry.rs device.rs

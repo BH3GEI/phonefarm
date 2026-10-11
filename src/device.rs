@@ -1108,185 +1108,79 @@ impl Hdc {
     }
 }
 
-/// 设备后端统一分发。调用方一律持 Device,方法面与 Adb 逐位同构;选择按 serial 前缀:
-/// "hdc:<connect key>" → Hdc(OpenHarmony),其余(含 None)→ Adb。
+/// 设备后端统一分发。调用方一律持 Device,方法面与 Adb 逐位同构;选择按 serial 前缀
+/// (见 `platform::open`): "hdc:<connect key>" → Hdc(OpenHarmony),其余(含 None)→ Adb。
 /// Android 零扰动由构造保证: 不带前缀时行为与旧 Adb 直连一字不差。
-pub enum Device {
-    Adb(Adb),
-    Hdc(Hdc),
+///
+/// 新增一种设备/平台: 实现 `platform::Backend`, 在 `platform::open` 登记前缀即可,
+/// 这里不用动 (见 docs/DEVICES.md)。
+pub struct Device {
+    b: Box<dyn crate::platform::Backend>,
 }
 
 impl Device {
     pub fn new(serial: Option<String>, tmp: String) -> Self {
-        match serial {
-            Some(s) if s.starts_with("hdc:") => {
-                let key = s["hdc:".len()..].trim().to_string();
-                Device::Hdc(Hdc::new(if key.is_empty() { None } else { Some(key) }, tmp))
-            }
-            other => Device::Adb(Adb::new(other, tmp)),
-        }
+        Self { b: crate::platform::open(serial, tmp) }
+    }
+    /// 直接拿一个后端构造 (新平台 / 测试替身)。
+    #[allow(dead_code)]
+    pub fn from_backend(b: Box<dyn crate::platform::Backend>) -> Self {
+        Self { b }
+    }
+    /// 这台设备的后端 (平台名、三层可行性声明等)。
+    #[allow(dead_code)]
+    pub fn backend(&self) -> &dyn crate::platform::Backend {
+        self.b.as_ref()
     }
     /// --freeze-on-done 置位:分发到具体后端。done 定局后调用。
-    pub fn set_frozen(&self) {
-        match self { Device::Adb(d) => d.set_frozen(), Device::Hdc(d) => d.set_frozen() }
-    }
-    pub fn health_check(&self, ms: u64) -> bool {
-        match self { Device::Adb(d) => d.health_check(ms), Device::Hdc(d) => d.health_check(ms) }
-    }
-    pub fn revive(&self, emulator_cmd: &str) -> bool {
-        match self { Device::Adb(d) => d.revive(emulator_cmd), Device::Hdc(d) => d.revive(emulator_cmd) }
-    }
-    pub fn els_full(&self, timeout_ms: u64) -> (Vec<Node>, Vec<FullNode>, String, String) {
-        match self { Device::Adb(d) => d.els_full(timeout_ms), Device::Hdc(d) => d.els_full(timeout_ms) }
-    }
-    pub fn foreground_pkg(&self) -> String {
-        match self { Device::Adb(d) => d.foreground_pkg(), Device::Hdc(d) => d.foreground_pkg() }
-    }
-    pub fn sys_state(&self) -> SysState {
-        match self { Device::Adb(d) => d.sys_state(), Device::Hdc(d) => d.sys_state() }
-    }
-    pub fn clipboard(&self) -> Option<String> {
-        match self { Device::Adb(d) => d.clipboard(), Device::Hdc(d) => d.clipboard() }
-    }
-    pub fn launchable_apps(&self) -> Vec<(String, String)> {
-        match self { Device::Adb(d) => d.launchable_apps(), Device::Hdc(d) => d.launchable_apps() }
-    }
-    pub fn screen(&self, out_jpg: &str) -> Option<(i32, i32)> {
-        match self { Device::Adb(d) => d.screen(out_jpg), Device::Hdc(d) => d.screen(out_jpg) }
-    }
-    pub fn screen_image(&self) -> Option<image::DynamicImage> {
-        match self { Device::Adb(d) => d.screen_image(), Device::Hdc(_) => None }
-    }
-    pub fn quick_thumb(&self, tag: &str) -> Option<Vec<u8>> {
-        match self { Device::Adb(d) => d.quick_thumb(tag), Device::Hdc(d) => d.quick_thumb(tag) }
-    }
-    pub fn size(&self) -> (i32, i32) {
-        match self { Device::Adb(d) => d.size(), Device::Hdc(d) => d.size() }
-    }
-    pub fn tap(&self, x: i32, y: i32) {
-        match self { Device::Adb(d) => d.tap(x, y), Device::Hdc(d) => d.tap(x, y) }
-    }
-    pub fn swipe(&self, x: i32, y: i32, x2: i32, y2: i32) {
-        match self { Device::Adb(d) => d.swipe(x, y, x2, y2), Device::Hdc(d) => d.swipe(x, y, x2, y2) }
-    }
-    pub fn scroll_down(&self) {
-        match self { Device::Adb(d) => d.scroll_down(), Device::Hdc(d) => d.scroll_down() }
-    }
-    pub fn scroll_up(&self) {
-        match self { Device::Adb(d) => d.scroll_up(), Device::Hdc(d) => d.scroll_up() }
-    }
-    pub fn type_text(&self, text: &str) {
-        match self { Device::Adb(d) => d.type_text(text), Device::Hdc(d) => d.type_text(text) }
-    }
-    pub fn clear_field(&self) {
-        match self { Device::Adb(d) => d.clear_field(), Device::Hdc(d) => d.clear_field() }
-    }
-    pub fn back(&self) {
-        match self { Device::Adb(d) => d.back(), Device::Hdc(d) => d.back() }
-    }
-    pub fn home(&self) {
-        match self { Device::Adb(d) => d.home(), Device::Hdc(d) => d.home() }
-    }
-    pub fn force_stop(&self, pkg: &str) {
-        match self { Device::Adb(d) => d.force_stop(pkg), Device::Hdc(d) => d.force_stop(pkg) }
-    }
+    pub fn set_frozen(&self) { self.b.set_frozen() }
+    pub fn health_check(&self, ms: u64) -> bool { self.b.health_check(ms) }
+    pub fn revive(&self, emulator_cmd: &str) -> bool { self.b.revive(emulator_cmd) }
+    pub fn els_full(&self, timeout_ms: u64) -> (Vec<Node>, Vec<FullNode>, String, String) { self.b.els_full(timeout_ms) }
+    pub fn foreground_pkg(&self) -> String { self.b.foreground_pkg() }
+    pub fn sys_state(&self) -> SysState { self.b.sys_state() }
+    pub fn clipboard(&self) -> Option<String> { self.b.clipboard() }
+    pub fn launchable_apps(&self) -> Vec<(String, String)> { self.b.launchable_apps() }
+    pub fn screen(&self, out_jpg: &str) -> Option<(i32, i32)> { self.b.screen(out_jpg) }
+    pub fn screen_image(&self) -> Option<image::DynamicImage> { self.b.screen_image() }
+    pub fn quick_thumb(&self, tag: &str) -> Option<Vec<u8>> { self.b.quick_thumb(tag) }
+    pub fn size(&self) -> (i32, i32) { self.b.size() }
+    pub fn tap(&self, x: i32, y: i32) { self.b.tap(x, y) }
+    pub fn swipe(&self, x: i32, y: i32, x2: i32, y2: i32) { self.b.swipe(x, y, x2, y2) }
+    pub fn scroll_down(&self) { self.b.scroll_down() }
+    pub fn scroll_up(&self) { self.b.scroll_up() }
+    pub fn type_text(&self, text: &str) { self.b.type_text(text) }
+    pub fn clear_field(&self) { self.b.clear_field() }
+    pub fn back(&self) { self.b.back() }
+    pub fn home(&self) { self.b.home() }
+    pub fn force_stop(&self, pkg: &str) { self.b.force_stop(pkg) }
     /// 返回冷启动毫秒(Android am start -W 的 WaitTime;OH/monkey 路线采不到为 None)
-    pub fn launch(&self, pkg: &str, comp: &str) -> Option<i64> {
-        match self { Device::Adb(d) => d.launch(pkg, comp), Device::Hdc(d) => d.launch(pkg, comp) }
-    }
-    pub fn telemetry_setup(&self, pkg: &str) -> bool {
-        match self { Device::Adb(d) => d.telemetry_setup(pkg), Device::Hdc(d) => d.telemetry_setup(pkg) }
-    }
-    pub fn telemetry(&self, heavy: bool, pkg: &str) -> crate::telemetry::Telemetry {
-        match self { Device::Adb(d) => d.telemetry(heavy, pkg), Device::Hdc(d) => d.telemetry(heavy, pkg) }
-    }
-    pub fn shell(&self, cmd: &str, ms: u64) -> String {
-        match self { Device::Adb(d) => d.shell(cmd, ms), Device::Hdc(d) => d.shell(cmd, ms) }
-    }
+    pub fn launch(&self, pkg: &str, comp: &str) -> Option<i64> { self.b.launch(pkg, comp) }
+    pub fn telemetry_setup(&self, pkg: &str) -> bool { self.b.telemetry_setup(pkg) }
+    pub fn telemetry(&self, heavy: bool, pkg: &str) -> crate::telemetry::Telemetry { self.b.telemetry(heavy, pkg) }
+    pub fn shell(&self, cmd: &str, ms: u64) -> String { self.b.shell(cmd, ms) }
     /// 流式 shell(CTS Harness): 长生命周期管道,逐行消费由调用方负责
-    pub fn stream_shell(&self, cmd: &str) -> std::io::Result<std::process::Child> {
-        match self { Device::Adb(d) => d.stream_shell(cmd), Device::Hdc(d) => d.stream_shell(cmd) }
-    }
+    pub fn stream_shell(&self, cmd: &str) -> std::io::Result<std::process::Child> { self.b.stream_shell(cmd) }
     /// 送文件上设备(CTS 差量部署)
-    pub fn push_file(&self, local: &str, remote: &str) -> bool {
-        match self { Device::Adb(d) => d.push_file(local, remote), Device::Hdc(d) => d.push_file(local, remote) }
-    }
-    /// 端口转发 本机 tcp:local → 设备 tcp:remote(安卓侧 HiSmartPerf 采集器要用)
-    pub fn forward(&self, local: u16, remote: u16) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.forward(local, remote),
-            // hdc 有自己的 fport, 但鸿蒙侧的 HiSmartPerf 走的是 SP_daemon 落盘, 用不上转发
-            Device::Hdc(_) => Err("hdc 后端未实现端口转发".into()),
-        }
-    }
+    pub fn push_file(&self, local: &str, remote: &str) -> bool { self.b.push_file(local, remote) }
+    /// 端口转发 本机 tcp:local → 设备 tcp:remote(安卓侧 HiSmartPerf 采集器要用;
+    /// 鸿蒙侧 SP_daemon 落盘, 用不上转发, hdc 后端如实报未实现)
+    pub fn forward(&self, local: u16, remote: u16) -> Result<(), String> { self.b.forward(local, remote) }
     /// 撤掉一条端口转发
-    pub fn forward_remove(&self, local: u16) {
-        if let Device::Adb(d) = self {
-            d.forward_remove(local)
-        }
-    }
+    pub fn forward_remove(&self, local: u16) { self.b.forward_remove(local) }
     /// 拉回设备文件/目录(CTS 结果提取;单次 best-effort,产物由调用方验证)
-    pub fn pull(&self, remote: &str, local: &str) -> bool {
-        match self { Device::Adb(d) => d.pull(remote, local), Device::Hdc(d) => d.pull(remote, local) }
-    }
+    pub fn pull(&self, remote: &str, local: &str) -> bool { self.b.pull(remote, local) }
     /// 后端名(CTS 日志通道选择: hdc→hilog, adb→logcat)
-    pub fn backend_name(&self) -> &'static str {
-        match self { Device::Adb(_) => "adb", Device::Hdc(_) => "hdc" }
-    }
-    pub fn gamepad_press(&self, btn: &str, duration_ms: u64) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.gamepad_press(btn, duration_ms),
-            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
-        }
-    }
-    pub fn gamepad_down(&self, btn: &str) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.gamepad_down(btn),
-            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
-        }
-    }
-    pub fn gamepad_up(&self, btn: &str) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.gamepad_up(btn),
-            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
-        }
-    }
-    pub fn gamepad_stick(&self, stick: &str, x: f32, y: f32, duration_ms: u64) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.gamepad_stick(stick, x, y, duration_ms),
-            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
-        }
-    }
-    pub fn gamepad_trigger(&self, trigger: &str, val: f32, duration_ms: u64) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.gamepad_trigger(trigger, val, duration_ms),
-            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
-        }
-    }
-    pub fn gamepad_dpad(&self, dir: &str, duration_ms: u64) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.gamepad_dpad(dir, duration_ms),
-            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
-        }
-    }
-    pub fn gamepad_reset(&self) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.gamepad_reset(),
-            Device::Hdc(_) => Ok(()),
-        }
-    }
-    pub fn gamepad_close(&self) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.gamepad_close(),
-            Device::Hdc(_) => Ok(()),
-        }
-    }
-    pub fn gamepad_wander(&self, duration_ms: u64) -> Result<(), String> {
-        match self {
-            Device::Adb(d) => d.gamepad_wander(duration_ms),
-            Device::Hdc(_) => Err("HDC 设备暂不支持虚拟手柄注入".into()),
-        }
-    }
+    pub fn backend_name(&self) -> &'static str { self.b.transport() }
+    pub fn gamepad_press(&self, btn: &str, duration_ms: u64) -> Result<(), String> { self.b.gamepad_press(btn, duration_ms) }
+    pub fn gamepad_down(&self, btn: &str) -> Result<(), String> { self.b.gamepad_down(btn) }
+    pub fn gamepad_up(&self, btn: &str) -> Result<(), String> { self.b.gamepad_up(btn) }
+    pub fn gamepad_stick(&self, stick: &str, x: f32, y: f32, duration_ms: u64) -> Result<(), String> { self.b.gamepad_stick(stick, x, y, duration_ms) }
+    pub fn gamepad_trigger(&self, trigger: &str, val: f32, duration_ms: u64) -> Result<(), String> { self.b.gamepad_trigger(trigger, val, duration_ms) }
+    pub fn gamepad_dpad(&self, dir: &str, duration_ms: u64) -> Result<(), String> { self.b.gamepad_dpad(dir, duration_ms) }
+    pub fn gamepad_reset(&self) -> Result<(), String> { self.b.gamepad_reset() }
+    pub fn gamepad_close(&self) -> Result<(), String> { self.b.gamepad_close() }
+    pub fn gamepad_wander(&self, duration_ms: u64) -> Result<(), String> { self.b.gamepad_wander(duration_ms) }
 }
 
 /// Android 遥测脚本(设备端 sh 一趟跑完全部数据源,段间哨兵行分隔)。
@@ -1824,9 +1718,9 @@ mod tests {
     #[test]
     fn device_dispatch_by_serial_prefix() {
         // "hdc:" 前缀走 Hdc,其余(真机serial/None)走 Adb——Android 零扰动的地基
-        assert!(matches!(Device::new(Some("hdc:5ce1227d".into()), "/tmp".into()), Device::Hdc(_)));
-        assert!(matches!(Device::new(Some("emulator-5554".into()), "/tmp".into()), Device::Adb(_)));
-        assert!(matches!(Device::new(None, "/tmp".into()), Device::Adb(_)));
+        assert_eq!(Device::new(Some("hdc:5ce1227d".into()), "/tmp".into()).backend_name(), "hdc");
+        assert_eq!(Device::new(Some("emulator-5554".into()), "/tmp".into()).backend_name(), "adb");
+        assert_eq!(Device::new(None, "/tmp".into()).backend_name(), "adb");
     }
 
     #[test]

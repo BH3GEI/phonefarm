@@ -23,9 +23,11 @@ mod framecheck;
 mod llm;
 mod looptrace;
 mod sysparam;
+mod curtail;
 mod vksreport;
 mod parallel;
 mod device;
+mod platform;
 mod devlock;
 mod eval;
 mod fold;
@@ -45,6 +47,7 @@ mod smartperf;
 mod plugins;
 mod runtime;
 mod script;
+mod selftest;
 mod serve;
 mod telemetry;
 mod vks;
@@ -192,6 +195,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 解析:  parse-trace <trace.txt> [--full] [--comm 线程名]   (ftrace 文本 -> 帧时序/GPU 活跃/排队/带宽指标, 纯离线)
        attribute <summary.json>                          (一轮 summary -> 主因判定 + 正交带宽维, 纯离线)
        analyze <A臂glob> [B臂glob] [--metric M]           (离散度 + 漂移 + 精确置换检验 + 置换反演 CI)
+       curtail-replay <A臂glob> <B臂glob> [--alpha A] [--metrics m1,m2]  (确定性截断离线回放: 截在哪、判定是否与跑满一致)
        frames-moving <raw1> <raw2>                        (两张 screencap 裸帧的平均逐像素差 %, 判画面动没动)
        crosscheck-report <轮目录>                         (两条采集通路并排对照表, 纯离线)
        refbench-report --root <runs目录>                  (refbench M0 六判据汇总, 规则哈希自证)
@@ -208,6 +212,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 闭环:  autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]
               [--no-llm] [--probe-only] [--baseline-runs N] [--power-in-verdict auto|on|off]
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
+自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
+       (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
 灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop [pkg] | target <pkg> | status | off} [--keep-prop]
        (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
        gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
@@ -233,7 +239,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)
 设备锁: 碰设备的子命令 (run/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
-       capture/test-batch/cts-fetch/quest/probe/exec/experiment) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
+       capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
        通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h] [--no-devlock]
        锁已在同一 label 手里 (外层 devlock run / optimize) 时原地执行; 没拿到锁不碰设备, 退出 2";
 
@@ -712,6 +718,11 @@ fn main() {
             // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)
             std::process::exit(graylayer::run_gray_layer(&args[1..]));
         }
+        Some("selftest") => {
+            // 判定链的已知答案真机自检 (refbench): A/A 误判率、已知变好检出率与 MDE、
+            // 已知变差必须 REJECT、画质作弊必须被画面判据拦下
+            std::process::exit(selftest::run_selftest(&args[1..]));
+        }
         Some("autoloop") => {
             // 系统参数全自动闭环 (probe -> 基线 -> 冻结规则 -> 提名 -> ABBA -> 判定 -> 报告)
             std::process::exit(autoloop::run_autoloop(&args[1..]));
@@ -756,6 +767,10 @@ fn main() {
         Some("frames-moving") => {
             // 两张 adb screencap 裸帧的平均逐像素差 (%)。纯离线, 确认"画面真的在动"。
             std::process::exit(framecheck::run_frames_moving(&args[1..]));
+        }
+        Some("curtail-replay") => {
+            // 确定性截断的离线回放: 归档两臂逐轮数据按 ABBA 到达顺序重演, 核对截断不改判定。纯离线。
+            std::process::exit(curtail::run_replay(&args[1..]));
         }
         Some("analyze") => {
             // 多轮 summary.json → 离散度 (判据 1) 与两臂对比 (判据 3)。纯离线, 无随机。

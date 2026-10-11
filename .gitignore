@@ -32,3 +32,5 @@ loop_v1/runs_sysparam/**/env.txt
 loop_v1/runs_sysparam/**/*.png
 # 裸帧 (负载自检用, 每张 13MB); 判定结论在 spin_check.json 里, 够作证
 loop_v1/runs_sysparam/**/*.raw
+# selftest 实跑产物 (trace/spv/截图); 结论与判定输入另行挑选入库
+loop_v1/runs_selftest/
