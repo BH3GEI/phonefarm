@@ -112,14 +112,54 @@ fn json_bytes(v: &impl Serialize) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(v).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProcessSupervision {
+    #[default]
+    OwnHelperGroups,
+    InheritedGroup,
+}
+impl ProcessSupervision {
+    fn is_standalone(&self) -> bool {
+        *self == Self::OwnHelperGroups
+    }
+    fn validate(self) -> Result<(), String> {
+        if self.is_standalone() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            if unsafe { libc::getpgrp() } != std::process::id() as i32 {
+                return Err("inherited-group requires phonefarm to lead a fresh isolated process group owned by an outer supervisor".into());
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        Err("inherited-group requires a Unix process supervisor".into())
+    }
+    fn artifact_state(self) -> &'static str {
+        if self.is_standalone() {
+            "built_offline"
+        } else {
+            "built_offline_outer_quiescence_required"
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Tool {
     path: PathBuf,
     sha256: String,
     version: String,
+    #[serde(skip)]
+    supervision: ProcessSupervision,
 }
 impl Tool {
-    fn load(p: PathBuf, timeout: Duration) -> Result<Self, String> {
+    fn load(
+        p: PathBuf,
+        timeout: Duration,
+        supervision: ProcessSupervision,
+    ) -> Result<Self, String> {
         let path = fs::canonicalize(&p).map_err(|e| {
             format!(
                 "missing tool {}: {e}; install an Android NDK explicitly",
@@ -127,8 +167,12 @@ impl Tool {
             )
         })?;
         let sha256 = file_hash(&path)?;
-        let (status, stdout, _) =
-            bounded_process(&path, &["--version"], timeout.min(Duration::from_secs(10)))?;
+        let (status, stdout, _) = bounded_process(
+            &path,
+            &["--version"],
+            timeout.min(Duration::from_secs(10)),
+            supervision,
+        )?;
         if !status.success() {
             return Err(format!("tool --version failed: {}", path.display()));
         }
@@ -137,6 +181,7 @@ impl Tool {
             path,
             sha256,
             version,
+            supervision,
         };
         t.check()?;
         Ok(t)
@@ -152,13 +197,14 @@ impl Tool {
     }
     fn exec(&self, args: &[&str], log: &Path, timeout: Duration) -> Result<String, String> {
         self.check()?;
-        let (status, stdout, stderr) = match bounded_process(&self.path, args, timeout) {
-            Ok(out) => out,
-            Err(e) => {
-                write(log, e.as_bytes())?;
-                return Err(e);
-            }
-        };
+        let (status, stdout, stderr) =
+            match bounded_process(&self.path, args, timeout, self.supervision) {
+                Ok(out) => out,
+                Err(e) => {
+                    write(log, e.as_bytes())?;
+                    return Err(e);
+                }
+            };
         self.check()?;
         let text = format!(
             "{}\n{}",
@@ -183,17 +229,25 @@ fn bounded_process(
     path: &Path,
     args: &[&str],
     timeout: Duration,
+    supervision: ProcessSupervision,
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
     use std::os::unix::process::CommandExt;
-    let mut child = Command::new(path)
+    supervision.validate()?;
+    let mut command = Command::new(path);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let group = child.id() as i32;
+        .stderr(Stdio::piped());
+    if supervision.is_standalone() {
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let group = if supervision.is_standalone() {
+        child.id() as i32
+    } else {
+        std::process::id() as i32
+    };
     let overflow = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
     let pipes: Vec<Box<dyn Read + Send>> = vec![
@@ -231,7 +285,13 @@ fn bounded_process(
             results.insert(index, result);
         }
         if status.is_none() {
-            status = child.try_wait().map_err(|e| e.to_string())?;
+            status = match child.try_wait() {
+                Ok(s) => s,
+                Err(e) => {
+                    terminate_build_group(group);
+                    return Err(e.to_string());
+                }
+            };
         }
         let reason = if overflow.load(Ordering::Relaxed) {
             Some("tool output limit exceeded")
@@ -253,11 +313,15 @@ fn bounded_process(
             None
         };
         if let Some(reason) = reason {
-            // The process group belongs only to this invocation; terminate its compiler helpers too.
-            unsafe {
-                libc::kill(-group, libc::SIGKILL);
+            terminate_build_group(group);
+            // Never introduce an unbounded wait after the timeout itself.
+            let cleanup = Instant::now();
+            while cleanup.elapsed() < Duration::from_millis(500) {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                }
             }
-            let _ = child.wait();
             return Err(format!(
                 "{reason}: {} (limit {}s, {} bytes per stream)",
                 path.display(),
@@ -271,10 +335,10 @@ fn bounded_process(
                 // Closed pipes alone do not prove that a background writer has stopped.
                 let alive = unsafe { libc::kill(-group, 0) };
                 let error = std::io::Error::last_os_error();
-                if alive == 0 || error.raw_os_error() != Some(libc::ESRCH) {
-                    unsafe {
-                        libc::kill(-group, libc::SIGKILL);
-                    }
+                if supervision.is_standalone()
+                    && (alive == 0 || error.raw_os_error() != Some(libc::ESRCH))
+                {
+                    terminate_build_group(group);
                     return Err(format!(
                         "tool left background descendants or group status unknown: {}",
                         path.display()
@@ -282,10 +346,22 @@ fn bounded_process(
                 }
                 let stdout = results.remove(&0).unwrap()?;
                 let stderr = results.remove(&1).unwrap()?;
+                // Inherited mode cannot claim this group is absent: phonefarm is
+                // still its leader. The artifact explicitly requires outer retirement.
                 return Ok((status, stdout, stderr));
             }
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(unix)]
+fn terminate_build_group(group: i32) {
+    // Never log before terminating: an unread full stdout/stderr pipe could
+    // block the kill itself. In inherited mode the outer durable InFlight and
+    // signal receipt provide the failure evidence; this kills phonefarm too.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
     }
 }
 #[cfg(not(unix))]
@@ -293,6 +369,7 @@ fn bounded_process(
     _: &Path,
     _: &[&str],
     _: Duration,
+    _: ProcessSupervision,
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
     Err("artifact builds currently require a Unix host for bounded process-group execution".into())
 }
@@ -308,6 +385,8 @@ struct Descriptor {
     native_flags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adaptation: Option<Value>,
+    #[serde(default, skip_serializing_if = "ProcessSupervision::is_standalone")]
+    process_supervision: ProcessSupervision,
 }
 #[derive(Debug, Serialize, Deserialize)]
 struct Manifest {
@@ -344,7 +423,7 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
     let manifest: Manifest =
         serde_json::from_slice(&read(&dir.join("manifest.json"))?).map_err(|e| e.to_string())?;
     if manifest.schema_version != 1
-        || manifest.state != "built_offline"
+        || manifest.state != manifest.descriptor.process_supervision.artifact_state()
         || manifest.device_validation != "not_run"
         || manifest.deployable
     {
@@ -470,7 +549,7 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
     elf_arm64(&read(&dir.join(LAYER_NAME))?)?;
     Ok(
         json!({"artifact_id":manifest.artifact_id,"layer_sha256":manifest.layer_sha256,
-        "state":manifest.state,"device_validation":manifest.device_validation,"deployable":false,"files_verified":manifest.files.len()}),
+        "state":manifest.state,"device_validation":manifest.device_validation,"deployable":false,"files_verified":manifest.files.len(),"process_supervision":manifest.descriptor.process_supervision,"requires_outer_quiescence":!manifest.descriptor.process_supervision.is_standalone(),"outer_quiescence_verified":false}),
     )
 }
 
@@ -529,7 +608,9 @@ fn build(
     out: &Path,
     ndk: &Path,
     timeout: Duration,
+    supervision: ProcessSupervision,
 ) -> Result<Value, String> {
+    supervision.validate()?;
     // Read once; subsequent compilers only see this owned snapshot.
     let (bytes, imported, origin) = if let Some(dir) = adaptation {
         let (snapshots, summary) = crate::storageadapter::snapshots(dir)?;
@@ -565,7 +646,7 @@ fn build(
             write(&stage.join(stored), &snapshots[original])?;
         }
     }
-    let result = build_stage(&stage, ndk, timeout, origin);
+    let result = build_stage(&stage, ndk, timeout, origin, supervision);
     match result {
         Ok(id) => {
             verify(&stage)?;
@@ -584,12 +665,12 @@ fn build(
                 }
                 fs::remove_dir_all(&stage).map_err(|e| e.to_string())?;
                 Ok(
-                    json!({"artifact":dest,"artifact_id":id,"reused":true,"device_validation":"not_run","deployable":false}),
+                    json!({"artifact":dest,"artifact_id":id,"reused":true,"device_validation":"not_run","deployable":false,"process_supervision":supervision,"requires_outer_quiescence":!supervision.is_standalone(),"outer_quiescence_verified":false}),
                 )
             } else {
                 fs::rename(&stage, &dest).map_err(|e| e.to_string())?;
                 Ok(
-                    json!({"artifact":dest,"artifact_id":id,"reused":false,"device_validation":"not_run","deployable":false}),
+                    json!({"artifact":dest,"artifact_id":id,"reused":false,"device_validation":"not_run","deployable":false,"process_supervision":supervision,"requires_outer_quiescence":!supervision.is_standalone(),"outer_quiescence_verified":false}),
                 )
             }
         }
@@ -613,6 +694,7 @@ fn build_stage(
     ndk: &Path,
     timeout: Duration,
     adaptation: Option<Value>,
+    supervision: ProcessSupervision,
 ) -> Result<String, String> {
     let tag = if ndk.join("toolchains/llvm/prebuilt/darwin-x86_64").is_dir() {
         "darwin-x86_64"
@@ -623,16 +705,27 @@ fn build_stage(
     let mut tools = BTreeMap::new();
     tools.insert(
         "glslc".into(),
-        Tool::load(ndk.join("shader-tools").join(tag).join("glslc"), timeout)?,
+        Tool::load(
+            ndk.join("shader-tools").join(tag).join("glslc"),
+            timeout,
+            supervision,
+        )?,
     );
     tools.insert(
         "clang++".into(),
-        Tool::load(bin.join("aarch64-linux-android30-clang++"), timeout)?,
+        Tool::load(
+            bin.join("aarch64-linux-android30-clang++"),
+            timeout,
+            supervision,
+        )?,
     );
-    tools.insert("nm".into(), Tool::load(bin.join("llvm-nm"), timeout)?);
+    tools.insert(
+        "nm".into(),
+        Tool::load(bin.join("llvm-nm"), timeout, supervision)?,
+    );
     tools.insert(
         "readelf".into(),
-        Tool::load(bin.join("llvm-readelf"), timeout)?,
+        Tool::load(bin.join("llvm-readelf"), timeout, supervision)?,
     );
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../knobs/gray/layer");
     let mut inputs = BTreeMap::new();
@@ -715,6 +808,7 @@ fn build_stage(
             .chain(["-I<snapshot>".into(), "-llog".into()])
             .collect(),
         adaptation,
+        process_supervision: supervision,
     };
     let descriptor_bytes = json_bytes(&descriptor)?;
     let id = format!("upop-{}", hash(&descriptor_bytes));
@@ -803,7 +897,7 @@ fn build_stage(
     let manifest = Manifest {
         schema_version: 1,
         artifact_id: id.clone(),
-        state: "built_offline".into(),
+        state: supervision.artifact_state().into(),
         device_validation: "not_run".into(),
         deployable: false,
         descriptor,
@@ -855,6 +949,7 @@ fn cli(args: &[String]) -> Result<Value, String> {
             "--artifact",
             "--timeout-seconds",
             "--adapted-artifact",
+            "--process-supervision",
         ]
         .contains(&key.as_str())
         {
@@ -877,10 +972,15 @@ fn cli(args: &[String]) -> Result<Value, String> {
             "--out",
             "--ndk",
             "--timeout-seconds",
+            "--process-supervision",
         ],
         "inspect" => &["--spirv"],
         "verify" => &["--artifact"],
-        _ => return Err("expected build, inspect, verify, adapt-storage or verify-adaptation".into()),
+        _ => {
+            return Err(
+                "expected build, inspect, verify, adapt-storage or verify-adaptation".into(),
+            )
+        }
     };
     if opts.keys().any(|k| !allowed.contains(k)) {
         return Err("argument does not apply to subcommand".into());
@@ -894,6 +994,19 @@ fn cli(args: &[String]) -> Result<Value, String> {
             if opts.contains_key("--source") == opts.contains_key("--adapted-artifact") {
                 return Err("build requires exactly one of --source or --adapted-artifact".into());
             }
+            let supervision = match opts.get("--process-supervision").copied() {
+                None | Some("own-helper-groups") => ProcessSupervision::OwnHelperGroups,
+                Some("inherited-group") => ProcessSupervision::InheritedGroup,
+                Some(_) => {
+                    return Err(
+                        "process supervision must be own-helper-groups or inherited-group".into(),
+                    )
+                }
+            };
+            if !supervision.is_standalone() && !opts.contains_key("--ndk") {
+                return Err("inherited-group requires an explicit --ndk path".into());
+            }
+            supervision.validate()?;
             let default = std::env::var("REFBENCH_NDK").unwrap_or_else(|_| {
                 format!(
                     "{}/ndk/28.2.13676358",
@@ -916,6 +1029,7 @@ fn cli(args: &[String]) -> Result<Value, String> {
                 Path::new(get("--out")?),
                 Path::new(opts.get("--ndk").copied().unwrap_or(&default)),
                 Duration::from_secs(seconds),
+                supervision,
             )
         }
         _ => unreachable!(),

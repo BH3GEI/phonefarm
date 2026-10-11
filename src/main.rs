@@ -219,7 +219,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop [pkg] | target <pkg> | status | off} [--keep-prop]
        (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
-工件:  gray-artifact {build (--source sampled.comp | --adapted-artifact DIR) --out DIR [--ndk DIR] [--timeout-seconds 1..120] | inspect --spirv FILE | verify --artifact DIR | adapt-storage --source original.comp --spirv original.spv --out DIR | verify-adaptation --artifact DIR} [--json]
+工件:  gray-artifact {build (--source sampled.comp | --adapted-artifact DIR) --out DIR [--ndk DIR] [--timeout-seconds 1..120] [--process-supervision own-helper-groups|inherited-group] | inspect --spirv FILE | verify --artifact DIR | adapt-storage --source original.comp --spirv original.spv --out DIR | verify-adaptation --artifact DIR} [--json]
        (离线编译/ABI/摘要门禁; deployable=false, 不构成真机部署资格)
        gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
        (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)

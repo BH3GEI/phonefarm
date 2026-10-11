@@ -28,6 +28,11 @@ Source paths, tool executable paths and subprocess arguments are passed as struc
 
 ## Native marker semantics
 
+External preparation drivers can explicitly select the provisional inherited
+process group interface in [native build supervision](SPEC_NATIVE_BUILD_SUPERVISION.md).
+Its artifact state requires the outer supervisor to establish group absence and
+verify bytes again; launcher/helper exit alone is not a completed preparation.
+
 The marker retains existing copyprobe fields and adds the artifact identity and these counts:
 
 | Counter | Actual event represented | Does not establish |
