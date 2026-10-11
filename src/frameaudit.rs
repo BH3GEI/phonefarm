@@ -612,7 +612,9 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
             continue;
         }
         let (n, dead, _unk) = pass_prod.get(&i).copied().unwrap_or((0, 0, 0));
-        if n == dead {
+        // pass 里开了查询 (遮挡查询最常见): 产出是查询结果, 不写附件也不是白画
+        let queries = u(&ev.raw, "qo") + u(&ev.raw, "qx");
+        if n == dead && queries == 0 {
             let bytes: f64 = ev.raw["att"].as_array().unwrap().iter().map(|a| {
                 let (a1, a2, a3, a4) = t.att_bytes(ev, a);
                 a1 + a2 + a3 + a4
@@ -626,11 +628,12 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
                 ms: ev.ms,
                 certain: false,
                 why: format!(
-                    "{} 产出的 {} 块内容{}; draw {} 笔 (不确定点: fragment 里写 storage buffer 层看不见)",
+                    "{} 产出的 {} 块内容{}; draw {} 笔, pass 内无查询 (不确定点: fragment 里写 storage buffer 层看不见{})",
                     ev_sig(ev),
                     n,
                     if n == 0 { "一块都不存回显存" } else { "全部没人读" },
-                    u(&ev.raw, "dr") + u(&ev.raw, "dri") + u(&ev.raw, "drn")
+                    u(&ev.raw, "dr") + u(&ev.raw, "dri") + u(&ev.raw, "drn"),
+                    if ev.raw.get("qo").is_none() { "; 这份抓取的层还不记查询, 也看不见查询" } else { "" }
                 ),
             });
         }
@@ -743,6 +746,7 @@ pub(crate) fn frame_stats(t: &Timeline, f: usize) -> Value {
     let (mut draws, mut load_b, mut store_b, mut ms_sum, mut timed, mut passes) = (0u64, 0.0, 0.0, 0.0, 0u64, 0u64);
     let mut lo_load = 0u64;
     let mut empty_pass = 0u64;
+    let mut query_passes = 0u64;
     for ev in &t.evs[lo..hi] {
         *kinds.entry(ev.kind.clone()).or_default() += 1;
         if ev.kind == "pass" {
@@ -751,6 +755,9 @@ pub(crate) fn frame_stats(t: &Timeline, f: usize) -> Value {
             draws += d;
             if d == 0 && u(&ev.raw, "ca") == 0 {
                 empty_pass += 1;
+            }
+            if u(&ev.raw, "qo") + u(&ev.raw, "qx") > 0 {
+                query_passes += 1;
             }
             for a in ev.raw["att"].as_array().cloned().unwrap_or_default() {
                 let (a1, a2, a3, a4) = t.att_bytes(ev, &a);
@@ -775,6 +782,7 @@ pub(crate) fn frame_stats(t: &Timeline, f: usize) -> Value {
         "pass_ms_sum": (ms_sum * 1000.0).round() / 1000.0,
         "draws": draws,
         "empty_passes": empty_pass,
+        "query_passes": query_passes,
         "load_attachments": lo_load,
         "model_load_mb": (load_b / 1e6 * 100.0).round() / 100.0,
         "model_store_mb": (store_b / 1e6 * 100.0).round() / 100.0,
@@ -1173,6 +1181,28 @@ mod tests {
         assert_eq!(dead.len(), 1, "只剩深度那份白存: {fs:#?}");
         assert!((dead[0].bytes - 30000.0).abs() < 1e-6);
         assert!(!fs.iter().any(|x| x.rule == "transient_ok" && x.why.contains("图#2")), "{fs:#?}");
+    }
+
+    /// 只测深度、不写回任何附件、但开了遮挡查询的 pass (原神 rp112 的形态) 不算白画
+    #[test]
+    fn occlusion_query_pass_is_not_dead() {
+        let mut j = fixture();
+        for f in j["frames"].as_array_mut().unwrap() {
+            let evs = f["submits"][0]["cbs"][0]["ev"].as_array_mut().unwrap();
+            let q = json!({"k":"pass","rp":7,"w":100,"h":100,"dr":11,"qo":11,"qx":0,
+                "att":[{"i":2,"m":0,"l":0,"f":129,"s":1,"lo":0,"st":1000301000,"slo":0,"sst":1000301000,"il":3,"fl":3,"ro":1}]});
+            evs.insert(1, q.clone());
+            let mut q2 = q;
+            q2["qo"] = json!(0);
+            q2["rp"] = json!(8);
+            evs.insert(2, q2);
+        }
+        let t = Timeline::from_json(&j).unwrap();
+        let fs = find(&t);
+        let dead_eps: Vec<usize> = fs.iter().filter(|x| x.rule == "dead_pass" && x.frame == 0).map(|x| x.ev).collect();
+        assert!(!dead_eps.contains(&1), "带遮挡查询的不报: {fs:#?}");
+        assert!(dead_eps.contains(&2), "不带查询的照报: {fs:#?}");
+        assert_eq!(frame_stats(&t, 0)["query_passes"], json!(1));
     }
 
     #[test]
