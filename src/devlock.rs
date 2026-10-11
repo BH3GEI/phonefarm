@@ -35,7 +35,7 @@ const POLL: Duration = Duration::from_secs(45);
 const HEARTBEAT: Duration = Duration::from_secs(60);
 
 /// 会碰设备、要拿锁的子命令。
-const LOCKED: [&str; 18] = [
+const LOCKED: [&str; 19] = [
     "run",
     "benchmark",
     "parallel",
@@ -54,6 +54,7 @@ const LOCKED: [&str; 18] = [
     "probe",
     "exec",
     "experiment",
+    "selftest",
 ];
 
 /// 从参数里剥下来的锁选项。
@@ -74,6 +75,10 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
         return false;
     }
     if rest.iter().any(|a| a == "-h" || a == "--help") {
+        return false;
+    }
+    // selftest report 只读本地证据目录、不带子命令只打用法, 都不碰设备
+    if sub == "selftest" && matches!(rest.first().map(|s| s.as_str()), None | Some("report")) {
         return false;
     }
     if matches!(sub, "eval" | "gpu-op") {
@@ -311,6 +316,9 @@ mod tests {
     fn only_device_touching_subcommands_take_the_lock() {
         assert!(needs_lock("gray-layer", &v(&["off"])));
         assert!(needs_lock("perf", &v(&["--serial", "S"])));
+        assert!(needs_lock("selftest", &v(&["run", "--out", "d"])));
+        assert!(!needs_lock("selftest", &v(&["report", "--root", "d"])));
+        assert!(!needs_lock("selftest", &v(&[])));
         for s in ["fleet", "devices", "keepalive", "serve", "parse-trace", "analyze", "report"] {
             assert!(!needs_lock(s, &[]), "{s}");
         }
