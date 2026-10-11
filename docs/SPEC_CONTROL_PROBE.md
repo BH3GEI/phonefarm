@@ -84,3 +84,46 @@ This prevents an earlier cold-state vendor CPU bound from being mistaken for
 the restore target of a loaded session. Pre-probe and restored snapshots must
 still equal that exact frozen snapshot; later unrelated drift remains BLOCKED.
 Legacy timing is unchanged.
+
+## Separate absolute capability preset (new observations only)
+
+`capability_absolute_v1` is an explicitly selected, receiver-owned preset accepted
+only by `confirmation-driver probe-controls`. It is never a fallback from
+`loaded_steady_v1` or `legacy_cold_v1`. Their numerical rules and all historical
+failures remain unchanged. Performance prepare/collect/qualification and GOL
+confirmation must reject this preset; no baseline, plan, statistical sample or
+performance qualification is emitted.
+
+This preset proves the narrower configuration readback/hold/restore capability.
+It retains the loaded preset's typed CPU/GPU/skin/battery identity and unit
+checks, minimum passive/HAL-severe-derived absolute caps, independent battery
+45C cap, HAL Ready=true, no status override, and status 0–2 at every reading.
+Before any ownership-bearing remote installation or candidate write it freezes
+receiver rules, metadata and a >=30s, >=6 complete-reading window with strict
+monotonic uptime and gaps <=6s. All points must satisfy absolute caps/HAL.
+Per-sensor range and mean +/-2C diagnostic bands are retained, but range <=3C
+and membership in those diagnostic bands are not capability predicates. The
+diagnostic artifact has its own schema and cannot be used as a stable reference.
+
+After this admission window the full initial control snapshot/sibling restore
+graph is frozen. A fresh host snapshot and the remote frozen thermal tool check
+absolute caps/HAL immediately before each write. The remote 11s hold samples
+before apply and at post-apply +1/+6/+11s, checks configuration readback at +1
+and +11, and emits an explicit thermal hold completion receipt binding actual
+apply-hold start/end uptime and four full readings. Receiver reconstruction
+requires exactly four readings, gaps <=6s, last reading at least 11s after the
+recorded hold start, and the pre-apply reading before that start. Missing,
+truncated, invalid-unit, hot/severe/override/unknown, incomplete hold or restore
+evidence blocks and keeps the same recovery barrier. Temperature fluctuation
+does not prove safe sustained clocks, identical workloads or comparable arms.
+
+The exact frozen tool set includes `thermal-purpose.txt` declaring this preset.
+The worker rejects it for every mode except `control_probe` and
+`reconcile_controls`, before acquiring write ownership. Consumers recompute
+all preset/diagnostic/tool bytes from retained raw data. Any mismatch or missing
+purpose marker blocks. Capability success still requires the existing four
+complete snapshots, exact initial/restored equality, owned-group quiescence and
+permanent remote session closure. Result scope remains
+`configuration_readback_only`, all performance/game/proof/promotion flags false.
+Explicit fake remains synthetic. No fourth live attempt is authorized by this
+host implementation change.

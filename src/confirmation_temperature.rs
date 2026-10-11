@@ -526,6 +526,48 @@ printf 'must_not_collect_next_point\n'
         }
     }
 }
+#[cfg(test)]
+mod capability_entry_tests {
+    use super::*;
+    #[test]
+    fn actual_worker_purpose_guard_rejects_performance_before_ownership() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("pf-cap-purpose-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("thermal-purpose.txt"), b"capability_absolute_v1\n").unwrap();
+        let guard = WORKER
+            .split_once("# A capability diagnostic session")
+            .unwrap()
+            .1
+            .split_once(r#"R="$D/$RUN""#)
+            .unwrap()
+            .0;
+        for mode in [
+            "sample",
+            "probe",
+            "reconcile",
+            "control_probe",
+            "reconcile_controls",
+        ] {
+            let script = format!(
+                "set -eu\nD={}\nMODE={}\n# A capability diagnostic session{}\nprintf entered\n",
+                quote(dir.to_str().unwrap()),
+                quote(mode),
+                guard
+            );
+            let out = Command::new("sh").arg("-c").arg(script).output().unwrap();
+            let allowed = matches!(mode, "control_probe" | "reconcile_controls");
+            assert_eq!(out.status.success(), allowed, "{mode}: {:?}", out);
+            if !allowed {
+                assert_eq!(out.status.code(), Some(87));
+                assert!(out.stdout.is_empty());
+            }
+        }
+        fs::remove_file(dir.join("thermal-purpose.txt")).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+}
+
 fn window_script() -> Result<String, String> {
     Ok(format!("#!/system/bin/sh\nset -eu\n{}{}", clock_helpers()?,
     "dur=${1:?duration}; interval=${2:?interval}\ncase $dur in ''|*[!0-9]*) exit 81;; esac\n[ \"$dur\" -ge 2 ] && [ \"$dur\" -le 1000 ] && [ \"$interval\" = 1 ] || exit 81\nD=$(dirname \"$0\"); start=$(thermal_uptime) || exit 81; n=0\nwhile :; do\n  if point=$(sh \"$D/thermal_sample.sh\"); then :; else code=$?; printf '%s\\n' \"$point\"; exit \"$code\"; fi\n  printf '%s\\n' \"$point\"; n=$((n+1))\n  if [ \"$n\" = 1 ]; then printf '%s\\n' \"$start\" > \"${3:?ready receipt}\"; fi\n  end=$(thermal_uptime) || exit 81\n  up=$(thermal_point_uptime \"$point\") || exit 81\n  if awk -v a=\"$start\" -v b=\"$up\" -v d=\"$dur\" 'BEGIN{exit !(b-a>=d)}'; then break; fi\n  thermal_wait_until \"$(thermal_deadline \"$up\" \"$interval\")\" \"$(thermal_deadline \"$up\" 6)\" \"$up\" || exit 81\ndone\nprintf '#phonefarm_thermal_window_complete dur=%s interval=%s start=%s end=%s samples=%s\\n' \"$dur\" \"$interval\" \"$start\" \"$end\" \"$n\"\n"))
@@ -616,6 +658,39 @@ pub(super) fn freeze_loaded(
     serial: &str,
     boot: &str,
 ) -> Result<FrozenTemperature, String> {
+    freeze_preset(t, lease, dir, serial, boot, "loaded_steady_v1")
+}
+pub(super) fn freeze_capability(
+    t: &mut Transport,
+    lease: &Lease,
+    dir: &Path,
+    serial: &str,
+    boot: &str,
+) -> Result<FrozenTemperature, String> {
+    require(
+        read_json(&dir.join("request.json"))?["schema"] == "phonefarm/control_probe_request@1",
+        "capability preset is control-only",
+    )?;
+    freeze_preset(t, lease, dir, serial, boot, "capability_absolute_v1")
+}
+fn reference_for(
+    profile: &crate::thermal_profile::Profile,
+    readings: &[crate::thermal_profile::Sample],
+) -> Result<crate::thermal_profile::ReferenceBand, String> {
+    if profile.id == "capability_absolute_v1" {
+        crate::thermal_profile::freeze_capability_diagnostics(profile, readings)
+    } else {
+        crate::thermal_profile::freeze_reference_band(profile, readings)
+    }
+}
+fn freeze_preset(
+    t: &mut Transport,
+    lease: &Lease,
+    dir: &Path,
+    serial: &str,
+    boot: &str,
+    preset: &str,
+) -> Result<FrozenTemperature, String> {
     let raw = collect_metadata(t, lease, dir, boot)?;
     let hal = checked(
         t,
@@ -632,7 +707,7 @@ pub(super) fn freeze_loaded(
         &mut inv,
         std::str::from_utf8(&hal).map_err(|e| e.to_string())?,
     )?;
-    let profile = crate::thermal_profile::resolve("loaded_steady_v1", &typed_metadata(&inv)?)?;
+    let profile = crate::thermal_profile::resolve(preset, &typed_metadata(&inv)?)?;
     let profile_sha = crate::thermal_profile::profile_sha256(&profile)?;
     save_json(
         dir,
@@ -646,7 +721,7 @@ pub(super) fn freeze_loaded(
     save_json(
         dir,
         "thermal-rules.json",
-        &json!({"schema":"phonefarm/frozen_thermal_producer@1","temperature_profile_id":"loaded_steady_v1",
+        &json!({"schema":"phonefarm/frozen_thermal_producer@1","temperature_profile_id":preset,
         "profile_sha256":profile_sha,"metadata_raw":raw["raw"],"hal_raw":halref,"warmup_script_sha256":sha(warmup_script.as_bytes()),
         "actual_serial":serial,"boot_id":boot,"freeze_at":if t.origin=="synthetic"{(chrono::Utc::now()-chrono::Duration::hours(5)).to_rfc3339()}else{now()},"scope":"temperature_only_before_control"}),
     )?;
@@ -685,13 +760,23 @@ pub(super) fn freeze_loaded(
         std::str::from_utf8(&bytes).map_err(|e| e.to_string())?,
         &paths,
     )?;
-    let reference = crate::thermal_profile::freeze_reference_band(&profile, &readings)?;
+    let reference = reference_for(&profile, &readings)?;
     save_json(
         dir,
         "thermal_reference.json",
         &serde_json::to_value(&reference).map_err(|e| e.to_string())?,
     )?;
-    let script = sampling_script(&profile, Some(&reference))?;
+    let script = sampling_script(
+        &profile,
+        if preset == "capability_absolute_v1" {
+            None
+        } else {
+            Some(&reference)
+        },
+    )?;
+    if preset == "capability_absolute_v1" {
+        save(dir, "thermal-purpose.txt", b"capability_absolute_v1\n")?;
+    }
     save(dir, "thermal_sample.sh", script.as_bytes())?;
     t.input_hashes
         .insert(dir.join("thermal_sample.sh"), sha(script.as_bytes()));
@@ -709,6 +794,22 @@ pub(super) fn freeze_loaded(
     Ok(FrozenTemperature { profile, reference })
 }
 pub(super) fn load_frozen(dir: &Path) -> Result<FrozenTemperature, String> {
+    load_preset(dir, "loaded_steady_v1")
+}
+pub(super) fn load_capability_frozen(dir: &Path) -> Result<FrozenTemperature, String> {
+    let request = read_json(&dir.join("request.json"))?;
+    require(
+        request["schema"] == "phonefarm/control_probe_request@1"
+            && request["temperature_profile_id"] == "capability_absolute_v1",
+        "capability preset is control-only",
+    )?;
+    require(
+        bounded(&dir.join("thermal-purpose.txt"), 128)? == b"capability_absolute_v1\n",
+        "capability purpose marker missing or changed",
+    )?;
+    load_preset(dir, "capability_absolute_v1")
+}
+fn load_preset(dir: &Path, preset: &str) -> Result<FrozenTemperature, String> {
     let state = read_json(&dir.join("state.json"))?;
     let rules = read_json(&dir.join("thermal-rules.json"))?;
     let raw = bounded(&dir.join("thermal_metadata.raw.tsv"), 256 * 1024)?;
@@ -721,10 +822,10 @@ pub(super) fn load_frozen(dir: &Path) -> Result<FrozenTemperature, String> {
         &mut inv,
         std::str::from_utf8(&hal).map_err(|e| e.to_string())?,
     )?;
-    let profile = crate::thermal_profile::resolve("loaded_steady_v1", &typed_metadata(&inv)?)?;
+    let profile = crate::thermal_profile::resolve(preset, &typed_metadata(&inv)?)?;
     require(
         rules["schema"] == "phonefarm/frozen_thermal_producer@1"
-            && rules["temperature_profile_id"] == "loaded_steady_v1"
+            && rules["temperature_profile_id"] == preset
             && rules["profile_sha256"] == crate::thermal_profile::profile_sha256(&profile)?
             && rules["actual_serial"] == state["serial"]
             && rules["boot_id"] == state["boot_id"],
@@ -748,7 +849,7 @@ pub(super) fn load_frozen(dir: &Path) -> Result<FrozenTemperature, String> {
         std::str::from_utf8(&warm).map_err(|e| e.to_string())?,
         &paths,
     )?;
-    let reference = crate::thermal_profile::freeze_reference_band(&profile, &readings)?;
+    let reference = reference_for(&profile, &readings)?;
     let retained: crate::thermal_profile::ReferenceBand =
         serde_json::from_value(read_json(&dir.join("thermal_reference.json"))?)
             .map_err(|e| e.to_string())?;
@@ -758,7 +859,15 @@ pub(super) fn load_frozen(dir: &Path) -> Result<FrozenTemperature, String> {
     )?;
     require(
         bounded(&dir.join("thermal_sample.sh"), 2 * 1024 * 1024)?
-            == sampling_script(&profile, Some(&reference))?.as_bytes(),
+            == sampling_script(
+                &profile,
+                if preset == "capability_absolute_v1" {
+                    None
+                } else {
+                    Some(&reference)
+                },
+            )?
+            .as_bytes(),
         "thermal readback execution script differs",
     )?;
     require(
@@ -818,6 +927,32 @@ pub(super) fn loaded_snapshot(
     temperature: &FrozenTemperature,
     label: &str,
 ) -> Result<Value, String> {
+    require(
+        temperature.profile.id == "loaded_steady_v1",
+        "performance point requires loaded reference preset",
+    )?;
+    thermal_snapshot(t, lease, dir, temperature, label)
+}
+pub(super) fn capability_snapshot(
+    t: &mut Transport,
+    lease: &Lease,
+    dir: &Path,
+    temperature: &FrozenTemperature,
+    label: &str,
+) -> Result<Value, String> {
+    require(
+        temperature.profile.id == "capability_absolute_v1",
+        "capability point requires absolute preset",
+    )?;
+    thermal_snapshot(t, lease, dir, temperature, label)
+}
+fn thermal_snapshot(
+    t: &mut Transport,
+    lease: &Lease,
+    dir: &Path,
+    temperature: &FrozenTemperature,
+    label: &str,
+) -> Result<Value, String> {
     let raw = checked(
         t,
         "thermal_snapshot",
@@ -845,16 +980,18 @@ pub(super) fn loaded_snapshot(
         assessed.compliant,
         "loaded thermal point is outside frozen operational profile",
     )?;
-    for (path, v) in &assessed.normalized_c {
-        let band = temperature
-            .reference
-            .bands
-            .get(path)
-            .ok_or("thermal point reference missing")?;
-        require(
-            *v >= band.low_c && *v <= band.high_c,
-            "loaded point outside frozen baseline-only reference band",
-        )?;
+    if temperature.profile.id != "capability_absolute_v1" {
+        for (path, v) in &assessed.normalized_c {
+            let band = temperature
+                .reference
+                .bands
+                .get(path)
+                .ok_or("thermal point reference missing")?;
+            require(
+                *v >= band.low_c && *v <= band.high_c,
+                "loaded point outside frozen baseline-only reference band",
+            )?;
+        }
     }
     let receipt = json!({"checked_at":now(),"profile_sha256":crate::thermal_profile::profile_sha256(&temperature.profile)?,"raw":readings[0],"assessment":assessed,"scope":"temperature_single_point_only"});
     save_json(dir, &format!("{label}-thermal.json"), &receipt)?;
@@ -871,17 +1008,80 @@ pub(super) fn assess_hold(
         .iter()
         .map(|s| s.path.clone())
         .collect::<Vec<_>>();
-    let readings = samples(raw, &paths)?;
-    let result = crate::thermal_profile::evaluate_against_reference(
-        &temperature.profile,
-        &temperature.reference,
-        &readings,
-    )?;
+    let capability = temperature.profile.id == "capability_absolute_v1";
+    let (body, completion) = if capability {
+        let (body, tail) = raw
+            .split_once("#phonefarm_control_hold_complete ")
+            .ok_or("control thermal hold completion missing")?;
+        require(
+            tail.lines().count() == 1 && raw.ends_with('\n'),
+            "control hold completion malformed",
+        )?;
+        let mut fields = BTreeMap::new();
+        for field in tail.trim().split_whitespace() {
+            let (k, v) = field
+                .split_once('=')
+                .ok_or("hold completion field malformed")?;
+            require(
+                fields.insert(k, v).is_none(),
+                "duplicate hold completion field",
+            )?;
+        }
+        require(
+            fields.keys().copied().collect::<BTreeSet<_>>()
+                == BTreeSet::from(["start", "end", "samples", "profile"])
+                && fields["profile"] == "capability_absolute_v1"
+                && fields["samples"] == "4",
+            "hold completion keys/count/purpose differ",
+        )?;
+        let number = |key| {
+            fields[key]
+                .parse::<f64>()
+                .map_err(|_| "hold completion clock invalid".to_string())
+        };
+        let start = number("start")?;
+        let end = number("end")?;
+        require(
+            start.is_finite() && end.is_finite() && start >= 0. && end - start >= 11.,
+            "control hold shorter than 11s or clock unknown",
+        )?;
+        (
+            body,
+            json!({"start_uptime_s":start,"end_uptime_s":end,"samples":4,"profile_id":"capability_absolute_v1"}),
+        )
+    } else {
+        (raw, Value::Null)
+    };
+    let readings = samples(body, &paths)?;
+    if capability {
+        let start = completion["start_uptime_s"].as_f64().ok_or("hold start")?;
+        let end = completion["end_uptime_s"].as_f64().ok_or("hold end")?;
+        require(
+            readings.len() == 4
+                && readings[0].uptime_s <= start
+                && start - readings[0].uptime_s <= 6.
+                && readings[1].uptime_s >= start + 1.
+                && readings[2].uptime_s >= start + 6.
+                && readings[3].uptime_s >= start + 11.
+                && readings[3].uptime_s <= end
+                && end - readings[3].uptime_s <= 6.,
+            "control thermal readings do not cover the complete registered hold",
+        )?;
+    }
+    let result = if capability {
+        crate::thermal_profile::evaluate_window(&temperature.profile, &readings)?
+    } else {
+        crate::thermal_profile::evaluate_against_reference(
+            &temperature.profile,
+            &temperature.reference,
+            &readings,
+        )?
+    };
     require(
         result.compliant,
         "control hold temperature escaped frozen reference/operational window",
     )?;
-    let report = json!({"profile_sha256":crate::thermal_profile::profile_sha256(&temperature.profile)?,"assessment":result,"scope":"provided_control_hold_temperature_readings_only"});
+    let report = json!({"temperature_profile_id":temperature.profile.id,"stable_reference_required":!capability,"completion":completion,"diagnostic_reference":if capability{serde_json::to_value(&temperature.reference).map_err(|e|e.to_string())?}else{Value::Null},"profile_sha256":crate::thermal_profile::profile_sha256(&temperature.profile)?,"assessment":result,"scope":"provided_control_hold_temperature_readings_only"});
     save_json(dir, "control-hold-thermal.json", &report)?;
     Ok(report)
 }

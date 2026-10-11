@@ -63,3 +63,16 @@ Installing/downloading a game is not a rendering baseline. Versioned typed ENV,
 new profile/receiver policy hashes and full restoration receipts must be consumed
 before a loaded profile can qualify an experiment. Probe-only results retain
 eligible/proof/promotion=false. Legacy ENV is not silently upgraded.
+
+## Control capability purpose
+
+The pure resolver additionally recognizes `capability_absolute_v1` for the
+control-only producer. Its selected sensors, units, cap derivation, HAL and
+window integrity rules equal the typed loaded preset. Its >=30s/≥6 diagnostic
+admission does not enforce the loaded <=3C range or mean +/-2C reference band.
+`freeze_capability_diagnostics` emits
+`phonefarm/thermal_capability_diagnostics@1`; `freeze_reference_band` and
+`evaluate_against_reference` explicitly reject this ID. Diagnostic ranges/bands
+are not stable-reference evidence. Endpoint allowlists must independently
+reject it for performance admission and observations. All loaded/cold serialized
+profiles, numerical rules and reference contracts retain their existing meaning.

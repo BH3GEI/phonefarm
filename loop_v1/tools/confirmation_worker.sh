@@ -7,6 +7,11 @@ case "$TOKEN:$RUN" in *[!a-zA-Z0-9_:-]*) exit 70 ;; esac
 [ "$(cat "$D/owner")" = "$TOKEN $BOOT" ] || exit 71
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT" ] || exit 72
 [ ! -e "$D/session.closed" ] || exit 86
+# A capability diagnostic session cannot enter any performance sampling mode.
+if [ -e "$D/thermal-purpose.txt" ]; then
+  [ -f "$D/thermal-purpose.txt" ] && [ "$(cat "$D/thermal-purpose.txt")" = capability_absolute_v1 ] || exit 87
+  case "$MODE" in control_probe|reconcile_controls) ;; *) exit 87 ;; esac
+fi
 R="$D/$RUN"
 #phonefarm_thermal_clock_begin
 thermal_uptime() {
@@ -361,6 +366,10 @@ case "$MODE" in
       fi
     done < "$D/$RUN.plan.tsv"
     [ "$MODE" != control_probe ] || snapshot snapshot_after_run
+    if [ -f "$D/thermal-purpose.txt" ]; then
+      thermal_hold_end=$(thermal_uptime) || exit 81
+      printf '#phonefarm_control_hold_complete start=%s end=%s samples=4 profile=capability_absolute_v1\n' "$thermal_hold_start" "$thermal_hold_end" >> "$R/thermal_hold.raw.tsv"
+    fi
     restore_controls
     [ "$MODE" = control_probe ] || restore_trace
     snapshot snapshot_restored

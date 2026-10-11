@@ -697,6 +697,9 @@ mod tests {
         loaded.thermal_reference_sha256 = Some("unknown".into());
         assert!(loaded.validate().is_err());
         loaded.thermal_reference_sha256 = Some("cd".repeat(32));
+        loaded.temperature_profile_id = Some("capability_absolute_v1".into());
+        assert!(loaded.validate().is_err());
+        loaded.temperature_profile_id = Some("loaded_steady_v1".into());
         loaded.version = 1;
         assert!(loaded.validate().is_err());
     }

@@ -45,14 +45,17 @@ cpu.policy0.scaling_min=100
 '''
 def thermal_hal():
     status='3' if fail=='thermal_severe' else '2'
-    out=f'IsStatusOverride: false\nThermal Status: {status}\nHAL Ready: true\n'
+    override='true' if fail=='thermal_override' else 'false'
+    out=f'IsStatusOverride: {override}\nThermal Status: {status}\nHAL Ready: true\n'
     for ty,name,t in [(0,'CPU0',95),(1,'GPU0',95),(2,'battery',80),(3,'skin',60)]:
         out+=f'TemperatureThreshold{{mType={ty}, mName={name}, mHotThrottlingThresholds=[NaN, NaN, NaN, {t}.0, NaN, NaN, 115.0], mColdThrottlingThresholds=[]}}\n'
     return out
 def thermal_raw(step=5,up=None):
     up=state.get('thermal_uptime',2000.) if up is None else up;state['thermal_uptime']=up+step
+    call=state.get('thermal_calls',0);state['thermal_calls']=call+1
     out=f'#phonefarm_thermal_sample v1\nUPTIME\t{up}\n'
     for path,v in [('/sys/class/thermal/thermal_zone0/temp',80000),('/sys/class/thermal/thermal_zone1/temp',60000),('/sys/class/thermal/thermal_zone2/temp',50000),('/sys/class/power_supply/battery/temp',390)]:
+        if 'thermal_zone0' in path and fail in ['capability_fluctuating','thermal_drift_31']:v+=((call%2)* (7700 if fail=='capability_fluctuating' else 3100))
         if fail=='thermal_missing' and 'battery' in path:continue
         if fail=='thermal_hot_before_probe' and state['files'] and 'thermal_zone0' in path:v=92000
         out+=f'TEMP\t{path}\t{v}\n'
@@ -77,10 +80,12 @@ elif cmd=='sh':
     if b'#phonefarm_thermal_metadata v1' in data:
         print('#phonefarm_thermal_metadata v1\nBOOT\tfake-boot')
         for i,ty,dom,t in [(0,'cpu-0','cpu',108000),(1,'gpuss-0','gpu',95000),(2,'skin-msm-therm','skin',60000)]:
-            print(f'SENSOR\t/sys/class/thermal/thermal_zone{i}/temp\t{ty}\t{dom}\tmilli_celsius\nTRIP\t/sys/class/thermal/thermal_zone{i}/temp\tpassive\t{t}')
+            unit='deci_celsius' if fail=='thermal_wrong_unit' and dom=='cpu' else 'milli_celsius'
+            print(f'SENSOR\t/sys/class/thermal/thermal_zone{i}/temp\t{ty}\t{dom}\t{unit}\nTRIP\t/sys/class/thermal/thermal_zone{i}/temp\tpassive\t{t}')
         print('SENSOR\t/sys/class/power_supply/battery/temp\tbattery\tbattery\tdeci_celsius\n#end')
     elif b'#phonefarm_thermal_sample v1' in data:
         count=data.count(b'sh -c') or 1
+        if fail=='thermal_short_admission' and count>=6:count=5
         for n in range(count):sys.stdout.write(thermal_raw(5,1045977.+state['runs']*20 if count==1 else None))
         if fail=='loaded_cpu_drift' and count>=6:
             state['snapshot_before_warmup']=state['snapshot']
@@ -122,7 +127,15 @@ elif cmd.startswith('setsid sh ') and '/worker.sh ' in cmd:
         if key=='setting.system.refresh_rate_mode':receipt+=f'{key}.mode{val}_fps=120 (readback={val})\n'
         state['files'][r+'/probe_receipt.txt']=receipt
         if mode=='control_probe' and d+'/thermal_sample.sh' in state['files']:
-            state['files'][r+'/thermal_hold.raw.tsv']=''.join(thermal_raw(5) for _ in range(4))
+            if d+'/thermal-purpose.txt' in state['files']:
+                start=state.get('thermal_uptime',2000.)
+                series=''.join(thermal_raw(1,start+offset) for offset in [0,1.1,6.1,11.1])
+                if fail=='control_hold_hot':series=series.replace('\t80000\n','\t92000\n')
+                if fail=='control_hold_severe':series=series.replace('Thermal Status: 2','Thermal Status: 3')
+                series+=f'#phonefarm_control_hold_complete start={start+.05} end={start+11.15} samples=4 profile=capability_absolute_v1\n'
+                if fail=='control_hold_incomplete':series=series.split('#phonefarm_control_hold_complete')[0]
+                state['files'][r+'/thermal_hold.raw.tsv']=series
+            else:state['files'][r+'/thermal_hold.raw.tsv']=''.join(thermal_raw(5) for _ in range(4))
         print('PROBE_COMPLETE')
     elif mode=='sample':
         duration,lead,envdur=int(words[7]),int(words[8]),int(words[9]);role=words[10]
