@@ -1,0 +1,26 @@
+{
+  "captures": 3,
+  "gap_s": 20,
+  "mode": "frameaudit-ts",
+  "pkg": "com.miHoYo.Yuanshen",
+  "pkg_version": "versionName=7.1.0_48052158_48145775",
+  "restore": "已摘层。回读:\n  debug.vulkan.layers = []\n  state               = [#adb_exit=1]",
+  "result": [
+    {
+      "file": "fa_1.json",
+      "go": 1,
+      "wall": "2026-10-11T15:16:03.572050-07:00"
+    },
+    {
+      "file": "fa_2.json",
+      "go": 2,
+      "wall": "2026-10-11T15:16:31.978218-07:00"
+    },
+    {
+      "file": "fa_3.json",
+      "go": 3,
+      "wall": "2026-10-11T15:17:00.426536-07:00"
+    }
+  ],
+  "serial": "91253241019A"
+}
