@@ -16,8 +16,9 @@ cannot be uploaded through this facility.
 
 The registered `kgsl_queued_origin_spf_v1` main phase adds exactly four names:
 `render_ownership.sh`, `render_args.tsv`, `render_reader.elf` and the existing
-`ftrace-trace_clock` restoration file. It requires loaded confirmation purpose;
-control-only, capability and nonloaded purposes cannot select it. The maximum
+`ftrace-trace_clock` restoration file. Both existing confirmation thermal routes
+remain supported: legacy cold has16 files for one control and loaded has18.
+Control-only and capability purposes cannot select it. The maximum
 set is49 names for32 validated controls. The ELF receives only a receiver-fixed
 0700 mode in the batched installer; every fresh verifier requires it executable
 as well as matching exact length and SHA256. Verification never repairs its

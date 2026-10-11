@@ -87,8 +87,8 @@ pub(super) fn names(
         "capability fixed tools are control-only",
     )?;
     require(
-        !queued || loaded && !control_only && !capability,
-        "queued fixed tools require loaded confirmation purpose",
+        !queued || !control_only && !capability,
+        "queued fixed tools require confirmation purpose",
     )?;
     let mut n = [
         "worker.sh",
@@ -310,6 +310,9 @@ mod tests {
             Self::with_queued(false)
         }
         fn with_queued(queued: bool) -> Self {
+            Self::with_profile(true, queued)
+        }
+        fn with_profile(loaded: bool, queued: bool) -> Self {
             let base = std::env::var_os("PHONEFARM_FIXED_TOOLS_TEST_ARTIFACT_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(std::env::temp_dir);
@@ -323,7 +326,7 @@ mod tests {
             let input = root.join("input");
             std::fs::create_dir(&input).unwrap();
             let remote = root.join("owned-remote");
-            let files = names(false, true, false, 1, queued).unwrap();
+            let files = names(false, loaded, false, 1, queued).unwrap();
             for name in &files {
                 // Nontext bytes exercise the decoder without ever executing the uploaded file.
                 let bytes = if name == "worker.sh" || name == "render_reader.elf" {
@@ -431,30 +434,32 @@ mod tests {
     #[test]
     fn queued_reader_binary_mode_is_installed_then_freshly_verified_without_repair() {
         use std::os::unix::fs::PermissionsExt;
-        let mut f = Fixture::with_queued(true);
-        f.install();
-        let reader = f.remote.join("render_reader.elf");
-        assert_eq!(
-            std::fs::read(&reader).unwrap(),
-            (0..=255).collect::<Vec<u8>>()
-        );
-        assert_eq!(
-            std::fs::metadata(&reader).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(f.bundle.manifest.count, 18);
-        let receipt = f.verify();
-        assert_eq!(receipt.code, 0);
-        f.bundle.accept_verify(&receipt.stdout).unwrap();
-        assert_eq!(f.transport.sequence, 2);
-        std::fs::set_permissions(&reader, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let receipt = f.verify();
-        assert_eq!(receipt.code, 93);
-        assert!(f.bundle.accept_verify(&receipt.stdout).is_err());
-        assert_eq!(
-            std::fs::metadata(&reader).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        for loaded in [false, true] {
+            let mut f = Fixture::with_profile(loaded, true);
+            f.install();
+            let reader = f.remote.join("render_reader.elf");
+            assert_eq!(
+                std::fs::read(&reader).unwrap(),
+                (0..=255).collect::<Vec<u8>>()
+            );
+            assert_eq!(
+                std::fs::metadata(&reader).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(f.bundle.manifest.count, if loaded { 18 } else { 16 });
+            let receipt = f.verify();
+            assert_eq!(receipt.code, 0);
+            f.bundle.accept_verify(&receipt.stdout).unwrap();
+            assert_eq!(f.transport.sequence, 2);
+            std::fs::set_permissions(&reader, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let receipt = f.verify();
+            assert_eq!(receipt.code, 93);
+            assert!(f.bundle.accept_verify(&receipt.stdout).is_err());
+            assert_eq!(
+                std::fs::metadata(&reader).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
     #[test]
     fn fresh_actual_verifier_rejects_changed_missing_symlink_and_fifo() {
@@ -576,7 +581,7 @@ mod tests {
         );
         assert!(names(false, true, true, 1, false).is_err());
         assert!(names(true, true, false, 2, false).is_err());
-        assert!(names(false, false, false, 1, true).is_err());
+        assert!(names(false, false, false, 1, true).is_ok());
         assert!(names(true, true, false, 1, true).is_err());
         assert!(names(true, true, true, 1, true).is_err());
         let n = names(false, true, false, 1, false).unwrap();

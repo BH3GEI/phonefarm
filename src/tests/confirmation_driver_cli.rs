@@ -1564,6 +1564,21 @@ fn queued_origin_actual_prepare_freeze_collect_retains_synthetic_boundary() {
     }
 }
 #[test]
+fn queued_origin_legacy_thermal_request_keeps_existing_native_route() {
+    let f = origin_fixture();
+    let mut r = f.read("request.json");
+    r["temperature_profile_id"] = json!("legacy_cold_v1");
+    f.write("request.json", &r);
+    let (code, p) = f.prepare("");
+    assert_eq!(code, 0, "{p}");
+    assert_eq!(p["status"], "SIMULATED_BLOCKED");
+    assert_eq!(f.read("session/tools.manifest.json")["count"], 16);
+    assert_eq!(f.read("session/conditions.json")["schema"], "phonefarm/confirmation_conditions@3");
+    assert!(!f.dir.join("session/thermal_sample.sh").exists());
+    assert!(f.dir.join("session/render-contract.json").exists());
+    assert!(f.dir.join("session/render-helper-removed.json").exists());
+}
+#[test]
 fn queued_origin_foreign_unmatched_loss_never_prepare() {
     for fail in ["origin_foreign", "origin_unmatched", "origin_loss"] {
         let f = origin_fixture();
