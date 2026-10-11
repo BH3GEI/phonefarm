@@ -1223,8 +1223,11 @@ fn fixed_tools_loaded_prepare_batches_two_calls_and_freshly_rechecks_each_baseli
         let bytes = remote["files"][format!("{d}/{name}")]
             .as_str()
             .unwrap()
-            .as_bytes();
-        assert_eq!(file["sha256"], sha(bytes));
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).expect("fake remote Latin-1 byte code point"))
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, std::fs::read(f.dir.join("session").join(name)).unwrap(), "{name}");
+        assert_eq!(file["sha256"], sha(&bytes));
         assert_eq!(file["bytes"], bytes.len());
     }
     for i in 0..3 {
