@@ -60,6 +60,34 @@ def thermal_raw(step=5,up=None):
         if fail=='thermal_hot_before_probe' and state['files'] and 'thermal_zone0' in path:v=92000
         out+=f'TEMP\t{path}\t{v}\n'
     return out+'#hal_begin\n'+thermal_hal()+'#hal_end\n#end\n'
+def render_raw(up, active=True):
+    raw=(root/'render-origin.raw.tsv').read_text().replace('UPTIME_END_PLACEHOLDER',str(up+.1)).replace('UPTIME_PLACEHOLDER',str(up))
+    if active:raw=raw.replace('[local] boot global','local [boot] global')
+    if fail=='origin_loss':raw=raw.replace('overrun: 0','overrun: 1')
+    if fail=='origin_epoch' and state['runs']>3:raw=raw.replace('320740','320741')
+    return raw
+
+def render_trace(trace,base):
+    records=[]
+    for line in trace.splitlines():
+        m=re.match(r'\s*(.*?)-(\d+)\s+\[(\d+)\]\s+\S+\s+(\d+\.\d+):\s+(\w+):\s*(.*)',line)
+        if not m:continue
+        if m[5]=='adreno_cmdbatch_submitted':
+            tid=32074 if m[1].strip()=='UnityGfxDeviceW' else 2222
+            if fail=='origin_foreign':tid=2222
+            kv=dict(re.findall(r'(\w+)=([^ ]+)',m[6]));t=float(m[4])
+            records.append((t-.0002,f' UnityGfxDeviceW-{tid} [000] ..... {t-.0002:.6f}: adreno_cmdbatch_queued: ctx={kv["ctx"]} ctx_prio=0 ts={kv["ts"]} queued=2 flags=IB_LIST'))
+            records.append((t,f' worker-555 [003] ..... {t:.6f}: adreno_cmdbatch_submitted: ctx={kv["ctx"]} ts={kv["ts"]} flags=IB_LIST'))
+    if fail in ['origin_spf1','origin_spf3']:
+        records=[];spf=int(fail[-1]);pattern=[15,15,16,17,18,18,17,16] if spf==1 else [2,5,26];t=base+1.15
+        for n in range(140):
+            if t>base+3.5:break
+            records.extend([(t-.0002,f' game-32074 [000] ..... {t-.0002:.6f}: adreno_cmdbatch_queued: ctx=41 ctx_prio=0 ts={n+1} queued=2 flags=IB_LIST'),(t,f' worker-555 [003] ..... {t:.6f}: adreno_cmdbatch_submitted: ctx=41 ts={n+1} flags=IB_LIST')]);t+=pattern[n%len(pattern)]/1000
+    if fail=='origin_tail_scope' and state['runs']>3:
+        records.extend([(base+3.55,f' game-32000 [000] ..... {base+3.55:.6f}: adreno_cmdbatch_queued: ctx=99 ctx_prio=0 ts=1 queued=1 flags=IB_LIST'),(base+3.65,f' worker-555 [003] ..... {base+3.65:.6f}: adreno_cmdbatch_submitted: ctx=99 ts=1 flags=IB_LIST')])
+    if fail=='origin_unmatched':records=[(t,l) for t,l in records if 'queued:' not in l]
+    records.sort()
+    return f'#loop_v1_meta capture_start_uptime={base+1.1} capture_end_uptime={base+3.56} duration_req=2 join_start_uptime={base-.3} tail_end_uptime={base+6.56} join_end_uptime={base+6.8}\n'+'\n'.join(l for _,l in records)+'\n'
 args=sys.argv[1:];assert args[:2]==['-s','fake-target'] and args[2]=='shell'
 cmd=shlex.split(args[3]);assert cmd[:2]==['su','-c']; cmd=cmd[2]; data=sys.stdin.buffer.read()
 with (root/'argv.jsonl').open('a') as f:f.write(json.dumps({'argv':args,'command':cmd,'stdin':data.decode(),'simulation':True})+'\n')
@@ -76,6 +104,8 @@ if cmd.startswith('set -eu; id;'):
     print('uid=0(root) gid=0(root)');print('fake-serial');print('changed-boot' if fail=='boot' else 'fake-boot');print('/system/bin/setsid')
 elif cmd=='dumpsys activity activities': print('mResumedActivity: ActivityRecord x '+('com.example.crashed/.Home' if fail=='foreground' else 'com.example.game/.Game')+' t1')
 elif cmd=='timeout 8 dumpsys thermalservice':sys.stdout.write(thermal_hal())
+elif cmd.startswith('sh -s -- ') and b'#phonefarm_render_witness v2' in data:
+    sys.stdout.write(render_raw(1045975.,False))
 elif cmd=='sh':
     if b'#phonefarm_thermal_metadata v1' in data:
         print('#phonefarm_thermal_metadata v1\nBOOT\tfake-boot')
@@ -90,7 +120,9 @@ elif cmd=='sh':
         if fail=='loaded_cpu_drift' and count>=6:
             state['snapshot_before_warmup']=state['snapshot']
             state['snapshot']=state['snapshot'].replace('cpu.policy0.scaling_max=1000','cpu.policy0.scaling_max=600')
-    elif b'# device_snapshot' in data: sys.stdout.write(state['snapshot'])
+    elif b'# device_snapshot' in data:
+        if b'ftrace.trace_clock=' in data and 'ftrace.trace_clock=' not in state['snapshot']:state['snapshot']=state['snapshot'].replace('# end','ftrace.trace_clock=[local] boot global\n# end')
+        sys.stdout.write(state['snapshot'])
     elif b'probe_sysparam' in data:
         print('# probe_sysparam v1\ncpu.policies=0')
         max_freq='600' if 'cpu.policy0.scaling_max=600' in state['snapshot'] else '1000'
@@ -143,6 +175,14 @@ elif cmd.startswith('setsid sh ') and '/worker.sh ' in cmd:
         trace=(root/'trace_fixture.txt').read_text().split('\n',1)[1]
         trace=re.sub(r'10459\d{2}\.\d+',lambda m:f'{float(m[0])+(base-1045978):.6f}',trace)
         state['files'][r+'/trace.txt']=f'#loop_v1_meta capture_start_uptime={base+1.1} capture_end_uptime={base+3.56} duration_req=2\n'+trace
+        if d+'/render_ownership.sh' in state['files']:
+            state['files'][r+'/trace.txt']=render_trace(trace,base)
+            state['files'][r+'/render-before.raw.tsv']=render_raw(base-.2)
+            after=render_raw(base+6.9)
+            for cpu in [0,3]:
+                n=sum(f'[{cpu:03}]' in line for line in state['files'][r+'/trace.txt'].splitlines());after=after.replace(f'BEGIN\tstats/cpu{cpu}\nentries: 0',f'BEGIN\tstats/cpu{cpu}\nentries: {n}')
+            state['files'][r+'/render-after.raw.tsv']=render_raw(base+6.6)
+            state['files'][r+'/render-final.raw.tsv']=after
         env=f'#sample_env v1 dur={envdur} interval=1\n#battery_status=Discharging\n#battery_capacity=80\n#fan_state=none\n# fixture-run={run}\n'
         for n in range(envdur):env+=f'ENV {base+n} 3850000 -1000000 NA 0 0 cpu-0 39000\n'
         env+='#battery_status_after=Discharging\n#sample_env done\n'

@@ -23,6 +23,7 @@ mod crosscheck;
 mod framecheck;
 mod llm;
 mod looptrace;
+mod render_attribution;
 mod sysparam;
 mod vksreport;
 mod parallel;

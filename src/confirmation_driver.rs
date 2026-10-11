@@ -98,6 +98,8 @@ struct Request {
     temperature_profile_id: Option<String>,
     #[serde(default)]
     goal: Option<Goal>,
+    #[serde(default)]
+    render_attribution_profile_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -202,6 +204,14 @@ fn request(path: &Path) -> Result<(Request, Vec<u8>, Vec<u8>, Vec<u8>), String> 
         req.goal != Some(Goal::DisplaySmoothness),
         "driver supports explicit render_efficiency/render_cadence only; display not verified",
     )?;
+    require(
+        req.render_attribution_profile_id
+            .as_deref()
+            .is_none_or(|id| id == crate::render_attribution::PROFILE)
+            && (req.render_attribution_profile_id.is_none()
+                || req.goal == Some(Goal::RenderCadence)),
+        "unknown ownership profile or non-cadence attribution goal",
+    )?;
     let mut ids = BTreeSet::new();
     for (i, p) in req.schedule.iter().enumerate() {
         require(
@@ -252,6 +262,10 @@ fn roots() -> Result<(PathBuf, PathBuf, Duration), String> {
         .map_err(|_| "invalid lease timeout")?;
     Ok((root, legacy, Duration::from_millis(ms)))
 }
+fn snapshot_source(render: bool) -> String {
+    if render { SNAPSHOT.replace("echo \"# end\"", "printf 'ftrace.trace_clock=%s\\n' \"$(cat /sys/kernel/tracing/trace_clock)\"\necho \"# end\"") }
+    else { SNAPSHOT.into() }
+}
 fn start_transport(dir: &Path, req: &Request, phase: &str) -> Result<Transport, String> {
     start_transport_target(dir, &req.transport, phase)
 }
@@ -260,10 +274,12 @@ fn start_transport_target(dir: &Path, target: &Target, phase: &str) -> Result<Tr
     fs::create_dir(&p).map_err(|e| e.to_string())?;
     let program = dir.join("transport.snapshot");
     let mut input_hashes = BTreeMap::new();
+    let render = read_json(&dir.join("request.json"))?.get("render_attribution_profile_id").is_some_and(|v| !v.is_null());
+    let snapshot = snapshot_source(render);
     for (name, expected) in [
         ("worker.sh", WORKER),
         ("bootstrap.sh", BOOTSTRAP),
-        ("snapshot.sh", SNAPSHOT),
+        ("snapshot.sh", snapshot.as_str()),
         ("probe_readonly.sh", PROBE),
         ("sample_env.sh", ENV),
         ("cold.sh", COLD),
@@ -458,6 +474,20 @@ fn frozen_names(dir: &Path) -> Result<BTreeSet<String>, String> {
     if read_json(&dir.join("request.json"))?["temperature_profile_id"] == "loaded_steady_v1" {
         names.extend(temperature::frozen_names().iter().map(|s| (*s).to_owned()));
     }
+    if read_json(&dir.join("request.json"))?["render_attribution_profile_id"]
+        == crate::render_attribution::PROFILE
+    {
+        names.extend(
+            [
+                "render_ownership.sh",
+                "render_args.tsv",
+                "render-initial.raw.tsv",
+                "ftrace-trace_clock",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
+    }
     Ok(names)
 }
 fn verify(dir: &Path) -> Result<(), String> {
@@ -540,6 +570,10 @@ fn prepared_names(dir: &Path) -> Result<BTreeSet<String>, String> {
         } {
             names.insert(format!("admission_{i}-{suffix}"));
         }
+    }
+    if read_json(&dir.join("request.json"))?["render_attribution_profile_id"]==crate::render_attribution::PROFILE {
+        names.insert("render-contract.json".into());
+        for i in 0..3 {for suffix in ["render-before.raw.tsv","render-after.raw.tsv"]{names.insert(format!("admission_{i}-{suffix}"));}}
     }
     Ok(names)
 }
@@ -877,16 +911,43 @@ fn sample(
         raw["cold"] = save_json(dir, &format!("{id}-cold.json"), &cold)?;
     }
     raw["probe"] = file_ref(dir, "probe.txt")?;
+    if req.render_attribution_profile_id.is_some() {
+        for (key, file) in [
+            ("render_before", "render-before.raw.tsv"),
+            ("render_after", "render-after.raw.tsv"),
+            ("render_final", "render-final.raw.tsv"),
+        ] {
+            raw[key] = save(
+                dir,
+                &format!("{id}-{file}"),
+                &pull(t, lease, state, id, file)?,
+            )?;
+        }
+    }
     let finished = if fake { virtual_finished } else { now() };
     let artifact = if role == "baseline" {
         "baseline.json"
     } else {
         "candidate.json"
     };
-    let r = json!({"schema":if loaded{"phonefarm/run_one_bundle@2"}else{"phonefarm/run_one_bundle@1"},"evidence_origin":if fake{"synthetic"}else{"live_device"},"phase":phase,"run_id":id,"pair_id":pair,"sample_role":role,"device_serial":actual.0,"started_at":started,"finished_at":finished,"conditions":file_ref(dir,"conditions.json")?,"artifact":file_ref(dir,artifact)?,"raw":raw});
+    let r = json!({"schema":if req.render_attribution_profile_id.is_some(){"phonefarm/run_one_bundle@3"}else if loaded{"phonefarm/run_one_bundle@2"}else{"phonefarm/run_one_bundle@1"},"evidence_origin":if fake{"synthetic"}else{"live_device"},"phase":phase,"run_id":id,"pair_id":pair,"sample_role":role,"device_serial":actual.0,"started_at":started,"finished_at":finished,"conditions":file_ref(dir,"conditions.json")?,"artifact":file_ref(dir,artifact)?,"raw":raw});
     let name = format!("{id}-run.json");
     let reference = save_json(dir, &name, &r)?;
-    let validity = observation::validate_raw_run(&dir.join(&name))?;
+    let grouping = if req.render_attribution_profile_id.is_some() && phase == "confirmation" {
+        Some(
+            serde_json::from_value::<crate::render_attribution::Frozen>(read_json(
+                &dir.join("render-contract.json"),
+            )?)
+            .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+    let validity = if let Some(f) = grouping.as_ref() {
+        observation::validate_raw_run_with_render(&dir.join(&name), Some(f))?
+    } else {
+        observation::validate_raw_run(&dir.join(&name))?
+    };
     save_json(dir, &format!("{id}-validation.json"), &validity)?;
     if fake {
         require(
@@ -926,6 +987,7 @@ fn plan(dir: &Path, req: &Request, admission: &Value, runs: &[Value]) -> Result<
         for k in ["trace", "env"] {
             artifacts.push(raw["raw"][k]["sha256"].clone());
         }
+        if req.render_attribution_profile_id.is_some() {for k in ["render_before","render_after","render_final"] {artifacts.push(raw["raw"][k]["sha256"].clone());}}
         if req.temperature_profile_id.as_deref() == Some("loaded_steady_v1") {
             for k in ["thermal_admission", "thermal_window"] {
                 artifacts.push(raw["raw"][k]["sha256"].clone());
@@ -999,10 +1061,11 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         "transport.snapshot",
         &bounded(&req.transport.program, CAP)?,
     )?;
+    let snapshot = snapshot_source(req.render_attribution_profile_id.is_some());
     for (name, s) in [
         ("worker.sh", WORKER),
         ("bootstrap.sh", BOOTSTRAP),
-        ("snapshot.sh", SNAPSHOT),
+        ("snapshot.sh", snapshot.as_str()),
         ("probe_readonly.sh", PROBE),
         ("sample_env.sh", ENV),
         ("cold.sh", COLD),
@@ -1014,12 +1077,24 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         "workload.sh",
         workload(&workloadbytes, &req)?.as_bytes(),
     )?;
+    if req.render_attribution_profile_id.is_some() {
+        save(
+            &out,
+            "render_ownership.sh",
+            crate::render_attribution::COLLECTOR.as_bytes(),
+        )?;
+        save(
+            &out,
+            "render_args.tsv",
+            format!("{}\t{}\n", req.package, req.render_comm).as_bytes(),
+        )?;
+    }
     let mut policy = Policy::new(
         req.goal.unwrap_or(Goal::RenderEfficiency),
         req.schedule.len() as u32,
         false,
     );
-    let mut contract = json!({"schema":"phonefarm/heldout_sampling_contract@1","policy":policy,"request_sha256":sha(&requestbytes),"workload_sha256":sha(&workloadbytes),"candidate_sha256":sha(&artifactbytes),"worker_sha256":sha(WORKER.as_bytes()),"bootstrap_sha256":sha(BOOTSTRAP.as_bytes()),"snapshot_sha256":sha(SNAPSHOT.as_bytes()),"probe_sha256":sha(PROBE.as_bytes()),"env_sha256":sha(ENV.as_bytes()),"cold_sha256":sha(COLD.as_bytes()),"transport_sha256":file_ref(&out,"transport.snapshot")?["sha256"],"primary_improvement_percent":1.0,"maximum_regression_percent":1.0,"family_alpha":0.05,"clock_scope":if req.transport.kind=="fake"{"synthetic_virtual_timing"}else{"host_utc_and_device_proc_uptime_separate"}});
+    let mut contract = json!({"schema":"phonefarm/heldout_sampling_contract@1","policy":policy,"request_sha256":sha(&requestbytes),"workload_sha256":sha(&workloadbytes),"candidate_sha256":sha(&artifactbytes),"worker_sha256":sha(WORKER.as_bytes()),"bootstrap_sha256":sha(BOOTSTRAP.as_bytes()),"snapshot_sha256":sha(snapshot.as_bytes()),"probe_sha256":sha(PROBE.as_bytes()),"env_sha256":sha(ENV.as_bytes()),"cold_sha256":sha(COLD.as_bytes()),"transport_sha256":file_ref(&out,"transport.snapshot")?["sha256"],"primary_improvement_percent":1.0,"maximum_regression_percent":1.0,"family_alpha":0.05,"clock_scope":if req.transport.kind=="fake"{"synthetic_virtual_timing"}else{"host_utc_and_device_proc_uptime_separate"}});
 
     let (root, legacy, timeout) = roots()?;
     let mut lease = Lease::acquire(
@@ -1031,6 +1106,34 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
     )?;
     let mut t = start_transport(&out, &req, "prepare-commands")?;
     let (serial, boot) = identity(&mut t, &lease, &req.package)?;
+    if req.render_attribution_profile_id.is_some() {
+        t.input_hashes.insert(
+            out.join("render_ownership.sh"),
+            sha(crate::render_attribution::COLLECTOR.as_bytes()),
+        );
+        let raw = checked(
+            &mut t,
+            "render_initial",
+            &format!("sh -s -- {} {}", quote(&req.package), quote(&req.render_comm)),
+            Some(&out.join("render_ownership.sh")),
+            20,
+            2 * 1024 * 1024,
+            &lease,
+        )?;
+        let initial = crate::render_attribution::witness(
+            std::str::from_utf8(&raw).map_err(|e| e.to_string())?,
+            &req.package,
+            &req.render_comm,
+        )?;
+        require(
+            initial.scope.boot_id == boot && initial.filters_clear,
+            "initial render identity/filter scope unsupported",
+        )?;
+        save(&out, "render-initial.raw.tsv", &raw)?;
+        contract["render_attribution_profile_id"] = json!(crate::render_attribution::PROFILE);
+        contract["render_collector_sha256"] =
+            json!(sha(crate::render_attribution::COLLECTOR.as_bytes()));
+    }
     let loaded = req.temperature_profile_id.as_deref() == Some("loaded_steady_v1");
     if loaded {
         // Freeze the actual loaded restore state only after baseline-only warmup.
@@ -1087,6 +1190,22 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         save(&out, &name, format!("{value}\n").as_bytes())?;
         files.push(name);
     }
+    if req.render_attribution_profile_id.is_some() {
+        let raw_clock = parsed
+            .get("ftrace.trace_clock")
+            .ok_or("clock restore receipt missing")?;
+        let selected = raw_clock
+            .split_whitespace()
+            .filter(|s| s.starts_with('[') && s.ends_with(']'))
+            .collect::<Vec<_>>();
+        require(selected.len() == 1, "clock restore receipt unknown")?;
+        save(
+            &out,
+            "ftrace-trace_clock",
+            format!("{}\n", selected[0].trim_matches(['[', ']'])).as_bytes(),
+        )?;
+        files.push("ftrace-trace_clock".into());
+    }
     let token = format!(
         "session_{}_{}",
         std::process::id(),
@@ -1106,9 +1225,12 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         contract["temperature_contract"] = temperature_contract(&out)?;
     }
     save_json(&out, "sampling-contract.json", &contract)?;
-    let mut c = json!({"schema":if loaded{"phonefarm/confirmation_conditions@2"}else{"phonefarm/confirmation_conditions@1"},"device_serial":serial,"device_boot_id":boot,"snapshot_cpu_policies":policies,"render_comm":req.render_comm,"capture_seconds":req.capture_seconds,"frozen_at":if req.transport.kind=="fake"{(chrono::Utc::now()-chrono::Duration::hours(4)).to_rfc3339()}else{now()},"policy":policy,"sampling_contract_sha256":file_ref(&out,"sampling-contract.json")?["sha256"]});
+    let mut c = json!({"schema":if req.render_attribution_profile_id.is_some(){"phonefarm/confirmation_conditions@3"}else if loaded{"phonefarm/confirmation_conditions@2"}else{"phonefarm/confirmation_conditions@1"},"device_serial":serial,"device_boot_id":boot,"snapshot_cpu_policies":policies,"render_comm":req.render_comm,"capture_seconds":req.capture_seconds,"frozen_at":if req.transport.kind=="fake"{(chrono::Utc::now()-chrono::Duration::hours(4)).to_rfc3339()}else{now()},"policy":policy,"sampling_contract_sha256":file_ref(&out,"sampling-contract.json")?["sha256"]});
     if loaded {
         c["thermal_contract"] = file_ref(&out, "thermal-evidence.json")?;
+    }
+    if req.render_attribution_profile_id.is_some() {
+        c["render_attribution"]=json!({"profile_id":crate::render_attribution::PROFILE,"package":req.package,"initial_witness":file_ref(&out,"render-initial.raw.tsv")?});
     }
     save_json(&out, "conditions.json", &c)?;
     save_json(
@@ -1120,6 +1242,13 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         let name = format!("probe_{i}.plan.tsv");
         save(&out, &name, plan.as_bytes())?;
         files.push(name);
+    }
+    if req.render_attribution_profile_id.is_some() {
+        files.extend(
+            ["render_ownership.sh", "render_args.tsv"]
+                .into_iter()
+                .map(String::from),
+        );
     }
     let mut frozenfiles = files.clone();
     frozenfiles.extend(
@@ -1139,6 +1268,7 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         .into_iter()
         .map(String::from),
     );
+    if req.render_attribution_profile_id.is_some() {frozenfiles.push("render-initial.raw.tsv".into());}
     if loaded {
         frozenfiles.extend(temperature::frozen_names().iter().map(|s| (*s).to_owned()));
     }
@@ -1209,11 +1339,38 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
             None,
         )?);
     }
-    let admission = save_json(
-        &out,
-        "admission.json",
-        &json!({"schema":"phonefarm/confirmation_baseline_admission@1","conditions":file_ref(&out,"conditions.json")?,"baseline_artifact":file_ref(&out,"baseline.json")?,"runs":runs}),
-    )?;
+    let mut admission_value = json!({"schema":"phonefarm/confirmation_baseline_admission@1","conditions":file_ref(&out,"conditions.json")?,"baseline_artifact":file_ref(&out,"baseline.json")?,"runs":runs});
+    if req.render_attribution_profile_id.is_some() {
+        let initial = bounded(&out.join("render-initial.raw.tsv"), 2 * 1024 * 1024)?;
+        let scope = crate::render_attribution::witness(
+            std::str::from_utf8(&initial).map_err(|e| e.to_string())?,
+            &req.package,
+            &req.render_comm,
+        )?
+        .scope;
+        let mut records = vec![];
+        for i in 0..3 {
+            let v = read_json(&out.join(format!("admission_{i}-validation.json")))?;
+            let (observed, record): (
+                crate::render_attribution::Scope,
+                crate::render_attribution::Baseline,
+            ) = serde_json::from_value(v["render_record"].clone()).map_err(|e| e.to_string())?;
+            require(observed == scope, "admission render ownership differs")?;
+            records.push(record);
+        }
+        let frozen = crate::render_attribution::freeze(&scope, records)?;
+        save_json(
+            &out,
+            "render-contract.json",
+            &serde_json::to_value(frozen).map_err(|e| e.to_string())?,
+        )?;
+        admission_value["schema"] = json!("phonefarm/confirmation_baseline_admission@2");
+        admission_value["render_contract"] = file_ref(&out, "render-contract.json")?;
+    }
+    let admission = save_json(&out, "admission.json", &admission_value)?;
+    if req.render_attribution_profile_id.is_some() {
+        observation::validate_render_admission(&out.join("admission.json"))?;
+    }
     let p = plan(&out, &req, &admission, &runs)?;
     save_json(&out, "plan.json", &p)?;
     let qualification =
@@ -1257,6 +1414,7 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
     )
 }
 fn validate_contract(dir: &Path, req: &Request) -> Result<(), String> {
+    let snapshot = snapshot_source(req.render_attribution_profile_id.is_some());
     let c = read_json(&dir.join("sampling-contract.json"))?;
     require(
         c["policy"]
@@ -1269,7 +1427,7 @@ fn validate_contract(dir: &Path, req: &Request) -> Result<(), String> {
     for (key, name, expected) in [
         ("worker_sha256", "worker.sh", WORKER),
         ("bootstrap_sha256", "bootstrap.sh", BOOTSTRAP),
-        ("snapshot_sha256", "snapshot.sh", SNAPSHOT),
+        ("snapshot_sha256", "snapshot.sh", snapshot.as_str()),
         ("probe_sha256", "probe_readonly.sh", PROBE),
         ("env_sha256", "sample_env.sh", ENV),
         ("cold_sha256", "cold.sh", COLD),
@@ -1301,15 +1459,57 @@ fn validate_contract(dir: &Path, req: &Request) -> Result<(), String> {
         require(
             c["schema"] == "phonefarm/heldout_sampling_contract@2"
                 && c["temperature_contract"] == temperature_contract(dir)?
-                && conditions["schema"] == "phonefarm/confirmation_conditions@2"
+                && conditions["schema"]
+                    == (if req.render_attribution_profile_id.is_some() {
+                        "phonefarm/confirmation_conditions@3"
+                    } else {
+                        "phonefarm/confirmation_conditions@2"
+                    })
                 && conditions["thermal_contract"] == file_ref(dir, "thermal-evidence.json")?,
             "loaded receiver contract mismatch",
         )?;
     } else {
         require(
             c["schema"] == "phonefarm/heldout_sampling_contract@1"
-                && conditions["schema"] == "phonefarm/confirmation_conditions@1",
+                && conditions["schema"]
+                    == (if req.render_attribution_profile_id.is_some() {
+                        "phonefarm/confirmation_conditions@3"
+                    } else {
+                        "phonefarm/confirmation_conditions@1"
+                    }),
             "legacy receiver contract changed",
+        )?;
+    }
+    if req.render_attribution_profile_id.is_some() {
+        observation::validate_render_admission(&dir.join("admission.json"))?;
+        let raw = bounded(&dir.join("render-initial.raw.tsv"), 2 * 1024 * 1024)?;
+        let initial = crate::render_attribution::witness(
+            std::str::from_utf8(&raw).map_err(|e| e.to_string())?,
+            &req.package,
+            &req.render_comm,
+        )?;
+        require(
+            bounded(&dir.join("ftrace-trace_clock"), CAP)?
+                == format!("{}\n", initial.selected_clock).as_bytes(),
+            "clock restore input differs from initial witness",
+        )?;
+        require(
+            c["render_attribution_profile_id"] == crate::render_attribution::PROFILE
+                && c["render_collector_sha256"]
+                    == sha(crate::render_attribution::COLLECTOR.as_bytes())
+                && bounded(&dir.join("render_ownership.sh"), CAP)?
+                    == crate::render_attribution::COLLECTOR.as_bytes()
+                && bounded(&dir.join("render_args.tsv"), CAP)?
+                    == format!("{}\t{}\n", req.package, req.render_comm).as_bytes()
+                && conditions["render_attribution"]
+                    == json!({"profile_id":crate::render_attribution::PROFILE,"package":req.package,"initial_witness":file_ref(dir,"render-initial.raw.tsv")?}),
+            "receiver ownership contract changed",
+        )?;
+    } else {
+        require(
+            c.get("render_attribution_profile_id").is_none()
+                && conditions.get("render_attribution").is_none(),
+            "legacy falsely adds ownership",
         )?;
     }
     require(

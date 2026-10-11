@@ -127,6 +127,7 @@ restore_trace() {
   trace_write current_tracer "$(cat "$D/ftrace-current_tracer")" || return 1
   trace_write buffer_size_kb "$(cat "$D/ftrace-buffer_size_kb")" || return 1
   trace_write set_event '' || return 1
+  if [ -f "$D/ftrace-trace_clock" ]; then trace_write trace_clock "$(cat "$D/ftrace-trace_clock")" || return 1; fi
   while IFS= read -r event; do [ -z "$event" ] || { intent trace_event set_event "$event" || return 1; printf '%s\n' "$event" >> /sys/kernel/tracing/set_event || return 1; }; done < "$D/ftrace-set_event"
   trace_write tracing_on "$(cat "$D/ftrace-tracing_on")" || return 1
 }
@@ -249,23 +250,53 @@ apply_plan() {
   restore_controls || return 1
   write_graph "$1"
 }
-capture() {
-  dur=$1
+render_prepare() {
   trace_write tracing_on 0 || return 1
   trace_write current_tracer nop || return 1
   trace_write buffer_size_kb 65536 || return 1
-  trace_write trace '' || return 1
-  for event in adreno_cmdbatch_submitted adreno_cmdbatch_retired kgsl_buslevel kgsl_pwrlevel kgsl_gpu_frequency kgsl_thermal_constraint kgsl_clock_throttling kgsl_bcl_clock_throttling; do
-    if [ -f "/sys/kernel/tracing/events/kgsl/$event/enable" ]; then trace_write "events/kgsl/$event/enable" 1 || return 1; fi
+  trace_write trace_clock boot || return 1
+  trace_write set_event '' || return 1
+  for pair in kgsl/adreno_cmdbatch_queued kgsl/adreno_cmdbatch_submitted kgsl/kgsl_context_create kgsl/kgsl_context_detach kgsl/kgsl_context_destroy sched/sched_process_fork sched/sched_process_exit; do
+    [ -f "/sys/kernel/tracing/events/$pair/enable" ] || return 1
+    trace_write "events/$pair/enable" 1 || return 1
   done
-  [ -f /sys/kernel/tracing/events/kgsl/adreno_cmdbatch_submitted/enable ] || return 1
-  [ -f /sys/kernel/tracing/events/kgsl/adreno_cmdbatch_retired/enable ] || return 1
+  trace_write trace '' || return 1
+  jstart=$(cut -d' ' -f1 /proc/uptime) || return 1
   trace_write tracing_on 1 || return 1
-  a=$(cut -d' ' -f1 /proc/uptime) || return 1
-  sleep "$dur" || return 1
-  trace_write tracing_on 0 || return 1
-  b=$(cut -d' ' -f1 /proc/uptime) || return 1
-  { printf '#loop_v1_meta capture_start_uptime=%s capture_end_uptime=%s duration_req=%s\n' "$a" "$b" "$dur"; cat /sys/kernel/tracing/trace; } > "$R/trace.txt"
+  IFS="$(printf '\t')" read -r pkg comm < "$D/render_args.tsv" || return 1
+  timeout 20 sh "$D/render_ownership.sh" "$pkg" "$comm" > "$R/render-before.raw.tsv" || return 1
+}
+capture() {
+  dur=$1
+  if [ -f "$D/render_ownership.sh" ]; then
+    sleep "$lead" || return 1
+    a=$(cut -d' ' -f1 /proc/uptime) || return 1
+    sleep "$dur" || return 1
+    b=$(cut -d' ' -f1 /proc/uptime) || return 1
+    sleep 3 || return 1
+    tailend=$(cut -d' ' -f1 /proc/uptime) || return 1
+    timeout 20 sh "$D/render_ownership.sh" "$pkg" "$comm" > "$R/render-after.raw.tsv" || return 1
+    trace_write tracing_on 0 || return 1
+    jend=$(cut -d' ' -f1 /proc/uptime) || return 1
+    timeout 20 sh "$D/render_ownership.sh" "$pkg" "$comm" > "$R/render-final.raw.tsv" || return 1
+    { printf '#loop_v1_meta capture_start_uptime=%s capture_end_uptime=%s duration_req=%s join_start_uptime=%s tail_end_uptime=%s join_end_uptime=%s\n' "$a" "$b" "$dur" "$jstart" "$tailend" "$jend"; cat /sys/kernel/tracing/trace; } > "$R/trace.txt"
+  else
+    trace_write tracing_on 0 || return 1
+    trace_write current_tracer nop || return 1
+    trace_write buffer_size_kb 65536 || return 1
+    trace_write trace '' || return 1
+    for event in adreno_cmdbatch_submitted adreno_cmdbatch_retired kgsl_buslevel kgsl_pwrlevel kgsl_gpu_frequency kgsl_thermal_constraint kgsl_clock_throttling kgsl_bcl_clock_throttling; do
+      if [ -f "/sys/kernel/tracing/events/kgsl/$event/enable" ]; then trace_write "events/kgsl/$event/enable" 1 || return 1; fi
+    done
+    [ -f /sys/kernel/tracing/events/kgsl/adreno_cmdbatch_submitted/enable ] || return 1
+    [ -f /sys/kernel/tracing/events/kgsl/adreno_cmdbatch_retired/enable ] || return 1
+    trace_write tracing_on 1 || return 1
+    a=$(cut -d' ' -f1 /proc/uptime) || return 1
+    sleep "$dur" || return 1
+    trace_write tracing_on 0 || return 1
+    b=$(cut -d' ' -f1 /proc/uptime) || return 1
+    { printf '#loop_v1_meta capture_start_uptime=%s capture_end_uptime=%s duration_req=%s\n' "$a" "$b" "$dur"; cat /sys/kernel/tracing/trace; } > "$R/trace.txt"
+  fi
 }
 cleanup_failure() {
   trap - EXIT INT TERM
@@ -386,6 +417,7 @@ case "$MODE" in
     snapshot snapshot_before
     [ "$role" = baseline ] || apply_plan "$D/candidate.plan.tsv"
     snapshot snapshot_at_run
+    if [ -f "$D/render_ownership.sh" ]; then render_prepare || exit 81; fi
     thermal_pid=''
     if [ -f "$D/thermal_sampler.sh" ]; then
       start_child thermal_sampler "$D/thermal_sampler.sh" "$((envdur+3))" 1 "$R/thermal.ready"; thermal_pid=$CHILD_PID
@@ -398,7 +430,7 @@ case "$MODE" in
     fi
     start_child workload "$D/workload.sh"; workload_pid=$CHILD_PID
     start_child sampler "$D/sample_env.sh" "$envdur" 1; sampler_pid=$CHILD_PID
-    sleep "$lead"
+    if [ ! -f "$D/render_ownership.sh" ]; then sleep "$lead"; fi
     if capture "$dur" > "$R/capture.log" 2> "$R/capture.stderr"; then echo 0 > "$R/capture_exit.txt"; else code=$?; echo "$code" > "$R/capture_exit.txt"; exit "$code"; fi
     if wait "$workload_pid"; then echo 0 > "$R/workload_exit.txt"; else code=$?; echo "$code" > "$R/workload_exit.txt"; exit "$code"; fi
     if wait "$sampler_pid"; then echo 0 > "$R/sampler_exit.txt"; else code=$?; echo "$code" > "$R/sampler_exit.txt"; exit "$code"; fi

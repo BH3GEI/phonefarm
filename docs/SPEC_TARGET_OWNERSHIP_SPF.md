@@ -1,0 +1,168 @@
+# Target queued-command origin and frozen submit grouping
+
+Status: implementation in progress. Offline acceptance pending. Android/GPU,
+installed-kernel semantic attestation and real performance acceptance NOT_RUN.
+Refs HGamey/.github#19, #14, #18, #11.
+
+Original base ef0e7b5bbfe77eb5fac1c8fcbf80cd469f68fe4b. Isolated checkout
+`worktrees/phonefarm-target-ownership-spf`, `codex/target-ownership-spf`, created
+with git worktree in the actual phonefarm repository because app cwd is OBSERVER
+and no suitable managed checkout was attached. B's start-to-start sampler fix
+796ea313dfe832d2de77c63fd8a82462b5e96b88 was independently cherry-picked as
+52aac8b. Final dependency base is published 61530eaeabffca0aa36a9cce2a7759ec4c7f3ef5;
+rebase skipped the already-upstream timing patch and preserved the exact tree
+d78694b57a02ca1e5182a940af986fab4988a143. Original prebase history remains
+`codex/target-ownership-spf-prebase`. B's workspace, immutable tools, prereview and older APKs stay unchanged.
+
+## Fixed route and estimand
+
+Explicit `render_attribution_profile_id=kgsl_queued_origin_spf_v1` is supported
+only with explicit `goal=render_cadence`. Unknown profile IDs reject. Missing
+profile preserves historical comm-only proxy semantics, never retroactively
+certifies package attribution. No caller owner boolean, context subset, SPF,
+limits, path or post-data route choice. Endpoint debugfs context headers are not
+an accepted alternative: they do not prove a full process-owned command stream.
+
+The estimand is **target-TGID original queued-command submit cadence during the
+frozen measurement window**, grouped by a baseline-derived period. It is not
+display FPS, completed GPU frames, process ownership of a context, GPU active
+time, power efficiency, exact scene reset or complete rendered game frames.
+The exact matching render comm/TID is diagnostic; selection uses all witnessed
+threads in the target TGID, never the submitted event's executor comm/TID.
+
+Primary pinned OnePlus SM8650 and SM8750 source references explain why queued
+is synchronous with queue_cmds, whereas submitted can execute on a worker or
+inline while serving unrelated pending contexts. Actual queued/lifecycle formats
+have NOT yet been read from the current device. Matching format/proc/version
+bytes are required; family source is a semantic design reference, not installed
+kernel source attestation. That latter limitation remains explicitly false.
+
+## Bounded producer and independent receiver
+
+The receiver owns a fixed readonly collector. It captures one exact package,
+UID/version, boot, /proc/version, PID/TGID/start ticks, **all** process tasks
+(max256, task_count must equal /proc/status Threads and include process leader),
+per-task status/stat/comm, single KGSL device `kgsl-3d0`, all seven event formats,
+trace_clock capabilities, event/PID filters, CPU mask and per-CPU loss/buffer
+entry stats (max64). Missing, mixed, unknown,
+malformed, incomplete, duplicate or changed records reject. A single diagnostic
+render comm must exist; its creator/command executor is not inferred from name.
+
+Worker enables queued/submitted, context create/detach/destroy and sched
+fork/exit under the existing owned ftrace restoration contract. The registered
+route temporarily selects globally comparable **boot** trace clock and freezes
+its exact original clock restore value. Clock is included in this route's device
+snapshots and restored before after_run/restored snapshots. Unsupported clock,
+formats or restoration receipts block. Historical scripts keep their route.
+
+Trace starts before the complete pre-witness, then workload/ENV children start,
+then a fixed lead and the measurement window. A fixed 3s tail is registered
+separately as tail_end; a complete post-witness also runs while lifecycle tracing
+is still continuous. Only after post-witness ends does the worker stop trace.
+A mandatory third final witness supplies the stable off-state counts/loss.
+Measurement, tail and full trace join bounds are distinct metadata fields;
+pre/post intervals must be fully inside the continuous trace span, and final
+stats must follow trace-off. This removes pre/post task-inventory gaps.
+All three witness scopes/epochs agree, clock is boot, event enables are1,
+event/PID filters/triggers are clear, and all CPU loss counts are0. Complete raw
+trace line counts must exactly match final per-CPU buffer entries over prefix,
+lead, measurement, tail and post-witness. No post/tail/collector time becomes a
+metric. Trace count is bounded250000 and raw time/CPU/global order is checked.
+The pre-collector runs before the thermal sampler starts, preserving its existing
+measurement-window coverage without changing thermal policy/deadlines.
+
+All measurement submitted packets require one preceding queued key `(ctx,ts)`
+in that capture. Every measurement packet's queued origin must follow the end
+of the complete pre-task witness plus one centisecond for /proc/uptime rounding,
+before target/foreign classification; an earlier
+unknown caller is BLOCKED, never silently classified foreign. All executor TIDs
+are retained as diagnostics. Target queued
+commands inside measurement must resolve by the frozen tail, else UNKNOWN,
+never silently omitted. Lead/tail-only submits are counted as boundary diagnostics
+and excluded from the estimand. Queued MARKER/SYNC are explicitly excluded GPU
+classes and counted; unsupported submitted classes, zero command ts, unknown
+flags, duplicate/replayed submitted or queued keys and sequence wrap reject.
+
+Context create/detach/destroy affecting any observed command ctx rejects over
+the whole span; those IDs identify a **capture-local opaque generation**, not a
+cross-run object identity or process owner. Any fork/exit touching a witnessed
+target task rejects. The same complete task epochs must exist at both endpoints;
+unknown/new/reused identities never become target callers. New target contexts
+or caller subsets cannot be selected for favorable results. The complete observed
+target caller/context sets from all three baselines are frozen for heldout arms.
+This includes all supported target commands queued inside measurement whose
+submission resolves only in the fixed tail; those tail submits are excluded
+from metrics but must still participate in the scope freeze.
+
+Raw clock/loss/lifecycle fields do not prove all-window foreground. Device event
+semantics and any unavailable events remain explicit qualification limitations;
+no fallback to submitted common_pid, endpoint ctx owner or comm-only selection.
+
+## Freeze and consumer chain
+
+Conditions/run @3 contain the profile and initial raw witness FileRef; thermal
+policy remains existing v1/v2. Admission @2 binds a create-only frozen render
+contract. All three independent raw baseline windows must produce identical
+scope, caller/context sets and grouping period. Existing lag1..6/ACF>=0.30
+inference is used; unknown or nonharmonic ambiguous periods reject. Frozen
+contract records raw SHA identities and baseline-derived SPF, never caller SPF.
+
+prepare produces the contract; GOL freezes its enclosing admission SHA and
+conditions SHA without new numeric thresholds. collect first reconstructs the
+contract from all three baseline traces and witnesses, including explicit
+synthetic sessions; qualification is never inferred from synthetic data. Raw
+receiver reconstructs independently again before heldout measurement. Heldout
+inference must equal frozen SPF/caller/context sets; calculation uses frozen
+SPF. Any edit/missing witness, raw/derived contradiction or grouping change
+rejects. UNKNOWN/interrupted sessions retain existing reconcile/new-session
+barriers; no auto-repeat or hidden legacy route fallback.
+
+Observations keep the existing thermal-dependent @1/@2 envelope for GOL,
+append command-origin/grouping diagnostics and derived gates, and continue to
+set eligible/gameproof/promotion false. Historical missing witnesses remain
+unattributed. Hash matching proves integrity, not source authenticity.
+
+## I/O, acceptance and limitations
+
+Each readonly record <=64KiB, whole witness <=2MiB, raw trace <=128MiB; existing
+same-fd Reader limits total cached evidence512MiB. Child execution/lease uses
+existing bounded transport and remote stop/restore barriers. New clock/event
+writes use the same intent journal and restore path, not an independent owner.
+
+Acceptance must exercise actual CLI prepare -> real GOL freeze -> PF collect ->
+raw receiver, using explicit controlled fake transport and always synthetic;
+no fake source is relabeled live. Countercases cover same-name foreign caller,
+worker executors, multiple contexts/callers, PID/TID epoch changes, fork/exit,
+ctx reuse/wrap, loss, local clock, unsupported flags, unmatched/duplicate keys,
+SPF2 -> 1/3, missing/tampered raw and rehashed frozen-contract contradiction, complete
+queued→tail joins with new scope, positional printf identity/flag contradictions,
+and lifecycle/witness gaps or origins before the complete pre-task table.
+Full local cargo test + default Clippy and independent review required.
+
+This delivery is a bounded command-origin receiver/producer mechanism. Device
+format/loss/clock/lifecycle acceptance, installed kernel semantics, display/GPU
+completion, foreground/scene reset, quality and real optimization proof are
+NOT_RUN/UNKNOWN; no automatic promotion. B is sole future device owner.
+
+Primary filter semantics reference:
+[Linux event tracing](https://docs.kernel.org/trace/events.html) explains event
+and PID filtering. The registered EMPTY sentinel is for empty set_event_pid and
+set_event_notrace_pid bytes (v6.6 trace_events.c uses trace_pid_show, whose empty
+list emits no records); it is not inferred from unrelated set_ftrace_pid's
+`no pid` display. Any nonempty PID list rejects. Installed read acceptance is
+still NOT_RUN.
+
+The finite print-wire reader binds every required ctx/ts/caller/lifecycle key to
+its exact positional REC field expression, not token presence. Conversion/argument
+counts agree and command flag expressions have the unique complete registered
+bit/name table. Swapped ctx/ts/parent/child fields, duplicate bits or changed
+flag meanings reject even when token strings and outer hashes still look valid.
+Matching wire structure does not attest installed-kernel behavior.
+
+Android mksh's stdin route is `sh -s -- PACKAGE COMM`; `sh - PACKAGE COMM`
+can instead treat PACKAGE as a script path and is rejected in the initial read
+before installation/control. A real readonly invocation demonstrated that
+argument difference; failure bytes and the corrected planned invocation are
+kept separately. Worker file-path invocations keep `sh SCRIPT PACKAGE COMM`.
+Post-witness trace events remain counted, but cannot resolve a measurement
+command later than the separately frozen 3s tail_end.

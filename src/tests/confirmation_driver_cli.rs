@@ -34,6 +34,11 @@ impl F {
         )
         .unwrap();
         std::fs::write(
+            dir.join("render-origin.raw.tsv"),
+            include_str!("support/render_origin.synthetic.raw.tsv"),
+        )
+        .unwrap();
+        std::fs::write(
             dir.join("trace_fixture.txt"),
             include_str!("../../loop_v1/fixtures/trace_slice.txt"),
         )
@@ -1358,4 +1363,104 @@ fn old_loaded_profile_still_rejects_three_point_one_degree_range_before_control(
     assert!(v["error"].as_str().unwrap().contains("thermally stable"));
     assert!(!f.dir.join("loaded/initial.snapshot").exists());
     assert!(!f.dir.join("legacy/devlock.d").exists());
+}
+
+fn origin_fixture() -> F {
+    let f = F::new(false);
+    let mut r = f.read("request.json");
+    r["goal"] = json!("render_cadence");
+    r["render_attribution_profile_id"] = json!("kgsl_queued_origin_spf_v1");
+    f.write("request.json", &r);
+    f
+}
+#[test]
+fn queued_origin_actual_prepare_freeze_collect_retains_synthetic_boundary() {
+    let f = origin_fixture();
+    let (code, p) = f.prepare("");
+    assert_eq!(code, 0, "{p}");
+    assert_eq!(p["status"], "SIMULATED_BLOCKED");
+    let c = f.read("session/render-contract.json");
+    assert_eq!(c["submits_per_group"], 2);
+    assert_eq!(c["caller_tids"], json!([32074]));
+    assert_eq!(
+        f.read("session/conditions.json")["schema"],
+        "phonefarm/confirmation_conditions@3"
+    );
+    f.freeze();
+    let (code, out) = f.collect();
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out["status"], "SIMULATED_BLOCKED");
+    assert_eq!(out["real_game_optimization_proven"], false);
+    let samples = f.read("session/samples.json");
+    assert_eq!(samples["source_kind"], "synthetic_fixture");
+    if let Some(bin) = std::env::var_os("PHONEFARM_DRIVER_GOL_BIN") {
+        let mut cmd = Command::new(bin);
+        cmd.args(["confirm", "judge", "--frozen"])
+            .arg(f.dir.join("frozen.json"))
+            .arg("--samples")
+            .arg(f.dir.join("session/samples.json"))
+            .arg("--out")
+            .arg(f.dir.join("origin-judge.json"));
+        let out = cmd.output().unwrap();
+        f.receipt("origin-gol-judge", &cmd, &out);
+        assert!(!out.status.success());
+        let j = f.read("origin-judge.json");
+        assert_ne!(j["status"], "PASS");
+        assert_eq!(j["real_game_optimization_proven"], false);
+        assert_eq!(j["promotion_allowed"], false);
+    }
+}
+#[test]
+fn queued_origin_foreign_unmatched_loss_never_prepare() {
+    for fail in ["origin_foreign", "origin_unmatched", "origin_loss"] {
+        let f = origin_fixture();
+        let (code, out) = f.prepare(fail);
+        assert_eq!(code, 1, "{fail} {out}");
+        assert!(!f.dir.join("session/prepared.manifest.json").exists());
+    }
+}
+#[test]
+fn queued_origin_frozen_scale_and_epoch_changes_block_heldout() {
+    for fail in ["origin_spf1", "origin_spf3", "origin_epoch", "origin_tail_scope"] {
+        let f = origin_fixture();
+        assert_eq!(f.prepare("").0, 0);
+        f.freeze();
+        let (code, out) = f.call(
+            &[
+                "collect",
+                "--session",
+                "session",
+                "--frozen",
+                "frozen.json",
+                "--execute",
+            ],
+            fail,
+        );
+        assert_eq!(code, 1, "{fail} {out}");
+        assert!(!f.dir.join("session/samples.json").exists());
+    }
+}
+#[test]
+fn queued_origin_rehashed_frozen_contract_does_not_hide_raw_contradiction() {
+    let f = origin_fixture();
+    assert_eq!(f.prepare("").0, 0);
+    f.freeze();
+    let mut c = f.read("session/render-contract.json");
+    c["submits_per_group"] = json!(3);
+    f.write("session/render-contract.json", &c);
+    // Outer prepared hashes are also rehashed to exercise receiver reconstruction, not integrity only.
+    let bytes = std::fs::read(f.dir.join("session/render-contract.json")).unwrap();
+    let mut a = f.read("session/admission.json");
+    a["render_contract"]["sha256"] = json!(sha(&bytes));
+    f.write("session/admission.json", &a);
+    let mut manifest = f.read("session/prepared.manifest.json");
+    for name in ["render-contract.json", "admission.json"] {
+        manifest["hashes"][name] = json!(sha(
+            &std::fs::read(f.dir.join("session").join(name)).unwrap()
+        ));
+    }
+    f.write("session/prepared.manifest.json", &manifest);
+    let (code, out) = f.collect();
+    assert_eq!(code, 1, "{out}");
+    assert!(!f.dir.join("session/samples.json").exists());
 }

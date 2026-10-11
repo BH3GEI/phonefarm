@@ -69,7 +69,10 @@ fn acf(xs: &[f64], lag: usize) -> f64 {
     let n = xs.len() - lag;
     let (a, b) = (&xs[..n], &xs[lag..lag + n]);
     let nf = n as f64;
-    let (ma, mb) = (py_sum(a.iter().copied()) / nf, py_sum(b.iter().copied()) / nf);
+    let (ma, mb) = (
+        py_sum(a.iter().copied()) / nf,
+        py_sum(b.iter().copied()) / nf,
+    );
     let num: f64 = py_sum((0..n).map(|i| (a[i] - ma) * (b[i] - mb)));
     let da = py_sum(a.iter().map(|v| (v - ma).powi(2))).sqrt();
     let db = py_sum(b.iter().map(|v| (v - mb).powi(2))).sqrt();
@@ -229,6 +232,22 @@ fn kv(re: &Regex, rest: &str) -> HashMap<String, i64> {
 }
 
 pub fn parse(text: &str, render_comm: &str) -> Parsed {
+    parse_grouped(text, render_comm, None, None)
+}
+pub fn parse_owned_contexts(
+    text: &str,
+    render_comm: &str,
+    contexts: &std::collections::BTreeSet<i64>,
+    spf: Option<usize>,
+) -> Parsed {
+    parse_grouped(text, render_comm, spf, Some(contexts))
+}
+fn parse_grouped(
+    text: &str,
+    render_comm: &str,
+    frozen_spf: Option<usize>,
+    contexts: Option<&std::collections::BTreeSet<i64>>,
+) -> Parsed {
     let line_re = Regex::new(LINE_RE).expect("LINE_RE");
     let kv_re = Regex::new(KV_RE).expect("KV_RE");
 
@@ -272,7 +291,9 @@ pub fn parse(text: &str, render_comm: &str) -> Parsed {
 
         match ev {
             "adreno_cmdbatch_submitted" => {
-                if m["comm"].trim() == render_comm {
+                if contexts.map_or(m["comm"].trim() == render_comm, |owned| {
+                    f.get("ctx").is_some_and(|ctx| owned.contains(ctx))
+                }) {
                     if let (Some(&ctx), Some(&ts)) = (f.get("ctx"), f.get("ts")) {
                         if !render_ctxs.contains(&ctx) {
                             render_ctxs.push(ctx);
@@ -321,7 +342,8 @@ pub fn parse(text: &str, render_comm: &str) -> Parsed {
         .windows(2)
         .map(|w| (w[1].0 - w[0].0) * 1000.0)
         .collect();
-    let (spf, spf_scores) = detect_submits_per_frame(&gaps, 6);
+    let (inferred_spf, spf_scores) = detect_submits_per_frame(&gaps, 6);
+    let spf = frozen_spf.unwrap_or(inferred_spf);
 
     // 帧时长 = 每 spf 个间隔一组求和。组边界同时用来聚合该帧的 GPU 活跃时长。
     let mut frame_ms = Vec::new();
@@ -493,10 +515,9 @@ fn num_or_zero(s: &PyVal, k: &str) -> f64 {
 /// —— 悄悄填个 0 等于凭空造一个测量值, 比整轮失败更糟。
 fn str_num_or_zero(s: &PyVal, k: &str) -> Result<f64, String> {
     match s.get(k) {
-        Some(PyVal::Str(t)) if !t.is_empty() => t
-            .trim()
-            .parse()
-            .map_err(|_| format!("{k} 不是数字: {t:?}")),
+        Some(PyVal::Str(t)) if !t.is_empty() => {
+            t.trim().parse().map_err(|_| format!("{k} 不是数字: {t:?}"))
+        }
         Some(v) => Ok(match v.as_f64() {
             Some(x) if x != 0.0 => x,
             _ => 0.0,
@@ -737,7 +758,10 @@ mod tests {
             for (name, got) in [
                 (format!("{stem}.summary.json"), summary.clone()),
                 (format!("{stem}.full.json"), dumps(&d.to_pyval())),
-                (format!("{stem}.attr.json"), dumps(&attribute(&parsed).unwrap())),
+                (
+                    format!("{stem}.attr.json"),
+                    dumps(&attribute(&parsed).unwrap()),
+                ),
             ] {
                 let want = std::fs::read_to_string(dir.join(&name)).unwrap();
                 assert_eq!(got, want.trim_end_matches('\n'), "{name} 不一致");

@@ -76,6 +76,13 @@ struct Bundle {
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RenderRegistration {
+    profile_id: String,
+    package: String,
+    initial_witness: FileRef,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Conditions {
     schema: String,
     device_serial: String,
@@ -89,6 +96,8 @@ struct Conditions {
     sampling_contract_sha256: Option<String>,
     #[serde(default)]
     thermal_contract: Option<FileRef>,
+    #[serde(default)]
+    render_attribution: Option<RenderRegistration>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +128,12 @@ struct PlanEntry {
 struct Raw {
     trace: FileRef,
     env: FileRef,
+    #[serde(default)]
+    render_before: Option<FileRef>,
+    #[serde(default)]
+    render_after: Option<FileRef>,
+    #[serde(default)]
+    render_final: Option<FileRef>,
     workload_exit: FileRef,
     sampler_exit: FileRef,
     capture_exit: FileRef,
@@ -147,6 +162,7 @@ fn unique_raw_artifacts(raw: &Raw) -> Vec<&String> {
     if let Some(r) = &raw.thermal_window {
         hashes.push(&r.sha256);
     }
+    for r in [&raw.render_before, &raw.render_after, &raw.render_final].into_iter().flatten() { hashes.push(&r.sha256); }
     // Plain exit-code files such as "0\n" legitimately have the same bytes across arms.
     hashes
 }
@@ -181,6 +197,8 @@ struct Admission {
     conditions: FileRef,
     baseline_artifact: FileRef,
     runs: Vec<FileRef>,
+    #[serde(default)]
+    render_contract: Option<FileRef>,
 }
 
 // These field orders mirror GOL PR29's serde tuple fingerprint. Value maps must not reorder Plan.
@@ -326,21 +344,35 @@ impl Reader {
 }
 
 fn conditions_valid(c: &Conditions) -> Result<(), String> {
+    if let Some(r) = &c.render_attribution {
+        require(
+            c.schema == "phonefarm/confirmation_conditions@3"
+                && r.profile_id == crate::render_attribution::PROFILE
+                && !r.package.is_empty()
+                && c.policy.goal == qualification::Goal::RenderCadence,
+            "invalid target ownership conditions",
+        )?;
+    }
     require(
         c.sampling_contract_sha256
             .as_ref()
             .is_none_or(|s| digest_ok(s)),
         "invalid sampling contract fingerprint",
     )?;
+    let attributed = c.render_attribution.is_some();
+    let schema_ok = if attributed {
+        c.schema == "phonefarm/confirmation_conditions@3"
+    } else {
+        (c.policy.version == 1 && c.schema == "phonefarm/confirmation_conditions@1")
+            || (c.policy.version == 2 && c.schema == "phonefarm/confirmation_conditions@2")
+    };
     require(
-        (c.schema == "phonefarm/confirmation_conditions@1"
-            && c.policy.version == 1
-            && c.thermal_contract.is_none())
-            || (c.schema == "phonefarm/confirmation_conditions@2"
-                && c.policy.version == 2
-                && c.thermal_contract
-                    .as_ref()
-                    .is_some_and(|r| digest_ok(&r.sha256))),
+        schema_ok
+            && ((c.policy.version == 1 && c.thermal_contract.is_none())
+                || (c.policy.version == 2
+                    && c.thermal_contract
+                        .as_ref()
+                        .is_some_and(|r| digest_ok(&r.sha256)))),
         "unknown conditions schema",
     )?;
     require(
@@ -549,7 +581,7 @@ fn control(
         "requested control not read back, or hidden state changed",
     )
 }
-fn trace_bounds(text: &str) -> Option<(f64, f64)> {
+pub(crate) fn trace_bounds(text: &str) -> Option<(f64, f64)> {
     let l = text
         .lines()
         .find(|l| l.starts_with("#loop_v1_meta capture_start_uptime="))?;
@@ -569,6 +601,10 @@ struct LoadedRun {
     manifest: Run,
     conditions: Conditions,
     parsed: Value,
+    render: Option<(
+        crate::render_attribution::Scope,
+        crate::render_attribution::Baseline,
+    )>,
     gates: BTreeMap<String, bool>,
     issues: Vec<String>,
     checks: Vec<qualification::Check>,
@@ -802,14 +838,20 @@ fn loaded_thermal(
         issues,
     })
 }
-fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, String> {
+fn load_run(
+    reader: &mut Reader,
+    base: &Path,
+    r: &FileRef,
+    frozen_render: Option<&crate::render_attribution::Frozen>,
+) -> Result<LoadedRun, String> {
     let (p, run): (_, Run) = reader.json(base, r)?;
     let base = p.parent().ok_or("run has no parent directory")?;
     let (_, c): (_, Conditions) = reader.json(base, &run.conditions)?;
     conditions_valid(&c)?;
     require(
-        (run.schema == "phonefarm/run_one_bundle@1" && c.policy.version == 1)
-            || (run.schema == "phonefarm/run_one_bundle@2" && c.policy.version == 2),
+        (run.schema == "phonefarm/run_one_bundle@1" && c.policy.version == 1 && c.render_attribution.is_none())
+            || (run.schema == "phonefarm/run_one_bundle@2" && c.policy.version == 2 && c.render_attribution.is_none())
+            || (run.schema == "phonefarm/run_one_bundle@3" && c.render_attribution.is_some()),
         "requires raw single-run bundle under its versioned conditions, not aggregate qualification",
     )?;
     if c.policy.version == 1 {
@@ -857,8 +899,62 @@ fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, 
     let capture_exit = exit(reader, &run.raw.capture_exit)?;
     let restore_exit = exit(reader, &run.raw.restore_exit)?;
     let parsed = looptrace::parse(&trace, &c.render_comm);
-    let summary: Value =
-        serde_json::from_str(&pyjson::dumps(&parsed.summarize())).map_err(|e| e.to_string())?;
+    let (summary, render): (Value, _) = if let Some(reg) = &c.render_attribution {
+        require(
+            (run.phase == "admission" && frozen_render.is_none())
+                || (run.phase == "confirmation" && frozen_render.is_some()),
+            "attributed heldout requires frozen baseline grouping",
+        )?;
+        let initial = reader.text(base, &reg.initial_witness)?;
+        for receipt in [&before, &active, &after, &restored] {
+            let snap = snapshot(receipt, &c.snapshot_cpu_policies)?;
+            require(
+                snap.get("ftrace.trace_clock")
+                    .is_some_and(|v| !v.is_empty() && v != "<unreadable>"),
+                "origin clock restoration snapshot absent",
+            )?;
+        }
+
+        let scope =
+            crate::render_attribution::witness(&initial, &reg.package, &c.render_comm)?.scope;
+        require(
+            scope.boot_id == c.device_boot_id,
+            "initial render boot differs",
+        )?;
+        let before = reader.text(
+            base,
+            run.raw
+                .render_before
+                .as_ref()
+                .ok_or("render before witness absent")?,
+        )?;
+        let after = reader.text(
+            base,
+            run.raw
+                .render_after
+                .as_ref()
+                .ok_or("render after witness absent")?,
+        )?;
+        let final_raw = reader.text(
+            base,
+            run.raw.render_final.as_ref().ok_or("render final-count witness absent")?,
+        )?;
+        let (summary, record) =
+            crate::render_attribution::analyze(&trace, &before, &after, &final_raw, &scope, frozen_render)?;
+        (summary, Some((scope, record)))
+    } else {
+        require(
+            run.raw.render_before.is_none()
+                && run.raw.render_after.is_none()
+                && run.raw.render_final.is_none()
+                && frozen_render.is_none(),
+            "legacy cannot carry ownership evidence",
+        )?;
+        (
+            serde_json::from_str(&pyjson::dumps(&parsed.summarize())).map_err(|e| e.to_string())?,
+            None,
+        )
+    };
     let mut env_stats: Value = serde_json::from_str(&pyjson::dumps(&sysparam::env_stats(&env)))
         .map_err(|e| e.to_string())?;
     let soc_zones = env.lines().filter(|l| l.starts_with("ENV ")).all(|l| {
@@ -899,8 +995,9 @@ fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, 
             .first_uptime
             .zip(env_window.last_uptime)
             .is_some_and(|(a, b)| b - a <= host_elapsed)
-        && parsed.span_s >= c.capture_seconds as f64 - 1.
-        && parsed.span_s <= uptime.1 - uptime.0 + 0.01;
+        && summary["span_s"].as_f64().is_some_and(|span| {
+            span >= c.capture_seconds as f64 - 1. && span <= uptime.1 - uptime.0 + 0.01
+        });
     env_stats["trace_window_verified"] = json!(window_ok);
     let frame = qualification::frame_evidence(&summary);
     let sample = json!({"summary":summary,"env":env_stats,"workload_exit":workload_exit,
@@ -970,6 +1067,7 @@ fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, 
         &c.policy,
     );
     Ok(LoadedRun {
+        render,
         manifest: run,
         conditions: c,
         parsed: sample,
@@ -1100,6 +1198,8 @@ struct Admitted {
     qualification: Value,
     capture_end: f64,
     env_end: f64,
+    render: Option<crate::render_attribution::Frozen>,
+    render_contract_sha256: Option<String>,
 }
 fn admission(
     reader: &mut Reader,
@@ -1115,7 +1215,8 @@ fn admission(
     let (path, a): (_, Admission) = reader.json(base, r)?;
     let base = path.parent().ok_or("admission has no directory")?;
     require(
-        a.schema == "phonefarm/confirmation_baseline_admission@1"
+        ((a.schema == "phonefarm/confirmation_baseline_admission@1" && c.render_attribution.is_none() && a.render_contract.is_none())
+            || (a.schema == "phonefarm/confirmation_baseline_admission@2" && c.render_attribution.is_some() && a.render_contract.is_some()))
             && a.conditions.sha256 == f.plan.conditions_sha256
             && a.baseline_artifact.sha256 == f.plan.baseline_artifact_sha256,
         "admission must bind raw baselines and matching conditions/artifact",
@@ -1130,9 +1231,11 @@ fn admission(
     let mut seen_ids = BTreeSet::new();
     let mut raw_seen = BTreeSet::new();
     let mut baseline = vec![];
+    let mut render_records=vec![];
+    let mut render_scope=None;
     let mut previous: Option<(DateTime<FixedOffset>, f64, f64)> = None;
     for r in &a.runs {
-        let run = load_run(reader, base, r)?;
+        let run = load_run(reader, base, r, None)?;
         let m = &run.manifest;
         require(
             run.valid()
@@ -1168,8 +1271,36 @@ fn admission(
                 .last_uptime
                 .ok_or("missing baseline ENV window")?,
         ));
+        if let Some((scope, record)) = run.render {
+            require(
+                render_scope.as_ref().is_none_or(|old| old == &scope),
+                "baseline ownership scope differs",
+            )?;
+            render_scope = Some(scope);
+            render_records.push(record);
+        }
         baseline.push(run.parsed);
     }
+    let render = if let Some(scope) = render_scope {
+        let derived = crate::render_attribution::freeze(&scope, render_records)?;
+        let (_, saved): (_, crate::render_attribution::Frozen) = reader.json(
+            base,
+            a.render_contract
+                .as_ref()
+                .ok_or("render frozen contract absent")?,
+        )?;
+        require(
+            saved == derived,
+            "frozen render contract does not reconstruct from baseline raw witnesses",
+        )?;
+        Some(derived)
+    } else {
+        require(
+            a.render_contract.is_none(),
+            "legacy render contract supplied",
+        )?;
+        None
+    };
     let mut e = qualification::Evidence::new(
         qualification::Stage::Experiment,
         c.policy.clone(),
@@ -1197,7 +1328,71 @@ fn admission(
         qualification: serde_json::to_value(q).map_err(|e| e.to_string())?,
         capture_end,
         env_end,
+        render,
+        render_contract_sha256: a.render_contract.as_ref().map(|r| r.sha256.clone()),
     })
+}
+
+/// Reconstruct the render contract without granting source/experiment qualification.
+/// Used for both live and explicitly synthetic sessions; errors never become fake truth.
+pub(crate) fn validate_render_admission(path: &Path) -> Result<(), String> {
+    let mut reader = Reader::default();
+    let bytes = regular_bytes(path, JSON_LIMIT)?;
+    let a: Admission = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let base = path.parent().ok_or("admission directory absent")?;
+    require(
+        a.schema == "phonefarm/confirmation_baseline_admission@2" && a.runs.len() == 3,
+        "origin admission requires three raw baseline runs",
+    )?;
+    let (_, c): (_, Conditions) = reader.json(base, &a.conditions)?;
+    conditions_valid(&c)?;
+    require(
+        c.render_attribution.is_some(),
+        "origin registration missing",
+    )?;
+    reader.read(base, &a.baseline_artifact, JSON_LIMIT)?;
+    let mut scope = None;
+    let mut records = vec![];
+    let mut ids = BTreeSet::new();
+    let mut previous = None;
+    for r in &a.runs {
+        let loaded = load_run(&mut reader, base, r, None)?;
+        let m = &loaded.manifest;
+        require(
+            m.phase == "admission"
+                && m.sample_role == "baseline"
+                && m.pair_id.is_none()
+                && m.conditions.sha256 == a.conditions.sha256
+                && m.artifact.sha256 == a.baseline_artifact.sha256
+                && ids.insert(m.run_id.clone()),
+            "origin baseline identity/role differs",
+        )?;
+        if let Some((end, up)) = previous {
+            require(
+                loaded.start > end && loaded.uptime.0 > up,
+                "origin baselines overlap",
+            )?;
+        }
+        previous = Some((loaded.end, loaded.uptime.1));
+        let (observed, record) = loaded.render.ok_or("origin baseline record missing")?;
+        require(
+            scope.as_ref().is_none_or(|old| old == &observed),
+            "origin baseline scope changed",
+        )?;
+        scope = Some(observed);
+        records.push(record);
+    }
+    let frozen = crate::render_attribution::freeze(&scope.ok_or("origin scope absent")?, records)?;
+    let (_, saved): (_, crate::render_attribution::Frozen) = reader.json(
+        base,
+        a.render_contract
+            .as_ref()
+            .ok_or("origin frozen contract absent")?,
+    )?;
+    require(
+        saved == frozen,
+        "frozen render contract does not reconstruct from baseline raw witnesses",
+    )
 }
 
 fn blank() -> Value {
@@ -1234,7 +1429,12 @@ fn reconstruct(path: &Path, reader: &mut Reader, out: &mut Value) -> Result<(), 
     )?;
     let base = path.parent().unwrap_or(Path::new("."));
     let (_, f): (_, Frozen) = reader.json(base, &b.frozen_plan)?;
-    let run = load_run(reader, base, &b.run)?;
+    let (run_path,raw_run): (_,Run)=reader.json(base,&b.run)?;
+    let run_base=run_path.parent().ok_or("run parent missing")?.to_path_buf();
+    let (_,conditions): (_,Conditions)=reader.json(&run_base,&raw_run.conditions)?;
+    conditions_valid(&conditions)?;frozen_valid(&f,&conditions)?;
+    let admitted=admission(reader,base,&b.baseline_admission,&f,&conditions)?;
+    let run = load_run(reader, base, &b.run, admitted.render.as_ref())?;
     let m = &run.manifest;
     let c = &run.conditions;
     if c.policy.version == 2 {
@@ -1338,11 +1538,28 @@ fn reconstruct(path: &Path, reader: &mut Reader, out: &mut Value) -> Result<(), 
         raw_hashes.iter().collect::<BTreeSet<_>>().len() == raw_hashes.len(),
         "independent trace/env/thermal reading raw bytes reused",
     )?;
-    let admitted = admission(reader, base, &b.baseline_admission, &f, c)?;
+    // Admission was reconstructed before any heldout grouping/measurement.
     require(
         run.uptime.0 > admitted.capture_end && run.env_window.first_uptime.is_some_and(|t|t>admitted.env_end),
         "same-boot confirmation capture uptime and entire ENV window must follow all admission windows",
     )?;
+    if let Some((scope, record)) = &run.render {
+        out["target_game_attribution"] = crate::render_attribution::diagnostic(scope, record);
+        out["sample_qualification"]["gates"]["target_command_origin_verified"] = json!(true);
+        out["sample_qualification"]["gates"]["frozen_grouping_verified"] = json!(true);
+        out["confirmation_binding"]["render_contract_sha256"] =
+            json!(admitted.render_contract_sha256);
+        for (key, r) in [
+            ("render_before_sha256", m.raw.render_before.as_ref()),
+            ("render_after_sha256", m.raw.render_after.as_ref()),
+            ("render_final_sha256", m.raw.render_final.as_ref()),
+        ] {
+            out["confirmation_binding"]["raw_artifacts"][key] =
+                json!(r.ok_or("render raw binding absent")?.sha256);
+        }
+    } else {
+        out["target_game_attribution"] = json!({"status":"UNKNOWN","reason":"historical comm-only proxy, no ownership contract"});
+    }
     let q = admitted.qualification;
     let admission_ok =
         q["experiment_allowed"] == true && q["eligible"] == false && q["stage"] == "experiment";
@@ -1396,6 +1613,12 @@ pub(crate) fn validate_driver_artifact(bytes: &[u8]) -> Result<(), String> {
 }
 /// Internal driver uses the same raw algorithms before registration; never a conclusion.
 pub(crate) fn validate_raw_run(path: &Path) -> Result<Value, String> {
+    validate_raw_run_with_render(path, None)
+}
+pub(crate) fn validate_raw_run_with_render(
+    path: &Path,
+    frozen: Option<&crate::render_attribution::Frozen>,
+) -> Result<Value, String> {
     let bytes = regular_bytes(path, JSON_LIMIT)?;
     let r = FileRef {
         path: path
@@ -1409,9 +1632,10 @@ pub(crate) fn validate_raw_run(path: &Path) -> Result<Value, String> {
         &mut Reader::default(),
         path.parent().unwrap_or(Path::new(".")),
         &r,
+        frozen,
     )?;
     Ok(
-        json!({"valid":loaded.valid(),"gates":loaded.gates,"issues":loaded.issues,"checks":loaded.checks,"parsed":loaded.parsed,
+        json!({"render_record":loaded.render,"valid":loaded.valid(),"gates":loaded.gates,"issues":loaded.issues,"checks":loaded.checks,"parsed":loaded.parsed,
         "evidence_origin":loaded.manifest.evidence_origin,"real_game_optimization_proven":false,"promotion_allowed":false}),
     )
 }
