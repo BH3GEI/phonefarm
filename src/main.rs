@@ -27,6 +27,7 @@ mod vksreport;
 mod parallel;
 mod device;
 mod eval;
+mod qualification;
 mod fold;
 mod gamepad;
 mod grayab;
@@ -202,6 +203,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        vks-report --root <A/B目录> --sample S --config-a N --config-b N   (两臂判读面, 判读哈希自证)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
+资格:  qualify --from evidence.json --json (纯离线资格评估；通过不等于优化成功)
 评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
        (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
         shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
@@ -708,6 +710,9 @@ fn main() {
         Some("autoloop") => {
             // 系统参数全自动闭环 (probe -> 基线 -> 冻结规则 -> 提名 -> ABBA -> 判定 -> 报告)
             std::process::exit(autoloop::run_autoloop(&args[1..]));
+        }
+        Some("qualify") => {
+            std::process::exit(qualification::run_qualify(&args[1..]));
         }
         Some("eval") => {
             // game_opt_loop 评测请求的唯一入口 (v2 信封 shader/sysparam/gray; v1 扁平兼容)

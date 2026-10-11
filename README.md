@@ -524,6 +524,20 @@ python3 examples/sequence_quality_fixture.py --out tasks/quality-demo --mode gho
 真实游戏资格仍需独立采集证明/审查。契约和完整边界见
 [`SPEC_SEQUENCE_QUALITY.md`](docs/SPEC_SEQUENCE_QUALITY.md)。
 
+## 实验与结论资格
+
+Rust `eval` / `autoloop` 先冻结目标与必需指标；缺功耗、冷机失败、基线不稳定、恢复失败、
+未知帧来源都阻断优化保留。KGSL 提交分组仍是渲染代理，不能宣称实际显示流畅度。
+无 root 鸿蒙可用公开遥测，但资格只会是 measure_only，不能用它验证系统参数/挂层优化。
+
+```bash
+phonefarm qualify --from examples/qualification_ready.json --json
+phonefarm eval --request request.json --qualify-from evidence.json --json
+```
+
+这两条离线入口不访问手机。示例是构造夹具，不是真机性能证明；第二条只评估资格，
+不输出候选 PASS。详见 [实验与结论资格合同](docs/SPEC_EXPERIMENT_QUALIFICATION.md)。
+
 ## 文档索引
 
 | 文档 | 内容 |

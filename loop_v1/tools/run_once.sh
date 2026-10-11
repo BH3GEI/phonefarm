@@ -49,7 +49,10 @@ adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/ftrace_capture.sh $CAPDUR /dat
     > "$OUTDIR/capture.log" 2>&1
 
 # 3) 等负载收尾
-wait "$WL_PID" || echo "[$LABEL] 警告: 负载脚本非零退出"
+WL_RC=0
+wait "$WL_PID" || WL_RC=$?
+printf '%s\n' "$WL_RC" > "$OUTDIR/workload_exit.txt"
+if [ "$WL_RC" -ne 0 ]; then echo "[$LABEL] 警告: 负载脚本非零退出 rc=$WL_RC"; fi
 
 # 4) 拉回原始证据并解析
 adb -s "$SERIAL" pull "/data/local/tmp/loop_v1_$LABEL.txt" "$OUTDIR/trace.txt" >/dev/null 2>&1
