@@ -330,3 +330,22 @@ Loaded prepared manifests require each `pre-probe_N-thermal.raw.tsv` and
 `pre-probe_N-thermal.json` receipt explicitly, in addition to the original probe
 and admission artifacts. Resuming collect rejects missing or extra prepared
 keys; a caller cannot drop these newly required control-admission receipts.
+
+Thermal collection schedules sample starts using device uptime deadlines. Warmup
+targets five seconds between starts; the query duration is subtracted from the
+remaining wait rather than followed by another five-second sleep. The frozen
+30-second, at-least-six-reading, <=6-second-gap and <=3C-span rules remain
+unchanged. A slow query, unknown/backward clock or missed six-second deadline
+blocks admission; cooling drift is independently rejected.
+
+The same owned worker clock helper schedules loaded probe checks and the typed
+window sampler. A probe waits through eleven seconds after apply before its
+final readback; checks retain their frozen temperature/reference requirements.
+Window collection targets one second between starts, may overrun that nominal
+target while a query is active, and still rejects a gap beyond six seconds. It
+never emits fabricated timestamps or catches up by reusing a sample. Host tests
+with an actual delayed sample body validate scheduling only, not Android clocks,
+thermal HAL latency, device quiescence or control restoration.
+
+A failed thermal point retains its partial raw stdout with the original nonzero
+exit code; it cannot emit a completion marker or become an admitted reading.

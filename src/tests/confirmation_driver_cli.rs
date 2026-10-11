@@ -1175,7 +1175,7 @@ fn actual_remote_prepare_probe_rechecks_thermal_before_apply_without_transport()
         std::fs::create_dir_all(worker_dir.join("probe_0")).unwrap();
         std::fs::write(
             worker_dir.join("thermal_sample.sh"),
-            format!("#!/bin/sh\nexit {thermal_exit}\n"),
+            format!("#!/bin/sh\nprintf 'UPTIME\t0\nHAL_STATUS\t3\n'\nexit {thermal_exit}\n"),
         )
         .unwrap();
         std::fs::write(
@@ -1193,6 +1193,10 @@ cleanup_failure() {{ :; }}
 apply_plan() {{ printf 'applied\n' > "$D/applied"; }}
 read_value() {{ printf '3\n'; }}
 sleep() {{ :; }}
+thermal_point_uptime() {{ printf '0\n'; }}
+thermal_uptime() {{ printf '0\n'; }}
+thermal_deadline() {{ printf '%s\n' "$2"; }}
+thermal_wait_until() {{ :; }}
 restore_controls() {{ :; }}
 restore_trace() {{ :; }}
 release_master() {{ :; }}
@@ -1213,5 +1217,14 @@ release_master() {{ :; }}
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(out.status.success(), should_apply);
+        if !should_apply {
+            let raw =
+                std::fs::read_to_string(worker_dir.join("probe_0/thermal_hold.raw.tsv")).unwrap();
+            assert!(
+                raw.contains("HAL_STATUS\t3"),
+                "failed sample raw output must remain diagnostic evidence"
+            );
+            assert_eq!(out.status.code(), Some(82));
+        }
     }
 }
