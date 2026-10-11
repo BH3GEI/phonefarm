@@ -1323,13 +1323,17 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             last["frames_submitted"] = serde_json::json!(res.frames_submitted);
             last["postfx_active"] = serde_json::json!(res.postfx_active);
             last["refbench_config_readback"] = serde_json::json!({"frames":res.frames_config,
-                "intensity":res.intensity,"scene":res.scene,"run_id":res.run_id});
+                "intensity":res.intensity,"scene":res.scene,"run_id":res.run_id,
+                "capture_mode":res.capture_mode,"performance_eligible":res.performance_eligible});
             if a.require_discharging && !battery_after.on_battery() {
                 fatal = Some("required discharge not verified after arm".into()); break;
             }
             if !restored {
                 fatal = Some("锁频态回读与锁前不一致, 设备状态未能 100% 还原".into());
                 break;
+            }
+            if let Err(e) = verify_refbench_performance_scope(&res) {
+                fatal = Some(e); break;
             }
             if req.v2_context.is_some() {
                 if let Err(e) = verify_refbench_conditions(&res, *arm, a.frames, a.intensity) {
@@ -1983,6 +1987,9 @@ pub struct RefbenchArm {
     pub run_id: Option<String>,
     pub clean_exit: bool,
     pub postfx_active: Option<bool>,
+    /// Raw declarations retain malformed/null values so they cannot become missing.
+    pub capture_mode: Option<Value>,
+    pub performance_eligible: Option<Value>,
     /// 帧间隔 (ms)
     pub intervals_ms: Vec<f64>,
     /// 每帧 GPU 忙时 (ms)
@@ -1990,7 +1997,32 @@ pub struct RefbenchArm {
     pub error: Option<String>,
 }
 
+impl RefbenchArm {
+    fn read_report(&mut self, v: &Value) {
+        self.frames_submitted = v.get("frames_submitted").and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
+        self.frames_config = v.pointer("/params/frames").and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
+        self.intensity = v.pointer("/params/intensity").and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
+        self.scene = v["scene"].as_str().map(str::to_string);
+        self.run_id = v["run_id"].as_str().map(str::to_string);
+        self.clean_exit = v.get("clean_exit").and_then(Value::as_bool).unwrap_or(false);
+        self.postfx_active = v.pointer("/postfx/active").and_then(Value::as_bool);
+        self.capture_mode = v.get("capture_mode").cloned();
+        self.performance_eligible = v.get("performance_eligible").cloned();
+    }
+}
+
+fn verify_refbench_performance_scope(r: &RefbenchArm) -> Result<(), String> {
+    if r.capture_mode.is_some() || r.performance_eligible.is_some() {
+        return Err("refbench capture declarations are outside the ordinary performance contract; quality capture and unknown/malformed modes cannot supply performance samples".into());
+    }
+    Ok(())
+}
+
 fn verify_refbench_conditions(r: &RefbenchArm, arm: Arm, expected_frames: u32, expected_intensity: u32) -> Result<(), String> {
+    verify_refbench_performance_scope(r)?;
     if r.frames_config != Some(expected_frames) || r.intensity != Some(expected_intensity)
         || r.scene.as_deref() != Some(refbench::SCENE)
         || r.run_id.as_deref() != Some(format!("gpuop_{}",arm.as_str()).as_str()) {
@@ -2112,20 +2144,7 @@ fn run_refbench_arm(
     // 回包: 它自己说跑了多少帧、干不干净、算子挂上没有
     let raw = phone.shell(&format!("cat {result} 2>/dev/null"), 20_000);
     match serde_json::from_str::<Value>(raw.trim()) {
-        Ok(v) => {
-            out.frames_submitted = v
-                .get("frames_submitted")
-                .and_then(Value::as_u64)
-                .and_then(|n| u32::try_from(n).ok());
-            out.frames_config = v.pointer("/params/frames").and_then(Value::as_u64).and_then(|n|u32::try_from(n).ok());
-            out.intensity = v.pointer("/params/intensity").and_then(Value::as_u64).and_then(|n|u32::try_from(n).ok());
-            out.scene = v["scene"].as_str().map(str::to_string);
-            out.run_id = v["run_id"].as_str().map(str::to_string);
-            out.clean_exit = v.get("clean_exit").and_then(Value::as_bool).unwrap_or(false);
-            out.postfx_active = v
-                .pointer("/postfx/active")
-                .and_then(Value::as_bool);
-        }
+        Ok(v) => out.read_report(&v),
         Err(e) => out.error = Some(format!("refbench 回包不可解析: {e}")),
     }
 
@@ -2555,6 +2574,34 @@ mod tests {
         assert!(verify_refbench_conditions(&r,Arm::Candidate,300,3).is_ok());
         assert!(verify_refbench_conditions(&r,Arm::Candidate,300,4).is_err());
         assert!(verify_refbench_conditions(&r,Arm::Candidate,301,3).is_err());
+    }
+
+    #[test]
+    fn refbench_quality_capture_or_unknown_declarations_never_supply_performance() {
+        let ordinary = serde_json::json!({"frames_submitted":300,"params":{"frames":300,"intensity":3},
+            "scene":refbench::SCENE,"run_id":"gpuop_A","clean_exit":true,"postfx":{"active":false}});
+        let mut arm = RefbenchArm::default();
+        arm.read_report(&ordinary);
+        assert!(verify_refbench_performance_scope(&arm).is_ok());
+        assert!(verify_refbench_conditions(&arm, Arm::Baseline, 300, 3).is_ok());
+        for declarations in [
+            serde_json::json!({"capture_mode":"quality_only","performance_eligible":false}),
+            serde_json::json!({"performance_eligible":false}),
+            serde_json::json!({"performance_eligible":true}),
+            serde_json::json!({"capture_mode":"off","performance_eligible":true}),
+            serde_json::json!({"capture_mode":"unknown"}),
+            serde_json::json!({"capture_mode":null}),
+            serde_json::json!({"performance_eligible":null}),
+            serde_json::json!({"capture_mode":false,"performance_eligible":"true"}),
+        ] {
+            let mut report = ordinary.clone();
+            report.as_object_mut().unwrap().extend(declarations.as_object().unwrap().clone());
+            let mut arm = RefbenchArm::default();
+            arm.read_report(&report);
+            assert!(arm.clean_exit && arm.frames_submitted == Some(300));
+            assert!(verify_refbench_performance_scope(&arm).is_err(), "legacy accepted {report}");
+            assert!(verify_refbench_conditions(&arm, Arm::Baseline, 300, 3).is_err(), "v2 accepted {report}");
+        }
     }
 
     /// 上游 game_opt_loop 写出来的那份 JSON 必须能被原样读进来。
