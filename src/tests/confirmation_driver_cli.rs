@@ -999,6 +999,24 @@ fn loaded_cadence_driver_freeze_ten_arms_and_actual_judge_cannot_promote_synthet
     f.write("request.json", &req);
     assert_eq!(f.prepare("").0, 0);
     f.freeze();
+    let prepared_bytes = std::fs::read(f.dir.join("session/prepared.manifest.json")).unwrap();
+    let mut prepared = f.read("session/prepared.manifest.json");
+    assert!(prepared["hashes"]
+        .get("pre-probe_0-thermal.raw.tsv")
+        .is_some());
+    prepared["hashes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pre-probe_0-thermal.raw.tsv");
+    f.write("session/prepared.manifest.json", &prepared);
+    let (code, bad) = f.collect();
+    assert_eq!(code, 1, "{bad}");
+    assert!(bad["error"]
+        .as_str()
+        .unwrap()
+        .contains("prepared evidence manifest"));
+    assert!(!f.dir.join("session/collection.started.json").exists());
+    std::fs::write(f.dir.join("session/prepared.manifest.json"), prepared_bytes).unwrap();
     let (code, v) = f.collect();
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["status"], "SIMULATED_BLOCKED");

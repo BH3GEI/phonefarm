@@ -325,3 +325,8 @@ ordinary prepare probes, and at the readback hold boundaries. Failed or unknown
 checks precede control writes or trigger owned cleanup; earlier warmup and later
 baseline rejection do not substitute for this per-write admission. Raw probe
 thermal receipts remain capability evidence, not performance samples.
+
+Loaded prepared manifests require each `pre-probe_N-thermal.raw.tsv` and
+`pre-probe_N-thermal.json` receipt explicitly, in addition to the original probe
+and admission artifacts. Resuming collect rejects missing or extra prepared
+keys; a caller cannot drop these newly required control-admission receipts.

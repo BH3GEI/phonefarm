@@ -502,6 +502,10 @@ fn prepared_names(dir: &Path) -> Result<BTreeSet<String>, String> {
         ] {
             names.insert(format!("probe_{i}-{suffix}"));
         }
+        if read_json(&dir.join("request.json"))?["temperature_profile_id"] == "loaded_steady_v1" {
+            names.insert(format!("pre-probe_{i}-thermal.raw.tsv"));
+            names.insert(format!("pre-probe_{i}-thermal.json"));
+        }
     }
     for i in 0..3 {
         for suffix in [
