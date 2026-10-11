@@ -1,6 +1,10 @@
 //! Bounded read-only thermal producer. Uses only receiver-generated frozen paths.
 use super::*;
 const METADATA: &str = include_str!("../loop_v1/tools/thermal_profile_metadata.sh");
+const REJECTION_GATE: &str = include_str!("../loop_v1/tools/thermal_rejection_gate.awk");
+#[cfg(test)]
+#[path = "tests/support/thermal_rejection_diagnostics.rs"]
+mod rejection_diagnostic_tests;
 
 pub(super) fn parse_metadata(raw: &str, boot: &str) -> Result<Value, String> {
     require(
@@ -623,10 +627,10 @@ fn sampling_script(
     }
     let mut setup = String::new();
     for (i, t) in profile.sensors.iter().enumerate() {
-        let scale = match t.unit {
-            crate::thermal_profile::Unit::MilliCelsius => 1000.,
-            crate::thermal_profile::Unit::DeciCelsius => 10.,
-            crate::thermal_profile::Unit::Celsius => 1.,
+        let (scale, unit) = match t.unit {
+            crate::thermal_profile::Unit::MilliCelsius => (1000., "milli_celsius"),
+            crate::thermal_profile::Unit::DeciCelsius => (10., "deci_celsius"),
+            crate::thermal_profile::Unit::Celsius => (1., "celsius"),
             _ => return Err("selected thermal unit unknown".into()),
         };
         let (lo, hi) = if let Some(r) = reference {
@@ -639,13 +643,34 @@ fn sampling_script(
             (-50., t.operating_cap_c)
         };
         setup += &format!(
-            "scale[{}]={scale:.10}; low[{}]={lo:.10}; high[{}]={hi:.10};",
+            "scale[{}]={scale:.10}; low[{}]={lo:.10}; high[{}]={hi:.10}; expected_path[{}]=\"{}\"; declared_unit[{}]=\"{unit}\"; operating_cap[{}]={:.10};",
             i + 1,
             i + 1,
-            i + 1
+            i + 1,
+            i + 1,
+            t.path,
+            i + 1,
+            i + 1,
+            t.operating_cap_c
         );
     }
-    let check=format!("printf '%s\\n' \"$values\" | awk 'BEGIN {{{setup}}} {{v=$0/scale[NR]; if ($0 !~ /^-?[0-9]+([.][0-9]+)?$/ || v<low[NR] || v>high[NR]) bad=1}} END {{exit (bad || NR!={})}}' || exit 82\n",profile.sensors.len());
+    let gate = REJECTION_GATE
+        .replace("__FROZEN_SENSOR_SETUP__", &setup)
+        .replace("__EXPECTED_COUNT__", &profile.sensors.len().to_string())
+        .replace(
+            "__BOUNDS_SOURCE__",
+            if reference.is_some() {
+                "reference_band"
+            } else {
+                "absolute_cap"
+            },
+        );
+    // AWK normally emitted no stdout. Its bounded failure receipt goes only to
+    // stderr, using the same values snapshot before the preserved exit82.
+    let check = format!(
+        "printf '%s\\n' \"$values\" | awk {} >&2 || exit 82\n",
+        quote(&gate)
+    );
     s = s.replace("set -- $values\n", &(check + "set -- $values\n"));
     // The same captured HAL bytes are printed and checked; no second query gives a different status.
     s=s.replace("printf '#hal_begin\\n'\ntimeout 8 dumpsys thermalservice\nprintf '#hal_end\\n'", "hal=$(timeout 8 dumpsys thermalservice)\nprintf '#hal_begin\\n%s\\n#hal_end\\n' \"$hal\"\nprintf '%s\\n' \"$hal\" | awk '/^Thermal Status: /{n++; if ($3 !~ /^[0-2]$/) bad=1} /^IsStatusOverride: /{o++; if ($2!=\"false\") bad=1} /^HAL Ready: /{r++; if ($3!=\"true\") bad=1} END{exit (bad || n!=1 || o!=1 || r!=1)}' || exit 83");
