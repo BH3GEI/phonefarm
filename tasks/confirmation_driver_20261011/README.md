@@ -5,8 +5,10 @@ reconcile`, with actual Android root/KGSL/sysparam command source. This session
 ran **zero actual ADB/HDC/device commands, SDK downloads, model calls or training**.
 Fake transport is explicit, remains synthetic, and GOL must return BLOCKED.
 
-Final production source is `f526b31`. The current full source/test/tool
-fingerprints and final cross-CLI fixture path are in `verification_summary.json`.
+The historical complete archive uses production source `f526b31`; its
+source/test/tool fingerprints and cross-CLI fixture path remain in
+`verification_summary.json`. Current followup source `22641c3` and its fresh
+full test/tool fingerprints are recorded separately in `lease_schema_followup.json`.
 Actual prepare/collect/registration argv, environment overrides, exit status and
 stdout/stderr are retained in each fixture's `host-cli-*.exit.json` receipts.
 The original workload/candidate files are deliberately changed after prepare
@@ -105,3 +107,23 @@ KGSL timing and battery measurement need a separately authorized hardware run.
 Full raw evidence remains local in this task folder. Only this README,
 reproduction helper and compact verification summary are committed; large logs,
 executable snapshots and raw captures are excluded.
+
+## Lease schema followup (2026-10-12)
+
+Source `22641c3` additionally refuses unfamiliar format-1 top-level fields and
+new marker versions in every marker consumer/Drop. The unit counterexample
+checks the exact schema error and unchanged marker bytes across active checks,
+admission, manual recovery, recovery ownership transfer and Drop. The original
+PR19 now includes the complete generic lease lifecycle backport (`28a4868`,
+evidence `4e171f7`, 533 tests); it imports no driver module. Both branches retain
+the same strict recovery fields and independent child-group lifecycle.
+
+Fresh full source gate: **568 passed** (535 unit, 10 driver CLI, 14 observation CLI,
+9 qualification CLI); driver group 634.13 seconds. Default Clippy exited 0,
+53 binary / 58 test warnings (46 duplicates), not strict clean. PF binary SHA-256
+`c2cba01d5e82397620210f4e15d62d8d32d9c3351f179b9432bb038d7fbc8bb6`;
+the actual GOL executable remained the `5149a3` / `589667fa…` build above.
+The current full test used default temporary fixtures, which are cleaned by
+the suite; it does not relabel the retained historical `final_v5` independent
+ten-bundle archive. Both runs remain synthetic/BLOCKED with false proof and
+promotion, zero real device/API execution and no Android worker acceptance.
