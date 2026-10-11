@@ -1,0 +1,201 @@
+{
+  "schema": "phonefarm/lease_pr19_backport_verification@1",
+  "original_pr19_source": "d03af6c00fb50fd12140bc14af0b593a55b4b9cb",
+  "source_commit": "28a48687943f311c72dc908e3e01ca0719adf5ec",
+  "binary_sha256": "49658dd9560b6a8063ae1b54f829eafd05de3516323304c13313932ac3714cca",
+  "devlease_sha256": "aa7c5161dfd4066d8e192445dbe8236d70e11a16e4ab2561bfa3b0a2b787459d",
+  "no_driver_import": true,
+  "routing_unchanged": true,
+  "test": {
+    "argv": [
+      "cargo",
+      "test",
+      "--offline",
+      "--manifest-path",
+      "src/Cargo.toml"
+    ],
+    "exit": 0,
+    "groups": [
+      {
+        "passed": 518,
+        "seconds": 7.96,
+        "name": "unit"
+      },
+      {
+        "passed": 3,
+        "seconds": 2.75,
+        "name": "lease_recovery_backport"
+      },
+      {
+        "passed": 12,
+        "seconds": 5.65,
+        "name": "v2_conditions_lease"
+      }
+    ],
+    "passed": 533,
+    "log": "tasks/lease_pr19_backport_20261012/cargo-test.log",
+    "log_sha256": "849ada91e22e81821218fdafef7a417e12b447abf72093940c8b8f9cc79b67da",
+    "environment": {
+      "PHONEFARM_BACKPORT_FIXTURE_ROOT": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-lease-pr19-backport/tasks/lease_pr19_backport_20261012/full-fixtures"
+    }
+  },
+  "clippy": {
+    "argv": [
+      "cargo",
+      "clippy",
+      "--offline",
+      "--manifest-path",
+      "src/Cargo.toml",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "strict_clean": false,
+    "log": "tasks/lease_pr19_backport_20261012/clippy.log",
+    "log_sha256": "cf71a921e6aba3a98f9810c5e4fbd91518d5f846b2ccb3661ea2d3fe8868e741",
+    "warnings": [
+      "warning: `phonefarm` (bin \"phonefarm\") generated 49 warnings (run `cargo clippy --fix --bin \"phonefarm\" -p phonefarm` to apply 23 suggestions)",
+      "warning: `phonefarm` (bin \"phonefarm\" test) generated 54 warnings (43 duplicates) (run `cargo clippy --fix --bin \"phonefarm\" -p phonefarm --tests` to apply 5 suggestions)"
+    ]
+  },
+  "fixture_receipts": [
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-future-99519-1791736632762491000/admission.json",
+      "sha256": "26ee3f95726ab763d575020bc36e7aeb221af8002a7c556ab77beafca9290db1"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-future-99519-1791736632762491000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "f20a0246754d7ea65c15a7f2f8b21e398561afa0102ce65aeaf34cba07845a70"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-future-99519-1791736632762491000/manual-recover.json",
+      "sha256": "26ee3f95726ab763d575020bc36e7aeb221af8002a7c556ab77beafca9290db1"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-grandchild-99519-1791736630059718000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "2dd2e36d3a1086484a7fb9db4b90b245b255c2c3982c83187090fdedab876e3e"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-grandchild-99519-1791736630059718000/manual-recover.json",
+      "sha256": "f252eeae05601b8e007224734cb7896e7f427d91d852065dc2c804361443fe74"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-grandchild-99519-1791736630059718000/next-admission.json",
+      "sha256": "af870aaa4ffa191b28f88faeb64574feac76064d067264abaeb58e9e95ee0f48"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-grandchild-99519-1791736630059718000/verified.json",
+      "sha256": "cd264d055dbcd887333614510b8a8b19349ada6d25017c773181f46f4325ba82"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-grandchild-99519-1791736630059718000/wrapper.json",
+      "sha256": "40ef16d5f3699e750f607388982e44d44983f356bb6dad7005b64dfb0f2505f2"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-legacy-idle-99519-1791736630059704000/manual-recover.json",
+      "sha256": "b3c888f5027f2db7abea46bd192cf81f81f4bc8c8de6f0377825ac568fc04e3a"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-nullpending-99519-1791736632704728000/admission.json",
+      "sha256": "f864b3888cd32fe537b5e38c93927d9c94a5e9e35e748431db18d1a9c707fc62"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-nullpending-99519-1791736632704728000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "bf65bc55e7157729a8d6878bcf4784a9da3410873fb258b54bbe991a77e0a327"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-nullpending-99519-1791736632704728000/manual-recover.json",
+      "sha256": "f864b3888cd32fe537b5e38c93927d9c94a5e9e35e748431db18d1a9c707fc62"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-pending-99519-1791736630059872000/admission.json",
+      "sha256": "6d129384a50461b44e7ef7f411758f1cda29eb38227f0d703f0d40815fd57256"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-pending-99519-1791736630059872000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "698889a85f88a32115250ce10e30e50fc2316be0de9ce2ca0a8fa8407ddc8e43"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-pending-99519-1791736630059872000/manual-recover.json",
+      "sha256": "6d129384a50461b44e7ef7f411758f1cda29eb38227f0d703f0d40815fd57256"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-pgidonly-99519-1791736632744487000/admission.json",
+      "sha256": "7662edb58d2e2faf92173c7f5f4bbda475e219f783cc8c8d78f5ce77ddc9f0d4"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-pgidonly-99519-1791736632744487000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "9aba9ee1667471b9851abb2d6f33a6a29f765998a05236ac260a8d6c3d83908f"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-pgidonly-99519-1791736632744487000/manual-recover.json",
+      "sha256": "7662edb58d2e2faf92173c7f5f4bbda475e219f783cc8c8d78f5ce77ddc9f0d4"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-pidonly-99519-1791736632726000000/admission.json",
+      "sha256": "7662edb58d2e2faf92173c7f5f4bbda475e219f783cc8c8d78f5ce77ddc9f0d4"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-pidonly-99519-1791736632726000000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "b90e39ab84d130739026f5a1396a99bdc1ed59ebd845bc9214d1b706d94d1fea"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-pidonly-99519-1791736632726000000/manual-recover.json",
+      "sha256": "7662edb58d2e2faf92173c7f5f4bbda475e219f783cc8c8d78f5ce77ddc9f0d4"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-recovery-99519-1791736632625180000/admission.json",
+      "sha256": "1ae2a270132956a8dbe86fd94787d3e42a6b5b6740a0ff6ec0bcad80149fba59"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-recovery-99519-1791736632625180000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "83ea411c61fe54b09e9d42e8a91c4f783f2a9ddb499bf331fb8f5e0743a20a86"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-recovery-99519-1791736632625180000/manual-recover.json",
+      "sha256": "ba291d9581df05388ed29f27dbd9d19250d186078218d33cba75665df6d652b5"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-stringpending-99519-1791736632660907000/admission.json",
+      "sha256": "f864b3888cd32fe537b5e38c93927d9c94a5e9e35e748431db18d1a9c707fc62"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-stringpending-99519-1791736632660907000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "e1ef558c88338d20d5a1a5521e829efa2e78c3dd8b7633d60e0bad4eab99002b"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-stringpending-99519-1791736632660907000/manual-recover.json",
+      "sha256": "f864b3888cd32fe537b5e38c93927d9c94a5e9e35e748431db18d1a9c707fc62"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-stringrecovery-99519-1791736632688656000/admission.json",
+      "sha256": "9629f82339d3a489ab8f4d3252df03fe89f2b0f065e74666fc62c90e8ab84f51"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-stringrecovery-99519-1791736632688656000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "d72ffd9b67fea0419a047000a69df5123eb88632f00092fd8f28aa5936d410db"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-stringrecovery-99519-1791736632688656000/manual-recover.json",
+      "sha256": "9629f82339d3a489ab8f4d3252df03fe89f2b0f065e74666fc62c90e8ab84f51"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-version-99519-1791736632782888000/admission.json",
+      "sha256": "7cef2312917ef8bdff9a581437e39de9d19a047ff013e951b3eff57fa6ee8f7e"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-version-99519-1791736632782888000/legacy/devlock.d/phonefarm-lease.json",
+      "sha256": "15d6ce31c0fe093d35db8e904f4c999c1ca0b487602f07af36c3e690e13e7cb0"
+    },
+    {
+      "path": "tasks/lease_pr19_backport_20261012/full-fixtures/lease-backport-version-99519-1791736632782888000/manual-recover.json",
+      "sha256": "7cef2312917ef8bdff9a581437e39de9d19a047ff013e951b3eff57fa6ee8f7e"
+    }
+  ],
+  "independent_review": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/system_handoff_20261011/lease_pr19_backport_readonly_review.md",
+  "device_executed": false,
+  "sdk_installed": false,
+  "model_api_calls": 0,
+  "hardware_acceptance": "NOT_RUN",
+  "device_restoration_proven": false,
+  "proof_or_promotion": false
+}
