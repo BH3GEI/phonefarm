@@ -1,0 +1,112 @@
+{
+  "tools": {
+    "toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android30-clang": {
+      "sha256": "cf2d40be93fb6051d3a66f5d6bdd24ccbe6595913040460f3607a241d562af76",
+      "bytes": 201,
+      "exit": 0,
+      "version_stdout": "Android (13624864, +pgo, -bolt, +lto, -mlgo, based on r530567e) clang version 19.0.1 (https://android.googlesource.com/toolchain/llvm-project 97a699bf4812a18fb657c2779f5296a4ab2694d2)\nTarget: aarch64-unknown-linux-android30\nThread model: posix\nInstalledDir: /Users/kamico/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin\n",
+      "version_stderr": ""
+    },
+    "toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android30-clang++": {
+      "sha256": "662b264a3a4ecaa251c2eee4537000a69b5078211223a9eeb76b0c3a213a1ee4",
+      "bytes": 205,
+      "exit": 0,
+      "version_stdout": "Android (13624864, +pgo, -bolt, +lto, -mlgo, based on r530567e) clang version 19.0.1 (https://android.googlesource.com/toolchain/llvm-project 97a699bf4812a18fb657c2779f5296a4ab2694d2)\nTarget: aarch64-unknown-linux-android30\nThread model: posix\nInstalledDir: /Users/kamico/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin\n",
+      "version_stderr": ""
+    },
+    "toolchains/llvm/prebuilt/darwin-x86_64/bin/clang-19": {
+      "sha256": "df85444b66234bf4cae267e22bde45ea8fef596d30ca2991b2091a27e6ea7718",
+      "bytes": 172733264,
+      "exit": 0,
+      "version_stdout": "Android (13624864, +pgo, -bolt, +lto, -mlgo, based on r530567e) clang version 19.0.1 (https://android.googlesource.com/toolchain/llvm-project 97a699bf4812a18fb657c2779f5296a4ab2694d2)\nTarget: x86_64-apple-darwin24.5.0\nThread model: posix\nInstalledDir: /Users/kamico/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin\n",
+      "version_stderr": ""
+    },
+    "toolchains/llvm/prebuilt/darwin-x86_64/bin/lld": {
+      "sha256": "295bc36e1b10be0137f09904b7cc928a11ab3d44a8ec8250e4087ebd71f091c2",
+      "bytes": 115866400,
+      "exit": 1,
+      "version_stdout": "",
+      "version_stderr": "lld is a generic driver.\nInvoke ld.lld (Unix), ld64.lld (macOS), lld-link (Windows), wasm-ld (WebAssembly) instead\n"
+    },
+    "toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-nm": {
+      "sha256": "709c3ec8bf09b68ac535275b1bb5bb511b7809413817036e3605f187809e7b81",
+      "bytes": 28941296,
+      "exit": 0,
+      "version_stdout": "llvm-nm, compatible with GNU nm\nLLVM (http://llvm.org/):\n  LLVM version 19.0.1 (/Volumes/Android/buildbot/src/android/llvm-r530567/out/llvm-project/llvm 97a699bf4812a18fb657c2779f5296a4ab2694d2)\n  Optimized build.\n",
+      "version_stderr": ""
+    },
+    "toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-readobj": {
+      "sha256": "37e565359be0c9f2868348dd314416a420d137ee84c891ec8474cf7d29cfd995",
+      "bytes": 11757520,
+      "exit": 0,
+      "version_stdout": "LLVM (http://llvm.org/):\n  LLVM version 19.0.1 (/Volumes/Android/buildbot/src/android/llvm-r530567/out/llvm-project/llvm 97a699bf4812a18fb657c2779f5296a4ab2694d2)\n  Optimized build.\n",
+      "version_stderr": ""
+    },
+    "shader-tools/darwin-x86_64/glslc": {
+      "sha256": "63da7bd4a7086bfb448e2c3d74af167f80204937bf3b440c5c99eeb76ee9b8b6",
+      "bytes": 11261008,
+      "exit": 0,
+      "version_stdout": "shaderc v2022.3 ndk-r29-beta2\nspirv-tools v2022.4 ndk-r29-beta2\nglslang ndk-r29-beta2\n\nTarget: SPIR-V 1.0\n",
+      "version_stderr": ""
+    },
+    "shader-tools/darwin-x86_64/spirv-val": {
+      "sha256": "d7716427a7e19074b7b435237742107b461572e63387ac1697df35fb4945b392",
+      "bytes": 2571216,
+      "exit": 0,
+      "version_stdout": "SPIRV-Tools v2022.4 ndk-r29-beta2\nTargets:\n  SPIR-V 1.0\n  SPIR-V 1.1\n  SPIR-V 1.2\n  SPIR-V 1.3\n  SPIR-V 1.4\n  SPIR-V 1.5\n  SPIR-V 1.6\n  SPIR-V 1.2 (under OpenCL 2.2 Full Profile semantics)\n  SPIR-V 1.0 (under Vulkan 1.0 semantics)\n  SPIR-V 1.3 (under Vulkan 1.1 semantics)\n SPIR-V 1.4 (under Vulkan 1.1 semantics)\n SPIR-V 1.5 (under Vulkan 1.2 semantics)\n SPIR-V 1.6 (under Vulkan 1.3 semantics)\n",
+      "version_stderr": ""
+    }
+  },
+  "spirv_validation": [
+    {
+      "shader": "alu_frag.spv",
+      "sha256": "eb2885c98b318150a91b6448aeec35f8c3a073695b43c2c91140ecbe1ac1050a",
+      "bytes": 1632,
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "shader": "blit_frag.spv",
+      "sha256": "34525c1d4f6e5dec1e260f1560e4f4b26d657f87d98a7157e6e4b3226af36293",
+      "bytes": 476,
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "shader": "fullscreen_vert.spv",
+      "sha256": "93b869f4557ed0b0ad2c104c309f426ae31dffc2a2c97f0a43f2ffbb65fdf67d",
+      "bytes": 932,
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "shader": "pingpong_frag.spv",
+      "sha256": "b4efa2132964cd7837baf29d0144d98fe75cde8455b71a6f1eaa13c595b01e67",
+      "bytes": 1500,
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "shader": "tri_frag.spv",
+      "sha256": "665529e9abad1409cb0897f6329de973db8676599d45094f854b3e95b498280e",
+      "bytes": 336,
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "shader": "tri_vert.spv",
+      "sha256": "ba269789bee49fa289a3cf0c07eda6990be3ad05c529cd41ef778d929a292efb",
+      "bytes": 1204,
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "gpu_validation": "not_run",
+  "device_calls": 0
+}

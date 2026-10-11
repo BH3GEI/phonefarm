@@ -1,0 +1,17 @@
+package: name='io.github.hgamey.refbench' versionCode='1' versionName='0.1.0' platformBuildVersionName='15' platformBuildVersionCode='35' compileSdkVersion='35' compileSdkVersionCodename='15'
+minSdkVersion:'30'
+targetSdkVersion:'35'
+application: label='refbench' icon=''
+launchable-activity: name='android.app.NativeActivity'  label='' icon=''
+feature-group: label=''
+  uses-feature: name='android.hardware.vulkan.version' version='4198400'
+  uses-feature: name='android.hardware.faketouch'
+  uses-implied-feature: name='android.hardware.faketouch' reason='default feature for all apps'
+  uses-feature: name='android.hardware.screen.landscape'
+  uses-implied-feature: name='android.hardware.screen.landscape' reason='one or more activities have specified a landscape orientation'
+main
+supports-screens: 'small' 'normal' 'large' 'xlarge'
+supports-any-density: 'true'
+locales:
+densities:
+native-code: 'arm64-v8a'
