@@ -4,8 +4,14 @@ use std::{fs, path::PathBuf, process::Command};
 #[test]
 fn host_native_counters_and_actual_layer_hooks() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../knobs/gray");
-    let temp =
-        std::env::temp_dir().join(format!("phonefarm-native-artifact-{}", std::process::id()));
+    let temp = std::env::temp_dir().join(format!(
+        "phonefarm-native-artifact-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     fs::create_dir(&temp).unwrap();
     let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
     let exe = temp.join("stats-test");
@@ -40,7 +46,7 @@ fn host_native_counters_and_actual_layer_hooks() {
         }
     }
     fs::write(temp.join("copy_spv.h"),"alignas(4) static const unsigned char kCopySpv[]={3,2,35,7};static const unsigned int kCopySpvLen=4;alignas(4) static const unsigned char kUpopSpv[]={3,2,35,7};static const unsigned int kUpopSpvLen=4;").unwrap();
-    for dynamic in [false, true] {
+    for (dynamic, fixture) in [(false, true), (true, true), (false, false), (true, false)] {
         if dynamic {
             fs::write(temp.join("artifact_metadata.h"),"#define RK_DYNAMIC_ARTIFACT_METADATA 1\nstatic const char kArtifactId[]=\"upop-host-fixture\";static const char kCandidateSourceSha256[]=\"source-fixture\";static const char kCandidateSpirvSha256[]=\"spv-fixture\";\n").unwrap();
         }
@@ -52,11 +58,10 @@ fn host_native_counters_and_actual_layer_hooks() {
         if dynamic {
             cmd.arg("-DRK_DYNAMIC_UPOP_BUILD=1");
         }
-        let exe = temp.join(if dynamic {
-            "dynamic-layer-test"
-        } else {
-            "legacy-layer-test"
-        });
+        if fixture {
+            cmd.arg("-DRK_LIFETIME_HOST_FIXTURE=1");
+        }
+        let exe = temp.join(format!("layer-{dynamic}-{fixture}-test"));
         let output = cmd
             .arg(root.join("tests/layer_artifact_test.cpp"))
             .arg("-o")
@@ -76,18 +81,51 @@ fn host_native_counters_and_actual_layer_hooks() {
         );
         let marker: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(
-            marker["upop_artifact"]["artifact_id"],
+            marker["artifact_id"],
             if dynamic {
                 "upop-host-fixture"
             } else {
                 "legacy-fixed-upop"
             }
         );
-        assert_eq!(marker["upop_artifact"]["counts"]["pipeline_created"], 1);
-        assert_eq!(marker["upop_artifact"]["counts"]["queue_submitted"], 2);
-        assert_eq!(marker["upop_artifact"]["counts"]["substituted"], 1);
-        assert_eq!(marker["upop_artifact"]["gpu_completion_proven"], false);
+        assert_eq!(marker["deployable"], false);
+        assert_eq!(
+            marker["native_marker"]["upop_artifact"]["ownership_scope"],
+            "recording_generation_per_dispatch"
+        );
+        assert_eq!(
+            marker["native_marker"]["upop_artifact"]["evaluation_eligible"],
+            false
+        );
+        assert_eq!(
+            marker["native_marker"]["upop_artifact"]["gpu_completion_proven"],
+            false
+        );
+        if fixture {
+            assert!(marker["ownership_cases"].as_u64().unwrap() >= 39);
+            assert!(marker["dispatch_recorded"].as_u64().unwrap() >= 141);
+        } else {
+            assert_eq!(marker["dispatch_recorded"], 0);
+            assert_eq!(marker["ownership_cases"], 1);
+        }
     }
+    let android_fixture = Command::new(&cxx)
+        .args([
+            "-std=c++17",
+            "-D__ANDROID__=1",
+            "-DRK_LIFETIME_HOST_FIXTURE=1",
+            "-fsyntax-only",
+            "-I",
+        ])
+        .arg(&temp)
+        .arg("-I")
+        .arg(root.join("tests/stubs"))
+        .arg(root.join("layer/vk_layer_refknobs.cpp"))
+        .output()
+        .unwrap();
+    assert!(!android_fixture.status.success());
+    assert!(String::from_utf8_lossy(&android_fixture.stderr)
+        .contains("Host lifetime contracts are forbidden"));
     fs::remove_file(temp.join("artifact_metadata.h")).unwrap();
     let output = Command::new(&cxx)
         .args([
