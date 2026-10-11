@@ -66,6 +66,11 @@ trap 'restore' EXIT INT TERM
 # ── 布置 ──
 echo 0 > "$T/tracing_on"
 echo nop > "$T/current_tracer"
+# 实例的时钟与全局保持一致 (全局常被设成 boot; 实例缺省 local, 时间戳会与 /proc/uptime 对不上)
+if [ "$MODE" = instance ]; then
+  CLK=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$ROOT/trace_clock" 2>/dev/null)
+  [ -n "$CLK" ] && echo "$CLK" > "$T/trace_clock" 2>/dev/null
+fi
 # 每 CPU 64MB; 写不进去 (内存不够) 就退到 16MB —— 实例里只有 kgsl 事件, 60s @ 120fps 也只要几 MB
 echo 65536 > "$T/buffer_size_kb" 2>/dev/null || echo 16384 > "$T/buffer_size_kb" 2>/dev/null
 echo > "$T/trace"
@@ -90,7 +95,7 @@ MARK_END=$(cat /proc/uptime | cut -d' ' -f1)
   echo "#loop_v1_meta gpu_busy=$(cat /sys/class/kgsl/kgsl-3d0/gpubusy 2>/dev/null) gpu_clk=$(cat /sys/class/kgsl/kgsl-3d0/gpuclk 2>/dev/null)"
   echo "#loop_v1_meta thermal_pwrlevel=$(cat /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel 2>/dev/null) min_pwrlevel=$(cat /sys/class/kgsl/kgsl-3d0/min_pwrlevel 2>/dev/null)"
   # 不进 loop_v1_meta (解析器不看), 只供人核对: 采在哪个 buffer、每 CPU 多大、冲掉了多少
-  echo "# phonefarm trace_mode=$MODE buffer_size_kb=$(cat "$T/buffer_size_kb" 2>/dev/null)"
+  echo "# phonefarm trace_mode=$MODE buffer_size_kb=$(cat "$T/buffer_size_kb" 2>/dev/null) trace_clock=$(sed -n 's/.*\[\(.*\)\].*/\1/p' "$T/trace_clock" 2>/dev/null)"
   for c in "$T"/per_cpu/cpu*; do
     echo "# phonefarm $(basename "$c") $(grep -E '^overrun' "$c/stats" 2>/dev/null)"
   done
