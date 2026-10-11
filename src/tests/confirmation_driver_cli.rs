@@ -24,6 +24,9 @@ impl F {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        // The driver canonicalizes its session. Keep independent producer inputs
+        // on the same root (/var and /private/var are aliases on macOS).
+        let dir = std::fs::canonicalize(dir).unwrap();
         std::fs::write(
             dir.join("fake-adb"),
             include_str!("support/fake_confirmation_adb.py"),
