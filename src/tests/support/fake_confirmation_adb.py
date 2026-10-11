@@ -132,7 +132,7 @@ elif cmd=='sh':
             assert len(blocks)==manifest['count']
             for i,(name,size,raw) in enumerate(blocks):
                 b=base64.b64decode(b''.join(raw.split()),validate=True);assert len(b)==int(size)
-                state['files'][d+'/'+name.decode()]=b.decode()
+                state['files'][d+'/'+name.decode()]=b.decode('latin1')
                 if fail=='batch_partial_install' and i==1:
                     statepath.write_text(json.dumps(state));sys.exit(91)
             if fail=='batch_corrupt_remote':state['files'][d+'/worker.sh']='X'+state['files'][d+'/worker.sh'][1:]
@@ -146,7 +146,7 @@ elif cmd=='sh':
             for entry in manifest['files']:
                 value=state['files'].get(d+'/'+entry['name'])
                 if value is None:sys.exit(92)
-                b=value.encode();print(f'FILE\t{entry["name"]}\t{len(b)}\t{hashlib.sha256(b).hexdigest()}');count+=1
+                b=value.encode('latin1');print(f'FILE\t{entry["name"]}\t{len(b)}\t{hashlib.sha256(b).hexdigest()}');count+=1
             if fail=='batch_truncated_verify':sys.exit(0)
             print(f'COUNT\t{count}\n#end')
     elif b'#phonefarm_thermal_metadata v1' in data:

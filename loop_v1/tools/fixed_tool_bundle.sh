@@ -44,6 +44,18 @@ finish_install() {
   sync
   printf 'INSTALL_COMPLETE\t%s\t%s\t%s\t%s\n' "$TOKEN" "$actual_boot" "$BUNDLE" "$n"
 }
+enable_reader() {
+  guard
+  [ -f "$D/render_reader.elf" ] && [ ! -L "$D/render_reader.elf" ] || exit 93
+  chmod 700 "$D/render_reader.elf" || exit 93
+  sync
+  guard
+  verify_reader
+}
+verify_reader() {
+  guard
+  [ -f "$D/render_reader.elf" ] && [ ! -L "$D/render_reader.elf" ] && [ -x "$D/render_reader.elf" ] || exit 93
+}
 prepare_verify() {
   command -v wc >/dev/null && command -v sha256sum >/dev/null || exit 89
   guard

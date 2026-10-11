@@ -76,6 +76,7 @@ pub(super) fn names(
     loaded: bool,
     capability: bool,
     controls: usize,
+    queued: bool,
 ) -> Result<BTreeSet<String>, String> {
     require(
         (1..=32).contains(&controls) && (!control_only || controls == 1),
@@ -84,6 +85,10 @@ pub(super) fn names(
     require(
         !capability || control_only && loaded,
         "capability fixed tools are control-only",
+    )?;
+    require(
+        !queued || loaded && !control_only && !capability,
+        "queued fixed tools require loaded confirmation purpose",
     )?;
     let mut n = [
         "worker.sh",
@@ -112,6 +117,17 @@ pub(super) fn names(
     if capability {
         n.insert("thermal-purpose.txt".into());
     }
+    if queued {
+        n.extend(
+            [
+                "render_ownership.sh",
+                "render_args.tsv",
+                "render_reader.elf",
+                "ftrace-trace_clock",
+            ]
+            .map(String::from),
+        );
+    }
     Ok(n)
 }
 pub(super) fn compile(
@@ -137,11 +153,11 @@ fn compile_owned(
     boot: &str,
 ) -> Result<Bundle, String> {
     require(
-        (11..=45).contains(&expected.len()),
+        (11..=49).contains(&expected.len()),
         "fixed tool set size invalid",
     )?;
-    let allowed = names(false, true, false, 32)?
-        .union(&names(true, true, true, 1)?)
+    let allowed = names(false, true, false, 32, true)?
+        .union(&names(true, true, true, 1, false)?)
         .cloned()
         .collect::<BTreeSet<_>>();
     require(
@@ -197,6 +213,10 @@ fn compile_owned(
         }
         installer.push_str("PHONEFARM_FIXED_BUNDLE_DATA\n");
         verifier.push_str(&format!("verify_fixed {} {}\n", quote(&e.name), e.bytes));
+    }
+    if expected.contains("render_reader.elf") {
+        installer.push_str("enable_reader\n");
+        verifier.push_str("verify_reader\n");
     }
     installer.push_str("finish_install\n");
     verifier.push_str("finish_verify\n");
@@ -287,6 +307,9 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
+            Self::with_queued(false)
+        }
+        fn with_queued(queued: bool) -> Self {
             let base = std::env::var_os("PHONEFARM_FIXED_TOOLS_TEST_ARTIFACT_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(std::env::temp_dir);
@@ -300,10 +323,10 @@ mod tests {
             let input = root.join("input");
             std::fs::create_dir(&input).unwrap();
             let remote = root.join("owned-remote");
-            let files = names(false, true, false, 1).unwrap();
+            let files = names(false, true, false, 1, queued).unwrap();
             for name in &files {
                 // Nontext bytes exercise the decoder without ever executing the uploaded file.
-                let bytes = if name == "worker.sh" {
+                let bytes = if name == "worker.sh" || name == "render_reader.elf" {
                     (0..=255).collect::<Vec<u8>>()
                 } else {
                     format!("frozen {name}\n").into_bytes()
@@ -404,6 +427,34 @@ mod tests {
                 0o700
             );
         }
+    }
+    #[test]
+    fn queued_reader_binary_mode_is_installed_then_freshly_verified_without_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut f = Fixture::with_queued(true);
+        f.install();
+        let reader = f.remote.join("render_reader.elf");
+        assert_eq!(
+            std::fs::read(&reader).unwrap(),
+            (0..=255).collect::<Vec<u8>>()
+        );
+        assert_eq!(
+            std::fs::metadata(&reader).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(f.bundle.manifest.count, 18);
+        let receipt = f.verify();
+        assert_eq!(receipt.code, 0);
+        f.bundle.accept_verify(&receipt.stdout).unwrap();
+        assert_eq!(f.transport.sequence, 2);
+        std::fs::set_permissions(&reader, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let receipt = f.verify();
+        assert_eq!(receipt.code, 93);
+        assert!(f.bundle.accept_verify(&receipt.stdout).is_err());
+        assert_eq!(
+            std::fs::metadata(&reader).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
     #[test]
     fn fresh_actual_verifier_rejects_changed_missing_symlink_and_fifo() {
@@ -516,16 +567,19 @@ mod tests {
     #[test]
     fn only_registered_names_and_bounded_regular_source_files_can_compile() {
         let f = Fixture::new();
-        let mut n = names(false, true, false, 1).unwrap();
+        let mut n = names(false, true, false, 1, false).unwrap();
         n.insert("arbitrary.bin".into());
         assert!(
             compile_owned(&f.input, &n, f.remote.to_str().unwrap(), "t", "b")
                 .unwrap_err()
                 .contains("nonreceiver")
         );
-        assert!(names(false, true, true, 1).is_err());
-        assert!(names(true, true, false, 2).is_err());
-        let n = names(false, true, false, 1).unwrap();
+        assert!(names(false, true, true, 1, false).is_err());
+        assert!(names(true, true, false, 2, false).is_err());
+        assert!(names(false, false, false, 1, true).is_err());
+        assert!(names(true, true, false, 1, true).is_err());
+        assert!(names(true, true, true, 1, true).is_err());
+        let n = names(false, true, false, 1, false).unwrap();
         assert!(compile(&f.input, &n, "/other/path", "t", "b").is_err());
         let file = f.input.join("worker.sh");
         std::fs::write(&file, vec![b'x'; FILE_LIMIT as usize + 1]).unwrap();

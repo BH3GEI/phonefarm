@@ -517,6 +517,7 @@ fn remote_tool_names(dir: &Path) -> Result<BTreeSet<String>, String> {
         matches!(preset, Some("loaded_steady_v1" | "capability_absolute_v1")),
         preset == Some("capability_absolute_v1"),
         count,
+        request["render_attribution_profile_id"] == crate::render_attribution::PROFILE,
     )
 }
 fn bundle_from_state(dir: &Path) -> Result<fixed_tools::Bundle, String> {
@@ -656,6 +657,9 @@ fn render_frozen_extra() -> Vec<&'static str> {
 }
 fn preinstall_names(dir: &Path) -> Result<BTreeSet<String>, String> {
     let mut n = frozen_names(dir)?;
+    for k in fixed_tools::FROZEN_NAMES {
+        n.remove(k);
+    }
     for k in [
         "sampling-contract.json",
         "conditions.json",
@@ -1034,6 +1038,19 @@ fn install_reader_helper(
     boot: &str,
     files: &[String],
 ) -> Result<(), String> {
+    let request: Request = serde_json::from_value(read_json(&dir.join("request.json"))?)
+        .map_err(|e| e.to_string())?;
+    let state = validate_preinstall(dir, &request)?;
+    let helper = helper_state(&state)?;
+    let expected = ["worker.sh", "bootstrap.sh", "render_ownership.sh", "render_reader.elf", "render_args.tsv"]
+        .map(String::from).into_iter().collect::<BTreeSet<_>>();
+    require(
+        !dir.join("inputs.manifest.json").exists()
+            && !dir.join("main-install.intent.json").exists()
+            && helper["remote"] == remote && helper["token"] == token && helper["boot_id"] == boot
+            && files.len() == expected.len() && files.iter().cloned().collect::<BTreeSet<_>>() == expected,
+        "helper-only installation identity/set/phase changed",
+    )?;
     journal(
         dir,
         json!({"event":if remote.ends_with("-reader"){"render_helper_install_intent"}else{"remote_install_intent"},"remote":remote,"token":token,"boot_id":boot,"files":files,"at":now()}),

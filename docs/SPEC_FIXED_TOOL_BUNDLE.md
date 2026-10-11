@@ -14,6 +14,24 @@ the receiver-generated probe_N.plan.tsv entries. Capability purpose remains
 control-only. Request/workload JSON, arbitrary paths and unrelated local files
 cannot be uploaded through this facility.
 
+The registered `kgsl_queued_origin_spf_v1` main phase adds exactly four names:
+`render_ownership.sh`, `render_args.tsv`, `render_reader.elf` and the existing
+`ftrace-trace_clock` restoration file. It requires loaded confirmation purpose;
+control-only, capability and nonloaded purposes cannot select it. The maximum
+set is49 names for32 validated controls. The ELF receives only a receiver-fixed
+0700 mode in the batched installer; every fresh verifier requires it executable
+as well as matching exact length and SHA256. Verification never repairs its
+mode or executes it.
+
+The preceding native initial witness is a distinct helper-only phase. Its
+five existing files remain on the bounded per-file installation path, bound
+to the helper directory, boot, token and preinstall manifest. Main bundle files
+do not exist yet and are excluded from that phase's expected manifest. The
+helper route accepts only its exact five names before main intent; its closure,
+absence verification and durable recovery barrier remain required. It cannot
+call the main installer or claim a control-state restore. This integration does
+not supply automatic recovery for a partially installed helper/main directory.
+
 Before any device write, freeze tools.manifest.json, tools.install.sh and
 tools.verify.sh together with every required original file, state, conditions,
 restore graph and other existing immutable inputs. The manifest includes exact
