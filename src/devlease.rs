@@ -238,6 +238,35 @@ impl Lease {
         .map_err(|e| format!("record child: {e}"))
     }
 
+    /// Only for a definite spawn Err: no child was established for this pending launch.
+    fn cancel_unspawned_command(&mut self, operation: &str) -> Result<(), String> {
+        // A failed fsync may follow a published rename; retain the barrier on any error.
+        let previously_preserved = self.preserve_marker;
+        self.preserve_marker = true;
+        self.check()?;
+        let mut m = marker(&self.legacy).ok_or("lease marker unavailable")?;
+        if previously_preserved
+            || m["recovery_required"] == true
+            || m["command_pending"] != true
+            || m["pending_operation"].as_str() != Some(operation)
+            || m.get("child_pid").is_some()
+            || m.get("child_pgid").is_some()
+        {
+            return Err("cannot cancel an unbound or mismatched pending launch".into());
+        }
+        m["command_pending"] = json!(false);
+        if let Some(o) = m.as_object_mut() {
+            o.remove("pending_operation");
+        }
+        durable_replace(
+            &self.legacy.join("phonefarm-lease.json"),
+            m.to_string().as_bytes(),
+        )
+        .map_err(|e| format!("cancel unspawned command: {e}"))?;
+        self.preserve_marker = false;
+        Ok(())
+    }
+
     pub(crate) fn clear_child(&self) -> Result<(), String> {
         self.check()?;
         let mut m = marker(&self.legacy).ok_or("lease marker unavailable")?;
@@ -557,7 +586,7 @@ pub fn run_lease(args: &[String]) -> i32 {
         eprintln!("phonefarm lease --serial S [--timeout-ms N] -- COMMAND ...");
         return 2;
     };
-    let _lease = match Lease::acquire(
+    let mut _lease = match Lease::acquire(
         &root,
         &legacy,
         &serial,
@@ -584,6 +613,11 @@ pub fn run_lease(args: &[String]) -> i32 {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
+            // Rust reported no child was established; retire only our exact pending launch.
+            // If the durable cancellation fails, Drop preserves the uncertainty barrier.
+            if let Err(cleanup) = _lease.cancel_unspawned_command("lease-wrapper") {
+                eprintln!("lease spawn cancellation: {cleanup}");
+            }
             eprintln!("lease command: {e}");
             return 2;
         }
@@ -618,6 +652,88 @@ pub fn run_lease(args: &[String]) -> i32 {
             let _ = child.wait();
             eprintln!("lease child: {e}");
             2
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "phonefarm-spawn-cancel-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+        fn lease(&self) -> Lease {
+            Lease::acquire(
+                &self.0.join("leases"),
+                &self.0.join("legacy"),
+                "fake-spawn-cancel",
+                "test",
+                Duration::from_millis(100),
+            )
+            .unwrap()
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // This test owns the create-only directory; no global or device state is used.
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn unspawned_pending_cancellation_releases_but_unresolved_drop_preserves() {
+        let scratch = Scratch::new();
+        let mut lease = scratch.lease();
+        lease.record_command_pending("lease-wrapper").unwrap();
+        lease.cancel_unspawned_command("lease-wrapper").unwrap();
+        assert_eq!(marker(&lease.legacy).unwrap()["command_pending"], false);
+        drop(lease);
+        assert!(!scratch.0.join("legacy/devlock.d").exists());
+        let unresolved = scratch.lease();
+        unresolved.record_command_pending("lease-wrapper").unwrap();
+        drop(unresolved);
+        assert!(scratch.0.join("legacy/devlock.d").exists());
+    }
+
+    #[test]
+    fn cancellation_rejects_mismatched_pending_child_or_owner_without_mutating() {
+        for (key, value) in [
+            ("pending_operation", json!("another-operation")),
+            ("command_pending", json!(false)),
+            ("child_pid", json!(123)),
+            ("child_pid", Value::Null),
+            ("child_pgid", json!(123)),
+            ("recovery_required", json!(true)),
+            ("owner", json!("replacement-owner")),
+        ] {
+            let scratch = Scratch::new();
+            let mut lease = scratch.lease();
+            lease.record_command_pending("lease-wrapper").unwrap();
+            let mut m = marker(&lease.legacy).unwrap();
+            m[key] = value;
+            durable_replace(&lease.legacy.join("phonefarm-lease.json"), m.to_string().as_bytes())
+                .unwrap();
+            let before = fs::read(lease.legacy.join("phonefarm-lease.json")).unwrap();
+            assert!(lease.cancel_unspawned_command("lease-wrapper").is_err(), "{key}");
+            assert_eq!(fs::read(lease.legacy.join("phonefarm-lease.json")).unwrap(), before);
+            let legacy = lease.legacy.clone();
+            drop(lease);
+            assert_eq!(fs::read(legacy.join("phonefarm-lease.json")).unwrap(), before);
         }
     }
 }

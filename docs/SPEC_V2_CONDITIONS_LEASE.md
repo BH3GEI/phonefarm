@@ -76,6 +76,12 @@ legacy `devlock.d` 位于 `DEVLOCK_DIR`（默认 /private/tmp/claude-501）。�
 `phonefarm lease --serial S --timeout-ms N -- COMMAND ...` 可保护其它本地工具，
 不要在此 wrapper 里再次调用自动租约的 phonefarm 命令，否则明确等待超时。
 
+wrapper 在 `spawn` 前持久化 pending launch。只有本次 `Command::spawn()` 明确
+返回 `Err`（没有建立 child），且本次 owner/token、pending operation 完整匹配、
+无 child PID/PGID 时，才可持久化撤销该 pending，随后释放本次 legacy marker。
+撤销写入或身份核验失败仍保留屏障。成功 spawn、绑定失败、等待/进程组状态未知、
+父进程中断及恢复要求不走此撤销路径；它不证明设备状态或远端工作已恢复。
+
 只保护同一宿主上合作入口。直接 adb/hdc、旧 shell 工具、另一台 Mac、UI/VLM/裸
 script 仍可能绕过；真机验收必须确认没有这些并发负载。SIGKILL 释放内核互斥但保留 abandoned 屏障，
 不会自动恢复手机 sysfs，也不能证明远端工作已停止；先按既有流程恢复，确认空闲后才可解除屏障。
