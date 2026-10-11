@@ -1,0 +1,27 @@
+{
+  "schema": "hgamey/live_checkpoint_review@1",
+  "completed": true,
+  "reviewed_unix_s": 1791752908.6973171,
+  "scope": "after_prewrite_HAL3_refusal_gpu11",
+  "scene": "gameplay_fixed60_camp",
+  "candidate_control_applied": false,
+  "performance_eligible": false,
+  "optimization_improvement_proven": false,
+  "artifact_sha256": {
+    "actions.json": "7303e44ea46f34a2cc7e969a53daeb77ec6f99665723e533b5c1efafca3b5d19",
+    "commands.json": "1250621471fefd41158f5f3cfdde1415ef6952534b095103423a040a0cf88efb",
+    "gpu-and-hal-after-block.intent.json": "775e9faf72619d0a3e12e17682c82a5e18bc9613a0781dbc41df490710e407fe",
+    "gpu-and-hal-after-block.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "gpu-and-hal-after-block.stdout": "f6e7889b522c1af533e5d4bdc13f1c76127fca2d160f1b695fed4822f0b0f0ad",
+    "lease.command.json": "e34236be733c918a8d0977aadfae9a323e6c8ce3faa84294c1d02309f976e6fb",
+    "lease.intent.json": "64b8f6dacdf6cda8e3591e983d247b1b5c490688705a654f3d14bb705e023b70",
+    "lease.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lease.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "screen.intent.json": "1299198b0d972ac841b744044144baa47ace13a40e2c995f9cc332d681d97e4e",
+    "screen.png": "787490de6d14d3a6b40cead0dac7ab63d6d94d6ef73231b79fee8ecc68664034",
+    "screen.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "state.intent.json": "003194b60a7769f0b9e9fa6f7f590a9aa5b0bdc16b60a1a251de61150ad7c3e4",
+    "state.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "state.stdout": "4121d4585ac559d0bdf4f74afbd64590779e201cf39f3e5a941052caa3fe8659"
+  }
+}

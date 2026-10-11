@@ -1,0 +1,33 @@
+{
+  "scope": "fixed60_gameplay_before_single_gpu_floor5_capability_probe",
+  "actions": [
+    [
+      "gpu-and-hal-before",
+      [
+        "shell",
+        "su -c 'echo GPU_MIN; cat /sys/class/kgsl/kgsl-3d0/min_pwrlevel; echo GPU_CLOCK; cat /sys/class/kgsl/kgsl-3d0/gpuclk; echo THERMAL; timeout 5 dumpsys thermalservice; echo UPTIME; cat /proc/uptime'"
+      ],
+      0,
+      false
+    ],
+    [
+      "screen",
+      [
+        "exec-out",
+        "screencap",
+        "-p"
+      ],
+      0,
+      true
+    ],
+    [
+      "state",
+      [
+        "shell",
+        "su -c 'echo BOOT; cat /proc/sys/kernel/random/boot_id; echo FOREGROUND; timeout 4 dumpsys activity activities | grep -E \"mResumedActivity|topResumedActivity\" || true; echo UPTIME; cat /proc/uptime'"
+      ],
+      0,
+      false
+    ]
+  ]
+}

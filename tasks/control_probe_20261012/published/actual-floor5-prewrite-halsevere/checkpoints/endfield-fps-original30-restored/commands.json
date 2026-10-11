@@ -1,0 +1,111 @@
+[
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "input",
+      "tap",
+      "2170",
+      "55"
+    ],
+    "started_unix_s": 1791752568.388865,
+    "timeout_s": 8,
+    "scope": "restore_original_game_fps30_after_fixed60_HAL3_prewrite_block_no_sysparam_write",
+    "finished_unix_s": 1791752568.4964721,
+    "exit_code": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "input",
+      "tap",
+      "575",
+      "110"
+    ],
+    "started_unix_s": 1791752570.506919,
+    "timeout_s": 8,
+    "scope": "restore_original_game_fps30_after_fixed60_HAL3_prewrite_block_no_sysparam_write",
+    "finished_unix_s": 1791752570.630831,
+    "exit_code": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "input",
+      "tap",
+      "1820",
+      "540"
+    ],
+    "started_unix_s": 1791752572.634518,
+    "timeout_s": 8,
+    "scope": "restore_original_game_fps30_after_fixed60_HAL3_prewrite_block_no_sysparam_write",
+    "finished_unix_s": 1791752572.7802932,
+    "exit_code": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "input",
+      "tap",
+      "1670",
+      "770"
+    ],
+    "started_unix_s": 1791752573.783947,
+    "timeout_s": 8,
+    "scope": "restore_original_game_fps30_after_fixed60_HAL3_prewrite_block_no_sysparam_write",
+    "finished_unix_s": 1791752573.91818,
+    "exit_code": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "exec-out",
+      "screencap",
+      "-p"
+    ],
+    "started_unix_s": 1791752575.927263,
+    "timeout_s": 8,
+    "scope": "restore_original_game_fps30_after_fixed60_HAL3_prewrite_block_no_sysparam_write",
+    "finished_unix_s": 1791752577.0177212,
+    "exit_code": 0,
+    "stdout_sha256": "d4309762f2ec452b9a53f0572c9acedf8a041351f0c094309f8c3fbf074c582a",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "su -c 'echo BOOT; cat /proc/sys/kernel/random/boot_id; echo FOREGROUND; timeout 4 dumpsys activity activities | grep -E \"mResumedActivity|topResumedActivity\" || true; echo UPTIME; cat /proc/uptime'"
+    ],
+    "started_unix_s": 1791752577.018958,
+    "timeout_s": 8,
+    "scope": "restore_original_game_fps30_after_fixed60_HAL3_prewrite_block_no_sysparam_write",
+    "finished_unix_s": 1791752577.262057,
+    "exit_code": 0,
+    "stdout_sha256": "99039652eb1573fe1be639257ab6510e83e6dde0b128afb70ea78e7a37a83770",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+]

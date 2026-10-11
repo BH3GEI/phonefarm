@@ -1,0 +1,142 @@
+#phonefarm_thermal_metadata v1
+BOOT	b03328bb-9647-4cc1-8e6c-8f534df69dad
+SENSOR	/sys/class/thermal/thermal_zone14/temp	cpu-2-0-0	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone14/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone14/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone14/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone14/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone14/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone15/temp	cpu-2-0-1	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone15/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone15/temp	passive	125000
+TRIP	/sys/class/thermal/thermal_zone15/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone15/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone15/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone16/temp	cpu-2-1-0	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone16/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone16/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone16/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone16/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone16/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone17/temp	cpu-2-1-1	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone17/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone17/temp	passive	125000
+TRIP	/sys/class/thermal/thermal_zone17/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone17/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone17/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone18/temp	cpu-2-2-0	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone18/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone18/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone18/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone18/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone18/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone19/temp	cpu-2-2-1	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone19/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone19/temp	passive	125000
+TRIP	/sys/class/thermal/thermal_zone19/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone19/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone19/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone20/temp	cpu-1-0-0	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone20/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone20/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone20/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone20/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone20/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone21/temp	cpu-1-0-1	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone21/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone21/temp	passive	125000
+TRIP	/sys/class/thermal/thermal_zone21/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone21/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone21/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone22/temp	cpu-1-1-0	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone22/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone22/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone22/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone22/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone22/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone23/temp	cpu-1-1-1	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone23/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone23/temp	passive	125000
+TRIP	/sys/class/thermal/thermal_zone23/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone23/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone23/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone25/temp	cpu-1-2-0	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone25/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone25/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone25/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone25/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone25/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone26/temp	cpu-1-2-1	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone26/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone26/temp	passive	125000
+TRIP	/sys/class/thermal/thermal_zone26/temp	passive	90000
+TRIP	/sys/class/thermal/thermal_zone26/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone26/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone26/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone27/temp	cpu-1-2-2	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone27/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone27/temp	passive	125000
+TRIP	/sys/class/thermal/thermal_zone27/temp	passive	108000
+TRIP	/sys/class/thermal/thermal_zone27/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone27/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone28/temp	cpu-0-0-0	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone28/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone28/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone28/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone28/temp	passive	112000
+TRIP	/sys/class/thermal/thermal_zone28/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone29/temp	cpu-0-1-0	cpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone29/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone29/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone29/temp	passive	110000
+TRIP	/sys/class/thermal/thermal_zone29/temp	passive	112000
+TRIP	/sys/class/thermal/thermal_zone29/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone41/temp	gpuss-0	gpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone41/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone41/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone41/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone41/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone42/temp	gpuss-1	gpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone42/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone42/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone42/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone42/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone43/temp	gpuss-2	gpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone43/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone43/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone43/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone43/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone44/temp	gpuss-3	gpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone44/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone44/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone44/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone44/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone45/temp	gpuss-4	gpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone45/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone45/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone45/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone45/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone46/temp	gpuss-5	gpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone46/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone46/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone46/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone46/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone47/temp	gpuss-6	gpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone47/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone47/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone47/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone47/temp	passive	115000
+SENSOR	/sys/class/thermal/thermal_zone48/temp	gpuss-7	gpu	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone48/temp	passive	115000
+TRIP	/sys/class/thermal/thermal_zone48/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone48/temp	passive	95000
+TRIP	/sys/class/thermal/thermal_zone48/temp	passive	115000
+EXCLUDED	/sys/class/thermal/thermal_zone53/temp	shell_front	no_passive_trip_contract
+EXCLUDED	/sys/class/thermal/thermal_zone54/temp	shell_frame	no_passive_trip_contract
+EXCLUDED	/sys/class/thermal/thermal_zone55/temp	shell_back	no_passive_trip_contract
+SENSOR	/sys/class/thermal/thermal_zone60/temp	skin-msm-therm	skin	milli_celsius
+TRIP	/sys/class/thermal/thermal_zone60/temp	passive	125000
+TRIP	/sys/class/thermal/thermal_zone60/temp	passive	60000
+TRIP	/sys/class/thermal/thermal_zone60/temp	passive	60000
+SENSOR	/sys/class/power_supply/battery/temp	battery	battery	deci_celsius
+#end

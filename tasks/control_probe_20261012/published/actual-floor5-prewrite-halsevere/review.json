@@ -1,0 +1,69 @@
+{
+  "schema": "hgamey/live_checkpoint_review@1",
+  "completed": true,
+  "status": "ENV_BLOCKED_BEFORE_CONTROL",
+  "reviewed_unix_s": 1791752908.6875362,
+  "scope": "registered_gpu_floor5_configuration_probe_attempt_no_write",
+  "source_commit": "19bfed5a2907c1770cf62656fbf9ded4d733a658",
+  "tool_sha256": "b2352f3e9aba7a394ea55af059bf2b66e64a7f0be4654f944f81c5fd83992d7e",
+  "serial": "c531e0a",
+  "boot_id": "b03328bb-9647-4cc1-8e6c-8f534df69dad",
+  "candidate_requested": {
+    "gpu.min_pwrlevel": "5"
+  },
+  "actual_gpu_min_before": 11,
+  "actual_gpu_min_after": 11,
+  "initial_snapshot_created": false,
+  "restore_graph_created": false,
+  "remote_worker_installed": false,
+  "candidate_written": false,
+  "hold_11s_executed": false,
+  "restore_experiment_executed": false,
+  "postfailure_normal_lease_exit": 0,
+  "performance_eligible": false,
+  "optimization_improvement_proven": false,
+  "model_api_calls": 0,
+  "typed_points_diagnostic_file": "typed-warmup-diagnostic.json",
+  "actual_temperatures": [
+    {
+      "cpu_max_c": 69.0,
+      "gpu_max_c": 67.4,
+      "skin_c": 55.585,
+      "battery_c": 42.1,
+      "global_hal_status": 2
+    },
+    {
+      "cpu_max_c": 68.6,
+      "gpu_max_c": 67.0,
+      "skin_c": 55.649,
+      "battery_c": 42.2,
+      "global_hal_status": 3
+    }
+  ],
+  "artifact_sha256": {
+    "driver.intent.json": "6e34441d1b1f56e433726907bc06a4a182a47e59a069a1fdb7423bc7950a7719",
+    "driver.command.json": "d6b421261fc55aff9fd11b4d90a2e1d429d641bf8a8d52ab84a03def3d86beb3",
+    "driver.stdout": "263fcdc5230ae9ed5bc1a717ee3b64f7f603c2637241887d3b98791e30da55fc",
+    "driver.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "request-input.json": "75d073d3edd96ff29865d02f90002d59fa49b985cba713eab4d2a0cb6a87b034",
+    "candidate-input.json": "defb53333b696c6a8a6f7dbaf1bb64da52fd9212c6bed34e4813f03026e280e6",
+    "typed-warmup-diagnostic.json": "96301283c5ac016a7875f16b8233655cada8a2efbc62cb1ad0d25f004f71685f",
+    "session/probe-contract.json": "4425830834e8b431e950235fac17fc6bacb046c4ec3b83f562ad40f81d2ed3ff",
+    "session/journal.jsonl": "5ee26910762ce9e82c610b9aaa5c2f9061a56645cb1538545481e967e4e28aa6",
+    "session/thermal_profile.json": "87b8a9506ae1a135996f97d3002d632e237b04158716dba5de8662207ed9b971",
+    "session/thermal-rules.json": "9804023706e4f6550da5a0f78d8db50d87851b50113e0bcca999514aefd83750",
+    "session/thermal_inventory.json": "3cd352dc3b77a2eb8551c2294d35dddc9693c4be3159a70f4832fdc5ee880893",
+    "session/thermal_metadata.raw.tsv": "39f5b865e967a0eeec9d18ade875e3fe87a181f9197538745e134d7090ec65e3",
+    "session/thermal_hal.raw.txt": "fb1404a902a4fe45df0fd5d52edd21ee450f1220c28d68072bc322f7ba815dd9",
+    "session/thermal_warmup.sh": "ffd1948608cc9af8908ee6c344352782ab0cc8be74644b38aa80425b5c798051",
+    "session/probe-commands/journal.jsonl": "56c9f7d5d5a46b961a1e48b2a084acf36869796ef77910e162d52f4e6b503d36",
+    "session/probe-commands/commands/0001-identity.stdout": "a418a88772011633ec5ceb5c1b12dfaf26130cc82979b9aff737744fbe26e3e6",
+    "session/probe-commands/commands/0001-identity.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "session/probe-commands/commands/0002-thermal_metadata.stdout": "39f5b865e967a0eeec9d18ade875e3fe87a181f9197538745e134d7090ec65e3",
+    "session/probe-commands/commands/0002-thermal_metadata.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "session/probe-commands/commands/0003-thermal_hal_metadata.stdout": "fb1404a902a4fe45df0fd5d52edd21ee450f1220c28d68072bc322f7ba815dd9",
+    "session/probe-commands/commands/0003-thermal_hal_metadata.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "session/probe-commands/commands/0004-thermal_baseline_only_warmup.stdout": "678e7efb272ea1190b2d508cd0b4667415ba84e52a193fa18194f3fcc67f935f",
+    "session/probe-commands/commands/0004-thermal_baseline_only_warmup.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

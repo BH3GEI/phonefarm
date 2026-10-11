@@ -1,0 +1,300 @@
+{
+  "scope": "partial_prewrite_temperature_diagnostics_not_admission",
+  "profile_sha256": "84cd16cf257c692f9b016411801ed5fc58ce3f0a5e2c317de204fbade575c49b",
+  "points": [
+    {
+      "uptime_s": 2406.61,
+      "global_hal_status": 2,
+      "domains_max_c": {
+        "battery": 42.1,
+        "cpu": 69.0,
+        "gpu": 67.4,
+        "skin": 55.585
+      },
+      "raw_sensor_readings": {
+        "battery": [
+          [
+            "battery",
+            42.1,
+            "/sys/class/power_supply/battery/temp"
+          ]
+        ],
+        "cpu": [
+          [
+            "cpu-2-0-0",
+            67.8,
+            "/sys/class/thermal/thermal_zone14/temp"
+          ],
+          [
+            "cpu-2-0-1",
+            67.4,
+            "/sys/class/thermal/thermal_zone15/temp"
+          ],
+          [
+            "cpu-2-1-0",
+            67.8,
+            "/sys/class/thermal/thermal_zone16/temp"
+          ],
+          [
+            "cpu-2-1-1",
+            68.2,
+            "/sys/class/thermal/thermal_zone17/temp"
+          ],
+          [
+            "cpu-2-2-0",
+            67.1,
+            "/sys/class/thermal/thermal_zone18/temp"
+          ],
+          [
+            "cpu-2-2-1",
+            67.8,
+            "/sys/class/thermal/thermal_zone19/temp"
+          ],
+          [
+            "cpu-1-0-0",
+            68.2,
+            "/sys/class/thermal/thermal_zone20/temp"
+          ],
+          [
+            "cpu-1-0-1",
+            69.0,
+            "/sys/class/thermal/thermal_zone21/temp"
+          ],
+          [
+            "cpu-1-1-0",
+            67.4,
+            "/sys/class/thermal/thermal_zone22/temp"
+          ],
+          [
+            "cpu-1-1-1",
+            67.8,
+            "/sys/class/thermal/thermal_zone23/temp"
+          ],
+          [
+            "cpu-1-2-0",
+            68.3,
+            "/sys/class/thermal/thermal_zone25/temp"
+          ],
+          [
+            "cpu-1-2-1",
+            68.7,
+            "/sys/class/thermal/thermal_zone26/temp"
+          ],
+          [
+            "cpu-1-2-2",
+            67.9,
+            "/sys/class/thermal/thermal_zone27/temp"
+          ],
+          [
+            "cpu-0-0-0",
+            67.2,
+            "/sys/class/thermal/thermal_zone28/temp"
+          ],
+          [
+            "cpu-0-1-0",
+            67.2,
+            "/sys/class/thermal/thermal_zone29/temp"
+          ]
+        ],
+        "gpu": [
+          [
+            "gpuss-0",
+            65.8,
+            "/sys/class/thermal/thermal_zone41/temp"
+          ],
+          [
+            "gpuss-1",
+            63.9,
+            "/sys/class/thermal/thermal_zone42/temp"
+          ],
+          [
+            "gpuss-2",
+            65.4,
+            "/sys/class/thermal/thermal_zone43/temp"
+          ],
+          [
+            "gpuss-3",
+            64.6,
+            "/sys/class/thermal/thermal_zone44/temp"
+          ],
+          [
+            "gpuss-4",
+            67.4,
+            "/sys/class/thermal/thermal_zone45/temp"
+          ],
+          [
+            "gpuss-5",
+            65.4,
+            "/sys/class/thermal/thermal_zone46/temp"
+          ],
+          [
+            "gpuss-6",
+            65.8,
+            "/sys/class/thermal/thermal_zone47/temp"
+          ],
+          [
+            "gpuss-7",
+            66.2,
+            "/sys/class/thermal/thermal_zone48/temp"
+          ]
+        ],
+        "skin": [
+          [
+            "skin-msm-therm",
+            55.585,
+            "/sys/class/thermal/thermal_zone60/temp"
+          ]
+        ]
+      },
+      "complete_point_end": true
+    },
+    {
+      "uptime_s": 2411.87,
+      "global_hal_status": 3,
+      "domains_max_c": {
+        "battery": 42.2,
+        "cpu": 68.6,
+        "gpu": 67.0,
+        "skin": 55.649
+      },
+      "raw_sensor_readings": {
+        "battery": [
+          [
+            "battery",
+            42.2,
+            "/sys/class/power_supply/battery/temp"
+          ]
+        ],
+        "cpu": [
+          [
+            "cpu-2-0-0",
+            66.7,
+            "/sys/class/thermal/thermal_zone14/temp"
+          ],
+          [
+            "cpu-2-0-1",
+            66.3,
+            "/sys/class/thermal/thermal_zone15/temp"
+          ],
+          [
+            "cpu-2-1-0",
+            66.7,
+            "/sys/class/thermal/thermal_zone16/temp"
+          ],
+          [
+            "cpu-2-1-1",
+            67.4,
+            "/sys/class/thermal/thermal_zone17/temp"
+          ],
+          [
+            "cpu-2-2-0",
+            66.3,
+            "/sys/class/thermal/thermal_zone18/temp"
+          ],
+          [
+            "cpu-2-2-1",
+            67.1,
+            "/sys/class/thermal/thermal_zone19/temp"
+          ],
+          [
+            "cpu-1-0-0",
+            68.2,
+            "/sys/class/thermal/thermal_zone20/temp"
+          ],
+          [
+            "cpu-1-0-1",
+            68.6,
+            "/sys/class/thermal/thermal_zone21/temp"
+          ],
+          [
+            "cpu-1-1-0",
+            67.1,
+            "/sys/class/thermal/thermal_zone22/temp"
+          ],
+          [
+            "cpu-1-1-1",
+            67.4,
+            "/sys/class/thermal/thermal_zone23/temp"
+          ],
+          [
+            "cpu-1-2-0",
+            67.5,
+            "/sys/class/thermal/thermal_zone25/temp"
+          ],
+          [
+            "cpu-1-2-1",
+            68.3,
+            "/sys/class/thermal/thermal_zone26/temp"
+          ],
+          [
+            "cpu-1-2-2",
+            68.3,
+            "/sys/class/thermal/thermal_zone27/temp"
+          ],
+          [
+            "cpu-0-0-0",
+            66.0,
+            "/sys/class/thermal/thermal_zone28/temp"
+          ],
+          [
+            "cpu-0-1-0",
+            66.4,
+            "/sys/class/thermal/thermal_zone29/temp"
+          ]
+        ],
+        "gpu": [
+          [
+            "gpuss-0",
+            65.8,
+            "/sys/class/thermal/thermal_zone41/temp"
+          ],
+          [
+            "gpuss-1",
+            64.2,
+            "/sys/class/thermal/thermal_zone42/temp"
+          ],
+          [
+            "gpuss-2",
+            65.4,
+            "/sys/class/thermal/thermal_zone43/temp"
+          ],
+          [
+            "gpuss-3",
+            64.6,
+            "/sys/class/thermal/thermal_zone44/temp"
+          ],
+          [
+            "gpuss-4",
+            67.0,
+            "/sys/class/thermal/thermal_zone45/temp"
+          ],
+          [
+            "gpuss-5",
+            65.8,
+            "/sys/class/thermal/thermal_zone46/temp"
+          ],
+          [
+            "gpuss-6",
+            65.8,
+            "/sys/class/thermal/thermal_zone47/temp"
+          ],
+          [
+            "gpuss-7",
+            65.4,
+            "/sys/class/thermal/thermal_zone48/temp"
+          ]
+        ],
+        "skin": [
+          [
+            "skin-msm-therm",
+            55.649,
+            "/sys/class/thermal/thermal_zone60/temp"
+          ]
+        ]
+      },
+      "complete_point_end": false
+    }
+  ],
+  "candidate_write_performed": false,
+  "eligible": false
+}

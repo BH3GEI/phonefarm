@@ -1,0 +1,24 @@
+{
+  "argv": [
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-capability-absolute-v5-19bfed5",
+    "confirmation-driver",
+    "probe-controls",
+    "--request",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/endfield-gpu-floor5-capability-absolute/request-input.json",
+    "--out",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/endfield-gpu-floor5-capability-absolute/session",
+    "--execute"
+  ],
+  "started_unix_s": 1791752430.394089,
+  "source_commit": "19bfed5a2907c1770cf62656fbf9ded4d733a658",
+  "tool_sha256": "b2352f3e9aba7a394ea55af059bf2b66e64a7f0be4654f944f81c5fd83992d7e",
+  "host_timeout_s": 360,
+  "scope": "one_registered_gpu_floor5_configuration_probe_hold11s_restore_only",
+  "performance_eligible": false,
+  "actual_clock_sustained_proven": false,
+  "request_sha256": "75d073d3edd96ff29865d02f90002d59fa49b985cba713eab4d2a0cb6a87b034",
+  "candidate_sha256": "defb53333b696c6a8a6f7dbaf1bb64da52fd9212c6bed34e4813f03026e280e6",
+  "game_load_fps": 60,
+  "original_game_load_fps": 30,
+  "independent_driver_owns_normal_shared_device_lease": true
+}
