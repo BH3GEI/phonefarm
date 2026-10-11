@@ -509,6 +509,21 @@ tasks/<任务名>/        程序唯一可写区域
   runs/<局ID>/         log.jsonl（只追加）、ctx.log、步骤截图与 XML UI 树
 ```
 
+## 连续配对帧质量（离线）
+
+```bash
+./phonefarm sequence-quality --reference reference.json --candidate candidate.json \
+  --rules frozen_rules.json --out tasks/quality/report.json
+# 仅生成合成夹具演示；不是实际游戏验收材料
+python3 examples/sequence_quality_fixture.py --out tasks/quality-demo --mode ghost
+```
+
+输出空间 PSNR、RGB 色偏、相邻重建残差变化和异常帧 ID。缺帧、错配、来源未知、
+未冻结规则、缺候选工件绑定或运动超出检测范围返回 `UNKNOWN`，不能充当质量通过。
+`PASS` 只表示冻结指标范围内；配对账本哈希不证明真实采集，报告不证明无鬼影，
+真实游戏资格仍需独立采集证明/审查。契约和完整边界见
+[`SPEC_SEQUENCE_QUALITY.md`](docs/SPEC_SEQUENCE_QUALITY.md)。
+
 ## 文档索引
 
 | 文档 | 内容 |

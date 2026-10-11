@@ -32,6 +32,7 @@ mod gamepad;
 mod grayab;
 mod graylayer;
 mod shotdiff;
+mod sequence_quality;
 mod hypo;
 mod mtools;
 mod caps;
@@ -211,6 +212,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
        gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
        (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)
+画质:  sequence-quality --reference R.json --candidate C.json --rules frozen.json [--out tasks/quality/report.json]
+       (配对连续帧 RGB PSNR/色偏/残差变化, 零 Token 离线; PASS 只覆盖冻结指标, 不证明无鬼影)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
        (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
 性能:  perf [--serial S] [--app 包名] [--rounds 10] [--source sysfs|smartperf] [--power-rail usb|battery] [--xpower-out 目录] [--json]
@@ -690,6 +693,9 @@ fn main() {
         Some("shot-diff") => {
             // copyprobe 验收 ②: 截帧逐像素比对 (控制对基线)
             std::process::exit(shotdiff::run_shot_diff(&args[1..]));
+        }
+        Some("sequence-quality") => {
+            std::process::exit(sequence_quality::run_sequence_quality(&args[1..]));
         }
         Some("gray-ab") => {
             // 灰档 A/B 采集编排 (两臂都挂层只切属性; 每臂重启原神)
