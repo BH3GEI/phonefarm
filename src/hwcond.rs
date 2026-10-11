@@ -33,8 +33,24 @@ pub fn progress(tag: &str, msg: &str) {
     eprintln!("[{tag}] {msg}");
 }
 
+/// 本机状态文件目录: `PHONEFARM_STATE_DIR` > `~/.local/state/phonefarm` > 系统临时目录。
+///
+/// 不默认放临时目录: 2026-10-11 宿主机崩溃重启, 临时目录被清空, 锁频/停充的
+/// 「改之前是什么」随之丢失, 设备被留在改过的状态里, 下次启动也无从回滚。
+pub fn state_dir() -> std::path::PathBuf {
+    let dir = std::env::var_os("PHONEFARM_STATE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state/phonefarm")))
+        .unwrap_or_else(std::env::temp_dir);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        dir
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 /// 锁频前的设备快照落到本机状态文件 (按通路与 serial 区分);
-/// 进程被杀留下的锁态由下次启动或 `--unlock` 回滚。
+/// 进程被杀 (含宿主机崩溃重启) 留下的锁态由下次启动或 `--unlock` 回滚。
 pub fn lock_state_path(tag: &str, serial: &Option<String>) -> std::path::PathBuf {
     let s: String = serial
         .as_deref()
@@ -42,7 +58,7 @@ pub fn lock_state_path(tag: &str, serial: &Option<String>) -> std::path::PathBuf
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    std::env::temp_dir().join(format!("phonefarm-{tag}-lock-{s}.txt"))
+    state_dir().join(format!("phonefarm-{tag}-lock-{s}.txt"))
 }
 
 // ══════════════ 设备快照 ══════════════
