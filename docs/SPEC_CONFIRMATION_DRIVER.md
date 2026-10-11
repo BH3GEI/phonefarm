@@ -251,3 +251,10 @@ polling; it never calls blocking `wait` after a deadline. Failure to reap/prove
 group absence retains the marker; successful local kill still does not prove
 remote idleness. Offline tests exercise these host mechanisms and extracted
 remote terminal guards, not Android process/root semantics.
+
+Legacy eval/autoloop capability preflights also reserve a distinct temporary
+output directory per invocation: root/trace results must not borrow another
+concurrent device probe's `_cmd.out`. Failure to reserve a directory is unknown
+capability and cannot authorize writes. Fake CLI tests isolate both lease roots
+and explicitly verify that a nonroot probe cannot consume a concurrent root
+probe's output; this is host result isolation, not acquisition attestation.

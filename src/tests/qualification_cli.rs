@@ -320,3 +320,86 @@ esac
     assert_eq!(r["qualification"]["status"], "blocked");
     assert_eq!(r["qualification"]["probe_allowed"], false);
 }
+
+#[cfg(unix)]
+#[test]
+fn concurrent_capability_probes_cannot_borrow_another_devices_root_output() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let shared = Scratch::new();
+    let t = Scratch::new();
+    let other = Scratch::new();
+    let stub = shared.0.join("fake-adb-collision");
+    std::fs::write(
+        &stub,
+        r#"#!/bin/sh
+case "$*" in
+ *'su -c id'*)
+  case "$*" in
+   *nonroot-fixture*)
+    echo 'uid=2000(shell) gid=2000(shell)'
+    touch "$COLLISION_DIR/nonroot-started"
+    n=0
+    while [ ! -f "$COLLISION_DIR/root-trace-written" ]; do
+      n=$((n+1)); [ "$n" -lt 500 ] || exit 8; sleep 0.01
+    done
+    sleep 0.2;;
+   *) echo 'uid=0(root) gid=0(root)';;
+  esac;;
+ *TRACE_AVAILABLE*)
+  echo 'uid=0(root) TRACE_AVAILABLE'
+  touch "$COLLISION_DIR/root-trace-written";;
+ *device_snapshot.sh*) echo 'cpu.policy0.scaling_min=300';;
+ *probe_sysparam.sh*) echo 'cpu.policies=0';;
+ *) exit 0;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut req = request();
+    req["payload"]["probe_only"] = json!(true);
+    let nonroot_request = t.write("request.json", &req);
+    let root_request = other.write("request.json", &req);
+    let mut a = cmd(&t)
+        .args(["eval", "--request"])
+        .arg(nonroot_request)
+        .args(["--serial", "nonroot-fixture", "--out"])
+        .arg(t.0.join("out"))
+        .env("ADB_BIN", &stub)
+        .env("COLLISION_DIR", &shared.0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !shared.0.join("nonroot-started").exists() {
+        if std::time::Instant::now() >= deadline {
+            let _ = a.kill();
+            let _ = a.wait();
+            panic!("nonroot fixture did not begin bounded root probe");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let b = cmd(&other)
+        .args(["eval", "--request"])
+        .arg(root_request)
+        .args(["--serial", "root-fixture", "--out"])
+        .arg(other.0.join("out"))
+        .env("ADB_BIN", &stub)
+        .env("COLLISION_DIR", &shared.0)
+        .output()
+        .unwrap();
+    let a = a.wait_with_output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    assert!(a.status.success(), "{}", String::from_utf8_lossy(&a.stderr));
+    let root = report(&b);
+    let nonroot = report(&a);
+    assert_eq!(root["qualification"]["probe_allowed"], true, "{root}");
+    assert_eq!(
+        nonroot["qualification"]["probe_allowed"], false,
+        "{nonroot}"
+    );
+    assert!(!t.0.join("out/snap_before_probe.txt").exists());
+    assert_eq!(nonroot["status"], "ABORT");
+}

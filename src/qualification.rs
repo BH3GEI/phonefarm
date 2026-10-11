@@ -469,9 +469,25 @@ pub fn evaluate(e: &Evidence) -> Result<Report, String> {
 
 /// Only read operations. Call before push/probe/layer mutation, never infer root from model identity.
 pub fn inspect_device(serial: &str) -> Capabilities {
+    // Device::run_timeout writes _cmd.out under its supplied scratch directory.
+    // A shared temp_dir lets concurrent probes read another device's root output.
+    let scratch = match ProbeScratch::new() {
+        Ok(s) => s,
+        Err(_) => {
+            return Capabilities {
+                backend: if serial.starts_with("hdc:") {
+                    "hdc"
+                } else {
+                    "adb"
+                }
+                .into(),
+                ..Capabilities::default()
+            }
+        }
+    };
     let phone = crate::device::Device::new(
         Some(serial.into()),
-        std::env::temp_dir().to_string_lossy().into_owned(),
+        scratch.0.to_string_lossy().into_owned(),
     );
     let backend = phone.backend_name().to_string();
     let root = crate::hwcond::root_ok(&phone);
@@ -487,6 +503,47 @@ pub fn inspect_device(serial: &str) -> Capabilities {
         trace_available: Some(trace),
         measurement_available: Some(measurement),
         control_verified: None,
+    }
+}
+
+struct ProbeScratch(std::path::PathBuf);
+impl ProbeScratch {
+    fn new() -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(std::io::Error::other)?
+            .as_nanos();
+        for _ in 0..16 {
+            let dir = std::env::temp_dir().join(format!(
+                "phonefarm-capability-{}-{epoch}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&dir) {
+                Ok(()) => return Ok(Self(dir)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::other(
+            "cannot reserve capability output directory",
+        ))
+    }
+}
+impl Drop for ProbeScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0.join("_cmd.out"));
+        let _ = std::fs::remove_file(self.0.join("_hdc_cli.out"));
+        // Do not recursively remove unexpected content, even in our reserved directory.
+        let _ = std::fs::remove_dir(&self.0);
     }
 }
 
