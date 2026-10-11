@@ -31,6 +31,9 @@ use std::path::{Path, PathBuf};
 
 const USAGE: &str = "用法:
   phonefarm frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 本机层.so] [--pkg 包名] [--serial S]
+      [--tap \"x,y;x,y\"] [--settle 秒] [--extras \"intent extras\"]
+      (非原神: 不判大世界, 确认层在出帧后依次点击再等 settle 秒; Megacity 例:
+       --pkg com.unity.megacity.metro --extras \"--es scene city_static --es frames 100000\")
   phonefarm frame-audit storeop-check --rule <sig:i,...> --out <目录> [--rounds N] [--so 本机层.so] [--serial S]
       (storeop 开关机制验证: 同一局里现场开/关, 同位置同视角截图逐像素比对 + effective 命中 + 不崩)
   phonefarm frame-audit analyze <knobs_frameaudit.json>... [--md 输出.md] [--json 输出.json]";
@@ -925,6 +928,52 @@ pub(crate) fn analyze(paths: &[PathBuf]) -> Result<(String, Value), String> {
 
 // ── 真机抓帧 ──
 
+/// 把游戏带到要抓的画面。原神走既有流程 (等登录页 → 点门 → 按每帧 pass 数判大世界);
+/// 别的游戏不猜: 先确认层真在出帧 (marker 的 frames 在涨), 依次点 `taps` 里的坐标
+/// (每点之后等 5 秒), 再等 `settle` 秒让场景稳定。
+fn reach_scene(serial: &str, pkg: &str, taps: &[(u32, u32)], settle: u64) -> Result<(), String> {
+    if pkg == "com.miHoYo.Yuanshen" && taps.is_empty() {
+        crate::grayab::launch_to_world_layered(serial)?;
+        std::thread::sleep(std::time::Duration::from_secs(settle.min(60)));
+        return Ok(());
+    }
+    let frames = || -> i64 {
+        let m = su(serial, &format!("cat /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json /data/data/{pkg}/knobs_layer_out.json 2>/dev/null"), 30);
+        let body = GrayLayer::adb_stdout(&m);
+        regex::Regex::new(r#""frames":([0-9]+)"#).ok().and_then(|re| re.captures(body).and_then(|c| c[1].parse().ok())).unwrap_or(-1)
+    };
+    let mut f0 = -1;
+    for _ in 0..30 {
+        f0 = frames();
+        if f0 >= 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    if f0 < 0 {
+        return Err(format!("{pkg} 的层 marker 没出现: 层没挂上 (或不是 Vulkan 游戏)"));
+    }
+    for (x, y) in taps {
+        let _ = adb(serial, &["shell", &format!("input tap {x} {y}")], 30);
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(settle));
+    let f1 = frames();
+    if f1 <= f0 {
+        return Err(format!("{pkg} 的 present 计数不涨 ({f0} -> {f1}): 游戏没在出帧"));
+    }
+    Ok(())
+}
+
+fn parse_taps(s: &str) -> Vec<(u32, u32)> {
+    s.split(';')
+        .filter_map(|p| {
+            let (x, y) = p.split_once(',')?;
+            Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+        })
+        .collect()
+}
+
 const FA_FILES: [&str; 3] = [
     "/storage/emulated/0/Android/data/{pkg}/files/knobs_frameaudit.json",
     "/data/data/{pkg}/knobs_frameaudit.json",
@@ -956,16 +1005,15 @@ fn screencap(serial: &str, dst: &Path) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn capture(serial: &str, out: &Path, so: Option<String>, ts: bool, captures: u32, gap: u64, pkg: &str) -> Result<(), String> {
+fn capture(serial: &str, out: &Path, so: Option<String>, ts: bool, captures: u32, gap: u64, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
-    let gl = GrayLayer::new(serial).with_so(so);
+    let gl = GrayLayer::new(serial).with_so(so).with_launch_extras(extras);
     let _ = gl.off();
     let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
     let mode = if ts { "frameaudit-ts" } else { "frameaudit" };
     let res = (|| -> Result<Vec<Value>, String> {
         gl.mount_mode(mode, pkg, false)?;
-        crate::grayab::launch_to_world_layered(serial)?;
-        std::thread::sleep(std::time::Duration::from_secs(15));
+        reach_scene(serial, pkg, taps, settle)?;
         let mut got = Vec::new();
         for go in 1..=captures {
             let t0 = chrono::Local::now().to_rfc3339();
@@ -1064,9 +1112,10 @@ fn ui_rects(w: usize, h: usize) -> Vec<(usize, usize, usize, usize)> {
     ]
 }
 
-fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str) -> Result<Value, String> {
+#[allow(clippy::too_many_arguments)]
+fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<Value, String> {
     std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
-    let gl = GrayLayer::new(serial).with_so(so).with_storeop(Some(rule.to_string()), true);
+    let gl = GrayLayer::new(serial).with_so(so).with_storeop(Some(rule.to_string()), true).with_launch_extras(extras);
     let _ = gl.off();
     let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
     let set_on = |on: bool| {
@@ -1076,8 +1125,7 @@ fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, round
     };
     let res = (|| -> Result<Value, String> {
         gl.mount_mode("frameaudit", pkg, false)?;
-        crate::grayab::launch_to_world_layered(serial)?;
-        std::thread::sleep(std::time::Duration::from_secs(20));
+        reach_scene(serial, pkg, taps, settle)?;
         // 关/开交替: off on off on ... off, 每段 3 张 (间隔约 1 秒)
         let mut phases: Vec<(bool, Vec<Vec<u8>>)> = Vec::new();
         for k in 0..(2 * rounds + 1) {
@@ -1202,6 +1250,7 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                 .unwrap_or_else(|_| std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into()));
             let (mut out, mut so, mut ts, mut captures, mut gap) = (None, None, false, 3u32, 20u64);
             let mut pkg = "com.miHoYo.Yuanshen".to_string();
+            let (mut taps, mut settle, mut extras) = (Vec::new(), None::<u64>, None::<String>);
             let mut it = rest.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -1212,17 +1261,21 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                     "--gap" => gap = it.next().and_then(|x| x.parse().ok()).unwrap_or(gap),
                     "--pkg" => pkg = it.next().cloned().unwrap_or(pkg),
                     "--serial" => serial = it.next().cloned().unwrap_or(serial),
+                    "--tap" => taps = it.next().map(|s| parse_taps(s)).unwrap_or_default(),
+                    "--settle" => settle = it.next().and_then(|x| x.parse().ok()),
+                    "--extras" => extras = it.next().cloned(),
                     other => {
                         eprintln!("不认识的参数 {other:?}\n{USAGE}");
                         return 2;
                     }
                 }
             }
+            let settle = settle.unwrap_or(if pkg == "com.miHoYo.Yuanshen" { 15 } else { 60 });
             let Some(out) = out else {
                 eprintln!("{USAGE}");
                 return 2;
             };
-            match capture(&serial, Path::new(&out), so, ts, captures.max(1), gap, &pkg) {
+            match capture(&serial, Path::new(&out), so, ts, captures.max(1), gap, &pkg, &taps, settle, extras) {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("{e}");
@@ -1235,6 +1288,7 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                 .unwrap_or_else(|_| std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into()));
             let (mut out, mut so, mut rule, mut rounds) = (None, None, None, 2u32);
             let mut pkg = "com.miHoYo.Yuanshen".to_string();
+            let (mut taps, mut settle, mut extras) = (Vec::new(), None::<u64>, None::<String>);
             let mut it = rest.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -1244,17 +1298,21 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                     "--rounds" => rounds = it.next().and_then(|x| x.parse().ok()).unwrap_or(rounds),
                     "--pkg" => pkg = it.next().cloned().unwrap_or(pkg),
                     "--serial" => serial = it.next().cloned().unwrap_or(serial),
+                    "--tap" => taps = it.next().map(|s| parse_taps(s)).unwrap_or_default(),
+                    "--settle" => settle = it.next().and_then(|x| x.parse().ok()),
+                    "--extras" => extras = it.next().cloned(),
                     other => {
                         eprintln!("不认识的参数 {other:?}\n{USAGE}");
                         return 2;
                     }
                 }
             }
+            let settle = settle.unwrap_or(if pkg == "com.miHoYo.Yuanshen" { 20 } else { 60 });
             let (Some(out), Some(rule)) = (out, rule) else {
                 eprintln!("{USAGE}");
                 return 2;
             };
-            match storeop_check(&serial, Path::new(&out), so, &rule, rounds.max(1), &pkg) {
+            match storeop_check(&serial, Path::new(&out), so, &rule, rounds.max(1), &pkg, &taps, settle, extras) {
                 Ok(_) => 0,
                 Err(e) => {
                     eprintln!("{e}");
@@ -1465,6 +1523,13 @@ mod tests {
         assert!((pct - 100.0 / 3.0).abs() < 1e-9);
         assert!((mad - 25.0 / 9.0).abs() < 1e-9);
         assert_eq!(mx, 20);
+    }
+
+    #[test]
+    fn taps_parse() {
+        assert_eq!(parse_taps("1342,651; 10,20"), vec![(1342, 651), (10, 20)]);
+        assert!(parse_taps("").is_empty());
+        assert_eq!(parse_taps("x,1;3,4"), vec![(3, 4)]);
     }
 
     #[test]
