@@ -8,12 +8,14 @@
 # 不改任何热策略。输出每行一条样本, 主机端 env_stats() 纯函数解析。
 #
 #   ENV <uptime> <batt_uv> <batt_ua> <batt_uw|NA> <usb_uv> <usb_ua> <热区> <毫摄氏度>
+#   GPU <uptime> <kgsl max_pwrlevel> <kgsl gpuclk Hz>      (读得到时才有)
 set -u
 
 DUR="${1:-30}"
 IVL="${2:-2}"
 B=/sys/class/power_supply/battery
 U=/sys/class/power_supply/usb
+KGSL=/sys/class/kgsl/kgsl-3d0
 
 echo "#sample_env v1 dur=$DUR interval=$IVL"
 echo "#battery_status=$(cat $B/status 2>/dev/null)"
@@ -55,6 +57,11 @@ while [ "$n" -lt "$DUR" ]; do
     if [ "$t" -gt "$hot_t" ] 2>/dev/null; then hot_t=$t; hot_z=$ty; fi
   done
   printf 'ENV %s %s %s %s %s %s %s %s\n' "$up" "$bv" "$bi" "$bp" "$uv" "$ui" "$hot_z" "$hot_t"
+  # GPU 频率上限档与当前频率: 厂商性能服务 (perf2-hal / zperfcubeservice) 会在约 10 秒内
+  # 把 max_pwrlevel 改掉, 两臂/两次运行的 GPU 上限可能不一样。逐样本记下来, 主机端核对。
+  # 读不到 (节点不存在/没权限) 时整行不输出, 旧解析器只认 ENV 行, 不受影响。
+  gl=$(cat $KGSL/max_pwrlevel 2>/dev/null); gc=$(cat $KGSL/gpuclk 2>/dev/null)
+  [ -n "$gl" ] && [ -n "$gc" ] && printf 'GPU %s %s %s\n' "$up" "$gl" "$gc"
   n=$((n + IVL))
   sleep "$IVL"
 done
