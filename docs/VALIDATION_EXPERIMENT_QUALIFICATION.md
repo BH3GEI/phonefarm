@@ -30,3 +30,19 @@
 KGSL 仍是 submit proxy；无直接 display collector。控制验证仅 probe/apply readback，不证明持续生效。
 灰档控制面和连续帧质量没有独立真值，候选实验明确 ABORT。v1 shader/gpu-op 与旧 Python
 编排尚未迁移到本合同。issue 12 保持开放，须真机验收后再决定是否完成。
+
+## 2026-10-12 并发能力输出修正
+
+保留上面的 `e411436` 历史验收。本次仅回补每调用私有输出目录和相应测试，
+不引入独立确认 driver，也不改变资格规则或阈值。
+
+| 验证 | 结果 |
+| --- | --- |
+| `cd src && cargo test --offline --no-fail-fast` | 521 单测 + 9 实际 binary CLI 全部通过 |
+| `cd src && cargo clippy --offline --all-targets` | 完成；仓库仍有警告，本次修改的 Rust 文件无诊断 |
+| 并发 fake ADB 输出交错 | 非 root 保持 ABORT/probe_allowed=false，不进入快照；另一 fake root 可通过该合成 probe 门禁 |
+| 私有目录无法创建（TMPDIR 为普通文件） | root 检查 unknown、未调用 transport、未授权写入 |
+| `git diff --check` | 通过 |
+
+实际日志、源码及 binary 摘要在 `tasks/qualification_probe_output_20261012/`。
+fake transport 与 root 正例仅为宿主回归夹具，不是设备认证；真机、模型/API 调用仍为 0。
