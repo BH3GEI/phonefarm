@@ -1,0 +1,677 @@
+    Checking foldhash v0.2.0
+   Compiling proc-macro2 v1.0.107
+    Checking libm v0.2.16
+    Checking bit-vec v0.9.1
+    Checking unicode-xid v0.2.6
+    Checking unicode-width v0.2.2
+    Checking unicode-ident v1.0.24
+    Checking once_cell v1.21.4
+    Checking log v0.4.34
+    Checking arrayvec v0.7.8
+    Checking pp-rs v0.2.1
+    Checking hashbrown v0.17.1
+    Checking codespan-reporting v0.13.1
+    Checking bit-set v0.10.0
+   Compiling quote v1.0.47
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+    Checking indexmap v2.14.1
+    Checking num-traits v0.2.19
+    Checking moxcms v0.8.1
+    Checking chrono v0.4.45
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.21
+   Compiling zerocopy-derive v0.8.62
+    Checking thiserror v2.0.21
+    Checking naga-types v30.0.1
+    Checking image v0.25.10
+    Checking serde v1.0.229
+    Checking zerocopy v0.8.62
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking phonefarm v0.2.0 (/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-build-supervision/src)
+warning: digits grouped inconsistently by underscores
+   --> gpustat.rs:219:10
+    |
+219 |         -1259.139_216_722_402_8,
+    |          ^^^^^^^^^^^^^^^^^^^^^^ help: consider: `1_259.139_216_722_402_8`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#inconsistent_digit_grouping
+    = note: `#[warn(clippy::inconsistent_digit_grouping)]` on by default
+
+    Checking half v2.7.1
+    Checking naga v30.0.1
+warning: method `as_str` is never used
+   --> gpuop.rs:388:12
+    |
+387 | impl Carrier {
+    | ------------ method in this implementation
+388 |     pub fn as_str(&self) -> &'static str {
+    |            ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `power_usable` is never used
+   --> hwcond.rs:339:8
+    |
+339 | pub fn power_usable(rail: PowerRail, samples: &[PowerSample]) -> Result<(), String> {
+    |        ^^^^^^^^^^^^
+
+warning: function `count_false_success` is never used
+  --> mtools.rs:48:8
+   |
+48 | pub fn count_false_success(samples: &[Value]) -> u32 {
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: method `events` is never used
+   --> mtools.rs:132:12
+    |
+102 | impl ToolStore {
+    | -------------- method in this implementation
+...
+132 |     pub fn events(&self) -> &[Value] {
+    |            ^^^^^^
+
+warning: methods `events` and `next_id` are never used
+  --> caps.rs:80:12
+   |
+52 | impl CapStore {
+   | ------------- methods in this implementation
+...
+80 |     pub fn events(&self) -> &[Value] { &self.events }
+   |            ^^^^^^
+...
+83 |     pub fn next_id(&self, prefix: &str) -> String {
+   |            ^^^^^^^
+
+warning: function `summarize_android` is never used
+   --> perfsrc.rs:131:8
+    |
+131 | pub fn summarize_android(samples: &[PowerSample], rail: PowerRail) -> PerfSnapshot {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: doc list item without indentation
+  --> bench.rs:10:5
+   |
+10 | //!   540x960->1080x1920 时拷贝量 31MB/帧, invoke 比 gpu 高 7ms 且与结构无关, 故门禁不用它。
+   |     ^^
+   |
+   = help: if this is supposed to be its own paragraph, add a blank line
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+   = note: `#[warn(clippy::doc_lazy_continuation)]` on by default
+help: indent this line
+   |
+10 | //!     540x960->1080x1920 时拷贝量 31MB/帧, invoke 比 gpu 高 7ms 且与结构无关, 故门禁不用它。
+   |       ++
+
+warning: this `if` statement can be collapsed
+   --> bench.rs:335:5
+    |
+335 | /     if cur != size {
+336 | |         if !phone.push_file(local, &remote) {
+337 | |             return Err(format!("推送 {local} 到 {remote} 失败"));
+338 | |         }
+339 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+    = note: `#[warn(clippy::collapsible_if)]` on by default
+help: collapse nested if block
+    |
+335 ~     if cur != size
+336 ~         && !phone.push_file(local, &remote) {
+337 |             return Err(format!("推送 {local} 到 {remote} 失败"));
+338 ~         }
+    |
+
+warning: the use of negated comparison operators on partially ordered types produces code that is hard to read and refactor, please consider using the `partial_cmp` method instead, to make it clear that the two values could be incomparable
+   --> gpuop.rs:207:8
+    |
+207 |     if !(r.budget_ms > 0.0) {
+    |        ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#neg_cmp_op_on_partial_ord
+    = note: `#[warn(clippy::neg_cmp_op_on_partial_ord)]` on by default
+
+warning: manual implementation of `.is_multiple_of()`
+   --> gpuop.rs:258:8
+    |
+258 |     if bytes.len() % 4 != 0 {
+    |        ^^^^^^^^^^^^^^^^^^^^ help: replace with: `!bytes.len().is_multiple_of(4)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_multiple_of
+    = note: `#[warn(clippy::manual_is_multiple_of)]` on by default
+
+warning: float has excessive precision
+   --> gpustat.rs:217:9
+    |
+217 |         0.999_999_999_999_809_93,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#excessive_precision
+    = note: `#[warn(clippy::excessive_precision)]` on by default
+help: consider changing the type or truncating it to
+    |
+217 -         0.999_999_999_999_809_93,
+217 +         0.999_999_999_999_809_9,
+    |
+
+warning: doc list item without indentation
+   --> hwcond.rs:350:5
+    |
+350 | /// 两个数字都"合理", 区间一个都拦不住。而一个看起来合理的错数比一个越界的错数
+    |     ^
+    |
+    = help: if this is supposed to be its own paragraph, add a blank line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+help: indent this line
+    |
+350 | ///     两个数字都"合理", 区间一个都拦不住。而一个看起来合理的错数比一个越界的错数
+    |     ++++
+
+warning: doc list item without indentation
+   --> hwcond.rs:351:5
+    |
+351 | /// 危险得多: 越界的会被拦下, 合理的会被下游当成实测功耗拿去做 A/B 裁决。
+    |     ^
+    |
+    = help: if this is supposed to be its own paragraph, add a blank line
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+help: indent this line
+    |
+351 | ///     危险得多: 越界的会被拦下, 合理的会被下游当成实测功耗拿去做 A/B 裁决。
+    |     ++++
+
+warning: this `map_or` can be simplified
+   --> cli.rs:388:21
+    |
+388 |         .filter(|l| grep.map_or(true, |g| l.contains(g))).collect();
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+    = note: `#[warn(clippy::unnecessary_map_or)]` on by default
+help: use is_none_or instead
+    |
+388 -         .filter(|l| grep.map_or(true, |g| l.contains(g))).collect();
+388 +         .filter(|l| grep.is_none_or(|g| l.contains(g))).collect();
+    |
+
+warning: explicit call to `.into_iter()` in function argument accepting `IntoIterator`
+   --> cli.rs:959:16
+    |
+959 |         .chain(report.as_object().unwrap().clone().into_iter())
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^------------
+    |                                                   |
+    |                                                   help: consider removing the `.into_iter()`
+    |
+note: this parameter accepts any `IntoIterator`, so you don't need to call `.into_iter()`
+   --> /rustc/86a49fd71fecd25b0fd20247db0ba95eeceaba28/library/core/src/iter/traits/iterator.rs:502:11
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#useless_conversion
+    = note: `#[warn(clippy::useless_conversion)]` on by default
+
+warning: this `map_or` can be simplified
+    --> cts.rs:2066:12
+     |
+2066 |         if ext.as_deref().map_or(false, |e| SCAN_SKIP_EXT.contains(&e)) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_some_and instead
+     |
+2066 -         if ext.as_deref().map_or(false, |e| SCAN_SKIP_EXT.contains(&e)) {
+2066 +         if ext.as_deref().is_some_and(|e| SCAN_SKIP_EXT.contains(&e)) {
+     |
+
+warning: this `map_or` can be simplified
+   --> fold.rs:127:15
+    |
+127 |         while stack.last().map_or(false, |&t| full[t].depth >= full[i].depth) { stack.pop(); }
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_some_and instead
+    |
+127 -         while stack.last().map_or(false, |&t| full[t].depth >= full[i].depth) { stack.pop(); }
+127 +         while stack.last().is_some_and(|&t| full[t].depth >= full[i].depth) { stack.pop(); }
+    |
+
+warning: manual implementation of `.is_multiple_of()`
+   --> gamepad.rs:293:16
+    |
+293 |             if step_count % 7 == 0 {
+    |                ^^^^^^^^^^^^^^^^^^^ help: replace with: `step_count.is_multiple_of(7)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_multiple_of
+
+warning: manual implementation of `.is_multiple_of()`
+   --> gamepad.rs:297:23
+    |
+297 |             } else if step_count % 11 == 0 {
+    |                       ^^^^^^^^^^^^^^^^^^^^ help: replace with: `step_count.is_multiple_of(11)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_multiple_of
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> hypo.rs:314:41
+    |
+314 | pub fn parse_hypothesize(text: &str) -> Option<(String, Vec<(String, String, Vec<String>)>, Option<Value>)> {
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+    = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: this `impl` can be derived
+   --> perfsrc.rs:445:1
+    |
+445 | / impl Default for HarmonySmartPerf {
+446 | |     fn default() -> Self {
+447 | |         HarmonySmartPerf { pkg: None, flags: SpFlags::default(), xpower_out: None }
+448 | |     }
+449 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#derivable_impls
+    = note: `#[warn(clippy::derivable_impls)]` on by default
+help: replace the manual implementation with a derive attribute
+    |
+432 + #[derive(Default)]
+433 | pub struct HarmonySmartPerf {
+    |
+
+warning: doc list item without indentation
+  --> smartperf.rs:24:5
+   |
+24 | //!   频率类字段 (`cpuFrequ`/`gpuFrequency`/`ddrFrequency`) 在文档与实测报告里单位不自洽
+   |     ^^
+   |
+   = help: if this is supposed to be its own paragraph, add a blank line
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+help: indent this line
+   |
+24 | //!     频率类字段 (`cpuFrequ`/`gpuFrequency`/`ddrFrequency`) 在文档与实测报告里单位不自洽
+   |       ++
+
+warning: doc list item without indentation
+  --> smartperf.rs:25:5
+   |
+25 | //!   (文档写 Hz, 报告里的 `cpu-c0-max,3628800` 显然是 kHz), 故本模块**不做频率换算**,
+   |     ^^
+   |
+   = help: if this is supposed to be its own paragraph, add a blank line
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+help: indent this line
+   |
+25 | //!     (文档写 Hz, 报告里的 `cpu-c0-max,3628800` 显然是 kHz), 故本模块**不做频率换算**,
+   |       ++
+
+warning: doc list item without indentation
+  --> smartperf.rs:26:5
+   |
+26 | //!   只把原值放进 `extras`, 不进统一契约 —— 宁可不给, 不给一个单位错的数。
+   |     ^^
+   |
+   = help: if this is supposed to be its own paragraph, add a blank line
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_lazy_continuation
+help: indent this line
+   |
+26 | //!     只把原值放进 `extras`, 不进统一契约 —— 宁可不给, 不给一个单位错的数。
+   |       ++
+
+warning: manual implementation of `.is_multiple_of()`
+   --> plugins/genshin.rs:504:60
+    |
+504 |                 if self.consecutive_loading_ticks >= 10 && self.consecutive_loading_ticks % 5 == 0 {
+    |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `self.consecutive_loading_ticks.is_multiple_of(5)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_multiple_of
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> runtime.rs:249:14
+    |
+249 |     pending: Option<((String, i64), String, Vec<String>, u32, bool)>,
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this `let...else` may be rewritten with the `?` operator
+   --> runtime.rs:267:9
+    |
+267 |         let Some((ok, entry, osig, ostep, mut saw_new)) = self.pending.take() else { return None };
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace it with: `let (ok, entry, osig, ostep, mut saw_new) = self.pending.take()?;`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#question_mark
+    = note: `#[warn(clippy::question_mark)]` on by default
+
+warning: this `map_or` can be simplified
+   --> runtime.rs:349:12
+    |
+349 |         && target.map_or(true, |t| pkg != t)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use a standard comparison instead
+    |
+349 -         && target.map_or(true, |t| pkg != t)
+349 +         && (target != Some(pkg))
+    |
+
+warning: this function has too many arguments (9/7)
+   --> runtime.rs:361:1
+    |
+361 | / fn capture(phone: &Device, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64,
+362 | |            realw: i32, realh: i32, target: Option<&str>) -> Option<Cap> {
+    | |_______________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+    = note: `#[warn(clippy::too_many_arguments)]` on by default
+
+warning: this function has too many arguments (10/7)
+   --> runtime.rs:669:1
+    |
+669 | / fn capture_or_revive(phone: &Device, run_dir: &str, seq: u32, cfg: &Config, tmp: &str, cap_ms: u64,
+670 | |                      realw: i32, realh: i32, target: Option<&str>, revived: &mut bool) -> Option<Cap> {
+    | |_____________________________________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: this function has too many arguments (17/7)
+   --> runtime.rs:850:1
+    |
+850 | / fn render_ctx(goal: &str, glessons: &[Value], lessons: &[Value], last_verdict_line: &str, apps_line: &str, budget_line: &str,
+851 | |               map_line: &str, assert_line: &str, alert: &str, probe_line: &str, hypo_line: &str, runs: &[PageRun], bans: &[Ban],
+852 | |               note: &str, cap: &Cap, realw: i32, realh: i32) -> String {
+    | |______________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: this function has too many arguments (9/7)
+    --> runtime.rs:1072:1
+     |
+1072 | / fn gate(a: &mut ActN, cap: &Cap, bans: &[Ban], taps: &VecDeque<(i32, i32, String)>, cfg: &Config, tmp: &str,
+1073 | |         apps: &[(String, String)], realw: i32, realh: i32) -> Option<String> {
+     | |____________________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> runtime.rs:1446:8
+     |
+1446 |     -> Option<(String, Vec<(String, String)>, Value)> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this function has too many arguments (11/7)
+    --> runtime.rs:1663:1
+     |
+1663 | / pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
+1664 | |                ext_cold_ms: Option<i64>,
+1665 | |                endless: bool, budget: u32, app: Option<String>, asserts: Vec<String>,
+1666 | |                freeze_on_done: bool, resume: Option<ResumeInfo>) -> EpisodeResult {
+     | |_________________________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+warning: called `unwrap` on `tree` after checking its variant with `is_some`
+    --> runtime.rs:1743:54
+     |
+1743 |     if tree.is_some() { println!("(载入交互网: {}页/{}边)", tree.as_ref().unwrap().pages.len(), tree.as_ref().unwrap().edges.len()...
+     |     -----------------                                       ^^^^^^^^^^^^^^^^^^^^^^
+     |     |
+     |     help: try: `if let Some(<item>) = &tree`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_unwrap
+     = note: `#[warn(clippy::unnecessary_unwrap)]` on by default
+
+warning: called `unwrap` on `tree` after checking its variant with `is_some`
+    --> runtime.rs:1743:90
+     |
+1743 |     if tree.is_some() { println!("(载入交互网: {}页/{}边)", tree.as_ref().unwrap().pages.len(), tree.as_ref().unwrap().edges.len()...
+     |     ----------------- help: try: `if let Some(<item>) = &tree`                                  ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_unwrap
+
+warning: manual implementation of `.is_multiple_of()`
+    --> runtime.rs:1930:25
+     |
+1930 |             let heavy = tele_cnt % cfg.telemetry_interval.max(1) == 0;
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `tele_cnt.is_multiple_of(cfg.telemetry_interval.max(1))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_multiple_of
+
+warning: useless use of `format!`
+    --> runtime.rs:2824:25
+     |
+2824 |                         format!("全部命中 —— 契约语义:命中即可判达成")
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using `.to_string()`: `"全部命中 —— 契约语义:命中即可判达成".to_string()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#useless_format
+     = note: `#[warn(clippy::useless_format)]` on by default
+
+warning: manual implementation of `.is_multiple_of()`
+   --> script.rs:626:50
+    |
+626 |                 let heavy = step.heavy.unwrap_or(tele_cnt % cfg.tele_interval.max(1) == 0);
+    |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `tele_cnt.is_multiple_of(cfg.tele_interval.max(1))`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_multiple_of
+
+warning: manual implementation of `Option::map`
+  --> serve.rs:61:5
+   |
+61 | /     match id {
+62 | |         None => None, // notification: initialized/cancelled 等一律静默
+63 | |         Some(id) => Some(match method {
+64 | |             "initialize" => rpc_result(id, initialize_result(&req)),
+...  |
+69 | |         }),
+70 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_map
+   = note: `#[warn(clippy::manual_map)]` on by default
+help: try
+   |
+61 ~     id.map(|id| match method {
+62 +             "initialize" => rpc_result(id, initialize_result(&req)),
+63 +             "ping" => rpc_result(id, json!({})),
+64 +             "tools/list" => rpc_result(id, json!({"tools": tools_list()})),
+65 +             "tools/call" => call_tool(id, &req),
+66 +             _ => rpc_error(id, -32601, &format!("Method not found: {method}")),
+67 +         })
+   |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> telemetry.rs:176:39
+    |
+176 | pub fn parse_smaps_rollup(s: &str) -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#type_complexity
+
+warning: this `map_or` can be simplified
+   --> tree.rs:164:20
+    |
+164 |                 if best.map_or(true, |(_, bd)| d < bd) { best = Some((p, d)); }
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_none_or instead
+    |
+164 -                 if best.map_or(true, |(_, bd)| d < bd) { best = Some((p, d)); }
+164 +                 if best.is_none_or(|(_, bd)| d < bd) { best = Some((p, d)); }
+    |
+
+warning: this `map_or` can be simplified
+   --> tree.rs:251:24
+    |
+251 |                     if best.as_ref().map_or(true, |(ba, _)| area < *ba) {
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_none_or instead
+    |
+251 -                     if best.as_ref().map_or(true, |(ba, _)| area < *ba) {
+251 +                     if best.as_ref().is_none_or(|(ba, _)| area < *ba) {
+    |
+
+warning: manual implementation of `.is_multiple_of()`
+   --> tree.rs:281:41
+    |
+281 |         std::cmp::Ordering::Equal => if q % 2 == 0 { q } else { q + 1 },
+    |                                         ^^^^^^^^^^ help: replace with: `q.is_multiple_of(2)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_multiple_of
+
+warning: needlessly taken reference of left operand
+   --> universal/popup.rs:130:54
+    |
+130 |                     if best_confirm.as_ref().map(|b| &b.title != ck).unwrap_or(true) {
+    |                                                      --------^^^^^^
+    |                                                      |
+    |                                                      help: use the left value directly: `b.title`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#op_ref
+    = note: `#[warn(clippy::op_ref)]` on by default
+
+warning: needlessly taken reference of left operand
+   --> universal/popup.rs:145:54
+    |
+145 |                     if best_dismiss.as_ref().map(|b| &b.title != dk).unwrap_or(true) {
+    |                                                      --------^^^^^^
+    |                                                      |
+    |                                                      help: use the left value directly: `b.title`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#op_ref
+
+warning: this manual char comparison can be written more succinctly
+   --> main.rs:416:46
+    |
+416 | ...                   for w in v.split(|c| c == ',' || c == '、') {
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using an array of `char`: `[',', '、']`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_pattern_char_comparison
+    = note: `#[warn(clippy::manual_pattern_char_comparison)]` on by default
+
+warning: this manual char comparison can be written more succinctly
+   --> main.rs:510:46
+    |
+510 | ...                   for w in v.split(|c| c == ',' || c == '、') {
+    |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using an array of `char`: `[',', '、']`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_pattern_char_comparison
+
+warning: `phonefarm` (bin "phonefarm") generated 49 warnings (run `cargo clippy --fix --bin "phonefarm" -p phonefarm` to apply 23 suggestions)
+warning: manual implementation of `.is_multiple_of()`
+    --> gpuop.rs:2515:15
+     |
+2515 |         while name.len() % 4 != 0 {
+     |               ^^^^^^^^^^^^^^^^^^^ help: replace with: `!name.len().is_multiple_of(4)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_is_multiple_of
+
+warning: the borrowed expression implements the required traits
+    --> gpuop.rs:2970:57
+     |
+2970 |         let v: serde_json::Value = serde_json::to_value(&m).unwrap();
+     |                                                         ^^ help: change this to: `m`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+     = note: `#[warn(clippy::needless_borrows_for_generic_args)]` on by default
+
+warning: the borrowed expression implements the required traits
+    --> gpuop.rs:2980:57
+     |
+2980 |         let v: serde_json::Value = serde_json::to_value(&none).unwrap();
+     |                                                         ^^^^^ help: change this to: `none`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrows_for_generic_args
+
+warning: this assertion has a constant value
+    --> hwcond.rs:1055:9
+     |
+1055 |         assert!(SUSPEND_SETTLE_MS >= 8_000, "实得 {SUSPEND_SETTLE_MS} ms");
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: consider moving this into a const block: `const { assert!(..) }`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#assertions_on_constants
+     = note: `#[warn(clippy::assertions_on_constants)]` on by default
+
+warning: unnecessary use of `get(&3).is_none()`
+    --> cli.rs:1270:19
+     |
+1270 |         assert!(m.get(&3).is_none());
+     |                 --^^^^^^^^^^^^^^^^^
+     |                 |
+     |                 help: replace it with: `!m.contains_key(&3)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_get_then_check
+     = note: `#[warn(clippy::unnecessary_get_then_check)]` on by default
+
+warning: field assignment outside of initializer for an instance created with Default::default()
+   --> smartperf.rs:508:9
+    |
+508 |         s.current_ma = Some(-1200.0);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: consider initializing the variable with `smartperf::SpSample { current_ma: Some(-1200.0), voltage_uv: Some(4_212_000.0), ..Default::default() }` and removing relevant reassignments
+   --> smartperf.rs:507:9
+    |
+507 |         let mut s = SpSample::default();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#field_reassign_with_default
+    = note: `#[warn(clippy::field_reassign_with_default)]` on by default
+
+warning: field assignment outside of initializer for an instance created with Default::default()
+   --> smartperf.rs:539:9
+    |
+539 |         only_v.voltage_uv = Some(4_212_000.0);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: consider initializing the variable with `smartperf::SpSample { voltage_uv: Some(4_212_000.0), ..Default::default() }` and removing relevant reassignments
+   --> smartperf.rs:538:9
+    |
+538 |         let mut only_v = SpSample::default();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#field_reassign_with_default
+
+warning: field assignment outside of initializer for an instance created with Default::default()
+   --> smartperf.rs:543:9
+    |
+543 |         only_i.current_ma = Some(-1200.0);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: consider initializing the variable with `smartperf::SpSample { current_ma: Some(-1200.0), ..Default::default() }` and removing relevant reassignments
+   --> smartperf.rs:542:9
+    |
+542 |         let mut only_i = SpSample::default();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#field_reassign_with_default
+
+warning: used `assert_eq!` with a literal bool
+   --> telemetry.rs:628:9
+    |
+628 |         assert_eq!(parse_meminfo_app_a(A_MEMAPP).is_some(), true, "dumpsys meminfo TOTAL行");
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#bool_assert_comparison
+    = note: `#[warn(clippy::bool_assert_comparison)]` on by default
+help: replace it with `assert!(..)`
+    |
+628 -         assert_eq!(parse_meminfo_app_a(A_MEMAPP).is_some(), true, "dumpsys meminfo TOTAL行");
+628 +         assert!(parse_meminfo_app_a(A_MEMAPP).is_some(), "dumpsys meminfo TOTAL行");
+    |
+
+warning: useless use of `vec!`
+    --> runtime.rs:3200:35
+     |
+3200 | ...                   &vec!["广告设置".to_string()]).is_empty());
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: you can use a slice directly: `&["广告设置".to_string()]`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#useless_vec
+     = note: `#[warn(clippy::useless_vec)]` on by default
+
+warning: `phonefarm` (bin "phonefarm" test) generated 54 warnings (44 duplicates) (run `cargo clippy --fix --bin "phonefarm" -p phonefarm --tests` to apply 5 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.52s

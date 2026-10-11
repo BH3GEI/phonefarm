@@ -1,0 +1,19 @@
+[
+  {
+    "command": [
+      "cargo",
+      "test"
+    ],
+    "exit": 0,
+    "log": "cargo-test.log"
+  },
+  {
+    "command": [
+      "cargo",
+      "clippy",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "log": "clippy.log"
+  }
+]
