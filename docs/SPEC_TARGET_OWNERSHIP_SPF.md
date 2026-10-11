@@ -166,3 +166,19 @@ argument difference; failure bytes and the corrected planned invocation are
 kept separately. Worker file-path invocations keep `sh SCRIPT PACKAGE COMM`.
 Post-witness trace events remain counted, but cannot resolve a measurement
 command later than the separately frozen 3s tail_end.
+
+### Bounded text producer after actual runtime timeout
+
+The original producer used two external commands (`wc`/`cat`) per proc task
+record. A real 190-task inventory hit its unchanged remote20s deadline after
+88,470 bytes before formats and the terminal marker; that partial witness stays
+UNKNOWN. The revised registered reader uses `LC_ALL=C` shell builtin `read` and
+`printf` for newline-terminated proc/trace text, with the same64KiB per-record,
+2MiB transport/output,256-task and20s execution limits. Missing file, empty
+mandatory record, unterminated final line or size overflow aborts without its
+END/whole-witness `#end`. It never drops tasks or extends the deadline. Proc
+cmdline retains its separate bounded NUL-to-LF conversion. PID filter values
+keep the old trailing-LF removal and EMPTY-sentinel meaning. Host fixtures prove
+byte preservation and negative bounds, not Android runtime acceptance. A new
+source-pinned device inventory is still required before claiming usable live
+command-origin attribution.

@@ -1,10 +1,46 @@
 #!/system/bin/sh
 # Registered bounded readonly producer: package/task epochs, formats, clock and loss.
 set -eu
+LC_ALL=C; export LC_ALL
 PKG=${1:?package}; COMM=${2:?render comm}
 case "$PKG:$COMM" in *[!a-zA-Z0-9_.:]*) exit 81 ;; esac
 bounded() { size=$(wc -c < "$1"); [ "$size" -gt 0 ] && [ "$size" -le 65536 ]; }
-block() { bounded "$2"; printf 'BEGIN\t%s\n' "$1"; cat "$2"; printf '\nEND\t%s\n' "$1"; }
+# Fixed proc/trace text records are LF-terminated. No per-task wc/cat forks.
+block() {
+  printf 'BEGIN\t%s\n' "$1"
+  size=0
+  while :; do
+    line=
+    if IFS= read -r line; then
+      size=$((size+${#line}+1)); [ "$size" -le 65536 ] || return 81
+      printf '%s\n' "$line"
+    else
+      [ -z "$line" ] || return 81
+      break
+    fi
+  done < "$2"
+  [ "$size" -gt 0 ] || return 81
+  printf '\nEND\t%s\n' "$1"
+}
+# Same command-substitution trailing-LF semantics, without external commands.
+filter_value() {
+  text=; size=0; lf='
+'
+  while :; do
+    line=
+    if IFS= read -r line; then
+      size=$((size+${#line}+1)); [ "$size" -le 65536 ] || return 81
+      text="$text$line$lf"
+    else
+      [ -z "$line" ] || return 81
+      break
+    fi
+  done < "$2"
+  while :; do
+    case "$text" in *"$lf") text=${text%"$lf"} ;; *) break ;; esac
+  done
+  value "$1" "EMPTY$text"
+}
 value() { printf 'BEGIN\t%s\n%s\nEND\t%s\n' "$1" "$2" "$1"; }
 printf '#phonefarm_render_witness v2\n'
 value package "$PKG"
@@ -43,10 +79,8 @@ for event in sched_process_fork sched_process_exit; do
   block "trigger/$event" "/sys/kernel/tracing/events/sched/$event/trigger"
 done
 block trace_clock /sys/kernel/tracing/trace_clock
-[ "$(wc -c < /sys/kernel/tracing/set_event_pid)" -le 65536 ]
-value event_pid "EMPTY$(cat /sys/kernel/tracing/set_event_pid)"
-[ "$(wc -c < /sys/kernel/tracing/set_event_notrace_pid)" -le 65536 ]
-value event_notrace_pid "EMPTY$(cat /sys/kernel/tracing/set_event_notrace_pid)"
+filter_value event_pid /sys/kernel/tracing/set_event_pid
+filter_value event_notrace_pid /sys/kernel/tracing/set_event_notrace_pid
 block tracing_cpumask /sys/kernel/tracing/tracing_cpumask
 count=0
 for cpu in /sys/kernel/tracing/per_cpu/cpu[0-9]*; do

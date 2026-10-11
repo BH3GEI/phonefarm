@@ -1014,6 +1014,87 @@ pub fn diagnostic(scope: &Scope, b: &Baseline) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readonly_text_producer_keeps_bytes_bounds_and_uses_no_task_helpers() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "pf-render-text-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let source = include_str!("../loop_v1/tools/render_ownership_readonly.sh");
+        let prefix = source
+            .split("printf '#phonefarm_render_witness v2")
+            .next()
+            .unwrap();
+        let script = dir.join("reader.sh");
+        let input = dir.join("record");
+        let run = |tail: &str| {
+            std::fs::write(
+                &script,
+                format!("{prefix}\nPATH=/no-external-helpers; export PATH\n{tail}\n"),
+            )
+            .unwrap();
+            std::process::Command::new("/bin/sh")
+                .arg(&script)
+                .args(["com.example.game", "UnityGfxDeviceW"])
+                .arg(&input)
+                .output()
+                .unwrap()
+        };
+        let bytes = b"Name:\tgame\\raw\nThreads:\t190\nnonascii:\t\xe4\xb8\xad\n";
+        std::fs::write(&input, bytes).unwrap();
+        let output = run("block record \"$3\"; printf '#end\\n'");
+        assert!(output.status.success());
+        let mut expected = b"BEGIN\trecord\n".to_vec();
+        expected.extend(bytes);
+        expected.extend(b"\nEND\trecord\n#end\n");
+        assert_eq!(output.stdout, expected);
+        // Same actual reader for all 190*3 task fields, with no wc/cat in PATH.
+        let output = run("i=0; while [ \"$i\" -lt 570 ]; do block record \"$3\"; i=$((i+1)); done; printf '#end\\n'");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .matches("END\trecord\n")
+                .count(),
+            570
+        );
+        for bad in [
+            Vec::new(),
+            b"unterminated".to_vec(),
+            [vec![b'x'; 65536], vec![b'\n']].concat(),
+        ] {
+            std::fs::write(&input, bad).unwrap();
+            let output = run("block record \"$3\"; printf '#end\\n'");
+            assert!(!output.status.success());
+            assert!(!output.stdout.windows(5).any(|b| b == b"#end\n"));
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("END\trecord"));
+        }
+        std::fs::write(&input, [vec![b'x'; 65535], vec![b'\n']].concat()).unwrap();
+        assert!(run("block record \"$3\"; printf '#end\\n'")
+            .status
+            .success());
+        for (bytes, expected) in [
+            (b"".as_slice(), "EMPTY"),
+            (b"\n\n".as_slice(), "EMPTY"),
+            (b"123\n456\n\n".as_slice(), "EMPTY123\n456"),
+        ] {
+            std::fs::write(&input, bytes).unwrap();
+            let output = run("filter_value filter \"$3\"; printf '#end\\n'");
+            assert!(output.status.success());
+            assert_eq!(
+                output.stdout,
+                format!("BEGIN\tfilter\n{expected}\nEND\tfilter\n#end\n").as_bytes()
+            );
+        }
+        std::fs::remove_file(&input).unwrap();
+        assert!(!run("block record \"$3\"; printf '#end\\n'")
+            .status
+            .success());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     fn raw(up: f64) -> String {
         include_str!("tests/support/render_origin.synthetic.raw.tsv")
             .replace("UPTIME_END_PLACEHOLDER", &(up + 0.1).to_string())
