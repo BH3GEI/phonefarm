@@ -1,0 +1,14 @@
+{
+  "source_file": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-ndk-profile/tools/export_ndk_profile.py",
+  "source_sha256": "822e16a043d1153ddc8f50384765bfa6b24688b6ca777003b21fd2072a142386",
+  "case": "inventory exceeds advertised4096 entries before verify postcheck",
+  "source_kind": "synthetic_host_fixture",
+  "configured_entry_cap": 4096,
+  "returned_entries": 4097,
+  "zero_bytes": 0,
+  "elapsed_seconds": 0.08866470772773027,
+  "sdk_calls": 0,
+  "device_calls": 0,
+  "model_calls": 0,
+  "scope": "internal exportedSDK inventory, not full export accepted"
+}

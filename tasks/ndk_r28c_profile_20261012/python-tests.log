@@ -1,8 +1,11 @@
 test_actual_extra_output_refused (test_ndk_profile.Profile.test_actual_extra_output_refused) ... ok
 test_byte_and_entry_budgets_persist_negative (test_ndk_profile.Profile.test_byte_and_entry_budgets_persist_negative) ... ok
+test_current_permissions_binding (test_ndk_profile.Profile.test_current_permissions_binding) ... ok
 test_current_tool_mutation_refused (test_ndk_profile.Profile.test_current_tool_mutation_refused) ... ok
 test_existing_destination_never_covered (test_ndk_profile.Profile.test_existing_destination_never_covered) ... ok
 test_header_symlink_and_special_file_refused (test_ndk_profile.Profile.test_header_symlink_and_special_file_refused) ... ok
+test_inventory_block_budget_checked (test_ndk_profile.Profile.test_inventory_block_budget_checked) ... ok
+test_inventory_stream_refuses_4097_entries (test_ndk_profile.Profile.test_inventory_stream_refuses_4097_entries) ... ok
 test_known_alias_escape_or_unexpected_text (test_ndk_profile.Profile.test_known_alias_escape_or_unexpected_text) ... ok
 test_manifest_source_alias_claim_contradiction (test_ndk_profile.Profile.test_manifest_source_alias_claim_contradiction) ... ok
 test_mutation_after_snapshot_persists_incomplete (test_ndk_profile.Profile.test_mutation_after_snapshot_persists_incomplete) ... ok
@@ -11,12 +14,13 @@ test_numeric_false_and_extra_output_not_accepted (test_ndk_profile.Profile.test_
 test_oversized_receipt_is_bounded_before_read (test_ndk_profile.Profile.test_oversized_receipt_is_bounded_before_read) ... ok
 test_rehashed_unknown_manifest_field_refused (test_ndk_profile.Profile.test_rehashed_unknown_manifest_field_refused) ... ok
 test_sdk_root_link_refused (test_ndk_profile.Profile.test_sdk_root_link_refused) ... ok
+test_source_ancestor_symlink_refused (test_ndk_profile.Profile.test_source_ancestor_symlink_refused) ... ok
 test_source_revision_refused (test_ndk_profile.Profile.test_source_revision_refused) ... ok
 test_synthetic_exact_profile_and_unmodified_source (test_ndk_profile.Profile.test_synthetic_exact_profile_and_unmodified_source) ... ok
 test_unpublished_manifest_is_not_accepted (test_ndk_profile.Profile.test_unpublished_manifest_is_not_accepted) ... ok
 test_whole_deadline_blocks_publication (test_ndk_profile.Profile.test_whole_deadline_blocks_publication) ... ok
 
 ----------------------------------------------------------------------
-Ran 17 tests in 0.223s
+Ran 21 tests in 0.566s
 
 OK
