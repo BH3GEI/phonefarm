@@ -90,7 +90,7 @@ def render_trace(trace,base):
     return f'#loop_v1_meta capture_start_uptime={base+1.1} capture_end_uptime={base+3.56} duration_req=2 join_start_uptime={base-.3} tail_end_uptime={base+6.56} join_end_uptime={base+6.8}\n'+'\n'.join(l for _,l in records)+'\n'
 args=sys.argv[1:];assert args[:2]==['-s','fake-target'] and args[2]=='shell'
 cmd=shlex.split(args[3]);assert cmd[:2]==['su','-c']; cmd=cmd[2]; data=sys.stdin.buffer.read()
-with (root/'argv.jsonl').open('a') as f:f.write(json.dumps({'argv':args,'command':cmd,'stdin':data.decode(),'simulation':True})+'\n')
+with (root/'argv.jsonl').open('a') as f:f.write(json.dumps({'argv':args,'command':cmd,'stdin':data.decode('latin1'),'simulation':True})+'\n')
 fail=os.environ.get('PHONEFARM_FAKE_FAIL','')
 if fail=='closed_pipes_child' and cmd=='sh' and b'# device_snapshot' in data:
     pid=os.fork()
@@ -106,6 +106,18 @@ elif cmd=='dumpsys activity activities': print('mResumedActivity: ActivityRecord
 elif cmd=='timeout 8 dumpsys thermalservice':sys.stdout.write(thermal_hal())
 elif cmd.startswith('sh -s -- ') and b'#phonefarm_render_witness v2' in data:
     sys.stdout.write(render_raw(1045975.,False))
+elif cmd.startswith('sh -s -- ') and b'# Fixed helper-only closure checker' in data:
+    words=shlex.split(cmd);d,token,boot,run,mode=words[3:]
+    if fail=='helper_group_unknown':sys.exit(77)
+    assert state['files'][d+'/session.closed']==token+' '+boot+' '+run
+    print(('HELPER_CLOSED' if mode=='verify' else 'HELPER_REMOVED')+' '+token+' '+boot+' '+run)
+    if mode=='remove':state['files']={k:v for k,v in state['files'].items() if not k.startswith(d+'/')}
+elif cmd.startswith('set -eu; test ') and 'HELPER_ABSENT' in cmd:
+    d=re.search(r"test ! -e '([^']+)'",cmd).group(1)
+    assert not any(k.startswith(d+'/') for k in state['files'])
+    print('HELPER_ABSENT')
+elif cmd.startswith('set -eu; test ') and 'chmod 700' in cmd:
+    assert any(k.endswith('/render_reader.elf') for k in state['files'])
 elif cmd=='sh':
     if b'#phonefarm_thermal_metadata v1' in data:
         print('#phonefarm_thermal_metadata v1\nBOOT\tfake-boot')
@@ -138,17 +150,27 @@ elif cmd.startswith('set -eu; umask 077; mkdir '):
     token=re.search(r"printf '%s\\n' '([^']+)'",cmd).group(1)
     state['files'][remote+'/owner']=token+'\n'
 elif cmd.startswith('set -eu; test ') and 'cat >' in cmd:
-    dst=shlex.split(cmd.split('cat > ',1)[1].split(';',1)[0])[0];state['files'][dst]=data.decode()
+    dst=shlex.split(cmd.split('cat > ',1)[1].split(';',1)[0])[0];state['files'][dst]=data.decode('latin1')
 elif cmd.startswith('cat '):
     path=shlex.split(cmd)[1]
-    sys.stdout.write(state['files'][path])
+    sys.stdout.buffer.write(state['files'][path].encode('latin1'))
 elif cmd.startswith('setsid sh ') and '/worker.sh ' in cmd:
     words=shlex.split(cmd)[1:]; d,token,boot,mode,run=words[2:7];r=d+'/'+run
     assert state['files'][d+'/owner'].strip()==token+' '+boot
     if d+'/session.closed' in state['files']:sys.exit(86)
     if fail=='probe' and mode in ['probe','control_probe']:sys.exit(74)
     if fail=='workload' and mode=='sample':sys.exit(91)
-    if mode in ['probe','control_probe']:
+    if mode=='render_readonly':
+        if fail in ['helper_read_failure','helper_interrupt']:
+            statepath.write_text(json.dumps(state));sys.exit(81)
+        state['files'][r+'/render_reader.log']=render_raw(1045975.,False)
+        state['files'][r+'/render_exit.txt']='0\n'
+        state['files'][r+'/quiescence.txt']='OWNED_GROUPS_ABSENT\n'
+        print('READONLY_COMPLETE')
+    elif mode=='reconcile_render':
+        state['files'][d+'/session.closed']=token+' '+boot+' '+run
+        print('READONLY_RECONCILE_COMPLETE')
+    elif mode in ['probe','control_probe']:
         names=['snapshot_before','snapshot_at_run','snapshot_after_run','snapshot_restored'] if mode=='control_probe' else ['snapshot_before','snapshot_restored']
         for name in names:
             snap=state['snapshot']

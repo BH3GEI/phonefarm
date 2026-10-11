@@ -544,7 +544,7 @@ pub fn witness(raw: &str, package: &str, comm: &str) -> Result<Witness, String> 
     let filters_clear = EVENTS.iter().all(|ev| {
         get(&format!("filter/{ev}")).is_ok_and(|v| v.trim() == "none")
             && get(&format!("trigger/{ev}"))
-                .is_ok_and(|v| !v.trim().is_empty() && v.lines().all(|l| l.trim().starts_with('#')))
+                .is_ok_and(|v| !v.trim().is_empty() && v.lines().filter(|l| !l.trim().is_empty()).all(|l| l.trim().starts_with('#')))
     }) && get("event_pid")?.trim() == "EMPTY"
         && get("event_notrace_pid")?.trim() == "EMPTY";
     let mask = u64::from_str_radix(&get("tracing_cpumask")?.trim().replace(',', ""), 16)
@@ -1165,6 +1165,15 @@ mod tests {
             "UnityGfxDeviceW"
         )
         .is_err());
+    }
+    #[test]
+    fn empty_trigger_lines_are_not_active_trigger_records() {
+        let r=raw(98.8).replace("# Available triggers:\n", "# Available triggers:\n\n");
+        assert!(witness(&r,"com.example.game","UnityGfxDeviceW").unwrap().filters_clear);
+        let bad=r.replace("# Available triggers:\n", "# Available triggers:\ntraceoff:unlimited\n");
+        assert!(!witness(&bad,"com.example.game","UnityGfxDeviceW").unwrap().filters_clear);
+        let empty=r.replace("# Available triggers:\n", "");
+        assert!(!witness(&empty,"com.example.game","UnityGfxDeviceW").unwrap().filters_clear);
     }
     #[test]
     fn original_callers_multi_context_worker_executors_are_retained() {

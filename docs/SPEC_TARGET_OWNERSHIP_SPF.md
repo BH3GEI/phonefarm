@@ -199,7 +199,7 @@ the existing EMPTY and trailing-LF semantics. No shell command is evaluated by
 the helper and it performs no file writes.
 
 Fixed source is built with the already-installed official r28c arm64 API30
-compiler into an isolated artifact: `source.c`, `reader.elf`, `build.json`.
+compiler into an isolated artifact: `source.c`, `reader.elf`, `build.json`, `compiler.stdout`, `compiler.stderr`.
 Source bytes/schema/target/flags/source and ELF hashes are checked by the host;
 ELF64 little-endian AArch64 executable identity is mandatory. No binaries go
 into Git, no caller qualification boolean is accepted, and a matching hash is
@@ -216,3 +216,63 @@ freezes that same helper before any probe/control sampling. This is a guarded
 phase of the existing session, not a second owner/session or an automatic retry.
 Legacy missing-profile route needs no native artifact. A requested native route
 with absent or invalid artifact blocks, never falls back to either shell reader.
+
+
+### Guarded native preinstall and recovery (execution contract v1)
+
+An explicit queued-origin request must provide `render_reader_artifact`, the
+local directory locator of the five-file fixed-source artifact. Missing or
+invalid artifacts reject before transport. The receiver reads bounded regular
+files from a no-follow directory fd, verifies the fixed compiled-in source,
+receipt schema/target/flags, ELF64LE AArch64 PIE identity, source/ELF/compiler-log
+hashes and false proof flags. These bytes are copied into the session and frozen;
+matching hashes bind local provenance, not independent build authentication.
+
+After readonly identity/control-restore inventory and before any main worker
+installation, the host persists state and a complete preinstall input manifest,
+then holds the existing lease for recovery. A unique `-reader` directory uses
+the same session token and boot ID. Only fixed worker/bootstrap/collector/ELF/
+arguments are installed there with byte readback and executable mode. The
+`render_readonly` worker uses the existing durable master/child permit and
+PID/start/PGID ledger. Its child has a remote20s deadline. This mode and its
+failure trap never restore/write sysfs, settings or ftrace.
+
+The initial witness is accepted only after successful child exit and parsing.
+`reconcile_render` retires attributable helper children, revokes the helper
+session and releases its master. A separate fixed closure checker verifies
+both recorded master groups and child groups absent, exact token/boot and the
+revocation receipt; only then can it remove this owned helper directory. The
+host saves immutable closure and removal receipts before it persists the
+main-install intent. Main installation/control/capture cannot precede these
+receipts. Main worker witnesses consume the same frozen ELF as a third argument.
+
+Interrupted or failed preinstall is explicitly reconciled under the same lease
+barrier. Helper-only recovery is available only with the preinstall manifest,
+known state/tools, and no main-install intent, full input manifest or later
+control/capture/sample intent. Partial/unknown installation, PID reuse, live or
+unknown master/group, malformed ledger, boot/owner changes or ambiguous cleanup
+retain UNKNOWN and the barrier. It never invents a restore success. Once the
+main phase starts, only the existing full control/ftrace reconciliation may
+close the session, and it must also verify the helper closure. Helper shutdown
+is not a substitute for main-worker quiescence or full snapshot restoration.
+Normal/failed/interrupt cross-phase host cases exercise these exact callbacks;
+synthetic transport remains synthetic and cannot certify the physical device.
+
+
+The successful standalone v5 readonly record was independently parsed in full:
+184 tasks and all seven actual print mappings were structurally accepted.
+Its HOME/paused state, selected local clock and disabled events are not an arm
+measurement; no origin/SPF/display/GPU/performance qualification is derived.
+Comment-only trigger listings may contain blank lines: blank lines are ignored,
+at least one nonempty comment is required, and any noncomment record rejects.
+This is byte grammar acceptance, not clearing or rewriting device filters.
+
+Preinstall's closed/removal files are immutable. An interrupt after remote
+revocation but before durable complete removal receipt cannot be guessed safe;
+that ambiguous boundary retains the barrier. If complete removal receipt is
+already durable, helper-only recovery additionally checks the current helper
+path absent. After main intent/full input manifest, helper-only recovery is
+forbidden even if the helper itself is absent. Normal collection and full
+reconciliation verify frozen helper closure and current absence as part of the
+main execution closure. Prepared names include the native provenance files,
+preinstall/intent/closure receipts and all three baseline final raw witnesses.

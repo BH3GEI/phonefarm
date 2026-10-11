@@ -12,4 +12,4 @@ while [ ! -f "$R/permit-$TAG" ]; do
 done
 [ "$(cat "$R/permit-$TAG")" = "$TOKEN $BOOT" ] || exit 84
 [ ! -e "$D/session.closed" ] || exit 86
-exec sh "$SCRIPT" "$@"
+case "$TAG" in render_reader) exec timeout 20 sh "$SCRIPT" "$@" ;; *) exec sh "$SCRIPT" "$@" ;; esac

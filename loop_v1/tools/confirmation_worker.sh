@@ -176,12 +176,14 @@ children_valid() {
   CHILD_ROWS=0
   [ -e "$R/children.tsv" ] || [ -L "$R/children.tsv" ] || return 0
   ledger_complete "$R/children.tsv" || return 1
-  CHILD_ROWS=$(awk -F '\t' -v w="$D/workload.sh" -v s="$D/sample_env.sh" -v th="$D/thermal_sampler.sh" '
-    NF!=4 || ($1!="workload" && $1!="sampler" && $1!="thermal_sampler") || $2!~/^[0-9]+$/ ||
+  CHILD_ROWS=$(awk -F '\t' -v w="$D/workload.sh" -v s="$D/sample_env.sh" -v th="$D/thermal_sampler.sh" -v rr="$D/render_ownership.sh" -v mode="$MODE" '
+    ((mode=="render_readonly" || mode=="reconcile_render") && $1!="render_reader") ||
+    ((mode!="render_readonly" && mode!="reconcile_render") && $1=="render_reader") ||
+    NF!=4 || ($1!="workload" && $1!="sampler" && $1!="thermal_sampler" && $1!="render_reader") || $2!~/^[0-9]+$/ ||
     $2+0<=0 || $2+0>2147483647 || $3!~/^[0-9]+$/ || $3+0<=0 ||
-    ($1=="workload" && $4!=w) || ($1=="sampler" && $4!=s) || ($1=="thermal_sampler" && $4!=th) {bad=1}
+    ($1=="workload" && $4!=w) || ($1=="sampler" && $4!=s) || ($1=="thermal_sampler" && $4!=th) || ($1=="render_reader" && $4!=rr) {bad=1}
     ++tags[$1]>1 || ++pids[$2]>1 {bad=1}
-    END {if (bad || NR<1 || NR>3) exit 1; print NR}' "$R/children.tsv") || return 1
+    END {if (bad || NR<1 || NR>((mode=="render_readonly" || mode=="reconcile_render")?1:3)) exit 1; print NR}' "$R/children.tsv") || return 1
 }
 pending_known() {
   children_valid || return 1
@@ -190,7 +192,7 @@ pending_known() {
     ledger_complete "$pending" || return 1
     [ -f "$R/children.tsv" ] || return 1
     expected=${pending##*/}; expected=${expected#launch-}; expected=${expected%.pending}
-    case "$expected" in workload) script_expected="$D/workload.sh" ;; sampler) script_expected="$D/sample_env.sh" ;; thermal_sampler) script_expected="$D/thermal_sampler.sh" ;; *) return 1 ;; esac
+    case "$expected" in workload) script_expected="$D/workload.sh" ;; sampler) script_expected="$D/sample_env.sh" ;; thermal_sampler) script_expected="$D/thermal_sampler.sh" ;; render_reader) script_expected="$D/render_ownership.sh" ;; *) return 1 ;; esac
     awk -F '\t' -v t="$expected" -v s="$script_expected" '
       NF!=2 || $1!=t || $2!=s {bad=1} END {exit (bad || NR!=1)}' "$pending" || return 1
     consumed_pending=0
@@ -264,7 +266,7 @@ render_prepare() {
   jstart=$(cut -d' ' -f1 /proc/uptime) || return 1
   trace_write tracing_on 1 || return 1
   IFS="$(printf '\t')" read -r pkg comm < "$D/render_args.tsv" || return 1
-  timeout 20 sh "$D/render_ownership.sh" "$pkg" "$comm" > "$R/render-before.raw.tsv" || return 1
+  timeout 20 sh "$D/render_ownership.sh" "$pkg" "$comm" "$D/render_reader.elf" > "$R/render-before.raw.tsv" || return 1
 }
 capture() {
   dur=$1
@@ -275,10 +277,10 @@ capture() {
     b=$(cut -d' ' -f1 /proc/uptime) || return 1
     sleep 3 || return 1
     tailend=$(cut -d' ' -f1 /proc/uptime) || return 1
-    timeout 20 sh "$D/render_ownership.sh" "$pkg" "$comm" > "$R/render-after.raw.tsv" || return 1
+    timeout 20 sh "$D/render_ownership.sh" "$pkg" "$comm" "$D/render_reader.elf" > "$R/render-after.raw.tsv" || return 1
     trace_write tracing_on 0 || return 1
     jend=$(cut -d' ' -f1 /proc/uptime) || return 1
-    timeout 20 sh "$D/render_ownership.sh" "$pkg" "$comm" > "$R/render-final.raw.tsv" || return 1
+    timeout 20 sh "$D/render_ownership.sh" "$pkg" "$comm" "$D/render_reader.elf" > "$R/render-final.raw.tsv" || return 1
     { printf '#loop_v1_meta capture_start_uptime=%s capture_end_uptime=%s duration_req=%s join_start_uptime=%s tail_end_uptime=%s join_end_uptime=%s\n' "$a" "$b" "$dur" "$jstart" "$tailend" "$jend"; cat /sys/kernel/tracing/trace; } > "$R/trace.txt"
   else
     trace_write tracing_on 0 || return 1
@@ -302,14 +304,14 @@ cleanup_failure() {
   trap - EXIT INT TERM
   # The absence of an attributable child/group is required before any restore write.
   if stop_owned; then
-    case "$MODE" in control_probe|reconcile_controls) restore_controls || true ;; *) restore_trace && restore_controls || true ;; esac
+    case "$MODE" in render_readonly|reconcile_render) : ;; control_probe|reconcile_controls) restore_controls || true ;; *) restore_trace && restore_controls || true ;; esac
   fi
 }
 acquire_master() {
   [ ! -e "$D/session.closed" ] || return 1
   L="$D/worker.lock"
   if [ -d "$L" ]; then
-    case "$MODE" in reconcile|reconcile_controls) ;; *) return 1 ;; esac
+    case "$MODE" in reconcile|reconcile_controls|reconcile_render) ;; *) return 1 ;; esac
     ledger_complete "$L/owner" || return 1
     awk -v t="$TOKEN" -v b="$BOOT" 'NF!=5 || $1!=t || $2!=b {bad=1} END {exit (bad || NR!=1)}' "$L/owner" || return 1
     IFS=' ' read -r oldtoken oldboot oldpid oldticks oldrun < "$L/owner" || return 1
@@ -335,7 +337,7 @@ release_master() {
   [ "$(cat "$D/worker.lock/owner")" = "$MASTER" ] || return 1
   if [ -e "$D/session.closed" ]; then
     # Closure forbids all normal intents. Only this matching terminal reconcile may unlock.
-    case "$MODE" in reconcile|reconcile_controls) ;; *) return 1 ;; esac
+    case "$MODE" in reconcile|reconcile_controls|reconcile_render) ;; *) return 1 ;; esac
     [ "$(cat "$D/session.closed/owner")" = "$TOKEN $BOOT $RUN" ] || return 1
     [ "$(cat "$D/owner")" = "$TOKEN $BOOT" ] && [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT" ] || return 1
     printf '%s\tterminal_release_master\t%s\t%s\n' "$TOKEN" "$D/worker.lock" "$$" >> "$D/journal.tsv"
@@ -359,6 +361,33 @@ close_session() {
 # The host invokes this worker through setsid, so master and its synchronous children own one group.
 acquire_master || exit 85
 case "$MODE" in
+  render_readonly)
+    intent mkdir "$R" ''; mkdir "$R"
+    printf '%s\n' "$MASTER" > "$R/master.tsv"; sync
+    trap 'cleanup_failure' EXIT INT TERM
+    IFS="$(printf '\t')" read -r pkg comm < "$D/render_args.tsv" || exit 81
+    start_child render_reader "$D/render_ownership.sh" "$pkg" "$comm" "$D/render_reader.elf"
+    if wait "$CHILD_PID"; then echo 0 > "$R/render_exit.txt"; else code=$?; echo "$code" > "$R/render_exit.txt"; exit "$code"; fi
+    quiescent || exit 76
+    echo OWNED_GROUPS_ABSENT > "$R/quiescence.txt"
+    trap - EXIT INT TERM
+    release_master
+    echo READONLY_COMPLETE
+    ;;
+  reconcile_render)
+    for prior in "$D"/*; do
+      [ -d "$prior" ] || continue
+      [ "$prior" != "$D/worker.lock" ] || continue
+      R=$prior; stop_owned || exit 77
+      for pending in "$R"/launch-*.pending; do [ -e "$pending" ] || continue; intent clear_stopped_pending "$pending" ''; rm "$pending"; sync; done
+    done
+    R="$D/$RUN"; intent mkdir "$R" ''; mkdir "$R"
+    printf '%s\n' "$MASTER" > "$R/master.tsv"; sync
+    echo OWNED_GROUPS_ABSENT > "$R/quiescence.txt"
+    close_session
+    release_master
+    echo READONLY_RECONCILE_COMPLETE
+    ;;
   probe|control_probe)
     intent mkdir "$R" ''; mkdir "$R"
     trap 'cleanup_failure' EXIT INT TERM

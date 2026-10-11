@@ -1370,6 +1370,14 @@ fn origin_fixture() -> F {
     let mut r = f.read("request.json");
     r["goal"] = json!("render_cadence");
     r["render_attribution_profile_id"] = json!("kgsl_queued_origin_spf_v1");
+    let ad=f.dir.join("reader-artifact");std::fs::create_dir(&ad).unwrap();
+    let source=include_bytes!("../../tools/render-collector/reader.c");
+    let mut elf=vec![0_u8;64];elf[..6].copy_from_slice(b"\x7fELF\x02\x01");elf[16]=3;elf[18]=183;
+    std::fs::write(ad.join("source.c"),source).unwrap();std::fs::write(ad.join("reader.elf"),&elf).unwrap();
+    for n in ["compiler.stdout","compiler.stderr"]{std::fs::write(ad.join(n),[]).unwrap();}
+    f.write("reader-artifact/build.json",&json!({"schema":"phonefarm/render_reader_build@1","status":"BUILT","target":"aarch64-linux-android30","ndk_revision":"28.2.13676358","flags":["-std=c11","-O2","-Wall","-Wextra","-Werror","-fPIE","-pie","-Wl,-z,relro,-z,now"],"source_sha256":sha(source),"elf_sha256":sha(&elf),"compiler":{"path":"/synthetic/compiler","sha256":"a".repeat(64),"clang_path":"/synthetic/clang","clang_sha256":"b".repeat(64),"package_sha256":"c".repeat(64)},"execution":{"exit":0,"stdout_sha256":sha(&[]),"stderr_sha256":sha(&[]),"process_group_absent":true},"source_authentication":"local_build_receipt_not_independent_authentication","device_run":false,"installed_kernel_source_verified":false,"game_proof":false}));
+    r["render_reader_artifact"]=json!(ad);
+
     f.write("request.json", &r);
     f
 }
@@ -1463,4 +1471,264 @@ fn queued_origin_rehashed_frozen_contract_does_not_hide_raw_contradiction() {
     let (code, out) = f.collect();
     assert_eq!(code, 1, "{out}");
     assert!(!f.dir.join("session/samples.json").exists());
+}
+
+
+#[test]
+fn queued_origin_native_artifact_rejects_before_transport() {
+    for fail in ["missing", "source", "elf", "extra", "proof", "symlink"] {
+        let f = origin_fixture();
+        match fail {
+            "missing" => {
+                let mut r = f.read("request.json");
+                r.as_object_mut().unwrap().remove("render_reader_artifact");
+                f.write("request.json", &r);
+            }
+            "source" => {
+                std::fs::write(f.dir.join("reader-artifact/source.c"), b"different source").unwrap()
+            }
+            "elf" => std::fs::write(f.dir.join("reader-artifact/reader.elf"), b"wrong").unwrap(),
+            "extra" => std::fs::write(f.dir.join("reader-artifact/failure.json"), b"{}").unwrap(),
+            "proof" => {
+                let mut r = f.read("reader-artifact/build.json");
+                r["game_proof"] = json!(true);
+                f.write("reader-artifact/build.json", &r);
+            }
+            "symlink" => {
+                std::fs::rename(f.dir.join("reader-artifact"), f.dir.join("reader-real")).unwrap();
+                std::os::unix::fs::symlink(
+                    f.dir.join("reader-real"),
+                    f.dir.join("reader-artifact"),
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let (code, r) = f.prepare("");
+        assert_eq!(code, 1, "{fail} {r}");
+        assert!(!f.dir.join("argv.jsonl").exists());
+        assert!(!f.dir.join("session").exists());
+    }
+}
+#[test]
+fn queued_origin_helper_failure_has_only_helper_recovery() {
+    let f = origin_fixture();
+    let (code, r) = f.prepare("helper_interrupt");
+    assert_eq!(code, 1, "{r}");
+    assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    assert!(!f.dir.join("session/main-install.intent.json").exists());
+    assert!(!f.dir.join("session/inputs.manifest.json").exists());
+    let before = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
+    assert!(!before.contains("'probe' 'probe_0'"));
+    assert!(!before.contains("'sample'"));
+    let (code, r) = f.call(&["reconcile", "--session", "session", "--execute"], "");
+    assert_eq!(code, 0, "{r}");
+    assert_eq!(r["status"], "SIMULATED_HELPER_RECONCILED");
+    assert_eq!(r["control_restore_claimed"], false);
+    assert!(!f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    assert!(!f.dir.join("session/prepared.manifest.json").exists());
+    let after = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
+    assert!(after.contains("reconcile_render"));
+    assert!(!after.contains("'reconcile'"));
+}
+#[test]
+fn queued_origin_helper_unknown_or_main_intent_preserves_barrier() {
+    for fail in ["helper_group_unknown", "main_intent"] {
+        let f = origin_fixture();
+        assert_eq!(f.prepare("helper_read_failure").0, 1);
+        if fail == "main_intent" {
+            f.write(
+                "session/main-install.intent.json",
+                &json!({"schema":"phonefarm/main_install_intent@1"}),
+            );
+        }
+        let (code, r) = f.call(
+            &["reconcile", "--session", "session", "--execute"],
+            if fail == "main_intent" { "" } else { fail },
+        );
+        assert_eq!(code, 1, "{fail} {r}");
+        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        assert!(!f.dir.join("session/render-helper-removed.json").exists());
+    }
+}
+#[test]
+fn queued_origin_main_failure_requires_full_restoration() {
+    let f = origin_fixture();
+    assert_eq!(f.prepare("probe").0, 1);
+    assert!(f.dir.join("session/main-install.intent.json").exists());
+    assert!(f.dir.join("session/render-helper-removed.json").exists());
+    let (code, r) = f.call(&["reconcile", "--session", "session", "--execute"], "");
+    assert_eq!(code, 0, "{r}");
+    assert_eq!(r["status"], "SIMULATED_RECONCILED");
+    let argv = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
+    assert!(argv.contains("'reconcile'"));
+    assert!(!f.dir.join("session/prepared.manifest.json").exists());
+}
+#[test]
+fn actual_helper_closure_checker_rejects_ambiguous_groups_and_ledgers() {
+    for failure in [
+        "",
+        "owner",
+        "live_pid",
+        "unknown_group",
+        "pending",
+        "malformed_master",
+        "wrong_child",
+        "remove",
+    ] {
+        let f = F::new(false);
+        let d = f.dir.join("phonefarm-confirmation-token-reader");
+        let run = "helper_reconcile_1";
+        std::fs::create_dir_all(d.join(run)).unwrap();
+        std::fs::create_dir(d.join("session.closed")).unwrap();
+        std::fs::create_dir(d.join("proc")).unwrap();
+        std::fs::write(d.join("boot"), b"fake-boot\n").unwrap();
+        std::fs::write(
+            d.join("owner"),
+            if failure == "owner" {
+                b"other fake-boot\n".as_slice()
+            } else {
+                b"token fake-boot\n".as_slice()
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("session.closed/owner"),
+            format!("token fake-boot {run}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join(run).join("session_closed.txt"),
+            format!("SESSION_REVOKED token fake-boot {run}\n"),
+        )
+        .unwrap();
+        std::fs::write(d.join(run).join("quiescence.txt"), b"OWNED_GROUPS_ABSENT\n").unwrap();
+        std::fs::write(
+            d.join(run).join("master.tsv"),
+            if failure == "malformed_master" {
+                format!("token fake-boot 900001\n")
+            } else {
+                format!("token fake-boot 900001 123 {run}\n")
+            },
+        )
+        .unwrap();
+        if failure == "live_pid" {
+            std::fs::create_dir(d.join("proc/900001")).unwrap();
+        }
+        if failure == "pending" {
+            std::fs::write(
+                d.join(run).join("launch-render_reader.pending"),
+                b"unowned\n",
+            )
+            .unwrap();
+        }
+        if failure == "wrong_child" {
+            std::fs::write(
+                d.join(run).join("children.tsv"),
+                b"workload\t900002\t123\t/wrong\n",
+            )
+            .unwrap();
+        }
+        let shim = d.join("kill-shim");
+        std::fs::write(
+            &shim,
+            if failure == "unknown_group" {
+                b"#!/bin/sh\nprintf 'Permission denied\n' >&2\nexit 1\n".as_slice()
+            } else {
+                b"#!/bin/sh\nprintf 'No such process\n' >&2\nexit 1\n".as_slice()
+            },
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let script = include_str!("../../loop_v1/tools/confirmation_render_close.sh")
+            .replace("/data/local/tmp/", &format!("{}/", f.dir.display()))
+            .replace(
+                "/proc/sys/kernel/random/boot_id",
+                &format!("{}/boot", d.display()),
+            )
+            .replace("/proc/$1", &format!("{}/proc/$1", d.display()))
+            .replace("/system/bin/kill", shim.to_str().unwrap());
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &script, "owned-closure"]).arg(&d).args([
+            "token",
+            "fake-boot",
+            run,
+            if failure == "remove" {
+                "remove"
+            } else {
+                "verify"
+            },
+        ]);
+        let o = cmd.output().unwrap();
+        f.receipt("actual-helper-closure", &cmd, &o);
+        assert_eq!(
+            o.status.success(),
+            failure.is_empty() || failure == "remove",
+            "{failure}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert_eq!(d.exists(), failure != "remove");
+    }
+}
+
+#[test]
+fn actual_readonly_worker_failure_never_calls_control_or_trace_restore() {
+    let source = include_str!("../../loop_v1/tools/confirmation_worker.sh");
+    let body = source
+        .split("  render_readonly)\n")
+        .nth(1)
+        .unwrap()
+        .split("    ;;\n  reconcile_render)")
+        .next()
+        .unwrap();
+    let cleanup = source
+        .split("cleanup_failure() {\n")
+        .nth(1)
+        .unwrap()
+        .split("\n}\nacquire_master()")
+        .next()
+        .unwrap();
+    for (child_exit, group_known) in [(0, true), (81, true), (0, false)] {
+        let f = F::new(false);
+        let d = f.dir.join("readonly-worker");
+        std::fs::create_dir(&d).unwrap();
+        std::fs::write(
+            d.join("render_args.tsv"),
+            b"com.example.game\tUnityGfxDeviceW\n",
+        )
+        .unwrap();
+        let script = format!(
+            r#"set -eu
+D=$1; R="$D/render_initial"; MODE=render_readonly; MASTER='synthetic host master'
+intent() {{ :; }}
+sync() {{ :; }}
+start_child() {{ sh -c 'exit {child_exit}' & CHILD_PID=$!; }}
+quiescent() {{ {}; }}
+stop_owned() {{ printf stopped > "$D/stop-called"; return 0; }}
+restore_trace() {{ printf unsafe > "$D/restore-called"; }}
+restore_controls() {{ printf unsafe > "$D/restore-called"; }}
+release_master() {{ printf released > "$D/released"; }}
+cleanup_failure() {{
+{cleanup}
+}}
+{body}"#,
+            if group_known { "true" } else { "false" }
+        );
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &script, "owned-readonly-callback"]).arg(&d);
+        let o = cmd.output().unwrap();
+        f.receipt("actual-readonly-worker", &cmd, &o);
+        assert_eq!(
+            o.status.success(),
+            child_exit == 0 && group_known,
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(!d.join("restore-called").exists());
+        assert_eq!(d.join("released").exists(), child_exit == 0 && group_known);
+        if child_exit != 0 || !group_known {
+            assert!(d.join("stop-called").exists());
+        }
+    }
 }

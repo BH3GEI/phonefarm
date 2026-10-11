@@ -15,6 +15,8 @@ use std::{
 };
 #[path = "confirmation_control_probe.rs"]
 mod control_probe;
+#[path = "confirmation_render_reader.rs"]
+mod render_reader;
 #[path = "confirmation_temperature.rs"]
 pub(crate) mod temperature;
 const CAP: u64 = 128 * 1024 * 1024;
@@ -100,6 +102,8 @@ struct Request {
     goal: Option<Goal>,
     #[serde(default)]
     render_attribution_profile_id: Option<String>,
+    #[serde(default)]
+    render_reader_artifact: Option<PathBuf>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -212,6 +216,8 @@ fn request(path: &Path) -> Result<(Request, Vec<u8>, Vec<u8>, Vec<u8>), String> 
                 || req.goal == Some(Goal::RenderCadence)),
         "unknown ownership profile or non-cadence attribution goal",
     )?;
+    require(req.render_attribution_profile_id.is_some() == req.render_reader_artifact.is_some(), "queued-origin requires explicit native reader artifact; legacy cannot add it")?;
+    if let Some(path)=&req.render_reader_artifact { render_reader::artifact(path)?; }
     let mut ids = BTreeSet::new();
     for (i, p) in req.schedule.iter().enumerate() {
         require(
@@ -488,6 +494,7 @@ fn frozen_names(dir: &Path) -> Result<BTreeSet<String>, String> {
             .map(String::from),
         );
     }
+    if read_json(&dir.join("request.json"))?["render_attribution_profile_id"]==crate::render_attribution::PROFILE {names.extend(render_frozen_extra().into_iter().map(String::from));}
     Ok(names)
 }
 fn verify(dir: &Path) -> Result<(), String> {
@@ -577,6 +584,391 @@ fn prepared_names(dir: &Path) -> Result<BTreeSet<String>, String> {
     }
     Ok(names)
 }
+fn render_frozen_extra() -> Vec<&'static str> {
+    let mut n = render_reader::FILES.to_vec();
+    n.extend([
+        "render_close.sh",
+        "render-preinstall.manifest.json",
+        "render-helper.intent.json",
+        "render-helper-close.stdout",
+        "render-helper-remove.stdout",
+        "render-helper-closed.json",
+        "render-helper-removed.json",
+        "main-install.intent.json",
+    ]);
+    n
+}
+fn preinstall_names(dir: &Path) -> Result<BTreeSet<String>, String> {
+    let mut n = frozen_names(dir)?;
+    for k in [
+        "sampling-contract.json",
+        "conditions.json",
+        "baseline.json",
+        "render-initial.raw.tsv",
+    ] {
+        n.remove(k);
+    }
+    for k in render_frozen_extra() {
+        n.remove(k);
+    }
+    n.extend(render_reader::FILES.into_iter().map(String::from));
+    n.insert("render_close.sh".into());
+    Ok(n)
+}
+fn validate_preinstall(dir: &Path, req: &Request) -> Result<Value, String> {
+    require(
+        req.render_attribution_profile_id.as_deref() == Some(crate::render_attribution::PROFILE)
+            && req.render_reader_artifact.is_some(),
+        "not a native preinstall profile",
+    )?;
+    let m = read_json(&dir.join("render-preinstall.manifest.json"))?;
+    let h = m["hashes"].as_object().ok_or("preinstall hashes missing")?;
+    require(
+        m["schema"] == "phonefarm/render_preinstall_inputs@1"
+            && m.as_object().is_some_and(|o| o.len() == 2)
+            && h.keys().cloned().collect::<BTreeSet<_>>() == preinstall_names(dir)?,
+        "incomplete/extra preinstall input manifest",
+    )?;
+    for (n, s) in h {
+        require(
+            s.as_str() == Some(&sha(&bounded(&dir.join(n), CAP)?)),
+            "preinstall input bytes changed",
+        )?;
+    }
+    render_reader::verify(dir)?;
+    let snapshot = snapshot_source(true);
+    for (n, s) in [
+        ("worker.sh", WORKER),
+        ("bootstrap.sh", BOOTSTRAP),
+        ("snapshot.sh", snapshot.as_str()),
+        ("sample_env.sh", ENV),
+        ("probe_readonly.sh", PROBE),
+        ("cold.sh", COLD),
+        ("render_ownership.sh", crate::render_attribution::COLLECTOR),
+    ] {
+        require(
+            bounded(&dir.join(n), CAP)? == s.as_bytes(),
+            "preinstall receiver tool changed",
+        )?;
+    }
+    require(
+        bounded(&dir.join("workload.sh"), CAP)?
+            == workload(&bounded(&dir.join("workload.json"), 2 * 1024 * 1024)?, req)?.as_bytes()
+            && bounded(&dir.join("render_args.tsv"), 65536)?
+                == format!("{}\t{}\n", req.package, req.render_comm).as_bytes(),
+        "preinstall arguments/workload changed",
+    )?;
+    let s = read_json(&dir.join("state.json"))?;
+    let token = s["token"].as_str().ok_or("preinstall token")?;
+    let boot = s["boot_id"].as_str().ok_or("preinstall boot")?;
+    require(
+        s["schema"] == "phonefarm/confirmation_driver_state@1"
+            && safe(token)
+            && safe(boot)
+            && s["target"] == req.transport.target
+            && s["remote"] == format!("/data/local/tmp/phonefarm-confirmation-{token}")
+            && s["helper_remote"]
+                == format!("/data/local/tmp/phonefarm-confirmation-{token}-reader"),
+        "preinstall state identity mismatch",
+    )?;
+    Ok(s)
+}
+fn register_preinstall(t: &mut Transport, dir: &Path) -> Result<(), String> {
+    for (n, h) in read_json(&dir.join("render-preinstall.manifest.json"))?["hashes"]
+        .as_object()
+        .ok_or("preinstall hashes")?
+    {
+        t.input_hashes
+            .insert(dir.join(n), h.as_str().ok_or("preinstall digest")?.into());
+    }
+    Ok(())
+}
+fn helper_state(state: &Value) -> Result<Value, String> {
+    let mut h = state.clone();
+    h["remote"] = state
+        .get("helper_remote")
+        .ok_or("helper remote missing")?
+        .clone();
+    Ok(h)
+}
+fn render_initial(
+    t: &mut Transport,
+    lease: &Lease,
+    dir: &Path,
+    req: &Request,
+    state: &Value,
+) -> Result<Vec<u8>, String> {
+    let h = helper_state(state)?;
+    let files = [
+        "worker.sh",
+        "bootstrap.sh",
+        "render_ownership.sh",
+        "render_reader.elf",
+        "render_args.tsv",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect::<Vec<_>>();
+    save_json(
+        dir,
+        "render-helper.intent.json",
+        &json!({"schema":"phonefarm/render_helper_intent@1","state_sha256":file_ref(dir,"state.json")?["sha256"],"preinstall_sha256":file_ref(dir,"render-preinstall.manifest.json")?["sha256"],"remote":h["remote"],"token":h["token"],"boot_id":h["boot_id"],"files":files}),
+    )?;
+    install(
+        t,
+        lease,
+        dir,
+        h["remote"].as_str().unwrap(),
+        h["token"].as_str().unwrap(),
+        h["boot_id"].as_str().unwrap(),
+        &files,
+    )?;
+    let done = worker(t, lease, &h, "render_readonly", "render_initial", "", 28)?;
+    require(
+        done == b"READONLY_COMPLETE\n",
+        "native initial reader completion missing",
+    )?;
+    require(
+        pull(t, lease, &h, "render_initial", "render_exit.txt")? == b"0\n"
+            && pull(t, lease, &h, "render_initial", "quiescence.txt")? == b"OWNED_GROUPS_ABSENT\n",
+        "native reader exit/group unknown",
+    )?;
+    let raw = pull(t, lease, &h, "render_initial", "render_reader.log")?;
+    require(
+        raw.len() <= 2 * 1024 * 1024,
+        "native initial witness output bound",
+    )?;
+    // actual witness parser checks the complete task table and all seven formats.
+    crate::render_attribution::witness(
+        std::str::from_utf8(&raw).map_err(|e| e.to_string())?,
+        &req.package,
+        &req.render_comm,
+    )?;
+    Ok(raw)
+}
+fn close_helper(t: &mut Transport, lease: &Lease, dir: &Path, state: &Value) -> Result<(), String> {
+    let h = helper_state(state)?;
+    let run = format!(
+        "helper_reconcile_{}",
+        chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .ok_or("time overflow")?
+    );
+    let done = worker(t, lease, &h, "reconcile_render", &run, "", 45)?;
+    require(
+        done == b"READONLY_RECONCILE_COMPLETE\n",
+        "helper reconciliation completion missing",
+    )?;
+    for (mode, operation, name) in [
+        (
+            "verify",
+            "render_helper_close",
+            "render-helper-close.stdout",
+        ),
+        (
+            "remove",
+            "render_helper_remove",
+            "render-helper-remove.stdout",
+        ),
+    ] {
+        let raw = checked(
+            t,
+            operation,
+            &format!(
+                "sh -s -- {} {} {} {} {}",
+                quote(h["remote"].as_str().unwrap()),
+                quote(h["token"].as_str().unwrap()),
+                quote(h["boot_id"].as_str().unwrap()),
+                quote(&run),
+                quote(mode)
+            ),
+            Some(&dir.join("render_close.sh")),
+            20,
+            65536,
+            lease,
+        )?;
+        let expected = format!(
+            "{} {} {} {}\n",
+            if mode == "verify" {
+                "HELPER_CLOSED"
+            } else {
+                "HELPER_REMOVED"
+            },
+            h["token"].as_str().unwrap(),
+            h["boot_id"].as_str().unwrap(),
+            run
+        );
+        require(
+            raw == expected.as_bytes(),
+            "helper closure/group/owner receipt unknown",
+        )?;
+        save(dir, name, &raw)?;
+        if mode == "verify" {
+            save_json(
+                dir,
+                "render-helper-closed.json",
+                &json!({"schema":"phonefarm/render_helper_closed@1","state_sha256":file_ref(dir,"state.json")?["sha256"],"run_id":run,"stdout":file_ref(dir,name)?,"control_writes":false,"ftrace_writes":false,"eligible":false}),
+            )?;
+        } else {
+            save_json(
+                dir,
+                "render-helper-removed.json",
+                &json!({"schema":"phonefarm/render_helper_removed@1","state_sha256":file_ref(dir,"state.json")?["sha256"],"closed_sha256":file_ref(dir,"render-helper-closed.json")?["sha256"],"stdout":file_ref(dir,name)?,"eligible":false}),
+            )?;
+        }
+    }
+    helper_absent(t, lease, state)
+}
+fn validate_helper_intent(dir: &Path, state: &Value) -> Result<(), String> {
+    let h = helper_state(state)?;
+    let files = [
+        "worker.sh",
+        "bootstrap.sh",
+        "render_ownership.sh",
+        "render_reader.elf",
+        "render_args.tsv",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect::<Vec<_>>();
+    require(
+        read_json(&dir.join("render-helper.intent.json"))?
+            == json!({"schema":"phonefarm/render_helper_intent@1","state_sha256":file_ref(dir,"state.json")?["sha256"],"preinstall_sha256":file_ref(dir,"render-preinstall.manifest.json")?["sha256"],"remote":h["remote"],"token":h["token"],"boot_id":h["boot_id"],"files":files}),
+        "native helper intent/state mismatch",
+    )
+}
+fn validate_helper_removed(dir: &Path) -> Result<(), String> {
+    let s = read_json(&dir.join("state.json"))?;
+    let c = read_json(&dir.join("render-helper-closed.json"))?;
+    let r = read_json(&dir.join("render-helper-removed.json"))?;
+    validate_helper_intent(dir, &s)?;
+    if dir.join("main-install.intent.json").exists() {
+        require(
+            read_json(&dir.join("main-install.intent.json"))?
+                == json!({"schema":"phonefarm/main_install_intent@1","state_sha256":file_ref(dir,"state.json")?["sha256"],"helper_removed_sha256":file_ref(dir,"render-helper-removed.json")?["sha256"]}),
+            "main intent not bound to native closure",
+        )?;
+    }
+    let run = c["run_id"].as_str().ok_or("helper close run")?;
+    require(safe(run), "unsafe helper closure run")?;
+    let closed = format!(
+        "HELPER_CLOSED {} {} {run}\n",
+        s["token"].as_str().ok_or("token")?,
+        s["boot_id"].as_str().ok_or("boot")?
+    );
+    let removed = closed.replace("HELPER_CLOSED", "HELPER_REMOVED");
+    require(
+        c == json!({"schema":"phonefarm/render_helper_closed@1","state_sha256":file_ref(dir,"state.json")?["sha256"],"run_id":run,"stdout":file_ref(dir,"render-helper-close.stdout")?,"control_writes":false,"ftrace_writes":false,"eligible":false})
+            && r == json!({"schema":"phonefarm/render_helper_removed@1","state_sha256":file_ref(dir,"state.json")?["sha256"],"closed_sha256":file_ref(dir,"render-helper-closed.json")?["sha256"],"stdout":file_ref(dir,"render-helper-remove.stdout")?,"eligible":false})
+            && bounded(&dir.join("render-helper-close.stdout"), 65536)? == closed.as_bytes()
+            && bounded(&dir.join("render-helper-remove.stdout"), 65536)? == removed.as_bytes(),
+        "native helper closure binding changed",
+    )
+}
+fn helper_absent(t: &mut Transport, lease: &Lease, state: &Value) -> Result<(), String> {
+    let remote = state["helper_remote"].as_str().ok_or("helper remote")?;
+    require(
+        checked(
+            t,
+            "render_helper_absent",
+            &format!(
+                "set -eu; test \"$(cat /proc/sys/kernel/random/boot_id)\" = {}; test ! -e {}; test ! -L {}; printf 'HELPER_ABSENT\\n'",
+                quote(state["boot_id"].as_str().ok_or("boot")?),
+                quote(remote),
+                quote(remote)
+            ),
+            None,
+            10,
+            65536,
+            lease,
+        )? == b"HELPER_ABSENT\n",
+        "helper absence unknown",
+    )
+}
+fn reconcile_helper(dir: &Path) -> Result<Value, String> {
+    let req: Request =
+        serde_json::from_slice(&bounded(&dir.join("request.json"), 2 * 1024 * 1024)?)
+            .map_err(|e| e.to_string())?;
+    let state = validate_preinstall(dir, &req)?;
+    validate_helper_intent(dir, &state)?;
+    let events = bounded(&dir.join("journal.jsonl"), 8 * 1024 * 1024)?;
+    for l in events.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let e: Value = serde_json::from_slice(l).map_err(|e| e.to_string())?;
+        require(
+            !matches!(
+                e["event"].as_str(),
+                Some("remote_install_intent" | "sample_intent")
+            ) && !matches!(
+                e["operation"].as_str(),
+                Some("worker_probe" | "worker_sample" | "worker_control_probe")
+            ),
+            "helper-only reconciliation forbidden after main intent",
+        )?;
+    }
+    require(
+        !dir.join("main-install.intent.json").exists()
+            && !dir.join("inputs.manifest.json").exists(),
+        "main phase requires full reconciliation",
+    )?;
+    let (root, legacy, timeout) = roots()?;
+    let mut lease = Lease::acquire_recovery(&root, &legacy, &req.transport.target, dir, timeout)?;
+    let phase = format!(
+        "helper_recovery_{}",
+        chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .ok_or("time overflow")?
+    );
+    let mut t = start_transport(dir, &req, &phase)?;
+    register_preinstall(&mut t, dir)?;
+    let actual = identity(&mut t, &lease, "")?;
+    require(
+        actual.0 == state["serial"] && actual.1 == state["boot_id"],
+        "helper recovery actual identity changed",
+    )?;
+    if dir.join("render-helper-removed.json").exists() {
+        validate_helper_removed(dir)?;
+        helper_absent(&mut t, &lease, &state)?;
+        journal(
+            dir,
+            json!({"event":"helper_only_reconciliation_verified","old_samples_revalidated":false,"at":now()}),
+        )?;
+        lease.complete_recovery()?;
+        return Ok(
+            json!({"status":if req.transport.kind=="fake"{"SIMULATED_HELPER_RECONCILED"}else{"HELPER_CLOSED_REQUIRES_NEW_SESSION"},"old_samples_revalidated":false,"control_restore_claimed":false,"eligible":false,"real_game_optimization_proven":false,"promotion_allowed":false}),
+        );
+    }
+    let h = helper_state(&state)?;
+    for n in [
+        "worker.sh",
+        "bootstrap.sh",
+        "render_ownership.sh",
+        "render_reader.elf",
+        "render_args.tsv",
+    ] {
+        require(
+            checked(
+                &mut t,
+                "verify_helper_file",
+                &format!("cat {}/{}", quote(h["remote"].as_str().unwrap()), quote(n)),
+                None,
+                15,
+                CAP,
+                &lease,
+            )? == bounded(&dir.join(n), CAP)?,
+            "helper recovery execution bytes unknown",
+        )?;
+    }
+    close_helper(&mut t, &lease, dir, &state)?;
+    journal(
+        dir,
+        json!({"event":"helper_only_reconciliation_verified","old_samples_revalidated":false,"at":now()}),
+    )?;
+    lease.complete_recovery()?;
+    Ok(
+        json!({"status":if req.transport.kind=="fake"{"SIMULATED_HELPER_RECONCILED"}else{"HELPER_CLOSED_REQUIRES_NEW_SESSION"},"old_samples_revalidated":false,"control_restore_claimed":false,"eligible":false,"real_game_optimization_proven":false,"promotion_allowed":false}),
+    )
+}
+
 fn install(
     t: &mut Transport,
     lease: &Lease,
@@ -588,7 +980,7 @@ fn install(
 ) -> Result<(), String> {
     journal(
         dir,
-        json!({"event":"remote_install_intent","remote":remote,"token":token,"boot_id":boot,"files":files,"at":now()}),
+        json!({"event":if remote.ends_with("-reader"){"render_helper_install_intent"}else{"remote_install_intent"},"remote":remote,"token":token,"boot_id":boot,"files":files,"at":now()}),
     )?;
     checked(
         t,
@@ -630,6 +1022,9 @@ fn install(
             "remote frozen file bytes differ",
         )?;
     }
+    if files.iter().any(|n|n=="render_reader.elf") {
+        checked(t,"reader_executable_mode",&format!("set -eu; test \"$(cat {}/owner)\" = {}; test \"$(cat /proc/sys/kernel/random/boot_id)\" = {}; chmod 700 {}/render_reader.elf; test -x {}/render_reader.elf",quote(remote),quote(&format!("{token} {boot}")),quote(boot),quote(remote),quote(remote)),None,10,65536,lease)?;
+    }
     Ok(())
 }
 fn verify_remote(
@@ -639,6 +1034,7 @@ fn verify_remote(
     state: &Value,
 ) -> Result<(), String> {
     verify(dir)?;
+    if state.get("helper_remote").is_some(){validate_helper_removed(dir)?;helper_absent(t,lease,state)?;}
     let hashes = read_json(&dir.join("inputs.manifest.json"))?;
     for (name, _) in hashes["hashes"]
         .as_object()
@@ -655,6 +1051,9 @@ fn verify_remote(
                 | "workload.sh"
                 | "restore.tsv"
                 | "candidate.plan.tsv"
+                | "render_ownership.sh"
+                | "render_args.tsv"
+                | "render_reader.elf"
         ) || name.starts_with("ftrace-")
             || name.starts_with("probe_") && name.ends_with(".plan.tsv")
         {
@@ -1078,6 +1477,7 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         workload(&workloadbytes, &req)?.as_bytes(),
     )?;
     if req.render_attribution_profile_id.is_some() {
+        render_reader::snapshot(req.render_reader_artifact.as_deref().ok_or("native artifact required")?, &out)?;
         save(
             &out,
             "render_ownership.sh",
@@ -1106,34 +1506,6 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
     )?;
     let mut t = start_transport(&out, &req, "prepare-commands")?;
     let (serial, boot) = identity(&mut t, &lease, &req.package)?;
-    if req.render_attribution_profile_id.is_some() {
-        t.input_hashes.insert(
-            out.join("render_ownership.sh"),
-            sha(crate::render_attribution::COLLECTOR.as_bytes()),
-        );
-        let raw = checked(
-            &mut t,
-            "render_initial",
-            &format!("sh -s -- {} {}", quote(&req.package), quote(&req.render_comm)),
-            Some(&out.join("render_ownership.sh")),
-            20,
-            2 * 1024 * 1024,
-            &lease,
-        )?;
-        let initial = crate::render_attribution::witness(
-            std::str::from_utf8(&raw).map_err(|e| e.to_string())?,
-            &req.package,
-            &req.render_comm,
-        )?;
-        require(
-            initial.scope.boot_id == boot && initial.filters_clear,
-            "initial render identity/filter scope unsupported",
-        )?;
-        save(&out, "render-initial.raw.tsv", &raw)?;
-        contract["render_attribution_profile_id"] = json!(crate::render_attribution::PROFILE);
-        contract["render_collector_sha256"] =
-            json!(sha(crate::render_attribution::COLLECTOR.as_bytes()));
-    }
     let loaded = req.temperature_profile_id.as_deref() == Some("loaded_steady_v1");
     if loaded {
         // Freeze the actual loaded restore state only after baseline-only warmup.
@@ -1214,8 +1586,34 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
             .ok_or("time overflow")?
     );
     let remote = format!("/data/local/tmp/phonefarm-confirmation-{token}");
-    let state = json!({"schema":"phonefarm/confirmation_driver_state@1","serial":serial,"boot_id":boot,"target":req.transport.target,"token":token,"remote":remote,"policies":policies,"transport_origin":t.origin});
+    let mut state = json!({"schema":"phonefarm/confirmation_driver_state@1","serial":serial,"boot_id":boot,"target":req.transport.target,"token":token,"remote":remote,"policies":policies,"transport_origin":t.origin});
+    if req.render_attribution_profile_id.is_some() { state["helper_remote"]=json!(format!("{remote}-reader")); }
     save_json(&out, "state.json", &state)?;
+    for (i, (_, plan)) in graph.probes.iter().enumerate() {
+        let name = format!("probe_{i}.plan.tsv");
+        save(&out, &name, plan.as_bytes())?;
+        files.push(name);
+    }
+    if req.render_attribution_profile_id.is_some() {
+        let mut prefiles=files.clone();
+        prefiles.extend(["request.json","workload.json","candidate.json","transport.snapshot","probe_readonly.sh","cold.sh","initial.snapshot","state.json","render_ownership.sh","render_args.tsv","render_close.sh"].into_iter().map(String::from));
+        prefiles.extend(render_reader::FILES.iter().map(|n|(*n).to_owned()));
+        if loaded { prefiles.extend(temperature::frozen_names().iter().map(|n|(*n).to_owned())); }
+        let hashes=prefiles.into_iter().map(|n|Ok((n.clone(),file_ref(&out,&n)?["sha256"].clone()))).collect::<Result<BTreeMap<_,_>,String>>()?;
+        save_json(&out,"render-preinstall.manifest.json",&json!({"schema":"phonefarm/render_preinstall_inputs@1","hashes":hashes}))?;
+        validate_preinstall(&out,&req)?;
+        register_preinstall(&mut t,&out)?;
+        lease.hold_for_recovery(&out)?;
+        let raw=render_initial(&mut t,&lease,&out,&req,&state)?;
+        let initial=crate::render_attribution::witness(std::str::from_utf8(&raw).map_err(|e|e.to_string())?,&req.package,&req.render_comm)?;
+        require(initial.scope.boot_id==boot && initial.filters_clear,"initial native render identity/filter scope unsupported")?;
+        save(&out,"render-initial.raw.tsv",&raw)?;
+        close_helper(&mut t,&lease,&out,&state)?;
+        contract["render_attribution_profile_id"]=json!(crate::render_attribution::PROFILE);
+        contract["render_collector_sha256"]=json!(sha(crate::render_attribution::COLLECTOR.as_bytes()));
+        contract["render_reader_build_sha256"]=file_ref(&out,"render_reader.build.json")?["sha256"].clone();
+        contract["render_reader_elf_sha256"]=file_ref(&out,"render_reader.elf")?["sha256"].clone();
+    }
     if loaded {
         files.push("thermal_sample.sh".into());
         files.push("thermal_sampler.sh".into());
@@ -1238,14 +1636,9 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         "baseline.json",
         &json!({"kind":"sysparam","payload":{"params":{},"plan":[],"deny_keywords":crate::sysparam::DENY_KEYWORDS}}),
     )?;
-    for (i, (_, plan)) in graph.probes.iter().enumerate() {
-        let name = format!("probe_{i}.plan.tsv");
-        save(&out, &name, plan.as_bytes())?;
-        files.push(name);
-    }
     if req.render_attribution_profile_id.is_some() {
         files.extend(
-            ["render_ownership.sh", "render_args.tsv"]
+            ["render_ownership.sh", "render_args.tsv", "render_reader.elf"]
                 .into_iter()
                 .map(String::from),
         );
@@ -1268,7 +1661,11 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         .into_iter()
         .map(String::from),
     );
-    if req.render_attribution_profile_id.is_some() {frozenfiles.push("render-initial.raw.tsv".into());}
+    if req.render_attribution_profile_id.is_some() {
+        frozenfiles.push("render-initial.raw.tsv".into());
+        frozenfiles.extend(render_frozen_extra().into_iter().map(String::from));
+        save_json(&out,"main-install.intent.json",&json!({"schema":"phonefarm/main_install_intent@1","state_sha256":file_ref(&out,"state.json")?["sha256"],"helper_removed_sha256":file_ref(&out,"render-helper-removed.json")?["sha256"]}))?;
+    }
     if loaded {
         frozenfiles.extend(temperature::frozen_names().iter().map(|s| (*s).to_owned()));
     }
@@ -1413,7 +1810,7 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         json!({"status":if req.transport.kind=="fake"{"SIMULATED_BLOCKED"}else{"PREPARED"},"session":out,"plan":out.join("plan.json"),"eligible":false,"evidence_origin":t.origin,"real_game_optimization_proven":false,"promotion_allowed":false}),
     )
 }
-fn validate_contract(dir: &Path, req: &Request) -> Result<(), String> {
+fn validate_contract(dir: &Path, req: &Request, admission_required: bool) -> Result<(), String> {
     let snapshot = snapshot_source(req.render_attribution_profile_id.is_some());
     let c = read_json(&dir.join("sampling-contract.json"))?;
     require(
@@ -1481,7 +1878,9 @@ fn validate_contract(dir: &Path, req: &Request) -> Result<(), String> {
         )?;
     }
     if req.render_attribution_profile_id.is_some() {
-        observation::validate_render_admission(&dir.join("admission.json"))?;
+        if admission_required {observation::validate_render_admission(&dir.join("admission.json"))?;}
+        render_reader::verify(dir)?;
+        validate_helper_removed(dir)?;
         let raw = bounded(&dir.join("render-initial.raw.tsv"), 2 * 1024 * 1024)?;
         let initial = crate::render_attribution::witness(
             std::str::from_utf8(&raw).map_err(|e| e.to_string())?,
@@ -1497,6 +1896,8 @@ fn validate_contract(dir: &Path, req: &Request) -> Result<(), String> {
             c["render_attribution_profile_id"] == crate::render_attribution::PROFILE
                 && c["render_collector_sha256"]
                     == sha(crate::render_attribution::COLLECTOR.as_bytes())
+                && c["render_reader_build_sha256"]==file_ref(dir,"render_reader.build.json")?["sha256"]
+                && c["render_reader_elf_sha256"]==file_ref(dir,"render_reader.elf")?["sha256"]
                 && bounded(&dir.join("render_ownership.sh"), CAP)?
                     == crate::render_attribution::COLLECTOR.as_bytes()
                 && bounded(&dir.join("render_args.tsv"), CAP)?
@@ -1548,7 +1949,7 @@ fn prepared(dir: &Path) -> Result<(Request, Value), String> {
     let req: Request =
         serde_json::from_slice(&bounded(&dir.join("request.json"), 2 * 1024 * 1024)?)
             .map_err(|e| e.to_string())?;
-    validate_contract(dir, &req)?;
+    validate_contract(dir, &req, true)?;
     Ok((req, read_json(&dir.join("state.json"))?))
 }
 fn collect(dir: &Path, frozen_path: &Path, execute: bool) -> Result<Value, String> {
@@ -1683,11 +2084,12 @@ fn reconcile(dir: &Path, execute: bool) -> Result<Value, String> {
         return control_probe::reconcile(dir);
     }
     let dir = dir.canonicalize().map_err(|e| e.to_string())?;
+    if dir.join("render-preinstall.manifest.json").exists() && !dir.join("main-install.intent.json").exists() && !dir.join("inputs.manifest.json").exists() { return reconcile_helper(&dir); }
     verify(&dir)?;
     let req: Request =
         serde_json::from_slice(&bounded(&dir.join("request.json"), 2 * 1024 * 1024)?)
             .map_err(|e| e.to_string())?;
-    validate_contract(&dir, &req)?;
+    validate_contract(&dir, &req, false)?;
     let state = read_json(&dir.join("state.json"))?;
     let (root, legacy, timeout) = roots()?;
     let mut lease = Lease::acquire_recovery(&root, &legacy, &req.transport.target, &dir, timeout)?;
