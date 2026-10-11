@@ -116,6 +116,72 @@ fn actual_eval_offline_route_freezes_target_without_optimization_pass() {
     assert_eq!(report(&o)["qualification"]["eligible"], false);
 }
 #[cfg(unix)]
+#[test]
+fn integrated_offline_shader_precedes_live_support_and_lease_gates() {
+    // The merge must preserve offline replay before both the shader plan and any device lease.
+    // Use the real typed GOL envelope, an unsupported live hook and an existing foreign lock.
+    let t = Scratch::new();
+    let mut req: Value = serde_json::from_str(include_str!(
+        "../../examples/gol_shader_native_request.json"
+    ))
+    .unwrap();
+    req["conditions"]["temp_cap_c"] = json!(60);
+    req["payload"]["inject"]["via"] = json!("vulkan_layer");
+    let req = t.write("request.json", &req);
+    let evidence = t.write("evidence.json", &fixture());
+    let lock = t.0.join("legacy/devlock.d");
+    std::fs::create_dir_all(&lock).unwrap();
+    let owner = b"abandoned-experiment-unknown-remote-state\n";
+    std::fs::write(lock.join("owner"), owner).unwrap();
+    let adb = fake_adb(&t);
+    let log = t.0.join("adb.log");
+    let out = t.0.join("out");
+    let o = cmd(&t)
+        .args(["eval", "--request"])
+        .arg(&req)
+        .arg("--qualify-from")
+        .arg(evidence)
+        .arg("--out")
+        .arg(&out)
+        .env("ADB_BIN", &adb)
+        .env("HDC_BIN", &adb)
+        .env("QUALIFICATION_ADB_LOG", &log)
+        .output()
+        .unwrap();
+    let r = report(&o);
+    assert!(o.status.success());
+    assert_eq!(r["qualification_only"], true);
+    assert_eq!(r["qualification"]["eligible"], true); // hypothetical logic only
+    assert_eq!(r["status"], "ABORT");
+    assert_eq!(r["verdict"]["is_pareto_improvement"], false);
+    assert!(!out.exists());
+    assert!(!log.exists());
+    assert!(!t.0.join("leases").exists());
+    assert_eq!(std::fs::read(lock.join("owner")).unwrap(), owner);
+    // Removing only --qualify-from is a live request, so unsupported fields must ABORT first.
+    let o = cmd(&t)
+        .args(["eval", "--request"])
+        .arg(req)
+        .arg("--out")
+        .arg(&out)
+        .env("ADB_BIN", adb)
+        .env("QUALIFICATION_ADB_LOG", &log)
+        .output()
+        .unwrap();
+    let r = report(&o);
+    assert_eq!(o.status.code(), Some(2));
+    assert_eq!(r["status"], "ABORT");
+    assert_eq!(r["qualification"]["eligible"], false);
+    assert!(r["verdict"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported"));
+    assert!(!out.exists());
+    assert!(!log.exists());
+    assert!(!t.0.join("leases").exists());
+    assert_eq!(std::fs::read(lock.join("owner")).unwrap(), owner);
+}
+#[cfg(unix)]
 fn fake_adb(t: &Scratch) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let p = t.0.join("adb");
