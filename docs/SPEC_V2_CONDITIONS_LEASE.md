@@ -86,3 +86,17 @@ wrapper 在 `spawn` 前持久化 pending launch。只有本次 `Command::spawn()
 script 仍可能绕过；真机验收必须确认没有这些并发负载。SIGKILL 释放内核互斥但保留 abandoned 屏障，
 不会自动恢复手机 sysfs，也不能证明远端工作已停止；先按既有流程恢复，确认空闲后才可解除屏障。
 本轮不把离线互斥测试作为物理实验没有污染的证明。
+## Persistent marker validation
+
+Every host marker consumer validates the recovery state before device commands,
+ownership transfer or deletion. Present `command_pending`/`recovery_required`
+fields must be JSON booleans. Missing booleans remain compatible with the older
+format-1 lease that did not emit them; null/string/number values are UNKNOWN.
+`child_pid` and `child_pgid` must be absent together or both positive integers
+representing the same process-group leader, within the signed platform PID range.
+A dead leader with a missing group cannot establish local quiescence.
+
+Malformed state must be retained by Drop, normal admission, explicit driver
+reconciliation and manual idle recovery. An operator idle assertion cannot fill
+missing local group identity or clear a malformed/new driver barrier. Marker
+validation itself is neither remote quiescence nor device restoration evidence.

@@ -65,6 +65,33 @@ fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 fn marker(path: &Path) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(path.join("phonefarm-lease.json")).ok()?).ok()
 }
+/// Missing extension fields support old format-1 owners; present malformed fields never do.
+fn marker_state(m: &Value) -> Result<(bool, bool), String> {
+    if !m.is_object() || m["format"] != 1 || m["producer"] != "phonefarm" {
+        return Err("unknown lease marker format/producer".into());
+    }
+    let flag = |key: &str| match m.get(key) {
+        None => Ok(false),
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| format!("invalid lease {key}: expected boolean")),
+    };
+    let pending = flag("command_pending")?;
+    let recovery = flag("recovery_required")?;
+    match (m.get("child_pid"), m.get("child_pgid")) {
+        (None, None) => {}
+        (Some(pid), Some(pgid)) => {
+            let valid = |v: &Value| v.as_u64().filter(|n| *n > 0 && *n <= i32::MAX as u64);
+            let pid = valid(pid).ok_or("invalid lease child PID")?;
+            let pgid = valid(pgid).ok_or("invalid lease child PGID")?;
+            if pid != pgid {
+                return Err("lease child PID/PGID do not identify the same owned leader".into());
+            }
+        }
+        _ => return Err("incomplete lease child PID/PGID pair; local group unknown".into()),
+    }
+    Ok((pending, recovery))
+}
 fn owns(path: &Path, token: &str) -> bool {
     marker(path).is_some_and(|v| {
         v["token"].as_str() == Some(token)
@@ -117,10 +144,11 @@ impl Lease {
                 Ok(()) => break,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if let Some(m) = marker(&legacy) {
-                        if m["command_pending"] == true {
+                        let (pending, recovery) = marker_state(&m)?;
+                        if pending {
                             return Err("unbound pending transport launch cannot be cleared by idle assertion".into());
                         }
-                        if m["recovery_required"] == true {
+                        if recovery {
                             return Err(format!("RECOVERY_REQUIRED: explicit confirmation-driver reconcile required ({})", legacy.display()));
                         }
                         if m["format"] == 1 && m["producer"] == "phonefarm" {
@@ -202,6 +230,7 @@ impl Lease {
     }
 
     pub fn check(&self) -> Result<(), String> {
+        marker_state(&marker(&self.legacy).ok_or("lease marker unavailable")?)?;
         if !owns(&self.legacy, &self.token) {
             return Err("lease owner changed; experiment contaminated/unknown".into());
         }
@@ -327,6 +356,7 @@ impl Lease {
         let bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
         let legacy = legacy_root.join("devlock.d");
         let prior = marker(&legacy).ok_or("missing/corrupt recovery owner")?;
+        let (pending, _) = marker_state(&prior)?;
         let prior_token = prior["token"].as_str().ok_or("missing recovery token")?;
         let pid = prior["pid"]
             .as_u64()
@@ -343,7 +373,7 @@ impl Lease {
         {
             return Err("recovery owner/identity is live, unknown or mismatched".into());
         }
-        if prior["command_pending"] == true {
+        if pending {
             return Err("unbound pending transport launch; future ADB activity unknown, requires manual reconciliation".into());
         }
         if let Some(child) = prior.get("child_pid") {
@@ -430,12 +460,13 @@ impl Lease {
         let legacy = legacy_root.join("devlock.d");
         let m = marker(&legacy)
             .ok_or("no verifiable phonefarm owner; cannot recover manual/unknown lock")?;
-        if m["command_pending"] == true {
+        let (pending, recovery) = marker_state(&m)?;
+        if pending {
             return Err(
                 "unbound pending transport launch cannot be cleared by idle assertion".into(),
             );
         }
-        if m["recovery_required"] == true {
+        if recovery {
             return Err("confirmation driver barrier requires observed explicit reconcile; operator idle assertion cannot clear it".into());
         }
         let pid = m["pid"]
@@ -516,8 +547,11 @@ impl Drop for Lease {
         if let Some(h) = self.heartbeat.take() {
             let _ = h.join();
         }
-        let unknown_command = marker(&self.legacy)
-            .is_none_or(|m| m["command_pending"] == true || m.get("child_pid").is_some());
+        let unknown_command = marker(&self.legacy).is_none_or(|m| {
+            !marker_state(&m).is_ok_and(|(pending, recovery)| {
+                !pending && !recovery && m.get("child_pid").is_none()
+            })
+        });
         if !self.preserve_marker && !unknown_command {
             remove_owned(&self.legacy, &self.token);
         }
@@ -726,14 +760,114 @@ mod tests {
             lease.record_command_pending("lease-wrapper").unwrap();
             let mut m = marker(&lease.legacy).unwrap();
             m[key] = value;
-            durable_replace(&lease.legacy.join("phonefarm-lease.json"), m.to_string().as_bytes())
-                .unwrap();
+            durable_replace(
+                &lease.legacy.join("phonefarm-lease.json"),
+                m.to_string().as_bytes(),
+            )
+            .unwrap();
             let before = fs::read(lease.legacy.join("phonefarm-lease.json")).unwrap();
-            assert!(lease.cancel_unspawned_command("lease-wrapper").is_err(), "{key}");
-            assert_eq!(fs::read(lease.legacy.join("phonefarm-lease.json")).unwrap(), before);
+            assert!(
+                lease.cancel_unspawned_command("lease-wrapper").is_err(),
+                "{key}"
+            );
+            assert_eq!(
+                fs::read(lease.legacy.join("phonefarm-lease.json")).unwrap(),
+                before
+            );
             let legacy = lease.legacy.clone();
             drop(lease);
-            assert_eq!(fs::read(legacy.join("phonefarm-lease.json")).unwrap(), before);
+            assert_eq!(
+                fs::read(legacy.join("phonefarm-lease.json")).unwrap(),
+                before
+            );
         }
+    }
+
+    #[test]
+    fn corrupt_marker_extensions_block_every_release_and_transfer() {
+        let invalid = [
+            ("command_pending", json!("true")),
+            ("command_pending", Value::Null),
+            ("recovery_required", json!("true")),
+            ("recovery_required", json!(0)),
+            ("child_pid", json!(123)),
+            ("child_pgid", json!(123)),
+            ("child_pid", Value::Null),
+        ];
+        for (key, value) in invalid {
+            let scratch = Scratch::new();
+            let lease = scratch.lease();
+            let serial = lease.serial.clone();
+            let legacy = lease.legacy.clone();
+            let mut m = marker(&legacy).unwrap();
+            m[key] = value;
+            let state_error = marker_state(&m).unwrap_err();
+            durable_replace(
+                &legacy.join("phonefarm-lease.json"),
+                m.to_string().as_bytes(),
+            )
+            .unwrap();
+            let before = fs::read(legacy.join("phonefarm-lease.json")).unwrap();
+            assert_eq!(lease.check().unwrap_err(), state_error, "{key}");
+            drop(lease);
+            assert_eq!(
+                fs::read(legacy.join("phonefarm-lease.json")).unwrap(),
+                before
+            );
+            let root = scratch.0.join("leases");
+            let bridge = scratch.0.join("legacy");
+            assert_eq!(
+                Lease::acquire(&root, &bridge, &serial, "test", Duration::from_millis(25))
+                    .err()
+                    .unwrap(),
+                state_error
+            );
+            assert_eq!(
+                Lease::recover_confirmed_idle(&root, &bridge, &serial, Duration::from_millis(25))
+                    .unwrap_err(),
+                state_error
+            );
+            assert_eq!(
+                Lease::acquire_recovery(
+                    &root,
+                    &bridge,
+                    &serial,
+                    &scratch.0,
+                    Duration::from_millis(25)
+                )
+                .err()
+                .unwrap(),
+                state_error
+            );
+            assert_eq!(
+                fs::read(legacy.join("phonefarm-lease.json")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn marker_child_identity_requires_complete_equal_positive_signed_pair() {
+        let scratch = Scratch::new();
+        let lease = scratch.lease();
+        let mut m = marker(&lease.legacy).unwrap();
+        // Older format-1 markers without extension fields remain accepted.
+        assert_eq!(marker_state(&m).unwrap(), (false, false));
+        for (pid, group) in [
+            (0, 0),
+            (123, 124),
+            (i32::MAX as u64 + 1, i32::MAX as u64 + 1),
+        ] {
+            m["child_pid"] = json!(pid);
+            m["child_pgid"] = json!(group);
+            assert!(marker_state(&m).is_err());
+        }
+        m["child_pid"] = json!(123);
+        m["child_pgid"] = json!(123);
+        assert!(marker_state(&m).is_ok());
+        // Only the in-memory test value changed; the owned idle lease can release normally.
+        let legacy = lease.legacy.clone();
+        drop(lease);
+        assert!(!legacy.exists());
     }
 }
