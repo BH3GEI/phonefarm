@@ -28,7 +28,7 @@
 //!   原因写进档案的 `needs_human`, 这一次接入就算「需要人」, 不假装成功。
 //! * **负载只拖视角**: 起点在画面中部偏上 (摇杆在左下, 技能键在右下, 都碰不到),
 //!   右拖与左拖成对出现, 角色位置由构造保证不变。
-//! * 现场还原: 充电恢复 (退出前核对 charging_enabled), 回桌面。
+//! * 现场还原: 充电恢复 (退出前核对 charging_enabled), 回桌面, 媒体音量核对为 0 (手机必须静音)。
 //!
 //! 大模型只在 OCR 认不出、探针也说不在游戏里、连续卡住时才问一次 (`--vlm-calls` 封顶),
 //! 它给出的点击同样要过白名单, 且点位不能落在任何危险字样的框里。
@@ -663,6 +663,23 @@ impl Dev {
     fn pid(&self, pkg: &str) -> Option<i64> {
         self.sh(&format!("pidof {pkg}"), 6).split_whitespace().next()?.parse().ok()
     }
+}
+
+/// `cmd media_session volume --stream 3 --get` 的输出里取当前音量 ("volume is 0 in range [0..15]")。
+pub fn parse_volume(s: &str) -> Option<u32> {
+    let i = s.find("volume is ")? + "volume is ".len();
+    s[i..].split_whitespace().next()?.parse().ok()
+}
+
+/// 手机必须保持静音 (owner 规矩): 媒体音量 (stream 3) 不是 0 就压回 0。返回核对记录。
+/// 本流程本身从不调音量; 这一步防的是游戏或别的流程把它带上来。
+fn ensure_muted(dev: &Dev) -> Value {
+    let before = parse_volume(&dev.sh("cmd media_session volume --stream 3 --get", 10));
+    if before != Some(0) {
+        dev.sh("cmd audio set-volume 3 0", 10);
+    }
+    let after = parse_volume(&dev.sh("cmd media_session volume --stream 3 --get", 10));
+    json!({"stream3_before": before, "stream3_after": after})
 }
 
 fn wait_child(c: Option<std::process::Child>, secs: u64) {
@@ -1538,7 +1555,8 @@ pub fn run_onboard(args: &[String]) -> i32 {
     std::fs::write(out.join("enter.json"), serde_json::to_string_pretty(&enter_json).unwrap()).ok();
 
     if a.enter_only {
-        println!("{}", json!({"status": entered.status, "reason": entered.reason, "out": out}));
+        let mute = ensure_muted(&dev);
+        println!("{}", json!({"status": entered.status, "reason": entered.reason, "out": out, "mute": mute}));
         return match entered.status {
             "INGAME" => 0,
             "NEEDS_HUMAN" => 3,
@@ -1651,7 +1669,7 @@ pub fn run_onboard(args: &[String]) -> i32 {
     } else {
         "FAIL"
     };
-    let profile = json!({
+    let mut profile = json!({
         "profile_version": 1,
         "status": status,
         "package": a.pkg,
@@ -1715,12 +1733,14 @@ pub fn run_onboard(args: &[String]) -> i32 {
         "human_interventions": 0,
         "evidence": {"dir": out, "rounds": rounds_raw},
     });
-    let pp = out.join("profile.json");
-    std::fs::write(&pp, serde_json::to_string_pretty(&profile).unwrap()).ok();
-
     if !a.keep_fg {
         dev.sh("input keyevent 3", 5); // 回桌面
     }
+    let mute = ensure_muted(&dev);
+    println!("  静音核对: {mute}");
+    profile["conditions"]["mute"] = mute;
+    let pp = out.join("profile.json");
+    std::fs::write(&pp, serde_json::to_string_pretty(&profile).unwrap()).ok();
     println!("档案: {}  状态: {status}", pp.display());
     match status {
         "PASS" => 0,
@@ -1865,6 +1885,13 @@ mod tests {
     #[test]
     fn not_foreground_relaunches() {
         assert_eq!(classify(&[], false, "com.android.launcher3", Policy::default(), &[]).act, Act::Relaunch);
+    }
+
+    #[test]
+    fn volume_is_parsed_from_media_session_output() {
+        assert_eq!(parse_volume("volume is 0 in range [0..15]"), Some(0));
+        assert_eq!(parse_volume("[V] stream 3\nvolume is 7 in range [0..15]\n"), Some(7));
+        assert_eq!(parse_volume("Error: no such stream"), None);
     }
 
     #[test]
