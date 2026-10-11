@@ -30,6 +30,7 @@ mod device;
 mod devlease;
 mod eval;
 mod qualification;
+mod thermal_profile;
 mod confirmation_observation;
 mod confirmation_control;
 mod confirmation_driver;

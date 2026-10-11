@@ -2,6 +2,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,6 +55,17 @@ struct Plan {
     family_alpha: f64,
     paired_t_assumptions_acknowledged: bool,
     metrics: Vec<Metric>,
+    // Last and omitted for v1, matching the GOL/PF canonical Plan fingerprint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature_contract: Option<TemperatureContract>,
+}
+#[derive(Serialize)]
+struct TemperatureContract {
+    profile_id: String,
+    receiver_policy_version: u32,
+    profile_sha256: String,
+    reference_sha256: String,
+    thermal_contract_sha256: String,
 }
 #[derive(Serialize)]
 struct Schedule {
@@ -189,8 +201,10 @@ impl Fixture {
         let mut excluded = vec![];
         for n in 1..=3 {
             let r = self.s.read(&format!("explore{n}.json"));
-            for k in ["trace", "env"] {
-                excluded.push(r["raw"][k]["sha256"].as_str().unwrap().into());
+            for k in ["trace", "env", "thermal_admission", "thermal_window"] {
+                if let Some(digest) = r["raw"][k]["sha256"].as_str() {
+                    excluded.push(digest.into());
+                }
             }
         }
         let p = Plan {
@@ -234,6 +248,18 @@ impl Fixture {
                     maximum_regression: 1.,
                 },
             ],
+            temperature_contract: if self.s.read("conditions.json")["policy"]["version"] == 2 {
+                let c = self.s.read("conditions.json");
+                Some(TemperatureContract {
+                    profile_id: "loaded_steady_v1".into(),
+                    receiver_policy_version: 2,
+                    profile_sha256: c["policy"]["temperature_profile_sha256"].as_str().unwrap().into(),
+                    reference_sha256: c["policy"]["thermal_reference_sha256"].as_str().unwrap().into(),
+                    thermal_contract_sha256: c["thermal_contract"]["sha256"].as_str().unwrap().into(),
+                })
+            } else {
+                None
+            },
         };
         let fingerprint = hash(
             &serde_json::to_vec(&("game_opt_loop/confirmation_plan@1", registered, &p)).unwrap(),
@@ -264,6 +290,8 @@ impl Fixture {
             .output()
             .unwrap();
         assert!(!log.exists(), "offline producer invoked adb");
+        std::fs::write(self.s.0.join(format!("{name}.stdout")), &o.stdout).unwrap();
+        std::fs::write(self.s.0.join(format!("{name}.stderr")), &o.stderr).unwrap();
         let v = serde_json::from_slice(&o.stdout).unwrap_or_else(|e| {
             panic!(
                 "{e}: stdout={} stderr={}",
@@ -734,4 +762,437 @@ fn no_device_or_model_invocation_even_for_valid_observation() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
     assert!(!log.exists());
+}
+
+// These serializers independently freeze the public wire order. No production
+// thermal resolver/hash function is called to manufacture an accepted fixture.
+#[derive(Clone, Serialize)]
+struct ThermalTrip {
+    kind: &'static str,
+    raw: f64,
+}
+#[derive(Clone, Serialize)]
+struct ThermalMetadata {
+    path: String,
+    sensor_type: &'static str,
+    domain: &'static str,
+    unit: &'static str,
+    trip_points: Vec<ThermalTrip>,
+}
+#[derive(Serialize)]
+struct ThermalSensor {
+    path: String,
+    sensor_type: &'static str,
+    domain: &'static str,
+    unit: &'static str,
+    admission_cap_c: f64,
+    operating_cap_c: f64,
+    cap_basis: String,
+}
+#[derive(Serialize)]
+struct ThermalRules {
+    warmup_min_seconds: f64,
+    warmup_min_samples: usize,
+    sample_max_gap_seconds: f64,
+    warmup_max_range_c: f64,
+    reference_tolerance_c: f64,
+}
+#[derive(Serialize)]
+struct ThermalProfile {
+    schema: &'static str,
+    id: &'static str,
+    metadata: Vec<ThermalMetadata>,
+    sensors: Vec<ThermalSensor>,
+    excluded: Vec<Value>,
+    window: ThermalRules,
+}
+#[derive(Clone, Serialize)]
+struct ThermalSample {
+    uptime_s: f64,
+    readings: BTreeMap<String, f64>,
+    thermal_status: Option<u8>,
+}
+#[derive(Serialize)]
+struct ThermalBand {
+    low_c: f64,
+    high_c: f64,
+}
+#[derive(Serialize)]
+struct ThermalReference {
+    schema: &'static str,
+    profile_sha256: String,
+    bands: BTreeMap<String, ThermalBand>,
+    warmup: Vec<ThermalSample>,
+}
+const BATTERY_PATH: &str = "/sys/class/power_supply/battery/temp";
+const CPU_PATH: &str = "/sys/class/thermal/thermal_zone17/temp";
+const GPU_PATH: &str = "/sys/class/thermal/thermal_zone27/temp";
+const SKIN_PATH: &str = "/sys/class/thermal/thermal_zone7/temp";
+fn thermal_readings(cpu: f64) -> BTreeMap<String, f64> {
+    BTreeMap::from([
+        (BATTERY_PATH.into(), 393.),
+        (CPU_PATH.into(), cpu),
+        (GPU_PATH.into(), 60000.),
+        (SKIN_PATH.into(), 50000.),
+    ])
+}
+fn thermal_hal() -> String {
+    let mut s = "IsStatusOverride: false\nThermal Status: 0\nHAL Ready: true\n".to_string();
+    for (ty, name, severe) in [
+        (0, "CPU0", 95.),
+        (1, "GPU0", 95.),
+        (2, "battery", 80.),
+        (3, "skin", 60.),
+    ] {
+        s.push_str(&format!("TemperatureThreshold{{mType={ty}, mName={name}, mHotThrottlingThresholds=[NaN, NaN, NaN, {severe}, NaN, NaN, 115.0], mColdThrottlingThresholds=[]}}\n"));
+    }
+    s
+}
+fn thermal_point(uptime: f64, cpu: f64) -> String {
+    let mut s = format!("#phonefarm_thermal_sample v1\nUPTIME\t{uptime}\n");
+    for (path, value) in thermal_readings(cpu) {
+        s.push_str(&format!("TEMP\t{path}\t{value}\n"));
+    }
+    s.push_str("#hal_begin\n");
+    s.push_str(&thermal_hal());
+    s.push_str("#hal_end\n#end\n");
+    s
+}
+fn thermal_window(first: f64, cpu: f64) -> String {
+    let mut raw = String::new();
+    for n in 0..=8 {
+        raw.push_str(&thermal_point(first + n as f64, cpu));
+    }
+    raw.push_str(&format!(
+        "#phonefarm_thermal_window_complete dur=8 interval=1 start={first} end={} samples=9\n",
+        first + 8.
+    ));
+    raw
+}
+impl Scratch {
+    fn serialized<T: Serialize>(&self, name: &str, v: &T) -> Value {
+        let bytes = serde_json::to_vec(v).unwrap();
+        std::fs::write(self.0.join(name), &bytes).unwrap();
+        json!({"path":name,"sha256":hash(&bytes)})
+    }
+}
+impl Fixture {
+    fn replace_conditions(&mut self, conditions: Value) {
+        self.conditions = self.s.json("conditions.json", &conditions);
+        let mut admission = self.s.read("admission.json");
+        admission["conditions"] = self.conditions.clone();
+        for n in 1..=3 {
+            let name = format!("explore{n}.json");
+            let mut r = self.s.read(&name);
+            r["conditions"] = self.conditions.clone();
+            admission["runs"][n - 1] = self.s.json(&name, &r);
+        }
+        self.admission = self.s.json("admission.json", &admission);
+        let mut r = self.s.read("run.json");
+        r["conditions"] = self.conditions.clone();
+        self.update_run(&r);
+        self.freeze();
+    }
+    fn loaded() -> Self {
+        let mut f = Self::new();
+        let mut metadata = Vec::new();
+        let mut sensors = Vec::new();
+        let mut raw = "#phonefarm_thermal_metadata v1\nBOOT\tfixture-boot\n".to_string();
+        for (path, ty, domain, unit, passive, hal, cap, basis) in [
+            (
+                BATTERY_PATH,
+                "battery",
+                "battery",
+                "deci_celsius",
+                None,
+                800.,
+                45.,
+                "receiver battery cap; not a SoC limit",
+            ),
+            (
+                CPU_PATH,
+                "cpu-1-0",
+                "cpu",
+                "milli_celsius",
+                Some(100000.),
+                95000.,
+                90.,
+                "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+            ),
+            (
+                GPU_PATH,
+                "gpuss-0",
+                "gpu",
+                "milli_celsius",
+                Some(100000.),
+                95000.,
+                90.,
+                "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+            ),
+            (
+                SKIN_PATH,
+                "skin-0",
+                "skin",
+                "milli_celsius",
+                Some(60000.),
+                60000.,
+                57.,
+                "minimum passive/HAL severe threshold 60C minus receiver margin 3C",
+            ),
+        ] {
+            raw.push_str(&format!("SENSOR\t{path}\t{ty}\t{domain}\t{unit}\n"));
+            let mut trip_points = Vec::new();
+            if let Some(value) = passive {
+                raw.push_str(&format!("TRIP\t{path}\tpassive\t{value}\n"));
+                trip_points.push(ThermalTrip {
+                    kind: "passive",
+                    raw: value,
+                });
+            }
+            trip_points.push(ThermalTrip {
+                kind: "hal_severe",
+                raw: hal,
+            });
+            metadata.push(ThermalMetadata {
+                path: path.into(),
+                sensor_type: ty,
+                domain,
+                unit,
+                trip_points,
+            });
+            sensors.push(ThermalSensor {
+                path: path.into(),
+                sensor_type: ty,
+                domain,
+                unit,
+                admission_cap_c: cap,
+                operating_cap_c: cap,
+                cap_basis: basis.into(),
+            });
+        }
+        raw.push_str("#end\n");
+        let metadata_ref = f.s.text("thermal-metadata.tsv", &raw);
+        let hal_ref = f.s.text("thermal-hal.txt", &thermal_hal());
+        let profile = ThermalProfile {
+            schema: "phonefarm/thermal_profile@1",
+            id: "loaded_steady_v1",
+            metadata,
+            sensors,
+            excluded: Vec::new(),
+            window: ThermalRules {
+                warmup_min_seconds: 30.,
+                warmup_min_samples: 6,
+                sample_max_gap_seconds: 6.,
+                warmup_max_range_c: 3.,
+                reference_tolerance_c: 2.,
+            },
+        };
+        // Profile SHA is the typed wire serialization, not serde_json::Value key order.
+        let profile_bytes = serde_json::to_vec(&profile).unwrap();
+        let profile_sha = hash(&profile_bytes);
+        let profile_ref = f.s.serialized("thermal-profile.json", &profile);
+        assert_eq!(profile_ref["sha256"], profile_sha);
+        let warmup = (0..7)
+            .map(|n| ThermalSample {
+                uptime_s: 1045900. + n as f64 * 5.,
+                readings: thermal_readings(80000.),
+                thermal_status: Some(0),
+            })
+            .collect::<Vec<_>>();
+        let warmup_raw = warmup
+            .iter()
+            .map(|s| thermal_point(s.uptime_s, 80000.))
+            .collect::<String>();
+        let warmup_ref = f.s.text("thermal-warmup.tsv", &warmup_raw);
+        let mut bands = BTreeMap::new();
+        for sensor in &profile.sensors {
+            let scale = if sensor.unit == "deci_celsius" {
+                10.
+            } else {
+                1000.
+            };
+            let mean = warmup
+                .iter()
+                .map(|s| s.readings[&sensor.path] / scale)
+                .sum::<f64>()
+                / warmup.len() as f64;
+            bands.insert(
+                sensor.path.clone(),
+                ThermalBand {
+                    low_c: mean - 2.,
+                    high_c: (mean + 2.).min(sensor.operating_cap_c),
+                },
+            );
+        }
+        let reference = ThermalReference {
+            schema: "phonefarm/thermal_reference@1",
+            profile_sha256: profile_sha.clone(),
+            bands,
+            warmup,
+        };
+        let reference_ref = f.s.serialized("thermal-reference.json", &reference);
+        let evidence = f.s.json("thermal-evidence.json", &json!({
+            "schema":"phonefarm/frozen_thermal_evidence@1","actual_serial":"fixture-device","boot_id":"fixture-boot",
+            "rules_frozen_at":"2026-10-10T23:59:00Z","warmup_started_at":"2026-10-10T23:59:01Z","warmup_finished_at":"2026-10-10T23:59:32Z",
+            "metadata_raw":metadata_ref,"hal_raw":hal_ref,"warmup_raw":warmup_ref,"profile":profile_ref,"reference":reference_ref,
+            "profile_sha256":profile_sha,"reference_sha256":reference_ref["sha256"],"clock_scope":"host_utc_and_device_proc_uptime_separate"
+        }));
+        let mut conditions = f.s.read("conditions.json");
+        conditions["schema"] = json!("phonefarm/confirmation_conditions@2");
+        conditions["thermal_contract"] = evidence;
+        conditions["policy"]["version"] = json!(2);
+        conditions["policy"]["temp_cap_c"] = Value::Null;
+        conditions["policy"]["cool_c"] = Value::Null;
+        conditions["policy"]["temperature_profile_id"] = json!("loaded_steady_v1");
+        conditions["policy"]["temperature_profile_sha256"] = json!(profile_sha);
+        conditions["policy"]["thermal_reference_sha256"] = reference_ref["sha256"].clone();
+        for (index, name) in [
+            (1, "explore1.json"),
+            (2, "explore2.json"),
+            (3, "explore3.json"),
+            (5, "run.json"),
+        ] {
+            let mut r = f.s.read(name);
+            let first = 1045978. + index as f64 * 60.;
+            r["schema"] = json!("phonefarm/run_one_bundle@2");
+            r["raw"].as_object_mut().unwrap().remove("cold");
+            r["raw"]["thermal_admission"] = f.s.text(
+                &format!("loaded-{index}-admission.tsv"),
+                &thermal_point(first - 1., 80000.),
+            );
+            r["raw"]["thermal_window"] = f.s.text(
+                &format!("loaded-{index}-window.tsv"),
+                &thermal_window(first, 80000.),
+            );
+            r["raw"]["thermal_sampler_exit"] = f.s.text(&format!("loaded-{index}-exit.txt"), "0\n");
+            f.s.json(name, &r);
+        }
+        f.replace_conditions(conditions);
+        f
+    }
+}
+
+#[test]
+fn loaded_raw_cli_reconstructs_typed_windows_and_keeps_experiment_ineligible() {
+    // Receiver-shaped declared recorded origin exercises the actual offline CLI;
+    // these host fixtures are not acquired device evidence or a measured game.
+    let f = Fixture::loaded();
+    let (code, r) = f.output("loaded-valid");
+    assert_eq!(code, 0, "{r:#}");
+    assert_eq!(r["schema"], "phonefarm/confirmation_observation@2");
+    assert_eq!(
+        r["sample_qualification"]["schema"],
+        "phonefarm/confirmation_sample_qualification@2"
+    );
+    assert_eq!(r["status"], "VALID_OBSERVATION");
+    assert_eq!(r["qualification"]["version"], 2);
+    assert_eq!(r["qualification"]["stage"], "experiment");
+    assert_eq!(r["qualification"]["eligible"], false);
+    assert_eq!(r["qualification"]["policy"]["temp_cap_c"], Value::Null);
+    assert_eq!(r["qualification"]["policy"]["cool_c"], Value::Null);
+    assert_eq!(r["sample_qualification"]["valid_observation"], true);
+    let gates = r["sample_qualification"]["gates"].as_object().unwrap();
+    assert_eq!(gates.len(), 8);
+    assert!(!gates.contains_key("cold_verified"));
+    assert!(gates.values().all(|v| v == true), "{r:#}");
+    assert_eq!(
+        r["confirmation_binding"]["thermal_contract"],
+        f.s.read("frozen.json")["plan"]["temperature_contract"]
+    );
+    assert_eq!(r["real_game_optimization_proven"], false);
+    assert_eq!(r["promotion_allowed"], false);
+    let legacy = Fixture::new();
+    assert!(legacy.s.read("frozen.json")["plan"]
+        .get("temperature_contract")
+        .is_none());
+}
+
+#[test]
+fn loaded_raw_cli_missing_window_bad_exit_and_over_cap_are_blocked() {
+    for case in 0..3 {
+        let mut f = Fixture::loaded();
+        match case {
+            0 => {
+                let mut r = f.s.read("run.json");
+                r["raw"].as_object_mut().unwrap().remove("thermal_window");
+                f.update_run(&r);
+            }
+            1 => f.raw("thermal_sampler_exit", "7\n"),
+            _ => f.raw("thermal_window", &thermal_window(1046278., 91000.)),
+        }
+        let (code, r) = f.output(&format!("loaded-invalid-{case}"));
+        blocked(code, &r);
+        if case == 1 || case == 2 {
+            assert_eq!(
+                r["sample_qualification"]["gates"]["thermal_window_verified"], false,
+                "{r:#}"
+            );
+        }
+        assert_eq!(r["real_game_optimization_proven"], false);
+        assert_eq!(r["promotion_allowed"], false);
+    }
+}
+
+#[test]
+fn loaded_reference_widening_is_rejected_after_all_outer_bindings_are_rehashed() {
+    let mut f = Fixture::loaded();
+    let warmup_before = std::fs::read(f.s.0.join("thermal-warmup.tsv")).unwrap();
+    let mut reference = f.s.read("thermal-reference.json");
+    reference["bands"][CPU_PATH]["low_c"] = json!(20.);
+    reference["bands"][CPU_PATH]["high_c"] = json!(90.);
+    let reference_ref = f.s.json("thermal-reference.json", &reference);
+    let mut evidence = f.s.read("thermal-evidence.json");
+    evidence["reference"] = reference_ref.clone();
+    evidence["reference_sha256"] = reference_ref["sha256"].clone();
+    let evidence_ref = f.s.json("thermal-evidence.json", &evidence);
+    let mut conditions = f.s.read("conditions.json");
+    conditions["thermal_contract"] = evidence_ref;
+    conditions["policy"]["thermal_reference_sha256"] = reference_ref["sha256"].clone();
+    f.replace_conditions(conditions);
+    assert_eq!(
+        std::fs::read(f.s.0.join("thermal-warmup.tsv")).unwrap(),
+        warmup_before
+    );
+    let (code, r) = f.output("loaded-rehashed-reference");
+    blocked(code, &r);
+    assert!(
+        r["issues"]
+            .to_string()
+            .contains("original raw reconstruction"),
+        "{r:#}"
+    );
+}
+
+#[test]
+fn loaded_and_legacy_raw_schemas_cannot_be_mixed() {
+    let mut f = Fixture::loaded();
+    let mut r = f.s.read("run.json");
+    r["schema"] = json!("phonefarm/run_one_bundle@1");
+    f.update_run(&r);
+    let (code, r) = f.output("loaded-run-legacy-schema");
+    blocked(code, &r);
+    assert!(
+        r["issues"].to_string().contains("versioned conditions"),
+        "{r:#}"
+    );
+    let mut f = Fixture::new();
+    let mut r = f.s.read("run.json");
+    r["schema"] = json!("phonefarm/run_one_bundle@2");
+    f.update_run(&r);
+    let (code, r) = f.output("legacy-run-loaded-schema");
+    blocked(code, &r);
+    let mut f = Fixture::loaded();
+    let cold = f.s.json(
+        "wrong-legacy-cold.json",
+        &json!({"checked_at":"2026-10-11T00:05:00Z","zone":"cpu-1-0","c":39.,"waited_s":0}),
+    );
+    let mut r = f.s.read("run.json");
+    r["raw"]["cold"] = cold;
+    f.update_run(&r);
+    let (code, r) = f.output("loaded-has-legacy-cold");
+    blocked(code, &r);
+    assert!(
+        r["issues"].to_string().contains("legacy cold receipt"),
+        "{r:#}"
+    );
 }
