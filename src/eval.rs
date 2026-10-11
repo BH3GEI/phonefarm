@@ -1108,79 +1108,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
-    let primary = "frame_p95";
-    let (a_runs, b_runs) = (eval_runs(&ctrl_runs), eval_runs(&knob_runs));
-    // 与 autoloop 一致的判定指标表: 功耗只在两臂都处于放电态时才进判定
-    let on_battery_all = all_on_battery(&knob_runs, &ctrl_runs);
-    let mut metrics_list: Vec<(String, &str)> =
-        vec![("frame_p95".into(), "lower"), ("fps_mean".into(), "higher")];
-    if on_battery_all {
-        metrics_list.push(("power_w_mean".into(), "lower"));
-    }
-    let mut p_primary = 1.0f64;
-    let mut wins: Vec<String> = Vec::new();
-    let mut regressions: Vec<String> = Vec::new();
-    let mut per_metric: Vec<(String, Value)> = Vec::new();
-    let alpha_win = alpha / metrics_list.len() as f64;
-    for (metric, better) in &metrics_list {
-        let cmp = loopstat::compare(&a_runs, &b_runs, metric);
-        let diff = cmp.get("diff_mean").and_then(|v| v.as_f64());
-        let p = cmp.get("perm_p_two_sided").and_then(|v| v.as_f64());
-        let improved = match (diff, *better) {
-            (Some(d), "lower") => d < 0.0,
-            (Some(d), "higher") => d > 0.0,
-            _ => false,
-        };
-        let status = if cmp.get("error").is_some() || diff.is_none() {
-            "缺数据"
-        } else if improved && p.is_some_and(|x| x < alpha_win) {
-            wins.push(metric.to_string());
-            "显著改善"
-        } else if !improved && diff.is_some_and(|x| x != 0.0) && p.is_some_and(|x| x < alpha) {
-            regressions.push(metric.to_string());
-            "显著变差"
-        } else {
-            "无显著变化"
-        };
-        if metric == primary {
-            p_primary = p.unwrap_or(1.0);
-        }
-        per_metric.push((
-            metric.to_string(),
-            {
-                let sv = |k: &str| cmp.get(k).map(to_serde).unwrap_or(Value::Null);
-                json!({
-                    "status": status,
-                    "a_mean": sv("a_mean"),
-                    "b_mean": sv("b_mean"),
-                    "diff_mean": sv("diff_mean"),
-                    "diff_pct": sv("diff_pct"),
-                    "p": sv("perm_p_two_sided"),
-                    "ci95": sv("ci95"),
-                })
-            }
-        ));
-    }
-    let keep = !wins.is_empty() && regressions.is_empty();
-    report["verdict"] = json!({
-        "is_pareto_improvement": keep,
-        "p_value": p_primary,
-        "stat": "exact_permutation",
-        "alpha_win": alpha_win,
-        "alpha_regression": alpha,
-        // 轮数下界: alpha_win 是否够得着 (2/C(2n,n) < alpha_win)
-        "reachable": reachable(rounds, alpha_win),
-        "wins": wins,
-        "regressions": regressions,
-        "per_metric": Value::Object(per_metric.into_iter().collect()),
-        "reason": if keep {
-            json!(format!("改善 {} 且无显著退化", metrics_list.iter().find(|(m, _)| wins.first() == Some(&m.to_string())).map(|(m, _)| m.clone()).unwrap_or_default()))
-        } else if !regressions.is_empty() {
-            json!(format!("存在显著退化: {}", regressions.join(",")))
-        } else {
-            json!("没有任何指标显著改善")
-        },
-    });
+    let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
+    report["verdict"] = verdict;
     if let Some(note) = curtailed {
         // 构造上不可能: 截断只在「任何指标都已不可能显著改善」时发生, 部分数据的 p
         // 不会低于跑满的下界 (src/curtail.rs)。真出现了就是实现错了, 别把它当 KEEP 发出去。
@@ -1198,28 +1127,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     // ── metrics: 逐臂聚合 (B 臂 = 候选臂) ──
     // 臂内均值: ABBA 的全部轮一起算 —— 只取最后一轮的话, 那恰好是整场最热的
     // 一轮, 交替设计要抹掉的热漂移就全进了头条指标
-    let f = |runs: &[Value], k: &str| -> Option<f64> {
-        let xs: Vec<f64> = runs.iter().filter_map(|r| r["summary"][k].as_f64()).collect();
-        (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
-    };
-    let temps: Vec<f64> = knob_runs
-        .iter()
-        .chain(ctrl_runs.iter())
-        .filter_map(run_soc_temp_max)
-        .collect();
     let mut m = report["metrics"].take();
-    m["fps_p95_ms"] = json!(f(&knob_runs, "frame_p95"));
-    m["frame_p95_ms"] = json!(f(&knob_runs, "frame_p95"));
-    m["fps_mean"] = json!(f(&knob_runs, "fps_mean"));
-    m["soc_temp_max_c"] = json!(temps.iter().cloned().reduce(f64::max));
-    // 功耗: 只在放电态均值可信时给; 与帧时一样取候选臂全部轮的均值, 不取最后一轮
-    let power = if on_battery_all {
-        let xs: Vec<f64> = knob_runs.iter().filter_map(|r| r["env"]["power_w_mean"].as_f64()).collect();
-        (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
-    } else {
-        None
-    };
-    m["power_watt"] = json!(power);
+    let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
     m["psnr_db"] = Value::Null;
     unavailable(&mut m, "psnr_db", "sysparam 不动画面, 无画质可量");
     if power.is_none() {
@@ -1271,7 +1180,200 @@ fn reachable(n: u32, alpha_win: f64) -> bool {
     2.0 / c < alpha_win
 }
 
+/// ABBA 两臂的统计判定 (sysparam / gray 共用): 帧时 p95、平均帧率, 两臂都放电时加功耗。
+/// 回 (verdict JSON, 是否保留, 两臂是否都在放电态)。
+fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, rounds: u32) -> (Value, bool, bool) {
+    let primary = "frame_p95";
+    let (a_runs, b_runs) = (eval_runs(ctrl_runs), eval_runs(knob_runs));
+    // 与 autoloop 一致的判定指标表: 功耗只在两臂都处于放电态时才进判定
+    let on_battery_all = all_on_battery(knob_runs, ctrl_runs);
+    let mut metrics_list: Vec<(String, &str)> =
+        vec![("frame_p95".into(), "lower"), ("fps_mean".into(), "higher")];
+    if on_battery_all {
+        metrics_list.push(("power_w_mean".into(), "lower"));
+    }
+    let mut p_primary = 1.0f64;
+    let mut wins: Vec<String> = Vec::new();
+    let mut regressions: Vec<String> = Vec::new();
+    let mut per_metric: Vec<(String, Value)> = Vec::new();
+    let alpha_win = alpha / metrics_list.len() as f64;
+    for (metric, better) in &metrics_list {
+        let cmp = loopstat::compare(&a_runs, &b_runs, metric);
+        let diff = cmp.get("diff_mean").and_then(|v| v.as_f64());
+        let p = cmp.get("perm_p_two_sided").and_then(|v| v.as_f64());
+        let improved = match (diff, *better) {
+            (Some(d), "lower") => d < 0.0,
+            (Some(d), "higher") => d > 0.0,
+            _ => false,
+        };
+        let status = if cmp.get("error").is_some() || diff.is_none() {
+            "缺数据"
+        } else if improved && p.is_some_and(|x| x < alpha_win) {
+            wins.push(metric.to_string());
+            "显著改善"
+        } else if !improved && diff.is_some_and(|x| x != 0.0) && p.is_some_and(|x| x < alpha) {
+            regressions.push(metric.to_string());
+            "显著变差"
+        } else {
+            "无显著变化"
+        };
+        if metric == primary {
+            p_primary = p.unwrap_or(1.0);
+        }
+        per_metric.push((
+            metric.to_string(),
+            {
+                let sv = |k: &str| cmp.get(k).map(to_serde).unwrap_or(Value::Null);
+                json!({
+                    "status": status,
+                    "a_mean": sv("a_mean"),
+                    "b_mean": sv("b_mean"),
+                    "diff_mean": sv("diff_mean"),
+                    "diff_pct": sv("diff_pct"),
+                    "p": sv("perm_p_two_sided"),
+                    "ci95": sv("ci95"),
+                })
+            }
+        ));
+    }
+    let keep = !wins.is_empty() && regressions.is_empty();
+    let verdict = json!({
+        "is_pareto_improvement": keep,
+        "p_value": p_primary,
+        "stat": "exact_permutation",
+        "alpha_win": alpha_win,
+        "alpha_regression": alpha,
+        // 轮数下界: alpha_win 是否够得着 (2/C(2n,n) < alpha_win)
+        "reachable": reachable(rounds, alpha_win),
+        "wins": wins,
+        "regressions": regressions,
+        "per_metric": Value::Object(per_metric.into_iter().collect()),
+        "reason": if keep {
+            json!(format!("改善 {} 且无显著退化", metrics_list.iter().find(|(m, _)| wins.first() == Some(&m.to_string())).map(|(m, _)| m.clone()).unwrap_or_default()))
+        } else if !regressions.is_empty() {
+            json!(format!("存在显著退化: {}", regressions.join(",")))
+        } else {
+            json!("没有任何指标显著改善")
+        },
+    });
+    (verdict, keep, on_battery_all)
+}
+
+/// 逐臂聚合进 metrics (B 臂 = 候选臂)。回候选臂功耗 (放电态才有)。
+fn aggregate_metrics(m: &mut Value, knob_runs: &[Value], ctrl_runs: &[Value], on_battery_all: bool) -> Option<f64> {
+    let f = |runs: &[Value], k: &str| -> Option<f64> {
+        let xs: Vec<f64> = runs.iter().filter_map(|r| r["summary"][k].as_f64()).collect();
+        (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
+    };
+    let temps: Vec<f64> = knob_runs
+        .iter()
+        .chain(ctrl_runs.iter())
+        .filter_map(run_soc_temp_max)
+        .collect();
+    m["fps_p95_ms"] = json!(f(knob_runs, "frame_p95"));
+    m["frame_p95_ms"] = json!(f(knob_runs, "frame_p95"));
+    m["fps_mean"] = json!(f(knob_runs, "fps_mean"));
+    m["soc_temp_max_c"] = json!(temps.iter().cloned().reduce(f64::max));
+    // 功耗: 只在放电态均值可信时给; 与帧时一样取候选臂全部轮的均值, 不取最后一轮
+    let power = if on_battery_all {
+        let xs: Vec<f64> = knob_runs.iter().filter_map(|r| r["env"]["power_w_mean"].as_f64()).collect();
+        (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
+    } else {
+        None
+    };
+    m["power_watt"] = json!(power);
+    power
+}
+
 // ══════════════ gray ══════════════
+
+/// 一个 gray 候选的改写 → 挂层参数。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GrayKnobs {
+    /// LoadOp LOAD→DONT_CARE 全开。
+    pub loadop: bool,
+    /// 「去掉多余写回」指定串 ("0" = 关)。
+    pub storeop: String,
+}
+
+/// 读 payload.rewrites。不认识的开关、缺范围的写回改写一律拒收 —— 在碰设备之前。
+///
+/// - `loadop_dont_care`: 全部 LoadOp LOAD → DONT_CARE (层的 debug.knobs.loadop)。
+/// - `storeop_dont_care` + `scope = "<pass 特征码前缀 ≥8 位>:<附件下标>"`: 只改那一个 pass 的
+///   那一个附件 (debug.knobs.storeop)。特征码取自 `phonefarm frame-audit analyze`。可以有多条,
+///   合成一个指定串一起施加。
+pub(crate) fn parse_gray_rewrites(payload: &Value) -> Result<GrayKnobs, String> {
+    let arr = payload["rewrites"].as_array().cloned().unwrap_or_default();
+    if arr.is_empty() {
+        return Err("payload.rewrites 是空的: 没有要改写的".into());
+    }
+    let mut loadop = false;
+    let mut items: Vec<(String, u32)> = Vec::new();
+    for r in &arr {
+        let knob = r["knob"].as_str().unwrap_or("");
+        match knob {
+            "loadop_dont_care" => loadop = true,
+            "storeop_dont_care" => {
+                let scope = r["scope"].as_str().unwrap_or("");
+                let (sig, att) = scope.split_once(':').ok_or_else(|| {
+                    format!("storeop_dont_care 要 scope=\"<特征码前缀>:<附件下标>\", 收到 {scope:?}")
+                })?;
+                let att: u32 = att
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("storeop_dont_care 的附件下标看不懂: {scope:?}"))?;
+                items.push((sig.trim().to_string(), att));
+            }
+            other => return Err(format!("接收端不认识改写开关 {other:?} (认: loadop_dont_care / storeop_dont_care)")),
+        }
+    }
+    let storeop = crate::graylayer::storeop_spec(&items)?;
+    Ok(GrayKnobs { loadop, storeop })
+}
+
+/// 画面比对缺省门槛: 改写臂与对照臂同位置截图的 PSNR 低于它就判画面出错。
+pub(crate) const GRAY_MIN_PSNR_DB: f64 = 30.0;
+/// 挂层重启、进到场景之后先等画面稳下来再截图 (流式加载、过场淡入)。
+const GRAY_SHOT_SETTLE_S: u64 = 8;
+/// 两张图逐像素相同时 PSNR 是无穷大; JSON 放不下, 按这个值记。
+const PSNR_IDENTICAL_DB: f64 = 99.0;
+
+/// 两张 RGBA 截图的 PSNR (只算 RGB)。尺寸不同回 None —— 比不了, 不是"差别很大"。
+pub(crate) fn psnr_rgba(a: &[u8], b: &[u8]) -> Option<f64> {
+    if a.len() != b.len() || a.len() < 4 {
+        return None;
+    }
+    let mut se: f64 = 0.0;
+    let mut n: u64 = 0;
+    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        for c in 0..3 {
+            let d = pa[c] as f64 - pb[c] as f64;
+            se += d * d;
+        }
+        n += 3;
+    }
+    let mse = se / n as f64;
+    if mse == 0.0 {
+        return Some(PSNR_IDENTICAL_DB);
+    }
+    Some(((10.0 * (255.0f64 * 255.0 / mse).log10()) * 100.0).round() / 100.0)
+}
+
+/// 截一张原始 RGBA 帧 (adb exec-out screencap, 不经 PNG)。回 (宽, 高, 像素)。
+fn grab_rgba(serial: &str) -> Result<(u32, u32, Vec<u8>), String> {
+    let out = Command::new(adb_path())
+        .args(["-s", serial, "exec-out", "screencap"])
+        .output()
+        .map_err(|e| format!("截图起不来: {e}"))?;
+    let (w, h, px) = crate::framecheck::parse_screencap(&out.stdout)?;
+    Ok((w, h, px.to_vec()))
+}
+
+fn save_png(path: &Path, shot: &(u32, u32, Vec<u8>)) {
+    if let Some(img) = image::RgbaImage::from_raw(shot.0, shot.1, shot.2.clone()) {
+        let _ = img.save(path);
+    }
+}
 
 fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
     let kind = "gray";
@@ -1281,29 +1383,50 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     };
     let require_hit = req["payload"]["require_hit"].as_bool().unwrap_or(true);
     let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen").to_string();
+    let min_psnr = req["payload"]["image_check"]["min_psnr_db"]
+        .as_f64()
+        .unwrap_or(GRAY_MIN_PSNR_DB);
+    let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
+    let temp_cap = req["conditions"]["temp_cap_c"].as_f64();
+
+    // 改写在碰设备之前解析: 不认识的开关直接 ABORT, 设备一下都不碰
+    let knobs = match parse_gray_rewrites(&req["payload"]) {
+        Ok(k) => k,
+        Err(e) => {
+            report["verdict"]["reason"] = json!(e);
+            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+        }
+    };
 
     // knobs/gray 的调用层: src/graylayer.rs (enable_layer.sh 的 Rust 移植)。
-    // A/B 方法论与 knobs/gray/genshin_loadop_ab.sh 一致: **两臂都挂层**, 唯一差别
-    // 是 debug.knobs.loadop 属性 —— ctrl = 层+改写关, knob = 层+改写开。
+    // **两臂都挂层**, 唯一差别是改写属性 —— ctrl = 层+改写全关, knob = 层+这一组改写。
     // 要判的是"这条改写"值不值, 不是"挂层这件事"值不值; 两臂都挂层才能把层本身的
     // 开销消掉, 差值才干净地对应改写这一个改动。
     let gl = crate::graylayer::GrayLayer::new(serial);
-    let layer = |mode: &str| -> Result<(), String> { gl.mount_mode(mode, &pkg, false) };
+    let gl_knob = crate::graylayer::GrayLayer::new(serial)
+        .with_storeop((knobs.storeop != "0").then(|| knobs.storeop.clone()), false);
+    let mount = |arm: &str| -> Result<(), String> {
+        if arm == "knob" {
+            gl_knob.mount_mode(if knobs.loadop { "loadop" } else { "probe" }, &pkg, false)?;
+            gl_knob.require_storeop()
+        } else {
+            gl.mount_mode("probe", &pkg, false)
+        }
+    };
 
-    // 改写先落盘再动设备 (证据纪律), 然后施加
+    // 改写先落盘再动设备 (证据纪律)
     let _ = std::fs::create_dir_all(evidence);
     std::fs::write(
         evidence.join("rewrites.json"),
-        serde_json::to_string_pretty(&req["payload"]["rewrites"]).unwrap_or_default(),
+        serde_json::to_string_pretty(&json!({
+            "rewrites": req["payload"]["rewrites"],
+            "debug.knobs.loadop": if knobs.loadop { "1" } else { "0" },
+            "debug.knobs.storeop": knobs.storeop,
+            "image_check_min_psnr_db": min_psnr,
+        }))
+        .unwrap_or_default(),
     )
     .map_err(|e| e.to_string())?;
-    if let Err(e) = layer("loadop") {
-        // 施加失败也可能已经动了全局属性: 尽力摘干净再回报, 绝不把设备留在挂层态
-        let off_log = gl.off();
-        std::fs::write(evidence.join("restore.log"), off_log).ok();
-        report["verdict"]["reason"] = json!(format!("loadop 施加失败: {e}"));
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
 
     // 测量与 sysparam 同一套 ABBA (负载必须触控版)
     let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(1).max(1) as u32;
@@ -1322,22 +1445,39 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let mut knob_runs: Vec<Value> = Vec::new();
     let mut ctrl_runs: Vec<Value> = Vec::new();
     let mut abort_reason: Option<String> = None;
-    for i in 1..=rounds {
+    // 画面比对: 每一轮两臂各在负载开始前、同一位置截一张, 改写臂对对照臂算 PSNR。
+    // 对照臂相邻两轮之间也算一个, 当作"什么都没改时画面自己会差多少"的参照, 一起落进报告。
+    let mut psnr_knob_vs_ctrl: Vec<f64> = Vec::new();
+    let mut psnr_ctrl_vs_ctrl: Vec<f64> = Vec::new();
+    let mut prev_ctrl: Option<(u32, u32, Vec<u8>)> = None;
+    'rounds: for i in 1..=rounds {
+        let mut shots: std::collections::BTreeMap<&str, (u32, u32, Vec<u8>)> = Default::default();
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
-            // 两臂都挂层只切属性; 层是 CreateInstance 时读的, 切属性必须重启目标
-            // —— force-stop 是两臂切换的一部分, 不是异常处理
+            // 层是 CreateInstance 时读的, 切属性必须重启目标 —— force-stop 是两臂切换的一部分
             let _ = gl.off();
-            let mount = if arm == "knob" { "loadop" } else { "probe" };
-            if let Err(e) = layer(mount) {
+            if let Err(e) = mount(arm) {
                 abort_reason = Some(format!("{arm} 臂挂层失败: {e}"));
-                break;
+                break 'rounds;
             }
             // 挂层 = 重启了游戏。有游戏档案的目标 (enter == "onboard") 自己走回游戏场景;
             // 进不去这一臂就没法量, 整次评测作废, 不拿登录页 / 加载画面的帧凑数
             if req["workload"]["enter"].as_str() == Some("onboard") {
                 if let Err(e) = crate::onboard::enter_scene(serial, &pkg, &evidence.join(format!("{arm}{i}_enter"))) {
                     abort_reason = Some(format!("{arm}{i} 重启后没回到游戏场景: {e}"));
-                    break;
+                    break 'rounds;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
+            match grab_rgba(serial) {
+                Ok(shot) => {
+                    if i == 1 {
+                        save_png(&evidence.join(format!("shot_{arm}{i}.png")), &shot);
+                    }
+                    shots.insert(arm, shot);
+                }
+                Err(e) => {
+                    abort_reason = Some(format!("{arm}{i} 截图失败, 画面比对做不了: {e}"));
+                    break 'rounds;
                 }
             }
             let res = run_one_with(
@@ -1350,27 +1490,49 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                 req["workload"]["render_comm"].as_str(),
             );
             match res {
-                Ok(mut m) => match arm {
-                    "knob" => {
+                Ok(mut m) => {
+                    if let (Some(t), Some(cap)) = (run_soc_temp_max(&m), temp_cap) {
+                        if t > cap {
+                            abort_reason = Some(format!("{arm} 臂第 {i} 轮 SoC 结温 {t}C 超过上限 {cap}C"));
+                            break 'rounds;
+                        }
+                    }
+                    if arm == "knob" {
                         // 命中 marker 要在**这一臂跑完后立刻**采: 下一次 mount_layer
                         // 会把三个落点全删了重写, 拖到循环外读到的就是初始化的空表
                         let hits_now = layer_hits(serial, &pkg, evidence);
                         m["layer_hits"] = json!(hits_now);
                         knob_runs.push(m);
+                    } else {
+                        ctrl_runs.push(m);
                     }
-                    _ => ctrl_runs.push(m),
-                },
+                }
                 Err(e) => {
                     abort_reason = Some(e);
+                    break 'rounds;
                 }
             }
-            if abort_reason.is_some() {
-                break;
+        }
+        let (k, c) = (&shots["knob"], &shots["ctrl"]);
+        let Some(p) = psnr_rgba(&k.2, &c.2) else {
+            abort_reason = Some(format!("第 {i} 轮两臂截图尺寸不一样 ({}x{} vs {}x{}), 画面比对做不了", k.0, k.1, c.0, c.1));
+            break;
+        };
+        psnr_knob_vs_ctrl.push(p);
+        if let Some(prev) = &prev_ctrl {
+            if let Some(q) = psnr_rgba(&prev.2, &c.2) {
+                psnr_ctrl_vs_ctrl.push(q);
             }
         }
-        if abort_reason.is_some() {
+        if p < min_psnr {
+            save_png(&evidence.join(format!("shot_knob{i}_bad.png")), k);
+            save_png(&evidence.join(format!("shot_ctrl{i}_bad.png")), c);
+            abort_reason = Some(format!(
+                "画面出错: 第 {i} 轮改写臂与对照臂同位置截图 PSNR {p:.2} dB, 低于门槛 {min_psnr} dB (截图见 evidence_dir)"
+            ));
             break;
         }
+        prev_ctrl = shots.remove("ctrl");
     }
     // 还原
     let restore_log = gl.off();
@@ -1383,14 +1545,25 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         .max()
         .unwrap_or(0);
     let restore_clean = gl_off_clean(&restore_log);
+    let min_of = |v: &[f64]| v.iter().cloned().reduce(f64::min);
     report["conditions_observed"] = json!({
         "hits": hits,
         "apply_ok": hits > 0,
         "restored": restore_clean,
+        "image_check": {
+            "min_psnr_db": min_psnr,
+            "psnr_knob_vs_ctrl_db": psnr_knob_vs_ctrl,
+            "psnr_ctrl_vs_ctrl_db": psnr_ctrl_vs_ctrl,
+        },
     });
+    report["evidence_dir"] = json!(evidence.display().to_string());
 
     if let Some(reason) = abort_reason {
         report["verdict"]["reason"] = json!(reason);
+        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+    }
+    if !restore_clean {
+        report["verdict"]["reason"] = json!("摘层没摘干净 (见 restore.log), 后续数据不可信");
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
     // require_hit 缺省为真: 改写一次都没命中 = 拿 A 去和 A 比, 整轮作废
@@ -1399,13 +1572,21 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
             json!("require_hit=true 但改写一次都没命中 (层自报绑定计数为 0) —— 拿 A 去和 A 比, 整轮作废");
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
-    // gray 改了画面就必须量画质; 收端还没接真值对比, 按契约不能判保留
-    report["verdict"]["reason"] =
-        json!("收端尚未接 gray 的画质真值对比 (psnr_db 无法测量), 按契约 gray 不能判保留; 逐帧指标已照常采进 evidence_dir 供上层自行判读");
+
+    // 画面过了门槛: 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
+    let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
+    report["verdict"] = verdict;
     let mut m = report["metrics"].take();
-    unavailable(&mut m, "psnr_db", "收端尚未接 gray 的画质真值对比");
+    let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
+    m["psnr_db"] = json!(min_of(&psnr_knob_vs_ctrl));
+    if power.is_none() {
+        unavailable(&mut m, "power_watt", "非放电态 (或功耗采样缺失): 整机功耗量不准, 如实 null");
+    }
+    if m["fps_p95_ms"].is_null() {
+        unavailable(&mut m, "fps_p95_ms", "本轮没拿到可用的帧时序");
+    }
     report["metrics"] = m;
-    report["evidence_dir"] = json!(evidence.display().to_string());
+    report["status"] = json!(if keep { "PASS" } else { "REJECT" });
     Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
 }
 
@@ -1745,4 +1926,55 @@ mod path_tests {
         let serial = None::<String>.or_else(|| req["serial"].as_str().map(String::from));
         assert_eq!(serial.as_deref(), Some("REQ_SERIAL"));
     }
+
+    // ── gray: 改写解析与画面比对 ──
+
+    #[test]
+    fn gray_rewrites_map_to_layer_properties() {
+        let k = parse_gray_rewrites(&json!({"rewrites": [
+            {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"},
+            {"knob": "storeop_dont_care", "scope": "9d0b4db80bf552b8:0"},
+        ]}))
+        .unwrap();
+        assert!(!k.loadop);
+        assert_eq!(k.storeop, "15a51a879df99c32:2,9d0b4db80bf552b8:0");
+        let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "loadop_dont_care"}]})).unwrap();
+        assert!(k.loadop);
+        assert_eq!(k.storeop, "0");
+    }
+
+    /// 不认识的开关、缺范围、范围写错, 都在碰设备之前拒收。
+    #[test]
+    fn bad_gray_rewrites_are_refused_before_touching_the_device() {
+        for p in [
+            json!({"rewrites": []}),
+            json!({"rewrites": [{"knob": "render_scale"}]}),
+            json!({"rewrites": [{"knob": "storeop_dont_care"}]}),
+            json!({"rewrites": [{"knob": "storeop_dont_care", "scope": "15a51a87"}]}),
+            json!({"rewrites": [{"knob": "storeop_dont_care", "scope": "15a5:2"}]}),
+            json!({"rewrites": [{"knob": "storeop_dont_care", "scope": "15a51a879df99c32:x"}]}),
+        ] {
+            assert!(parse_gray_rewrites(&p).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn psnr_is_capped_for_identical_frames_and_drops_with_damage() {
+        let a = vec![100u8; 4 * 64];
+        assert_eq!(psnr_rgba(&a, &a), Some(PSNR_IDENTICAL_DB));
+        let mut b = a.clone();
+        for px in b.chunks_exact_mut(4).take(32) {
+            px[0] = 0; // 一半像素的红通道被画坏
+        }
+        let p = psnr_rgba(&a, &b).unwrap();
+        assert!(p < GRAY_MIN_PSNR_DB, "{p}");
+        // alpha 通道不算
+        let mut c = a.clone();
+        for px in c.chunks_exact_mut(4) {
+            px[3] = 0;
+        }
+        assert_eq!(psnr_rgba(&a, &c), Some(PSNR_IDENTICAL_DB));
+        assert_eq!(psnr_rgba(&a, &a[..128]), None, "尺寸不同比不了");
+    }
 }
+
