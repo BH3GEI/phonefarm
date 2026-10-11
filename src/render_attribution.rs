@@ -50,6 +50,7 @@ pub struct Scope {
     pub threads: BTreeMap<u32, Thread>,
     pub device: String,
     pub event_formats_sha256: BTreeMap<String, String>,
+    pub fork_parent_key: String,
     pub clock_capabilities_sha256: String,
     pub cpus: BTreeSet<u32>,
 }
@@ -278,6 +279,19 @@ fn command_flag_mapping(raw: &str) -> Result<(), String> {
         "command flag mapping differs from registered complete mapping",
     )
 }
+fn fork_parent_key(format: &str) -> Result<&str, String> {
+    let has = |key: &str| {
+        format
+            .split_whitespace()
+            .filter(|token| token.starts_with(&format!("{key}=")))
+            .count()
+    };
+    match (has("pid"), has("parent_pid")) {
+        (1, 0) => Ok("pid"),
+        (0, 1) => Ok("parent_pid"),
+        _ => Err("unknown/mixed/duplicate fork parent wire key".into()),
+    }
+}
 fn event_format(raw: &str, event: &str) -> Result<(), String> {
     need(
         raw.starts_with(&format!("name: {event}\n"))
@@ -335,6 +349,11 @@ fn event_format(raw: &str, event: &str) -> Result<(), String> {
         conversions.len() == args.len(),
         "printf argument/conversion count mismatch",
     )?;
+    let fork_key = if event == "sched_process_fork" {
+        fork_parent_key(&format)?
+    } else {
+        "parent_pid"
+    };
     let bindings: &[(&str, &str, &str)] = match event {
         "adreno_cmdbatch_queued" => &[
             ("ctx", "%u", "REC->id"),
@@ -352,7 +371,7 @@ fn event_format(raw: &str, event: &str) -> Result<(), String> {
             ("ctx", "%u", "REC->id"),
         ],
         "sched_process_fork" => &[
-            ("parent_pid", "%d", "REC->parent_pid"),
+            (fork_key, "%d", "REC->parent_pid"),
             ("child_pid", "%d", "REC->child_pid"),
         ],
         "sched_process_exit" => &[("pid", "%d", "REC->pid")],
@@ -602,6 +621,10 @@ pub fn witness(raw: &str, package: &str, comm: &str) -> Result<Witness, String> 
             threads: threads.clone(),
             device: "kgsl-3d0".into(),
             event_formats_sha256: formats,
+            fork_parent_key: fork_parent_key(
+                &print_mapping(field(get("format/sched_process_fork")?, "print fmt:")?)?.0,
+            )?
+            .into(),
             clock_capabilities_sha256: sha(clock
                 .iter()
                 .map(|c| c.trim_matches(['[', ']']))
@@ -798,7 +821,18 @@ pub fn analyze(
     for e in &events {
         match e.event {
             "sched_process_fork" => {
-                let parent = u32kv(e.rest, "parent_pid")?;
+                let other = if scope.fork_parent_key == "pid" {
+                    "parent_pid"
+                } else {
+                    "pid"
+                };
+                need(
+                    !e.rest
+                        .split_whitespace()
+                        .any(|t| t.starts_with(&format!("{other}="))),
+                    "mixed fork parent payload key",
+                )?;
+                let parent = u32kv(e.rest, &scope.fork_parent_key)?;
                 let child = u32kv(e.rest, "child_pid")?;
                 need(
                     !scope.threads.contains_key(&parent) && !scope.threads.contains_key(&child),
@@ -1015,85 +1049,19 @@ pub fn diagnostic(scope: &Scope, b: &Baseline) -> Value {
 mod tests {
     use super::*;
     #[test]
-    fn readonly_text_producer_keeps_bytes_bounds_and_uses_no_task_helpers() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "pf-render-text-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        let source = include_str!("../loop_v1/tools/render_ownership_readonly.sh");
-        let prefix = source
-            .split("printf '#phonefarm_render_witness v2")
-            .next()
+    fn native_reader_actual_host_countercases() {
+        let test = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tools/render-collector/test_reader.py");
+        let result = std::process::Command::new("python3")
+            .arg(test)
+            .output()
             .unwrap();
-        let script = dir.join("reader.sh");
-        let input = dir.join("record");
-        let run = |tail: &str| {
-            std::fs::write(
-                &script,
-                format!("{prefix}\nPATH=/no-external-helpers; export PATH\n{tail}\n"),
-            )
-            .unwrap();
-            std::process::Command::new("/bin/sh")
-                .arg(&script)
-                .args(["com.example.game", "UnityGfxDeviceW"])
-                .arg(&input)
-                .output()
-                .unwrap()
-        };
-        let bytes = b"Name:\tgame\\raw\nThreads:\t190\nnonascii:\t\xe4\xb8\xad\n";
-        std::fs::write(&input, bytes).unwrap();
-        let output = run("block record \"$3\"; printf '#end\\n'");
-        assert!(output.status.success());
-        let mut expected = b"BEGIN\trecord\n".to_vec();
-        expected.extend(bytes);
-        expected.extend(b"\nEND\trecord\n#end\n");
-        assert_eq!(output.stdout, expected);
-        // Same actual reader for all 190*3 task fields, with no wc/cat in PATH.
-        let output = run("i=0; while [ \"$i\" -lt 570 ]; do block record \"$3\"; i=$((i+1)); done; printf '#end\\n'");
-        assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout)
-                .matches("END\trecord\n")
-                .count(),
-            570
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
         );
-        for bad in [
-            Vec::new(),
-            b"unterminated".to_vec(),
-            [vec![b'x'; 65536], vec![b'\n']].concat(),
-        ] {
-            std::fs::write(&input, bad).unwrap();
-            let output = run("block record \"$3\"; printf '#end\\n'");
-            assert!(!output.status.success());
-            assert!(!output.stdout.windows(5).any(|b| b == b"#end\n"));
-            assert!(!String::from_utf8_lossy(&output.stdout).contains("END\trecord"));
-        }
-        std::fs::write(&input, [vec![b'x'; 65535], vec![b'\n']].concat()).unwrap();
-        assert!(run("block record \"$3\"; printf '#end\\n'")
-            .status
-            .success());
-        for (bytes, expected) in [
-            (b"".as_slice(), "EMPTY"),
-            (b"\n\n".as_slice(), "EMPTY"),
-            (b"123\n456\n\n".as_slice(), "EMPTY123\n456"),
-        ] {
-            std::fs::write(&input, bytes).unwrap();
-            let output = run("filter_value filter \"$3\"; printf '#end\\n'");
-            assert!(output.status.success());
-            assert_eq!(
-                output.stdout,
-                format!("BEGIN\tfilter\n{expected}\nEND\tfilter\n#end\n").as_bytes()
-            );
-        }
-        std::fs::remove_file(&input).unwrap();
-        assert!(!run("block record \"$3\"; printf '#end\\n'")
-            .status
-            .success());
-        std::fs::remove_dir_all(dir).unwrap();
+        assert!(String::from_utf8_lossy(&result.stderr).contains("Ran 7 tests"));
     }
     fn raw(up: f64) -> String {
         include_str!("tests/support/render_origin.synthetic.raw.tsv")
@@ -1155,6 +1123,48 @@ mod tests {
             rows,
         )
         .unwrap()
+    }
+    #[test]
+    fn actual_oneplus_format_records_and_finite_fork_pid_alias_are_supported() {
+        let raw = include_str!("tests/support/kgsl-formats-oneplus20261012.tsv");
+        for part in raw.split("BEGIN\t").skip(1) {
+            let (event, body) = part.split_once('\n').unwrap();
+            let body = body.split(&format!("END\t{event}\n")).next().unwrap();
+            event_format(body, event).unwrap();
+        }
+        // The installed format labels original parent_pid as pid=; freeze that
+        // exact key and reject payload/format mixtures or swapped expressions.
+        let witness_raw = self::raw(98.8).replace("comm=%s parent_pid=%d", "comm=%s pid=%d");
+        let scope = witness(&witness_raw, "com.example.game", "UnityGfxDeviceW")
+            .unwrap()
+            .scope;
+        assert_eq!(scope.fork_parent_key, "pid");
+        let mut lines = trace(2, 100.).lines().map(String::from).collect::<Vec<_>>();
+        lines.insert(2, " lifecycle-32074 [000] ..... 100.099800: sched_process_fork: comm=game pid=32074 child_comm=child child_pid=777".into());
+        let t = lines.join("\n") + "\n";
+        let post = self::raw(106.1).replace("comm=%s parent_pid=%d", "comm=%s pid=%d");
+        let final_raw = with_entries(
+            self::raw(106.4).replace("comm=%s parent_pid=%d", "comm=%s pid=%d"),
+            &t,
+        );
+        let result = analyze(&t, &witness_raw, &post, &final_raw, &scope, None);
+        let error = result.unwrap_err();
+        assert!(error.contains("fork/reuse"), "{error}");
+        assert!(witness(
+            &witness_raw.replace("pid=%d child_comm", "pid=%d parent_pid=%d child_comm"),
+            "com.example.game",
+            "UnityGfxDeviceW"
+        )
+        .is_err());
+        assert!(witness(
+            &witness_raw.replace(
+                "REC->parent_pid, REC->child_comm, REC->child_pid",
+                "REC->child_pid, REC->child_comm, REC->parent_pid"
+            ),
+            "com.example.game",
+            "UnityGfxDeviceW"
+        )
+        .is_err());
     }
     #[test]
     fn original_callers_multi_context_worker_executors_are_retained() {

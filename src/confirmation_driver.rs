@@ -573,7 +573,7 @@ fn prepared_names(dir: &Path) -> Result<BTreeSet<String>, String> {
     }
     if read_json(&dir.join("request.json"))?["render_attribution_profile_id"]==crate::render_attribution::PROFILE {
         names.insert("render-contract.json".into());
-        for i in 0..3 {for suffix in ["render-before.raw.tsv","render-after.raw.tsv"]{names.insert(format!("admission_{i}-{suffix}"));}}
+        for i in 0..3 {for suffix in ["render-before.raw.tsv","render-after.raw.tsv","render-final.raw.tsv"]{names.insert(format!("admission_{i}-{suffix}"));}}
     }
     Ok(names)
 }

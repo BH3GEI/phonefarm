@@ -182,3 +182,37 @@ keep the old trailing-LF removal and EMPTY-sentinel meaning. Host fixtures prove
 byte preservation and negative bounds, not Android runtime acceptance. A new
 source-pinned device inventory is still required before claiming usable live
 command-origin attribution.
+
+### Native bulk reader after second actual timeout
+
+The builtin-line revision also failed the unchanged actual20s limit (17,971bytes,
+no#end). Neither shell revision is accepted as a usable device producer. A fixed
+read-only C helper now receives a bounded NUL-framed request stream from the
+registered shell, snapshots each regular proc/trace file with bulk read of at
+most64KiB+1, and writes the same v2 witness bytes through one buffered process.
+Request stream/output each2MiB, requests<=2048, shell complete tasks<=256 and
+CPUs<=64, whole remote command20s remain fixed. Missing/short framing/end,
+unknown operations, empty mandatory record, partial LF, embedded text NUL,
+read/open/close/output errors or overflow fail without successful completion.
+Proc cmdline has the existing NUL-to-LF/trailing-LF conversion; PID filters have
+the existing EMPTY and trailing-LF semantics. No shell command is evaluated by
+the helper and it performs no file writes.
+
+Fixed source is built with the already-installed official r28c arm64 API30
+compiler into an isolated artifact: `source.c`, `reader.elf`, `build.json`.
+Source bytes/schema/target/flags/source and ELF hashes are checked by the host;
+ELF64 little-endian AArch64 executable identity is mandatory. No binaries go
+into Git, no caller qualification boolean is accepted, and a matching hash is
+not independent source authentication or installed-kernel semantic proof.
+Standalone B-owned inventory and actual event-format parse must run before
+final whole-gate acceptance. The actual fork label `pid=` binds only to the
+registered REC->parent_pid; mixed/swap/duplicate mapping rejects. Prepared
+manifest contains all three baseline witness suffixes including final.raw.
+
+Driver integration uses the existing single lease, unique remote owner, durable
+recovery barrier, source/artifact snapshots and remote byte check for a bounded
+helper-only installation before initial native witness. Full receiver contract
+freezes that same helper before any probe/control sampling. This is a guarded
+phase of the existing session, not a second owner/session or an automatic retry.
+Legacy missing-profile route needs no native artifact. A requested native route
+with absent or invalid artifact blocks, never falls back to either shell reader.
