@@ -22,18 +22,59 @@ const LOADOP_PROP: &str = "debug.knobs.loadop"; // 1 = 层把 loadOp LOAD 改写
 const DUMP_PROP: &str = "debug.knobs.passdump"; // 1 = 层导出 render pass 形状表
 const CP_PROP: &str = "debug.knobs.copyprobe"; // 1 = 1:1 拷贝探针 (隐含 passdump 追踪)
 const UPOP_PROP: &str = "debug.knobs.upop"; // 1 = 真超分算子 (gen1_loc3)
+/// Android 非只读属性值上限 91 字节 (PROP_VALUE_MAX 92 含结尾 0)。超了 setprop 会失败。
+pub(crate) const PROP_VALUE_MAX: usize = 91;
 pub(crate) const FA_PROP: &str = "debug.knobs.frameaudit"; // 1 = 一帧步骤清单 (只读, 隐含 passdump)
 pub(crate) const FA_TS_PROP: &str = "debug.knobs.frameaudit_ts"; // 1 = 步骤清单另插 GPU 时间戳
 pub(crate) const FA_GO_PROP: &str = "debug.knobs.frameaudit_go"; // 改成新编号 = 抓一次
+pub(crate) const STOREOP_PROP: &str = "debug.knobs.storeop"; // "<sig>:<i>,..." / "ds" / 0 (#91)
+pub(crate) const STOREOP_LIVE_PROP: &str = "debug.knobs.storeop_live"; // 1 = 孪生 pass 现场切换
+pub(crate) const STOREOP_ON_PROP: &str = "debug.knobs.storeop_on"; // 现场切换时的开/关
 const SO: &str = "libVkLayer_refknobs.so";
 const STATE: &str = "/data/local/tmp/knobs_layer_state"; // "把 .so 推进了哪个包"
 
 const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off} [--serial S] [--keep-prop] [--so 本机.so]";
 
+/// 「去掉多余写回」的属性串: 每项 (pass 特征码前缀, 附件下标) → "<sig>:<i>,…"。
+///
+/// 特征码前缀要 ≥8 位十六进制 (层只认这么长的前缀, 短了容易撞上别的 pass), 全串不能超过
+/// Android 属性值上限 —— 超了 setprop 静默失败, 层读到空串就当成关, 那一臂就成了对照臂。
+pub fn storeop_spec(items: &[(String, u32)]) -> Result<String, String> {
+    if items.is_empty() {
+        return Ok("0".into());
+    }
+    let mut parts = Vec::new();
+    for (sig, att) in items {
+        let sig = sig.trim().to_ascii_lowercase();
+        if sig.len() < 8 || sig.len() > 16 || !sig.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!("pass 特征码前缀要 8–16 位十六进制, 收到 {sig:?}"));
+        }
+        if *att > 31 {
+            return Err(format!("附件下标 {att} 不合理"));
+        }
+        parts.push(format!("{sig}:{att}"));
+    }
+    parts.sort();
+    parts.dedup();
+    let s = parts.join(",");
+    if s.len() > PROP_VALUE_MAX {
+        return Err(format!(
+            "写回改写指定串 {} 字节, 超过属性值上限 {PROP_VALUE_MAX}: 少放几项, 或把特征码前缀截短到 8 位",
+            s.len()
+        ));
+    }
+    Ok(s)
+}
+
 pub struct GrayLayer {
     serial: String,
     /// 显式指定的层 .so (测未合并的层; 缺省用 knobs/gray/build/out/ 下的产物)
     so: Option<String>,
+    /// storeop 改写规则与是否现场切换; None = 显式关掉 (每一档都写一遍, 不留上一轮的残值)
+    storeop: Option<(String, bool)>,
+    /// 启动目标时附加的 intent extras (例: Megacity 的 `--es scene city_static ...`)。
+    /// 层只在挂层后**第一次**启动时载入 (随后全局属性就清了), 所以 extras 必须在这次启动里带上。
+    launch_extras: Option<String>,
 }
 
 impl GrayLayer {
@@ -41,11 +82,24 @@ impl GrayLayer {
         Self {
             serial: serial.to_string(),
             so: None,
+            storeop: None,
+            launch_extras: None,
         }
     }
 
     pub fn with_so(mut self, so: Option<String>) -> Self {
         self.so = so;
+        self
+    }
+
+    pub fn with_launch_extras(mut self, extras: Option<String>) -> Self {
+        self.launch_extras = extras.filter(|e| !e.trim().is_empty());
+        self
+    }
+
+    /// storeop 改写规则 (见层里 parse_storeop_prop); live = 孪生 pass 现场切换, 初始为关
+    pub fn with_storeop(mut self, rule: Option<String>, live: bool) -> Self {
+        self.storeop = rule.map(|r| (r, live));
         self
     }
 
@@ -178,7 +232,11 @@ impl GrayLayer {
             .map(|l| l.trim().to_string())
             .unwrap_or_default();
         if act.contains('/') {
-            let _ = adb(&self.serial, &["shell", &format!("am start -n {act}")], 30);
+            let cmd = match &self.launch_extras {
+                Some(x) => format!("am start -n {act} {x}"),
+                None => format!("am start -n {act}"),
+            };
+            let _ = adb(&self.serial, &["shell", &cmd], 30);
         } else {
             eprintln!("  解析不到 {pkg} 的启动 activity, 请手动启动它");
         }
@@ -216,10 +274,24 @@ impl GrayLayer {
     }
 
     fn setprops_fa(&self, loadop: &str, dump: &str, cp: &str, upop: &str, fa: &str, fa_ts: &str) {
+        let (rule, live) = match &self.storeop {
+            Some((r, l)) => (r.as_str(), if *l { "1" } else { "0" }),
+            None => ("0", "0"),
+        };
         self.ashell(
-            &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}; setprop {FA_PROP} {fa}; setprop {FA_TS_PROP} {fa_ts}; setprop {FA_GO_PROP} 0'"),
+            &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}; setprop {FA_PROP} {fa}; setprop {FA_TS_PROP} {fa_ts}; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} \"{rule}\"; setprop {STOREOP_LIVE_PROP} {live}; setprop {STOREOP_ON_PROP} 0'"),
             15,
         );
+    }
+
+
+    /// 挂层之后核对 storeop 规则真的写进了属性。写不进 (例如超长) 时层读到的是关,
+    /// 那一臂就成了对照臂 —— 拿 A 去和 A 比。
+    pub fn require_storeop(&self) -> Result<(), String> {
+        match &self.storeop {
+            Some((rule, _)) => self.require_prop(STOREOP_PROP, rule, "写回改写"),
+            None => Ok(()),
+        }
     }
 
     /// 某个属性档的回读核验: 写不进就拒绝按那一档继续 (静默退化会让自报失真)。
@@ -285,7 +357,7 @@ impl GrayLayer {
             "debug.vulkan.layers = [{}]",
             self.getprop("debug.vulkan.layers")
         ));
-        for p in [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, FA_PROP, FA_TS_PROP, FA_GO_PROP] {
+        for p in [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, FA_PROP, FA_TS_PROP, FA_GO_PROP, STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP] {
             l.push(format!("{p}  = [{}]", self.getprop(p)));
         }
         let st = Self::adb_stdout(
@@ -309,7 +381,7 @@ impl GrayLayer {
     pub fn off(&self) -> String {
         self.ashell(
             &format!(
-                "su -c 'setprop debug.vulkan.layers \"\"; setprop {LOADOP_PROP} 0; setprop {DUMP_PROP} 0; setprop {CP_PROP} 0; setprop {UPOP_PROP} 0; setprop {FA_PROP} 0; setprop {FA_TS_PROP} 0; setprop {FA_GO_PROP} 0'"
+                "su -c 'setprop debug.vulkan.layers \"\"; setprop {LOADOP_PROP} 0; setprop {DUMP_PROP} 0; setprop {CP_PROP} 0; setprop {UPOP_PROP} 0; setprop {FA_PROP} 0; setprop {FA_TS_PROP} 0; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} 0; setprop {STOREOP_LIVE_PROP} 0; setprop {STOREOP_ON_PROP} 0'"
             ),
             15,
         );
@@ -456,5 +528,30 @@ mod launch_tests {
         let raw = "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false\ncom.miHoYo.Yuanshen/com.miHoYo.GetMobileInfo.MainActivity\n#adb_exit=0";
         let act = GrayLayer::adb_stdout(raw).lines().rev().find(|l| !l.trim().is_empty()).unwrap();
         assert_eq!(act.trim(), "com.miHoYo.Yuanshen/com.miHoYo.GetMobileInfo.MainActivity");
+    }
+}
+
+#[cfg(test)]
+mod storeop_tests {
+    use super::storeop_spec;
+
+    #[test]
+    fn spec_joins_sorted_unique_items() {
+        let s = storeop_spec(&[
+            ("15A51A879DF99C32".into(), 2),
+            ("9d0b4db80bf552b8".into(), 0),
+            ("15a51a879df99c32".into(), 2),
+        ])
+        .unwrap();
+        assert_eq!(s, "15a51a879df99c32:2,9d0b4db80bf552b8:0");
+        assert_eq!(storeop_spec(&[]).unwrap(), "0");
+    }
+
+    #[test]
+    fn short_or_non_hex_sigs_and_overlong_specs_are_refused() {
+        assert!(storeop_spec(&[("1234567".into(), 0)]).is_err());
+        assert!(storeop_spec(&[("zzzzzzzz".into(), 0)]).is_err());
+        let many: Vec<(String, u32)> = (0..6).map(|i| ("0123456789abcdef".to_string(), i)).collect();
+        assert!(storeop_spec(&many).unwrap_err().contains("上限"));
     }
 }

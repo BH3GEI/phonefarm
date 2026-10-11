@@ -1,0 +1,29 @@
+{
+  "apply_ok": false,
+  "capture_ok": false,
+  "checks": {
+    "clean_exit": true,
+    "frames_submitted": true,
+    "postfx_active": true,
+    "run_id": true,
+    "shader_path": true
+  },
+  "cool": {
+    "c": 44.2,
+    "timeout": false,
+    "waited_s": 2,
+    "zone": "cpu-0-1-0"
+  },
+  "cool_s": 2.4,
+  "label": "cal_wg0_1",
+  "load": {
+    "downs": 1,
+    "heavy_wg": 0,
+    "iters": 64
+  },
+  "lock_freq": false,
+  "remote_spv": "/data/local/tmp/phonefarm_selftest/wg0_it64_ds1.spv",
+  "seconds_total": 31.4,
+  "span_s": 5.9482,
+  "started_at": "2026-10-11T15:18:51"
+}

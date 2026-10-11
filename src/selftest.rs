@@ -480,6 +480,14 @@ pub fn judge_case(case_dir: &Path, n: usize, temp_cap_c: f64) -> Value {
     let mut out = d.clone();
     out["n"] = json!(n);
     out["outcome"] = json!(classify(&case.kind, &d));
+    // 只标出来、不改判定: GPU 档位在采集窗里被改过的臂 (见 read_pwr)
+    let changed: Vec<String> = a
+        .iter()
+        .chain(b.iter())
+        .filter(|(_, m)| m["arm"]["pwr"]["changed"] == json!(true))
+        .map(|(l, _)| l.clone())
+        .collect();
+    out["pwr_changed_arms"] = json!(changed);
     out
 }
 
@@ -801,6 +809,9 @@ pub fn render(r: &Value) -> String {
                 j["verdict"].as_str().unwrap_or("?"),
                 j["outcome"].as_str().unwrap_or(""),
             ));
+            if let Some(v) = j["pwr_changed_arms"].as_array().filter(|v| !v.is_empty()) {
+                s.push_str(&format!("      ⚠ GPU 档位在采集中被改过的臂: {}\n", v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ")));
+            }
         }
     }
     s.push_str("\n混淆矩阵 (行=真值, 列=KEEP / REJECT有显著变差 / REJECT无信号 / ABORT):\n");
@@ -1102,6 +1113,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
         Err(e) => json!({ "error": e, "timeout": true, "waited_s": c.cool_timeout_s }),
     };
     let cool_s = t0.elapsed().as_secs_f64();
+    let pwr_start = read_pwr(serial);
 
     // 2) 锁频 (可选): 只包住跑测, 与 gpu-op 同一做法 —— 先锁再等冷永远等不下来
     let lock = if c.lock_freq {
@@ -1152,6 +1164,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     let flt = format!("{REMOTE_DIR}/trace_kgsl.txt");
     let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {} {raw}", c.capdur_s), c.capdur_s + 90);
     std::fs::write(dir.join("capture.log"), &cap).ok();
+    let pwr_end = read_pwr(serial);
     // 只留解析器会读的行 (与 looptrace::parse 的预筛同一条件), 30 MB → 几百 KB
     su(serial, &format!("grep -E \"^#|adreno_cmdbatch|kgsl_\" {raw} > {flt}; rm -f {raw}; chmod 644 {flt}"), 60);
     let local_trace = dir.join("trace.kgsl.txt");
@@ -1225,6 +1238,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
         "apply_ok": apply_ok && capture_ok,
         "seconds_total": py_round(t0.elapsed().as_secs_f64(), 1),
         "lock_freq": c.lock_freq,
+        "pwr": { "start": pwr_start, "end": pwr_end, "changed": pwr_changed(&pwr_start, &pwr_end) },
     });
     std::fs::write(dir.join("arm.json"), serde_json::to_string_pretty(&arm).unwrap_or_default()).ok();
     log(&format!(
@@ -1235,6 +1249,38 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
         if apply_ok && capture_ok { String::new() } else { format!(" [未量成: {checks} capture_ok={capture_ok}]") }
     ));
     Ok(json!({ "summary": sm, "env": pv(&env), "arm": arm }))
+}
+
+/// GPU 频率档位的现值: max/min/thermal pwrlevel 与当前频率。
+///
+/// 厂商性能服务 (perf2-hal / zperfcubeservice) 会在测量中途改 max_pwrlevel (实测写 0 后约 10 s
+/// 又回到 17), 改了就等于换了测量条件。每臂起跑前与采集结束各记一份, 不一样就标出来。
+pub fn read_pwr(serial: &str) -> Value {
+    let out = su(serial, &format!(
+        "for f in max_pwrlevel min_pwrlevel thermal_pwrlevel gpuclk; do echo \"$f=$(cat {KGSL}/$f 2>/dev/null)\"; done"
+    ), 15);
+    parse_pwr(strip_exit(&out))
+}
+
+pub fn parse_pwr(text: &str) -> Value {
+    let mut m = serde_json::Map::new();
+    for line in text.lines() {
+        if let Some((k, v)) = line.trim().split_once('=') {
+            if !k.is_empty() && !v.is_empty() {
+                m.insert(k.to_string(), json!(v));
+            }
+        }
+    }
+    Value::Object(m)
+}
+
+/// 档位在这一臂里变没变 (只看档位, 当前频率本来就随负载变)。读不到算「不知道」, 不算变了。
+pub fn pwr_changed(start: &Value, end: &Value) -> Option<bool> {
+    let keys = ["max_pwrlevel", "min_pwrlevel", "thermal_pwrlevel"];
+    if keys.iter().any(|k| start.get(*k).is_none() || end.get(*k).is_none()) {
+        return None;
+    }
+    Some(keys.iter().any(|k| start[*k] != end[*k]))
 }
 
 fn gzip_replace(p: &Path) -> Result<(), String> {
@@ -1899,6 +1945,16 @@ mod tests {
         assert_eq!(r1["time_cost"]["per_n"][0]["minutes_per_experiment"], 5.0);
         assert!(render(&r1).contains("混淆矩阵"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pwr_change_is_about_levels_not_the_current_clock() {
+        let a = parse_pwr("max_pwrlevel=0\nmin_pwrlevel=17\nthermal_pwrlevel=7\ngpuclk=578000000\n");
+        let same = parse_pwr("max_pwrlevel=0\nmin_pwrlevel=17\nthermal_pwrlevel=7\ngpuclk=160000000\n");
+        let moved = parse_pwr("max_pwrlevel=17\nmin_pwrlevel=17\nthermal_pwrlevel=7\ngpuclk=160000000\n");
+        assert_eq!(pwr_changed(&a, &same), Some(false));
+        assert_eq!(pwr_changed(&a, &moved), Some(true));
+        assert_eq!(pwr_changed(&a, &parse_pwr("")), None);
     }
 
     #[test]

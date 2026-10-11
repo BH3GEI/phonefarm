@@ -173,6 +173,9 @@ struct DevDisp {
     PFN_vkCmdResetQueryPool CmdResetQueryPool = nullptr;
     PFN_vkCmdWriteTimestamp CmdWriteTimestamp = nullptr;
     PFN_vkGetQueryPoolResults GetQueryPoolResults = nullptr;
+    PFN_vkCmdBeginQuery CmdBeginQuery = nullptr;            // frameaudit: pass 里有没有查询 (遮挡查询的 pass 不能当白画)
+    PFN_vkCmdEndQuery CmdEndQuery = nullptr;
+    PFN_vkCmdCopyQueryPoolResults CmdCopyQueryPoolResults = nullptr;
     float ts_period_ns = 0.f;                               // VkPhysicalDeviceLimits::timestampPeriod
     VkDevice dev = VK_NULL_HANDLE;
     VkPhysicalDevice phys = VK_NULL_HANDLE;                 // 查显存类型用
@@ -228,6 +231,14 @@ static std::vector<Effective> g_effective;
 static int g_storeop_mode = 0;                                  // 0 关 / 1 ds / 2 指定
 static std::vector<std::pair<std::string, uint32_t>> g_storeop_pick;   // (sig 前缀, 附件下标)
 static std::map<VkRenderPass, uint64_t> g_rp_sig;               // 改写前原始描述的特征码
+// 现场切换 (debug.knobs.storeop_live=1): 应用拿到的是**原样**的 render pass, 层另建一个只差
+// load/store 的「孪生」pass; 开关开着时在 BeginRenderPass 里换成孪生的。两者按规范兼容
+// (兼容性不看 load/store op), framebuffer 与 pipeline 照用。好处: 同一局游戏里随时开关,
+// 同一位置同一视角截图做逐像素比对, 不用重启 (重启后视角/动画都对不齐)。
+// 开关状态由 debug.knobs.storeop_on 控制, 每 30 帧读一次。
+static bool g_storeop_live = false;
+static std::atomic<bool> g_storeop_on{false};
+static std::map<VkRenderPass, VkRenderPass> g_twin;              // 原样 pass -> 改写后的孪生
 
 // pass 特征码：附件个数、subpass 个数、每个附件的格式/采样/load/store/stencil load/store/初末布局 的 FNV-1a。
 // 用原始（改写前）描述算，所以和不挂改写时 frame-audit 报出来的 sig 一致，可以直接拿来写规则。
@@ -435,6 +446,9 @@ struct FaEv {
     uint32_t gx = 0, gy = 0, gz = 0;
     uint32_t barriers = 0;                    // 与上一事件之间的 barrier 调用数
     int32_t ts0 = -1, ts1 = -1;
+    // pass 内开的查询: 遮挡 (OCCLUSION) 与其它类型分开数。有遮挡查询的 pass 即使不写回
+    // 任何附件也有产出 (查询结果), 不能当「整个 pass 白画」。
+    uint32_t q_occ = 0, q_other = 0;
 };
 struct FaCb {
     std::vector<FaEv> ev;
@@ -463,7 +477,9 @@ struct FaState {
     std::map<void*, uint32_t> qid;     // 队列 -> 小编号
     uint64_t cb_unseen = 0, ev_overflow = 0, v2_copies = 0, submit2 = 0, dyn_passes = 0, sec_merged = 0;
     uint64_t ts_skipped = 0;
+    uint64_t q_outside = 0, q_copies = 0;   // pass 外开的查询 / 查询结果拷进 buffer (GPU 侧消费, 如条件渲染)
 };
+static std::map<VkQueryPool, uint32_t> g_qpool_type;   // 应用建的查询池 -> VkQueryType (本层自己的时间戳池不走钩子)
 static FaState g_fa;
 
 static uint64_t fa_pack(const SubRes& r) {
@@ -763,6 +779,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
         __system_property_get("debug.knobs.storeop", v);
         parse_storeop_prop(v);
         if (g_storeop_mode) RK_LOG("storeop 改写开: mode=%d 指定 %zu 条", g_storeop_mode, g_storeop_pick.size());
+        g_storeop_live = g_storeop_mode && read_bool_prop("debug.knobs.storeop_live");
+        g_storeop_on = g_storeop_live && read_bool_prop("debug.knobs.storeop_on");
+        if (g_storeop_live) RK_LOG("storeop 现场切换模式: 当前 %s", g_storeop_on.load() ? "开" : "关");
     }
     g_dump_passes = read_bool_prop("debug.knobs.passdump");
     g_copyprobe = read_bool_prop("debug.knobs.copyprobe");
@@ -915,6 +934,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     RK_GDPA(CmdResetQueryPool, PFN_vkCmdResetQueryPool, "vkCmdResetQueryPool");
     RK_GDPA(CmdWriteTimestamp, PFN_vkCmdWriteTimestamp, "vkCmdWriteTimestamp");
     RK_GDPA(GetQueryPoolResults, PFN_vkGetQueryPoolResults, "vkGetQueryPoolResults");
+    RK_GDPA(CmdBeginQuery, PFN_vkCmdBeginQuery, "vkCmdBeginQuery");
+    RK_GDPA(CmdEndQuery, PFN_vkCmdEndQuery, "vkCmdEndQuery");
+    RK_GDPA(CmdCopyQueryPoolResults, PFN_vkCmdCopyQueryPoolResults, "vkCmdCopyQueryPoolResults");
 #undef RK_GDPA
     if (inst) {
         auto gpp = (PFN_vkGetPhysicalDeviceProperties)gipa(inst, "vkGetPhysicalDeviceProperties");
@@ -966,6 +988,29 @@ static bool dev_of(void* k, DevDisp* out) {
 
 // ── 改写: LoadOp LOAD → DONT_CARE ──
 //
+// 现场切换: 登记孪生 pass。effective 记在孪生句柄上 —— 只有开关开着、真换上了孪生, begins 才涨。
+static void register_twin(VkRenderPass orig, VkRenderPass twin, uint64_t sig, const std::vector<Effective>& hits) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_twin[orig] = twin;
+    g_rp_sig[twin] = sig;
+    auto& idxs = g_rewritten[twin];
+    for (auto& h : hits) {
+        if (g_effective.size() >= RK_MAX_EFFECTIVE) { g_effective_dropped++; continue; }
+        idxs.push_back(g_effective.size());
+        g_effective.push_back(h);
+    }
+}
+// 开关开着就把 begin info 里的 pass 换成孪生的 (sub 由调用方提供存储)
+static const VkRenderPassBeginInfo* twin_begin(const VkRenderPassBeginInfo* bi, VkRenderPassBeginInfo* sub) {
+    if (!g_storeop_live || !bi || !g_storeop_on.load()) return bi;
+    std::lock_guard<std::mutex> lk(g_mtx);
+    auto it = g_twin.find(bi->renderPass);
+    if (it == g_twin.end()) return bi;
+    *sub = *bi;
+    sub->renderPass = it->second;
+    return sub;
+}
+
 // 钩 vkCreateRenderPass 而不是 vkCmdBeginRenderPass: loadOp 是**创建期**就烘进
 // VkRenderPass 对象的, BeginRenderPass 时已经改不动了。
 //
@@ -1011,6 +1056,26 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
 
     VkRenderPassCreateInfo mod = *ci;
     mod.pAttachments = atts.data();
+    if (g_storeop_live && !g_rewrite_loadop) {
+        // 应用拿原样的; 孪生的另建, 开关开时在 BeginRenderPass 里替换
+        VkResult r0 = d.CreateRenderPass(dev, ci, a, out);
+        if (r0 != VK_SUCCESS) return r0;
+        fa_record_rp(*out, ci);
+        if (g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
+        VkRenderPass twin = VK_NULL_HANDLE;
+        VkResult r1 = d.CreateRenderPass(dev, &mod, a, &twin);
+        if (r1 != VK_SUCCESS) { RK_LOG("孪生 pass 建不出 (%d), pass=%llu 这条开关作废", (int)r1, (unsigned long long)idx); return r0; }
+        fa_record_rp(twin, &mod);
+        if (g_dump_passes) record_rp(twin, idx, ci->attachmentCount,
+            [&](uint32_t i){ return (uint32_t)atts[i].format; },
+            [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
+            [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
+        register_twin(*out, twin, sig, hits);
+        return r0;
+    }
     VkResult r = d.CreateRenderPass(dev, &mod, a, out);
     if (r != VK_SUCCESS) {   // 改写导致创建失败就如实报, 不偷偷回退成原样
         RK_LOG("CreateRenderPass(改写后) 失败: %d, pass=%llu", (int)r, (unsigned long long)idx);
@@ -1075,6 +1140,25 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
 
     VkRenderPassCreateInfo2 mod = *ci;
     mod.pAttachments = atts.data();
+    if (g_storeop_live && !g_rewrite_loadop) {
+        VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
+        if (r0 != VK_SUCCESS) return r0;
+        fa_record_rp2(*out, ci);
+        if (g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
+            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
+        VkRenderPass twin = VK_NULL_HANDLE;
+        VkResult r1 = d.CreateRenderPass2(dev, &mod, a, &twin);
+        if (r1 != VK_SUCCESS) { RK_LOG("孪生 pass2 建不出 (%d), pass=%llu 这条开关作废", (int)r1, (unsigned long long)idx); return r0; }
+        fa_record_rp2(twin, &mod);
+        if (g_dump_passes) record_rp(twin, idx, ci->attachmentCount,
+            [&](uint32_t i){ return (uint32_t)atts[i].format; },
+            [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
+            [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
+        register_twin(*out, twin, sig, hits);
+        return r0;
+    }
     VkResult r = d.CreateRenderPass2(dev, &mod, a, out);
     if (r != VK_SUCCESS) {
         RK_LOG("CreateRenderPass2(改写后) 失败: %d, pass=%llu", (int)r, (unsigned long long)idx);
@@ -1105,7 +1189,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
 // 于是不加区分的 effective 会把一次空改写报成生效。
 static void note_begin(VkRenderPass rp) {
     // 只读档没有任何改写, 这里不该占 CmdBeginRenderPass 的热路径去抢全局锁
-    if (!g_rewrite_loadop || rp == VK_NULL_HANDLE) return;
+    // storeop 也是改写 (#91 漏了这一条: 只开 storeop 时 begins 恒为 0, 「真被用上」无从判断)
+    if ((!g_rewrite_loadop && !g_storeop_mode) || rp == VK_NULL_HANDLE) return;
     std::lock_guard<std::mutex> lk(g_mtx);
     auto it = g_rewritten.find(rp);
     if (it == g_rewritten.end()) return;
@@ -1122,6 +1207,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyRenderPass(
         RK_LOG_ONCE("DestroyRenderPass: 查不到下层函数");
         return;
     }
+    VkRenderPass twin = VK_NULL_HANDLE;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_rewritten.erase(rp);
@@ -1129,7 +1215,16 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyRenderPass(
         g_rp_seq.erase(rp);
         g_rp_info.erase(rp);
         g_rp_fa.erase(rp);
+        g_rp_sig.erase(rp);
+        // 孪生跟原样同生共死: 规范保证应用销毁原样 pass 时已没有在飞的命令用它, 换上的孪生同理
+        auto tw = g_twin.find(rp);
+        if (tw != g_twin.end()) {
+            twin = tw->second;
+            g_twin.erase(tw);
+            g_rewritten.erase(twin); g_rp_seq.erase(twin); g_rp_info.erase(twin); g_rp_fa.erase(twin); g_rp_sig.erase(twin);
+        }
     }
+    if (twin != VK_NULL_HANDLE) d.DestroyRenderPass(dev, twin, a);
     d.DestroyRenderPass(dev, rp, a);
 }
 
@@ -1777,6 +1872,8 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass(
         RK_LOG_ONCE("CmdBeginRenderPass: 查不到下层函数, 本次不计数也不转发");
         return;
     }
+    VkRenderPassBeginInfo sub;
+    bi = twin_begin(bi, &sub);
     g_rp++;
     note_begin(bi ? bi->renderPass : VK_NULL_HANDLE);
     note_pass(cb, bi, d);
@@ -1791,6 +1888,8 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass2(
         RK_LOG_ONCE("CmdBeginRenderPass2: 查不到下层函数, 本次不计数也不转发");
         return;
     }
+    VkRenderPassBeginInfo sub;
+    bi = twin_begin(bi, &sub);
     g_rp++;
     note_begin(bi ? bi->renderPass : VK_NULL_HANDLE);
     note_pass(cb, bi, d);       // 与 CmdBeginRenderPass 一致, 漏了它 RenderPass2 开的 pass 就不进表
@@ -1865,6 +1964,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdExecuteCommands(VkCommandBuffer cb, uint
                         open->draws += e.draws; open->draws_idx += e.draws_idx; open->draws_ind += e.draws_ind;
                         open->prims += e.prims; open->binds += e.binds; open->clear_att += e.clear_att;
                         open->clear_att_full += e.clear_att_full;
+                        open->q_occ += e.q_occ; open->q_other += e.q_other;
                         open->reads.insert(e.reads.begin(), e.reads.end());
                         open->writes.insert(e.writes.begin(), e.writes.end());
                         g_fa.sec_merged++;
@@ -1918,9 +2018,10 @@ static std::string fa_ev_json(const FaEv& e) {
     snprintf(b, sizeof b, ",\"br\":%u", e.barriers); o += b;
     if (e.kind == FA_PASS) {
         snprintf(b, sizeof b, ",\"rp\":%llu,\"w\":%u,\"h\":%u,\"dyn\":%s,\"sp\":%u,\"dr\":%u,\"dri\":%u,\"drn\":%u,"
-                 "\"prims\":%llu,\"ca\":%u,\"caf\":%u,\"bd\":%u,\"t0\":%d,\"t1\":%d",
+                 "\"prims\":%llu,\"ca\":%u,\"caf\":%u,\"bd\":%u,\"t0\":%d,\"t1\":%d,\"qo\":%u,\"qx\":%u",
                  (unsigned long long)e.rp, e.w, e.h, e.dyn ? "true" : "false", e.subpasses, e.draws, e.draws_idx,
-                 e.draws_ind, (unsigned long long)e.prims, e.clear_att, e.clear_att_full, e.binds, e.ts0, e.ts1);
+                 e.draws_ind, (unsigned long long)e.prims, e.clear_att, e.clear_att_full, e.binds, e.ts0, e.ts1,
+                 e.q_occ, e.q_other);
         o += b;
         if (e.sig) o += ",\"sig\":\"" + sig_hex(e.sig) + "\"";
         o += ",\"att\":[";
@@ -2014,11 +2115,12 @@ static void fa_write_file(const DevDisp& d) {   // 调用方持 g_mtx
              "{\"knob\":\"gray_frameaudit\",\"version\":1,\"pkg\":\"%s\",\"go\":%ld,\"arm_frame\":%llu,"
              "\"swapchain\":{\"w\":%u,\"h\":%u,\"fmt\":%u},\"ts_enabled\":%s,\"ts_period_ns\":%.6f,\"ts_slots\":[%u,%u],"
              "\"ts_available\":%u,\"diag\":{\"cb_unseen\":%llu,\"ev_overflow\":%llu,\"submit2\":%llu,\"dyn_passes\":%llu,"
-             "\"sec_merged\":%llu,\"ts_skipped\":%llu},",
+             "\"sec_merged\":%llu,\"ts_skipped\":%llu,\"q_outside\":%llu,\"q_copies\":%llu},",
              self_pkg().c_str(), g_fa.go, (unsigned long long)g_fa.arm_frame, g_swap_w, g_swap_h, g_swap_fmt,
              g_frameaudit_ts ? "true" : "false", (double)g_fa.period, g_fa.ts_lo, g_fa.ts_next, avail,
              (unsigned long long)g_fa.cb_unseen, (unsigned long long)g_fa.ev_overflow, (unsigned long long)g_fa.submit2,
-             (unsigned long long)g_fa.dyn_passes, (unsigned long long)g_fa.sec_merged, (unsigned long long)g_fa.ts_skipped);
+             (unsigned long long)g_fa.dyn_passes, (unsigned long long)g_fa.sec_merged, (unsigned long long)g_fa.ts_skipped,
+             (unsigned long long)g_fa.q_outside, (unsigned long long)g_fa.q_copies);
     std::string json = std::string(hdr) + "\"images\":" + imgs + ",\"ts\":" + ts + ",\"frames\":" + frames + "}";
     std::string pkg = self_pkg();
     const std::string cands[] = {
@@ -2317,6 +2419,39 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdUpdateBuffer(VkCommandBuffer cb, VkBuffe
     { std::lock_guard<std::mutex> lk(g_mtx); FaEv e; e.kind = FA_FILL_BUF; e.bytes = sz; fa_push(cb, std::move(e)); }
     d.CmdUpdateBuffer(cb, b, o, sz, p);
 }
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateQueryPool(VkDevice dev, const VkQueryPoolCreateInfo* ci,
+                                                         const VkAllocationCallbacks* a, VkQueryPool* out) {
+    DevDisp d; if (!dev_of(key(dev), &d) || !d.CreateQueryPool) { RK_LOG_ONCE("CreateQueryPool: 无下层"); return VK_ERROR_INITIALIZATION_FAILED; }
+    VkResult r = d.CreateQueryPool(dev, ci, a, out);
+    if (r == VK_SUCCESS && ci) { std::lock_guard<std::mutex> lk(g_mtx); g_qpool_type[*out] = (uint32_t)ci->queryType; }
+    return r;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyQueryPool(VkDevice dev, VkQueryPool p, const VkAllocationCallbacks* a) {
+    DevDisp d; if (!dev_of(key(dev), &d) || !d.DestroyQueryPool) { RK_LOG_ONCE("DestroyQueryPool: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_qpool_type.erase(p); }
+    d.DestroyQueryPool(dev, p, a);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginQuery(VkCommandBuffer cb, VkQueryPool p, uint32_t q, VkQueryControlFlags f) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdBeginQuery) { RK_LOG_ONCE("CmdBeginQuery: 无下层"); return; }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto it = g_qpool_type.find(p);
+        bool occ = it != g_qpool_type.end() && it->second == VK_QUERY_TYPE_OCCLUSION;
+        if (FaEv* e = fa_open(cb)) { if (occ) e->q_occ++; else e->q_other++; }
+        else g_fa.q_outside++;
+    }
+    d.CmdBeginQuery(cb, p, q, f);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdEndQuery(VkCommandBuffer cb, VkQueryPool p, uint32_t q) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdEndQuery) { RK_LOG_ONCE("CmdEndQuery: 无下层"); return; }
+    d.CmdEndQuery(cb, p, q);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdCopyQueryPoolResults(VkCommandBuffer cb, VkQueryPool p, uint32_t first, uint32_t n,
+    VkBuffer b, VkDeviceSize o, VkDeviceSize st, VkQueryResultFlags f) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdCopyQueryPoolResults) { RK_LOG_ONCE("CmdCopyQueryPoolResults: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_fa.q_copies++; }
+    d.CmdCopyQueryPoolResults(cb, p, first, n, b, o, st, f);
+}
 static VKAPI_ATTR VkResult VKAPI_CALL rk_QueueSubmit2(VkQueue q, uint32_t n, const VkSubmitInfo2* si, VkFence fence) {
     DevDisp d; if (!dev_of(key(q), &d) || !d.QueueSubmit2) { RK_LOG_ONCE("QueueSubmit2: 无下层"); return VK_ERROR_INITIALIZATION_FAILED; }
     if (si) {
@@ -2412,6 +2547,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     uint64_t f = ++g_frames;
+    if (g_storeop_live && f % 30 == 0) {
+        bool on = read_bool_prop("debug.knobs.storeop_on");
+        if (on != g_storeop_on.exchange(on)) RK_LOG("storeop 现场切换: %s (frame=%llu)", on ? "开" : "关", (unsigned long long)f);
+    }
     if (g_frameaudit) fa_on_present(d, f, pi);
     if (g_dump_passes) {
         {
@@ -2494,6 +2633,11 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
         RK_HOOK("vkCmdFillBuffer", rk_CmdFillBuffer);
         RK_HOOK("vkCmdUpdateBuffer", rk_CmdUpdateBuffer);
         RK_HOOK("vkGetSwapchainImagesKHR", rk_GetSwapchainImagesKHR);
+        RK_HOOK("vkCreateQueryPool", rk_CreateQueryPool);
+        RK_HOOK("vkDestroyQueryPool", rk_DestroyQueryPool);
+        RK_HOOK("vkCmdBeginQuery", rk_CmdBeginQuery);
+        RK_HOOK("vkCmdEndQuery", rk_CmdEndQuery);
+        RK_HOOK("vkCmdCopyQueryPoolResults", rk_CmdCopyQueryPoolResults);
     }
     RK_HOOK("vkCreateRenderPass2", rk_CreateRenderPass2);
     RK_HOOK("vkCreateRenderPass2KHR", rk_CreateRenderPass2);
@@ -2553,6 +2697,11 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_HOOK("vkCmdFillBuffer", rk_CmdFillBuffer);
         RK_HOOK("vkCmdUpdateBuffer", rk_CmdUpdateBuffer);
         RK_HOOK("vkGetSwapchainImagesKHR", rk_GetSwapchainImagesKHR);
+        RK_HOOK("vkCreateQueryPool", rk_CreateQueryPool);
+        RK_HOOK("vkDestroyQueryPool", rk_DestroyQueryPool);
+        RK_HOOK("vkCmdBeginQuery", rk_CmdBeginQuery);
+        RK_HOOK("vkCmdEndQuery", rk_CmdEndQuery);
+        RK_HOOK("vkCmdCopyQueryPoolResults", rk_CmdCopyQueryPoolResults);
     }
     if (dev == VK_NULL_HANDLE) return nullptr;
     DevDisp d;
