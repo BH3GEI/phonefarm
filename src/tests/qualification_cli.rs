@@ -26,9 +26,11 @@ impl Drop for Scratch {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn cmd() -> Command {
+fn cmd(t: &Scratch) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_phonefarm"));
-    c.current_dir(std::env::temp_dir());
+    c.current_dir(std::env::temp_dir())
+        .env("PHONEFARM_LEASE_DIR", t.0.join("lease"))
+        .env("DEVLOCK_DIR", t.0.join("legacy"));
     c
 }
 fn fixture() -> Value {
@@ -60,7 +62,7 @@ fn qualify_replays_same_evidence_and_blocks_display_proxy() {
     let t = Scratch::new();
     let p = t.write("evidence.json", &fixture());
     let run = || {
-        cmd()
+        cmd(&t)
             .args(["qualify", "--from"])
             .arg(&p)
             .arg("--json")
@@ -76,7 +78,7 @@ fn qualify_replays_same_evidence_and_blocks_display_proxy() {
     e["policy"]["goal"] = json!("display_smoothness");
     e["policy"]["required_metrics"] = json!(["frame_p95", "fps_mean"]);
     let p = t.write("display.json", &e);
-    let o = cmd().args(["qualify", "--from"]).arg(p).output().unwrap();
+    let o = cmd(&t).args(["qualify", "--from"]).arg(p).output().unwrap();
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(report(&o)["eligible"], false);
 }
@@ -85,7 +87,7 @@ fn actual_eval_offline_route_freezes_target_without_optimization_pass() {
     let t = Scratch::new();
     let req = t.write("request.json", &request());
     let e = t.write("evidence.json", &fixture());
-    let o = cmd()
+    let o = cmd(&t)
         .args(["eval", "--request"])
         .arg(&req)
         .arg("--qualify-from")
@@ -102,7 +104,7 @@ fn actual_eval_offline_route_freezes_target_without_optimization_pass() {
     let mut input = fixture();
     input["candidate"][0]["env"]["power_w_mean"] = Value::Null;
     let e = t.write("missing-power.json", &input);
-    let o = cmd()
+    let o = cmd(&t)
         .args(["eval", "--request"])
         .arg(req)
         .arg("--qualify-from")
@@ -136,7 +138,7 @@ fn actual_eval_nonroot_stops_before_push_or_writable_probe() {
     let req = t.write("request.json", &request());
     let adb = fake_adb(&t);
     let log = t.0.join("adb.log");
-    let o = cmd()
+    let o = cmd(&t)
         .args(["eval", "--request"])
         .arg(req)
         .args(["--serial", "fixture-device", "--out"])
@@ -159,7 +161,7 @@ fn actual_autoloop_nonroot_stops_before_probe_or_model() {
     let adb = fake_adb(&t);
     let log = t.0.join("adb.log");
     let out = t.0.join("out");
-    let o = cmd()
+    let o = cmd(&t)
         .args(["autoloop", "--serial", "fixture-device", "--out"])
         .arg(&out)
         .env("ADB_BIN", adb)
@@ -180,7 +182,7 @@ fn published_synthetic_fixture_cannot_qualify_real_claim() {
     let e: Value =
         serde_json::from_str(include_str!("../../examples/qualification_ready.json")).unwrap();
     let p = t.write("synthetic.json", &e);
-    let o = cmd().args(["qualify", "--from"]).arg(p).output().unwrap();
+    let o = cmd(&t).args(["qualify", "--from"]).arg(p).output().unwrap();
     assert_eq!(o.status.code(), Some(1));
     let r = report(&o);
     assert_eq!(r["eligible"], false);
@@ -193,7 +195,7 @@ fn eval_refuses_generator_relaxing_alpha() {
     r["protocol"]["p_threshold"] = json!(1.0);
     let p = t.write("bad-alpha.json", &r);
     let e = t.write("e.json", &fixture());
-    let o = cmd()
+    let o = cmd(&t)
         .args(["eval", "--request"])
         .arg(p)
         .arg("--qualify-from")
@@ -234,7 +236,7 @@ esac
     let mut r = request();
     r["payload"]["probe_only"] = json!(true);
     let req = t.write("probe.json", &r);
-    let o = cmd()
+    let o = cmd(&t)
         .args(["eval", "--request"])
         .arg(req)
         .args(["--serial", "fixture-device", "--out"])
@@ -250,4 +252,87 @@ esac
     assert_eq!(r["conditions_observed"]["restored"], false);
     assert_eq!(r["qualification"]["status"], "blocked");
     assert_eq!(r["qualification"]["probe_allowed"], false);
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_capability_probes_cannot_borrow_another_devices_root_output() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let shared = Scratch::new();
+    let t = Scratch::new();
+    let other = Scratch::new();
+    let stub = shared.0.join("fake-adb-collision");
+    std::fs::write(
+        &stub,
+        r#"#!/bin/sh
+case "$*" in
+ *'su -c id'*)
+  case "$*" in
+   *nonroot-fixture*)
+    echo 'uid=2000(shell) gid=2000(shell)'
+    touch "$COLLISION_DIR/nonroot-started"
+    n=0
+    while [ ! -f "$COLLISION_DIR/root-trace-written" ]; do
+      n=$((n+1)); [ "$n" -lt 500 ] || exit 8; sleep 0.01
+    done
+    sleep 0.2;;
+   *) echo 'uid=0(root) gid=0(root)';;
+  esac;;
+ *TRACE_AVAILABLE*)
+  echo 'uid=0(root) TRACE_AVAILABLE'
+  touch "$COLLISION_DIR/root-trace-written";;
+ *device_snapshot.sh*) echo 'cpu.policy0.scaling_min=300';;
+ *probe_sysparam.sh*) echo 'cpu.policies=0';;
+ *) exit 0;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut req = request();
+    req["payload"]["probe_only"] = json!(true);
+    let nonroot_request = t.write("request.json", &req);
+    let root_request = other.write("request.json", &req);
+    let mut a = cmd(&t)
+        .args(["eval", "--request"])
+        .arg(nonroot_request)
+        .args(["--serial", "nonroot-fixture", "--out"])
+        .arg(t.0.join("out"))
+        .env("ADB_BIN", &stub)
+        .env("COLLISION_DIR", &shared.0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !shared.0.join("nonroot-started").exists() {
+        if std::time::Instant::now() >= deadline {
+            let _ = a.kill();
+            let _ = a.wait();
+            panic!("nonroot fixture did not begin bounded root probe");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let b = cmd(&other)
+        .args(["eval", "--request"])
+        .arg(root_request)
+        .args(["--serial", "root-fixture", "--out"])
+        .arg(other.0.join("out"))
+        .env("ADB_BIN", &stub)
+        .env("COLLISION_DIR", &shared.0)
+        .output()
+        .unwrap();
+    let a = a.wait_with_output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    assert!(a.status.success(), "{}", String::from_utf8_lossy(&a.stderr));
+    let root = report(&b);
+    let nonroot = report(&a);
+    assert_eq!(root["qualification"]["probe_allowed"], true, "{root}");
+    assert_eq!(
+        nonroot["qualification"]["probe_allowed"], false,
+        "{nonroot}"
+    );
+    assert!(!t.0.join("out/snap_before_probe.txt").exists());
+    assert_eq!(nonroot["status"], "ABORT");
 }
