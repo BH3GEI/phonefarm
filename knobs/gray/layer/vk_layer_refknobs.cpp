@@ -23,6 +23,18 @@
 #include <vector>
 #include <sys/system_properties.h>
 #include <unistd.h>
+#include "artifact_stats.h"
+#ifdef RK_DYNAMIC_UPOP_BUILD
+#include "artifact_metadata.h"
+#ifndef RK_DYNAMIC_ARTIFACT_METADATA
+#error "Dynamic builds require artifact metadata; no fixed-shader fallback"
+#endif
+#include "copy_spv.h"
+static_assert(kUpopSpvLen > 0 && kUpopSpvLen % 4 == 0, "Dynamic candidate SPIR-V required");
+#else
+static const char kArtifactId[] = "legacy-fixed-upop";
+static const char kCandidateSourceSha256[] = "";
+static const char kCandidateSpirvSha256[] = "";
 #if __has_include("copy_spv.h")
 #include "copy_spv.h"
 #else
@@ -30,6 +42,7 @@ static const unsigned char kCopySpv[] = {0};
 static const unsigned int kCopySpvLen = 0;
 static const unsigned char kUpopSpv[] = {0};
 static const unsigned int kUpopSpvLen = 0;
+#endif
 #endif
 
 // ── layer 协商接口 (来自 vk_layer.h, ABI 稳定) ──
@@ -122,6 +135,10 @@ struct DevDisp {
     PFN_vkCmdExecuteCommands CmdExecuteCommands = nullptr;
     PFN_vkQueueSubmit QueueSubmit = nullptr;
     PFN_vkFreeCommandBuffers FreeCommandBuffers = nullptr;
+    PFN_vkAllocateCommandBuffers AllocateCommandBuffers = nullptr;
+    PFN_vkResetCommandBuffer ResetCommandBuffer = nullptr;
+    PFN_vkResetCommandPool ResetCommandPool = nullptr;
+    PFN_vkDestroyCommandPool DestroyCommandPool = nullptr;
     PFN_vkDestroyFramebuffer DestroyFramebuffer = nullptr;
     PFN_vkDestroyImage DestroyImage = nullptr;
     PFN_vkDestroyImageView DestroyImageView = nullptr;
@@ -150,6 +167,7 @@ struct DevDisp {
 };
 
 static std::mutex g_mtx;
+static ArtifactStats g_artifact_stats;
 static std::map<void*, InstDisp> g_inst;
 static std::map<void*, DevDisp> g_dev;
 static std::atomic<uint64_t> g_frames{0};
@@ -368,6 +386,16 @@ static void write_marker() {
             json += b;
         }
     }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        json += std::string(",\"upop_artifact\":{\"artifact_id\":\"") + kArtifactId
+            + "\",\"source_sha256\":\"" + kCandidateSourceSha256
+            + "\",\"spirv_sha256\":\"" + kCandidateSpirvSha256
+            + "\",\"requested\":" + (g_upop ? "true" : "false")
+            + ",\"disabled_state\":" + (g_cp.disabled ? "true" : "false")
+            + ",\"queue_submission_api\":\"vkQueueSubmit\",\"gpu_completion_proven\":false,\"counts\":"
+            + g_artifact_stats.json() + "}";
+    }
     json += "}";
 
     // 通道 1: logcat (root 可读, 不受目标应用存储沙箱影响)。
@@ -533,6 +561,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     d.CmdExecuteCommands = (PFN_vkCmdExecuteCommands)gdpa(*pDev, "vkCmdExecuteCommands");
     d.QueueSubmit = (PFN_vkQueueSubmit)gdpa(*pDev, "vkQueueSubmit");
     d.FreeCommandBuffers = (PFN_vkFreeCommandBuffers)gdpa(*pDev, "vkFreeCommandBuffers");
+    d.AllocateCommandBuffers = (PFN_vkAllocateCommandBuffers)gdpa(*pDev, "vkAllocateCommandBuffers");
+    d.ResetCommandBuffer = (PFN_vkResetCommandBuffer)gdpa(*pDev, "vkResetCommandBuffer");
+    d.ResetCommandPool = (PFN_vkResetCommandPool)gdpa(*pDev, "vkResetCommandPool");
+    d.DestroyCommandPool = (PFN_vkDestroyCommandPool)gdpa(*pDev, "vkDestroyCommandPool");
     d.DestroyFramebuffer = (PFN_vkDestroyFramebuffer)gdpa(*pDev, "vkDestroyFramebuffer");
     d.DestroyImage = (PFN_vkDestroyImage)gdpa(*pDev, "vkDestroyImage");
     d.DestroyImageView = (PFN_vkDestroyImageView)gdpa(*pDev, "vkDestroyImageView");
@@ -565,6 +597,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocat
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return; d = it->second; g_dev.erase(it); }
     write_marker();  // 收尾再落一次最终计数
+    bool owned_probe = g_cp.dev == dev;
     if (g_cp.dev == dev) {   // copyprobe 自建对象随 device 一起收
         if (g_cp.dst) { d.DestroyImageView(dev, g_cp.dst_view, nullptr); d.DestroyImage(dev, g_cp.dst, nullptr); d.FreeMemory(dev, g_cp.mem, nullptr); }
         if (g_cp.pipe) { d.DestroyPipeline(dev, g_cp.pipe, nullptr); d.DestroyPipelineLayout(dev, g_cp.pl, nullptr);
@@ -572,6 +605,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocat
                          d.DestroyShaderModule(dev, g_cp.sm, nullptr); }
         g_cp = CopyProbe{};
     }
+    { std::lock_guard<std::mutex> lk(g_mtx); if (owned_probe || g_dev.empty()) g_artifact_stats.clear_pending(); }
     if (d.DestroyDevice) d.DestroyDevice(dev, a);
 }
 
@@ -876,7 +910,11 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBindDescriptorSets(
                 VkDescriptorSet c = copyprobe_clone(cb, d, repl[i]);
                 if (c != repl[i]) { repl[i] = c; any = true; }
             }
-            if (any) { d.CmdBindDescriptorSets(cb, bp, pl, first, n, repl.data(), ndyn, dyn); return; }
+            if (any) {
+                d.CmdBindDescriptorSets(cb, bp, pl, first, n, repl.data(), ndyn, dyn);
+                if (g_upop) for (uint32_t i = 0; i < n; ++i) if (repl[i] != sets[i]) ++g_artifact_stats.substituted;
+                return;
+            }
         }
     }
     d.CmdBindDescriptorSets(cb, bp, pl, first, n, sets, ndyn, dyn);
@@ -1028,21 +1066,34 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBlitImage(
 // 然后 vkCmdBindDescriptorSets 钩子里把引用了 src 的那个绑定换成 dst 的克隆集。
 // 源图 = 上一个渲染分辨率 pass 的颜色附件 (note_pass 里记的 g_cb_prev_att)。
 
+static void cp_disable(const char* reason) {
+    g_cp.disabled = true;
+    if (g_upop) g_artifact_stats.disable(reason);
+#ifdef RK_DYNAMIC_UPOP_BUILD
+    else g_artifact_stats.disable(reason);
+#endif
+}
 static void cp_fail(const char* what, VkResult r) {
     RK_LOG("copyprobe 停用: %s -> %d", what, (int)r);
-    g_cp.disabled = true;
+    cp_disable(what);
 }
 
 // 建齐 compute 那套 (幂等; 尺寸变了重建 dst)。调用方必须持 g_mtx。
 static bool copyprobe_ensure(VkDevice dev, const DevDisp& d, uint32_t w, uint32_t h, uint32_t fmt) {
+    if (g_cp.dev != VK_NULL_HANDLE && g_cp.dev != dev) {
+        cp_disable("multiple_vulkan_devices_unsupported"); return false;
+    }
     if (g_cp.disabled) return false;
+#ifdef RK_DYNAMIC_UPOP_BUILD
+    if (!g_upop) { cp_disable("dynamic_upop_not_requested"); return false; }
+#endif
     if (fmt != VK_FORMAT_R8G8B8A8_UNORM) {   // 算子写死 rgba8, 格式不符不猜
         RK_LOG_ONCE("copyprobe 停用: src fmt=%u 不是 R8G8B8A8_UNORM, 算子不适用", fmt);
-        g_cp.disabled = true; return false;
+        cp_disable("unsupported_rgba8_format"); return false;
     }
     const unsigned char* spv = g_upop ? kUpopSpv : kCopySpv;
     unsigned int spv_len = g_upop ? kUpopSpvLen : kCopySpvLen;
-    if (spv_len == 0) { RK_LOG_ONCE("copyprobe 停用: 内嵌 SPV 为空 (构建没编 shader?)"); g_cp.disabled = true; return false; }
+    if (spv_len == 0) { RK_LOG_ONCE("copyprobe 停用: 内嵌 SPV 为空 (构建没编 shader?)"); cp_disable("empty_spirv"); return false; }
     VkResult r;
     if (g_cp.pipe == VK_NULL_HANDLE) {
         VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -1072,6 +1123,7 @@ static bool copyprobe_ensure(VkDevice dev, const DevDisp& d, uint32_t w, uint32_
         cpci.layout = g_cp.pl;
         r = d.CreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, nullptr, &g_cp.pipe);
         if (r != VK_SUCCESS) { cp_fail("CreateComputePipelines", r); return false; }
+        if (g_upop) ++g_artifact_stats.pipeline_created;
 
         // 池子要同时装: compute set + 每帧克隆的游戏 set。克隆集里可能有游戏的任何
         // 描述符类型, 全类型留余量; FREE_BIT 让换下来的旧克隆能还回池子 (游戏每帧
@@ -1154,7 +1206,7 @@ static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPas
     auto ii = g_img.find(src);
     if (ii == g_img.end()) return;
     const ImgInfo& im = ii->second;
-    if (!(im.usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { RK_LOG_ONCE("copyprobe 停用: src 不可采样"); g_cp.disabled = true; return; }
+    if (!(im.usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { RK_LOG_ONCE("copyprobe 停用: src 不可采样"); cp_disable("source_not_sampled"); return; }
     // 布局: 游戏在 pass 50 里用普通采样描述符读 src, 而 src 又不是 pass 50 framebuffer
     // 的附件 (fb 2141x969 vs src 2140x968 尺寸不符, 挂不上) —— 所以游戏必定在 pass 49
     // 结束之后、pass 50 开始之前自己插了 transition barrier 把它转成可采样布局,
@@ -1213,6 +1265,7 @@ static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPas
     d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pipe);
     d.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pl, 0, 1, &g_cp.cset, 0, nullptr);
     d.CmdDispatch(cb, (g_cp.w + 15) / 16, (g_cp.h + 15) / 16, 1);
+    if (g_upop) g_artifact_stats.record(reinterpret_cast<uintptr_t>(cb));
     VkImageMemoryBarrier b2{};
     b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     b2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -1279,7 +1332,7 @@ static VkDescriptorSet copyprobe_clone(VkCommandBuffer, const DevDisp& d, VkDesc
             d.FreeDescriptorSets(d.dev, g_cp.pool, 1, &ci->second.first);
             ci->second = {clone, gen};
         } else g_cp.clones[game_set] = {clone, gen};
-        if (g_cp.clones.size() > 512) { RK_LOG_ONCE("copyprobe: 克隆表超 512, 停用防爆"); g_cp.disabled = true; return game_set; }
+        if (g_cp.clones.size() > 512) { RK_LOG_ONCE("copyprobe: 克隆表超 512, 停用防爆"); cp_disable("descriptor_clone_limit"); return game_set; }
         ci = g_cp.clones.find(game_set);
     }
     g_cp.subs++;
@@ -1385,7 +1438,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_BeginCommandBuffer(VkCommandBuffer cb, 
             { auto& v = g_cb_passes[cb]; if (v.size() < 256) v.push_back(k); }
         }
     }
-    return d.BeginCommandBuffer(cb, bi);
+    VkResult result = d.BeginCommandBuffer(cb, bi);
+    if (result == VK_SUCCESS && g_upop) {
+        std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.reset(reinterpret_cast<uintptr_t>(cb));
+    }
+    return result;
 }
 
 // 二级缓冲被执行时, 它录的 pass 并入主缓冲的录制清单 —— 提交主缓冲时才算执行 (评审 #4/#9)
@@ -1396,6 +1453,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdExecuteCommands(VkCommandBuffer cb, uint
         std::lock_guard<std::mutex> lk(g_mtx);
         auto& v = g_cb_passes[cb];
         for (uint32_t i = 0; i < n; i++) {
+            if (g_upop) g_artifact_stats.inherit(reinterpret_cast<uintptr_t>(cb), reinterpret_cast<uintptr_t>(cbs[i]));
             auto it = g_cb_passes.find(cbs[i]);
             if (it == g_cb_passes.end()) continue;
             for (uint64_t k : it->second) { if (v.size() >= 256) break; v.push_back(k); }
@@ -1418,7 +1476,17 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueueSubmit(VkQueue q, uint32_t n, cons
                     for (uint64_t k : it->second) g_frame_seen.insert(k);
             }
     }
-    return d.QueueSubmit(q, n, si, fence);
+    uint64_t submitted = 0;
+    if (g_upop && si) {
+        std::vector<uintptr_t> cbs;
+        for (uint32_t i = 0; i < n; ++i) if (si[i].pCommandBuffers)
+            for (uint32_t j = 0; j < si[i].commandBufferCount; ++j)
+                cbs.push_back(reinterpret_cast<uintptr_t>(si[i].pCommandBuffers[j]));
+        std::lock_guard<std::mutex> lk(g_mtx); submitted = g_artifact_stats.submitted_count(cbs);
+    }
+    VkResult result = d.QueueSubmit(q, n, si, fence);
+    if (g_upop) { std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.submit_result(submitted, result == VK_SUCCESS); }
+    return result;
 }
 
 // cb 被释放时摘掉它的全部 per-cb 状态 (评审 #10: 这些 map 跑在游戏进程里, 只增不减会无限涨)
@@ -1428,11 +1496,44 @@ static VKAPI_ATTR void VKAPI_CALL rk_FreeCommandBuffers(VkDevice dev, VkCommandP
     if (g_dump_passes && cbs) {
         std::lock_guard<std::mutex> lk(g_mtx);
         for (uint32_t i = 0; i < n; i++) {
+            if (g_upop) g_artifact_stats.free(reinterpret_cast<uintptr_t>(cbs[i]));
             g_cb_cur.erase(cbs[i]); g_cb_sets.erase(cbs[i]); g_cb_draw_idx.erase(cbs[i]);
             g_cb_prev_att.erase(cbs[i]); g_cb_cur_is_swap.erase(cbs[i]); g_cb_passes.erase(cbs[i]);
         }
     }
     d.FreeCommandBuffers(dev, pool, n, cbs);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL rk_AllocateCommandBuffers(VkDevice dev, const VkCommandBufferAllocateInfo* ci, VkCommandBuffer* cbs) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.AllocateCommandBuffers) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult result = d.AllocateCommandBuffers(dev, ci, cbs);
+    if (result == VK_SUCCESS && ci && cbs) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (uint32_t i = 0; i < ci->commandBufferCount; ++i)
+            g_artifact_stats.allocated(reinterpret_cast<uintptr_t>(cbs[i]), reinterpret_cast<uintptr_t>(ci->commandPool));
+    }
+    return result;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_ResetCommandBuffer(VkCommandBuffer cb, VkCommandBufferResetFlags flags) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.ResetCommandBuffer) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult result = d.ResetCommandBuffer(cb, flags);
+    if (result == VK_SUCCESS) { std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.reset(reinterpret_cast<uintptr_t>(cb)); }
+    return result;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_ResetCommandPool(VkDevice dev, VkCommandPool pool, VkCommandPoolResetFlags flags) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.ResetCommandPool) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult result = d.ResetCommandPool(dev, pool, flags);
+    if (result == VK_SUCCESS) { std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.reset_pool(reinterpret_cast<uintptr_t>(pool)); }
+    return result;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyCommandPool(VkDevice dev, VkCommandPool pool, const VkAllocationCallbacks* a) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.DestroyCommandPool) return;
+    d.DestroyCommandPool(dev, pool, a);
+    std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.reset_pool(reinterpret_cast<uintptr_t>(pool), true);
 }
 
 // 同理: image / view / framebuffer 销毁时摘表 (评审 #10)。
@@ -1519,6 +1620,12 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
         RK_HOOK("vkCmdExecuteCommands", rk_CmdExecuteCommands);
         RK_HOOK("vkQueueSubmit", rk_QueueSubmit);
         RK_HOOK("vkFreeCommandBuffers", rk_FreeCommandBuffers);
+        if (g_upop) {
+            RK_HOOK("vkAllocateCommandBuffers", rk_AllocateCommandBuffers);
+            RK_HOOK("vkResetCommandBuffer", rk_ResetCommandBuffer);
+            RK_HOOK("vkResetCommandPool", rk_ResetCommandPool);
+            RK_HOOK("vkDestroyCommandPool", rk_DestroyCommandPool);
+        }
         RK_HOOK("vkDestroyFramebuffer", rk_DestroyFramebuffer);
         RK_HOOK("vkDestroyImage", rk_DestroyImage);
         RK_HOOK("vkDestroyImageView", rk_DestroyImageView);
@@ -1558,6 +1665,12 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_HOOK("vkCmdExecuteCommands", rk_CmdExecuteCommands);
         RK_HOOK("vkQueueSubmit", rk_QueueSubmit);
         RK_HOOK("vkFreeCommandBuffers", rk_FreeCommandBuffers);
+        if (g_upop) {
+            RK_HOOK("vkAllocateCommandBuffers", rk_AllocateCommandBuffers);
+            RK_HOOK("vkResetCommandBuffer", rk_ResetCommandBuffer);
+            RK_HOOK("vkResetCommandPool", rk_ResetCommandPool);
+            RK_HOOK("vkDestroyCommandPool", rk_DestroyCommandPool);
+        }
         RK_HOOK("vkDestroyFramebuffer", rk_DestroyFramebuffer);
         RK_HOOK("vkDestroyImage", rk_DestroyImage);
         RK_HOOK("vkDestroyImageView", rk_DestroyImageView);
