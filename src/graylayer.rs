@@ -169,7 +169,9 @@ impl GrayLayer {
     /// 无层对照实测 monkey 会把 refbench 的运行搅坏 (注入事件 = 与被测对象无关的扰动源)。
     fn launch_pkg(&self, pkg: &str) {
         let act = self.ashell(&format!("cmd package resolve-activity --brief {pkg}"), 30);
-        let act = act
+        // 必须先剥掉尾部的 `#adb_exit=N`: 它单独占最后一行, 不剥的话「最后一个非空行」
+        // 永远是这个标记而不是 activity, 启动恒失败 (2026-10-11 真机实测)
+        let act = Self::adb_stdout(&act)
             .lines()
             .rev()
             .find(|l| !l.trim().is_empty())
@@ -441,5 +443,18 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
             eprintln!("不认识的模式 {other:?}\n{USAGE}");
             2
         }
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::GrayLayer;
+
+    /// resolve-activity 的真实输出 (2026-10-11 NX809J) 加上 adb() 追加的退出码标记
+    #[test]
+    fn activity_line_survives_exit_marker() {
+        let raw = "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false\ncom.miHoYo.Yuanshen/com.miHoYo.GetMobileInfo.MainActivity\n#adb_exit=0";
+        let act = GrayLayer::adb_stdout(raw).lines().rev().find(|l| !l.trim().is_empty()).unwrap();
+        assert_eq!(act.trim(), "com.miHoYo.Yuanshen/com.miHoYo.GetMobileInfo.MainActivity");
     }
 }

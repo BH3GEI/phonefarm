@@ -416,7 +416,11 @@ pub(crate) struct Finding {
 /// 事件的稳定身份 (跨帧对齐用): 类型 + rp 序号 + 尺寸 + 该类型在帧内第几次出现
 fn ev_sig(ev: &Ev) -> String {
     match ev.kind.as_str() {
-        "pass" => format!("pass rp{} {}x{}", u(&ev.raw, "rp"), ev.w, ev.h),
+        // lead 的写回改写开关按层给的 sig (附件描述哈希) 定位 pass; 有就带上
+        "pass" => match ev.raw.get("sig").filter(|v| !v.is_null()) {
+            Some(sig) => format!("pass rp{} {}x{} sig={}", u(&ev.raw, "rp"), ev.w, ev.h, sig.as_str().map(|x| x.to_string()).unwrap_or_else(|| sig.to_string())),
+            None => format!("pass rp{} {}x{}", u(&ev.raw, "rp"), ev.w, ev.h),
+        },
         k => k.to_string(),
     }
 }
@@ -600,6 +604,86 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
             });
         }
     }
+    // 能做成 transient (LAZILY_ALLOCATED, 只活在 tile 上) 的附件: 在所有抓到的帧里,
+    // 这块内容从来没被「别的事件」读过 (只在 pass 内当 color/depth/input 用), 且每次进 pass
+    // 都是 CLEAR/DONT_CARE 开场。现状若还在 STORE, 写回全部是浪费; 改 transient 连显存都不占。
+    let mut by_img: BTreeMap<u32, (bool, Vec<usize>)> = BTreeMap::new(); // img -> (被别人读过, 用到它的 pass)
+    for (s, list) in &seq {
+        let e = by_img.entry(s.img).or_insert((false, vec![]));
+        let mut last_prod: Option<usize> = None;
+        for (i, a) in list {
+            match a {
+                Acc::Produce(p) => last_prod = Some(p.ev),
+                Acc::Read => {
+                    if last_prod.is_some_and(|p| p != *i) || *i >= t.evs.len() {
+                        e.0 = true;
+                    }
+                    if *i < t.evs.len() && t.evs[*i].kind != "pass" {
+                        e.0 = true;
+                    }
+                }
+                _ => {}
+            }
+            if *i < t.evs.len() && t.evs[*i].kind == "pass" && !e.1.contains(i) {
+                e.1.push(*i);
+            }
+            if *i < t.evs.len() && t.evs[*i].kind != "pass" && !matches!(a, Acc::Discard) {
+                e.0 = true; // 被拷贝/清屏/dispatch 碰过, 不当 transient
+            }
+        }
+    }
+    for (img, (read, passes)) in by_img {
+        if read || passes.is_empty() {
+            continue;
+        }
+        let Some(im) = t.imgs.get(&img) else { continue };
+        if im.swap {
+            continue;
+        }
+        // 每次用到它, 加载必须是 CLEAR/DONT_CARE, 且不能被描述符采样
+        let ok = passes.iter().all(|&i| {
+            let ev = &t.evs[i];
+            let as_att = ev.raw["att"].as_array().cloned().unwrap_or_default().into_iter().find(|a| u(a, "i") as u32 == img);
+            let sampled = ["rd", "wr"].iter().any(|k| {
+                ev.raw[*k].as_array().map(|v| v.iter().any(|x| x[0].as_u64() == Some(img as u64))).unwrap_or(false)
+            });
+            matches!(as_att, Some(ref a) if u(a, "lo") != 0 || u(a, "ro") == 2) && !sampled
+        });
+        if !ok {
+            continue;
+        }
+        let first = passes[0];
+        let ev = &t.evs[first];
+        if ev.frame == last_frame {
+            continue;
+        }
+        let stored: f64 = passes
+            .iter()
+            .filter(|&&i| t.evs[i].frame == ev.frame)
+            .map(|&i| {
+                let e2 = &t.evs[i];
+                e2.raw["att"].as_array().cloned().unwrap_or_default().iter()
+                    .filter(|a| u(a, "i") as u32 == img)
+                    .map(|a| { let (_, _, c, s2) = t.att_bytes(e2, a); c + s2 })
+                    .sum::<f64>()
+            })
+            .sum();
+        out.push(Finding {
+            rule: "transient_ok",
+            frame: ev.frame,
+            ev: first,
+            att: None,
+            bytes: stored,
+            ms: None,
+            certain: true,
+            why: format!(
+                "{} ({}) 只在 pass 内用、从不被别的步骤读: 可建成 LAZILY_ALLOCATED/transient; 当前每帧仍写回 {:.0} KB",
+                img_tag(t, &Sub { img, mip: 0, layer: 0 }),
+                fmt_name(im.fmt),
+                stored / 1e3
+            ),
+        });
+    }
     out.sort_by(|a, b| a.ev.cmp(&b.ev).then(a.att.cmp(&b.att)));
     out
 }
@@ -697,8 +781,14 @@ fn ev_line(t: &Timeline, i: usize) -> String {
                     )
                 })
                 .collect();
+            let (mut ld, mut stb) = (0.0, 0.0);
+            for a in r["att"].as_array().cloned().unwrap_or_default() {
+                let (a1, a2, a3, a4) = t.att_bytes(ev, &a);
+                ld += a1 + a2;
+                stb += a3 + a4;
+            }
             format!(
-                "| {} | pass rp{}{} | {}x{} | {} | {} | {} | {} |",
+                "| {} | pass rp{}{} | {}x{} | {} | {} | {} | {:.0} / {:.0} | {} |",
                 i,
                 u(r, "rp"),
                 if r["dyn"].as_bool() == Some(true) { " (dyn)" } else { "" },
@@ -707,18 +797,20 @@ fn ev_line(t: &Timeline, i: usize) -> String {
                 atts.join("<br>"),
                 u(r, "dr") + u(r, "dri") + u(r, "drn"),
                 r["rd"].as_array().map(|a| a.len()).unwrap_or(0),
+                ld / 1e3,
+                stb / 1e3,
                 ms
             )
         }
         "dispatch" => format!(
-            "| {} | dispatch | {:?} | rd {} / wr {} | - | - | - |",
+            "| {} | dispatch | {:?} | rd {} / wr {} | - | - | - | - |",
             i,
             r["g"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).collect::<Vec<_>>()).unwrap_or_default(),
             r["rd"].as_array().map(|a| a.len()).unwrap_or(0),
             r["wr"].as_array().map(|a| a.len()).unwrap_or(0)
         ),
         k => format!(
-            "| {} | {} | {}x{} | src {} → dst {} | - | - | - |",
+            "| {} | {} | {}x{} | src {} → dst {} | - | - | - | - |",
             i,
             k,
             r["ex"][0].as_u64().unwrap_or(0),
@@ -765,7 +857,7 @@ pub(crate) fn analyze(paths: &[PathBuf]) -> Result<(String, Value), String> {
         for (k, (n, b, ms)) in &agg {
             let _ = writeln!(md, "| {} | {:.1} | {:.2} | {:.3} |", k, *n as f64 / nfr, b / 1e6 / nfr, ms / nfr);
         }
-        let _ = writeln!(md, "\n### 第 0 帧步骤清单\n\n| # | 步骤 | 尺寸 | 附件 (角色:格式#图 load/store) | draw | 采样引用 | GPU ms |\n|---|---|---|---|---|---|---|");
+        let _ = writeln!(md, "\n### 第 0 帧步骤清单\n\n| # | 步骤 | 尺寸 | 附件 (角色:格式#图 load/store) | draw | 采样引用 | 模型读/写 KB | GPU ms |\n|---|---|---|---|---|---|---|---|");
         let (lo, hi) = t.frame_range(0);
         for i in lo..hi {
             let _ = writeln!(md, "{}", ev_line(&t, i));
@@ -1019,6 +1111,16 @@ mod tests {
         assert!(!fs.iter().any(|x| x.why.contains("(屏幕)") && x.rule == "dead_store"));
         // 最后一帧不报白存 (后面没有整帧可看)
         assert!(!fs.iter().any(|x| x.rule == "dead_store" && x.frame == 1));
+    }
+
+    #[test]
+    fn depth_only_used_in_pass_is_transient_candidate() {
+        let t = Timeline::from_json(&fixture()).unwrap();
+        let fs = find(&t);
+        let tr: Vec<_> = fs.iter().filter(|x| x.rule == "transient_ok").collect();
+        assert_eq!(tr.len(), 1, "{fs:#?}");
+        assert!(tr[0].why.contains("图#2"));
+        assert!((tr[0].bytes - 40000.0).abs() < 1e-6);
     }
 
     #[test]
