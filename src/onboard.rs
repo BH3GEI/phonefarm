@@ -1250,16 +1250,25 @@ struct MeasureCfg<'a> {
     suspend: bool,
 }
 
+/// charge_suspend.sh suspend 的输出里有没有「真转成放电态」: CHARGE_SUSPENDED (写节点后判成放电)
+/// 或 CHARGE_ALREADY_ON_BATTERY。CHARGE_FAIL / CHARGE_SKIP 都算没停住 —— 档案里不能写成停了。
+pub fn suspend_took(out: &str) -> bool {
+    out.lines().any(|l| l.starts_with("CHARGE_SUSPENDED") || l.starts_with("CHARGE_ALREADY_ON_BATTERY") || l.starts_with("CHARGE_ALREADY_SUSPENDED"))
+}
+
 fn measure(dev: &Dev, m: &MeasureCfg<'_>) -> (Vec<RoundStat>, Vec<Value>, bool, Value) {
     let MeasureCfg { pkg, workload, cap_s, rounds, comm, out, suspend } = *m;
     let mut stats = Vec::new();
     let mut raw = Vec::new();
     let mut over = false;
     let mut guard = ChargeGuard { dev, active: false, log: vec![] };
+    let mut suspended = false;
     if suspend {
         let o = dev.su(&format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
+        suspended = suspend_took(&o);
+        // 没生效时脚本已就地还原; 这里仍让守卫在收尾跑一次 restore (无状态文件时是空操作)
         guard.active = true;
-        guard.log.push(o.trim().lines().last().unwrap_or("").to_string());
+        guard.log.extend(o.trim().lines().map(str::to_string));
     }
     let short = pkg.rsplit('.').next().unwrap_or("game");
     for i in 0..rounds {
@@ -1307,7 +1316,7 @@ fn measure(dev: &Dev, m: &MeasureCfg<'_>) -> (Vec<RoundStat>, Vec<Value>, bool, 
     }
     guard.restore();
     let charging = dev.su("cat /sys/class/qcom-battery/charging_enabled", 10).trim().to_string();
-    let charge = json!({"suspended": suspend, "log": guard.log.clone(), "charging_enabled_after": charging});
+    let charge = json!({"requested": suspend, "suspended": suspended, "log": guard.log.clone(), "charging_enabled_after": charging});
     (stats, raw, over, charge)
 }
 
@@ -1733,6 +1742,13 @@ pub fn run_onboard(args: &[String]) -> i32 {
         "human_interventions": 0,
         "evidence": {"dir": out, "rounds": rounds_raw},
     });
+    if charge["requested"].as_bool() == Some(true) && charge["suspended"].as_bool() != Some(true) {
+        if let Some(pf) = profile["pitfalls"].as_array_mut() {
+            pf.push(json!({"id": "charge_not_suspended",
+                "symptom": "停充没生效: 写过的候选节点都没让电池状态离开 Charging, 功耗按规矩记 null",
+                "workaround": "看 conditions.charging.log 与各轮 env.txt; 停充修好前别拿这台机的功耗做判定"}));
+        }
+    }
     if !a.keep_fg {
         dev.sh("input keyevent 3", 5); // 回桌面
     }
@@ -1885,6 +1901,18 @@ mod tests {
     #[test]
     fn not_foreground_relaunches() {
         assert_eq!(classify(&[], false, "com.android.launcher3", Policy::default(), &[]).act, Act::Relaunch);
+    }
+
+    #[test]
+    fn suspend_counts_only_when_the_device_really_went_on_battery() {
+        // 10-11 手机节点上原神那次: 所有候选节点都试过, 仍是 Charging —— 不能记成「停了」
+        let fail = "CHARGE_TRY_FAILED /sys/class/qcom-battery/charging_enabled (写 0 无效)\n\
+CHARGE_FAIL: 所有候选节点都没能把设备转成放电态\n\
+CHARGE_STATE status=Charging current_now=-632000 capacity=100 on_battery=no";
+        assert!(!suspend_took(fail));
+        assert!(!suspend_took("CHARGE_SKIP: 电量 20% 低于停充下限 30%, 不停充"));
+        assert!(suspend_took("CHARGE_SUSPENDED /sys/class/qcom-battery/charging_enabled: 1 -> 0\nCHARGE_STATE status=Discharging current_now=-640000 capacity=100 on_battery=yes"));
+        assert!(suspend_took("CHARGE_ALREADY_ON_BATTERY (本来就在放电态, 不需要停充)"));
     }
 
     #[test]
