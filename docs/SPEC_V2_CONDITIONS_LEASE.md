@@ -60,7 +60,7 @@ gray-layer(除 status)、perf(除离线 CSV) 在设备操作前拿租约，完�
 按完整 backend+serial SHA256 命名文件，内核 `File::try_lock` 排他锁，文件永不删除，
 避免等待者持有旧 inode。等待有上限，默认 600 秒，可用
 `PHONEFARM_LEASE_TIMEOUT_MS` 调整。5 秒 owner 心跳。返回/异常展开/进程退出时
-内核释放文件锁；正常返回同时清理本次 owner。需要 Rust >=1.89。
+内核释放文件锁；只有本次已知无未完成命令/恢复屏障的正常返回才清理 owner。需要 Rust >=1.89。
 
 legacy `devlock.d` 位于 `DEVLOCK_DIR`（默认 /private/tmp/claude-501）。自动租约
 用同样的原子 mkdir 协议桥接并维护 owner，另持有共享 bridge 内核锁。
@@ -70,9 +70,11 @@ legacy `devlock.d` 位于 `DEVLOCK_DIR`（默认 /private/tmp/claude-501）。�
 不能把 parent PID 不存在推成设备空闲：本地 child/远端采集/系统设置可能仍未恢复。
 使用 `phonefarm lease --serial S --recover-abandoned --confirm-device-idle` 前，操作者须
 独立确认负载已停止、手机状态已恢复；此确认作为 operator_assertion 落日志，device_verified=false。
-仅在 marker 的 producer/serial/token/完整 owner 匹配且 parent 和记录的 child PID 均已不存在
-时接受确认。PID=0、ps 错误/权限错误、活 child、未带可验证 marker 的他人目录
-（即使心跳老）绝不删除。不同 serial 不能回收该目录。wrapper 记录 child PID。
+仅在 marker 的已知 schema、producer/serial/token/完整 owner 匹配，parent 与记录的
+child PID 均已不存在，且独立 child PGID 的 kill(0) 明确返回 ESRCH 时接受确认。
+PID=0、ps/权限错误、活/未知进程组、未带可验证 marker 的他人目录（即使心跳老）
+绝不删除。不同 serial 不能回收该目录。原版本记录的 PID-only marker 不包含独立
+进程组证据，视为 UNKNOWN；不能用 PID 猜 PGID 或用人工 idle 声明补齐。
 `phonefarm lease --serial S --timeout-ms N -- COMMAND ...` 可保护其它本地工具，
 不要在此 wrapper 里再次调用自动租约的 phonefarm 命令，否则明确等待超时。
 
@@ -80,3 +82,37 @@ legacy `devlock.d` 位于 `DEVLOCK_DIR`（默认 /private/tmp/claude-501）。�
 script 仍可能绕过；真机验收必须确认没有这些并发负载。SIGKILL 释放内核互斥但保留 abandoned 屏障，
 不会自动恢复手机 sysfs，也不能证明远端工作已停止；先按既有流程恢复，确认空闲后才可解除屏障。
 本轮不把离线互斥测试作为物理实验没有污染的证明。
+
+## Wrapper 生命周期与跨版本恢复屏障（PR19 回补）
+
+wrapper 在 spawn 前原子持久化 `command_pending=true` 与本次 `pending_operation`；
+子命令创建独立 Unix 进程组，随后原子记录相同的正数 `child_pid` / `child_pgid`。
+父进程在 spawn 与绑定之间崩溃留下 pending，禁止再次写设备或人工确认清除。
+leader 正常退出不足以完成命令：必须 owner/心跳持续匹配，且整个记录的进程组
+明确不存在，才能移除 child pair 并释放本次 marker。孙进程仍运行或检查未知则
+退出 2 并保留屏障。它不能阻止子命令主动逃离进程组，也不能认证远端状态。
+
+只有本次 `Command::spawn()` 明确返回 `Err`（没有建立 child），且本次
+owner/token、pending operation 匹配、没有 child pair/恢复要求时，才原子撤销
+该 pending。ENOENT/EACCES 可释放本次空闲 marker；撤销失败、成功 spawn、
+绑定失败、等待失败或未知组不走此路径。任何退出都释放内核锁，持久不确定状态
+仍阻断下一次实验；不把内核锁释放当作手机已经空闲。
+
+marker 与 owner/心跳更新用 create_new 临时文件、文件 sync、原子 rename 和目录
+sync，不能 truncate 正在消费的状态。所有 marker 消费（正常 admission/check、
+Drop、人工 recover 与内部恢复所有权转移）统一严格校验 format-1：
+
+- 仅接受已知顶层字段 `format, producer, pid, token, serial, label, owner,
+  command_pending, pending_operation, child_pid, child_pgid, recovery_required,
+  recovery_context, previous_owner`；新字段/新 format 必须升级消费者，不能忽略后清锁。
+- 出现的 pending/recovery flag 必须是真 JSON boolean；null/string/number 是 UNKNOWN。
+  旧无扩展字段、无 child 的 format-1 owner 兼容；它没有新增恢复证明。
+- child PID/PGID 必须同时缺省或是同一个正 signed PID 范围的独立 group leader。
+  只有单独 child 字段、不同值或无效值一律 UNKNOWN。
+- `command_pending=true` 与 `recovery_required=true` 必须保留；人工 idle assertion
+  不得解除。恢复要求须由拥有该协议的 driver 以原始停机/恢复证据明确 reconcile；
+  本 PR 没有导入 confirmation-driver，不提供该 driver 的恢复命令。
+
+所有未知/损坏/newer-schema marker 均原样保留；不递归删他人目录。离线 host
+测试只验证合作进程排他、已拥有进程组和可检测坏账本，未验收 Android/Harmony
+恢复、远端进程组或任何性能资格。

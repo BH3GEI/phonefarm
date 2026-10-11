@@ -117,9 +117,39 @@ fn timeout_preserves_other_owner_and_failure_releases() {
         .output()
         .unwrap();
     assert_eq!(r.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("lease command:"));
     assert!(!f.legacy().exists());
     let mut c = worker(&f, "C", "0", "50");
     assert!(c.wait().unwrap().success());
+}
+
+#[cfg(unix)]
+#[test]
+fn executable_permission_spawn_failure_retires_only_its_pending_marker() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("spawn-permission");
+    let program = f.dir.join("nonexecutable");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let r = f
+        .cmd()
+        .args([
+            "lease",
+            "--serial",
+            "fake-device",
+            "--timeout-ms",
+            "100",
+            "--",
+        ])
+        .arg(&program)
+        .output()
+        .unwrap();
+    assert_eq!(r.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("lease command:"));
+    assert!(!f.legacy().exists());
+    let mut next = worker(&f, "next", "0", "100");
+    assert!(next.wait().unwrap().success());
+    assert!(!f.legacy().exists());
 }
 #[test]
 fn crash_releases_kernel_but_abandoned_owner_blocks_live_child_and_unknown_device() {
