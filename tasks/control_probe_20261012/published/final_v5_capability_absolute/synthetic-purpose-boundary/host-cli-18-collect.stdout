@@ -1,0 +1,1 @@
+{"eligible":false,"error":"control-only absolute capability session cannot collect performance observations","promotion_allowed":false,"real_game_optimization_proven":false,"recovery":"device writes may have begun; no automatic retry, inspect persistent barrier and explicit reconcile","status":"BLOCKED"}

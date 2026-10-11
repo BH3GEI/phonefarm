@@ -1,0 +1,53 @@
+   Compiling phonefarm v0.2.0 (/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/src)
+warning: function `power_usable` is never used
+   --> hwcond.rs:339:8
+    |
+339 | pub fn power_usable(rail: PowerRail, samples: &[PowerSample]) -> Result<(), String> {
+    |        ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `count_false_success` is never used
+  --> mtools.rs:48:8
+   |
+48 | pub fn count_false_success(samples: &[Value]) -> u32 {
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: method `events` is never used
+   --> mtools.rs:132:12
+    |
+102 | impl ToolStore {
+    | -------------- method in this implementation
+...
+132 |     pub fn events(&self) -> &[Value] {
+    |            ^^^^^^
+
+warning: methods `events` and `next_id` are never used
+  --> caps.rs:80:12
+   |
+52 | impl CapStore {
+   | ------------- methods in this implementation
+...
+80 |     pub fn events(&self) -> &[Value] { &self.events }
+   |            ^^^^^^
+...
+83 |     pub fn next_id(&self, prefix: &str) -> String {
+   |            ^^^^^^^
+
+warning: function `summarize_android` is never used
+   --> perfsrc.rs:131:8
+    |
+131 | pub fn summarize_android(samples: &[PowerSample], rail: PowerRail) -> PerfSnapshot {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: `phonefarm` (bin "phonefarm") generated 5 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.09s
+     Running tests/confirmation_driver_cli.rs (target/debug/deps/confirmation_driver_cli-83762d2f688767ef)
+
+running 2 tests
+test absolute_capability_accepts_diagnostic_fluctuation_without_any_performance_upgrade ... ok
+test absolute_capability_bad_evidence_and_unknown_restore_still_block has been running for over 60 seconds
+test absolute_capability_bad_evidence_and_unknown_restore_still_block ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 113.84s
+

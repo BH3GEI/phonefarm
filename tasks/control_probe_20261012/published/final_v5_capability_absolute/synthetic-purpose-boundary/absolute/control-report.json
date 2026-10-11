@@ -1,0 +1,261 @@
+{
+  "actual_clock_sustained_proven": false,
+  "actual_serial": "fake-serial",
+  "boot_id": "fake-boot",
+  "closure": {
+    "quiescence": {
+      "path": "closed-quiescence.txt",
+      "sha256": "b00a4ba999c334227ec0fa2565c0be9771a6127486078ab8fa4eea1357eaac02"
+    },
+    "restore_exit": {
+      "path": "closed-restore_exit.txt",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "session_closed": {
+      "path": "closed-session_closed.txt",
+      "sha256": "f5bc906d4a89e2875c52f18fb41f40373d6eb4d37e9f8d5ab0410cbacf1b667e"
+    },
+    "snapshot_exit": {
+      "path": "closed-snapshot_restored.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "snapshot_restored": {
+      "path": "closed-snapshot_restored.txt",
+      "sha256": "62469d6ca4d2b19d5eb6fb02646b02eab6c5d3ed8043d2c38d1849415b42569c"
+    }
+  },
+  "cold": null,
+  "eligible": false,
+  "evidence_origin": "synthetic",
+  "experiment_eligible": false,
+  "hold_seconds": 11,
+  "power_window_verified": false,
+  "promotion_allowed": false,
+  "real_game_optimization_proven": false,
+  "receipts": {
+    "readback_receipt": {
+      "path": "probe_0-receipt.txt",
+      "sha256": "0f5f63fbc5f1111df3f01914c37bcf77263e56409d80422380d0991621bb8b88"
+    },
+    "snapshot_after_run": {
+      "path": "probe_0-snapshot_after_run.txt",
+      "sha256": "62469d6ca4d2b19d5eb6fb02646b02eab6c5d3ed8043d2c38d1849415b42569c"
+    },
+    "snapshot_after_run_exit": {
+      "path": "probe_0-snapshot_after_run.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "snapshot_at_run": {
+      "path": "probe_0-snapshot_at_run.txt",
+      "sha256": "62469d6ca4d2b19d5eb6fb02646b02eab6c5d3ed8043d2c38d1849415b42569c"
+    },
+    "snapshot_at_run_exit": {
+      "path": "probe_0-snapshot_at_run.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "snapshot_before": {
+      "path": "probe_0-snapshot_before.txt",
+      "sha256": "62469d6ca4d2b19d5eb6fb02646b02eab6c5d3ed8043d2c38d1849415b42569c"
+    },
+    "snapshot_before_exit": {
+      "path": "probe_0-snapshot_before.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "snapshot_restored": {
+      "path": "probe_0-snapshot_restored.txt",
+      "sha256": "62469d6ca4d2b19d5eb6fb02646b02eab6c5d3ed8043d2c38d1849415b42569c"
+    },
+    "snapshot_restored_exit": {
+      "path": "probe_0-snapshot_restored.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    }
+  },
+  "schema": "phonefarm/control_probe_report@1",
+  "scope": "configuration_readback_only",
+  "status": "SIMULATED_CONTROL_RESTORED",
+  "temperature": {
+    "assessment": {
+      "compliant": true,
+      "reasons": [],
+      "samples": [
+        {
+          "compliant": true,
+          "normalized_c": {
+            "/sys/class/power_supply/battery/temp": 39.0,
+            "/sys/class/thermal/thermal_zone0/temp": 80.0,
+            "/sys/class/thermal/thermal_zone1/temp": 60.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50.0
+          },
+          "reasons": [],
+          "scope": "temperature_snapshot_only"
+        },
+        {
+          "compliant": true,
+          "normalized_c": {
+            "/sys/class/power_supply/battery/temp": 39.0,
+            "/sys/class/thermal/thermal_zone0/temp": 87.7,
+            "/sys/class/thermal/thermal_zone1/temp": 60.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50.0
+          },
+          "reasons": [],
+          "scope": "temperature_snapshot_only"
+        },
+        {
+          "compliant": true,
+          "normalized_c": {
+            "/sys/class/power_supply/battery/temp": 39.0,
+            "/sys/class/thermal/thermal_zone0/temp": 80.0,
+            "/sys/class/thermal/thermal_zone1/temp": 60.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50.0
+          },
+          "reasons": [],
+          "scope": "temperature_snapshot_only"
+        },
+        {
+          "compliant": true,
+          "normalized_c": {
+            "/sys/class/power_supply/battery/temp": 39.0,
+            "/sys/class/thermal/thermal_zone0/temp": 87.7,
+            "/sys/class/thermal/thermal_zone1/temp": 60.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50.0
+          },
+          "reasons": [],
+          "scope": "temperature_snapshot_only"
+        }
+      ],
+      "scope": "provided_temperature_readings_only"
+    },
+    "completion": {
+      "end_uptime_s": 1045993.15,
+      "profile_id": "capability_absolute_v1",
+      "samples": 4,
+      "start_uptime_s": 1045982.05
+    },
+    "diagnostic_reference": {
+      "bands": {
+        "/sys/class/power_supply/battery/temp": {
+          "high_c": 41.0,
+          "low_c": 37.0
+        },
+        "/sys/class/thermal/thermal_zone0/temp": {
+          "high_c": 85.29999999999998,
+          "low_c": 81.29999999999998
+        },
+        "/sys/class/thermal/thermal_zone1/temp": {
+          "high_c": 62.0,
+          "low_c": 58.0
+        },
+        "/sys/class/thermal/thermal_zone2/temp": {
+          "high_c": 52.0,
+          "low_c": 48.0
+        }
+      },
+      "profile_sha256": "a4f61d66a7eacfe1b88c5098f33a20c406ffd698127850b7a665ea3bd039cec7",
+      "schema": "phonefarm/thermal_capability_diagnostics@1",
+      "warmup": [
+        {
+          "readings": {
+            "/sys/class/power_supply/battery/temp": 390.0,
+            "/sys/class/thermal/thermal_zone0/temp": 80000.0,
+            "/sys/class/thermal/thermal_zone1/temp": 60000.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50000.0
+          },
+          "thermal_status": 2,
+          "uptime_s": 2000.0
+        },
+        {
+          "readings": {
+            "/sys/class/power_supply/battery/temp": 390.0,
+            "/sys/class/thermal/thermal_zone0/temp": 87700.0,
+            "/sys/class/thermal/thermal_zone1/temp": 60000.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50000.0
+          },
+          "thermal_status": 2,
+          "uptime_s": 2005.0
+        },
+        {
+          "readings": {
+            "/sys/class/power_supply/battery/temp": 390.0,
+            "/sys/class/thermal/thermal_zone0/temp": 80000.0,
+            "/sys/class/thermal/thermal_zone1/temp": 60000.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50000.0
+          },
+          "thermal_status": 2,
+          "uptime_s": 2010.0
+        },
+        {
+          "readings": {
+            "/sys/class/power_supply/battery/temp": 390.0,
+            "/sys/class/thermal/thermal_zone0/temp": 87700.0,
+            "/sys/class/thermal/thermal_zone1/temp": 60000.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50000.0
+          },
+          "thermal_status": 2,
+          "uptime_s": 2015.0
+        },
+        {
+          "readings": {
+            "/sys/class/power_supply/battery/temp": 390.0,
+            "/sys/class/thermal/thermal_zone0/temp": 80000.0,
+            "/sys/class/thermal/thermal_zone1/temp": 60000.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50000.0
+          },
+          "thermal_status": 2,
+          "uptime_s": 2020.0
+        },
+        {
+          "readings": {
+            "/sys/class/power_supply/battery/temp": 390.0,
+            "/sys/class/thermal/thermal_zone0/temp": 87700.0,
+            "/sys/class/thermal/thermal_zone1/temp": 60000.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50000.0
+          },
+          "thermal_status": 2,
+          "uptime_s": 2025.0
+        },
+        {
+          "readings": {
+            "/sys/class/power_supply/battery/temp": 390.0,
+            "/sys/class/thermal/thermal_zone0/temp": 80000.0,
+            "/sys/class/thermal/thermal_zone1/temp": 60000.0,
+            "/sys/class/thermal/thermal_zone2/temp": 50000.0
+          },
+          "thermal_status": 2,
+          "uptime_s": 2030.0
+        }
+      ]
+    },
+    "profile_sha256": "a4f61d66a7eacfe1b88c5098f33a20c406ffd698127850b7a665ea3bd039cec7",
+    "scope": "provided_control_hold_temperature_readings_only",
+    "stable_reference_required": false,
+    "temperature_profile_id": "capability_absolute_v1"
+  },
+  "temperature_profile_id": "capability_absolute_v1",
+  "temperature_reference_purpose": "diagnostic_only_no_comparison",
+  "thermal_admission": {
+    "assessment": {
+      "compliant": true,
+      "normalized_c": {
+        "/sys/class/power_supply/battery/temp": 39.0,
+        "/sys/class/thermal/thermal_zone0/temp": 87.7,
+        "/sys/class/thermal/thermal_zone1/temp": 60.0,
+        "/sys/class/thermal/thermal_zone2/temp": 50.0
+      },
+      "reasons": [],
+      "scope": "temperature_snapshot_only"
+    },
+    "checked_at": "2026-10-11T20:10:01.169412+00:00",
+    "profile_sha256": "a4f61d66a7eacfe1b88c5098f33a20c406ffd698127850b7a665ea3bd039cec7",
+    "raw": {
+      "readings": {
+        "/sys/class/power_supply/battery/temp": 390.0,
+        "/sys/class/thermal/thermal_zone0/temp": 87700.0,
+        "/sys/class/thermal/thermal_zone1/temp": 60000.0,
+        "/sys/class/thermal/thermal_zone2/temp": 50000.0
+      },
+      "thermal_status": 2,
+      "uptime_s": 1045977.0
+    },
+    "scope": "temperature_single_point_only"
+  }
+}
