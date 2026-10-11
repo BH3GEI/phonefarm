@@ -47,6 +47,7 @@ mod smartperf;
 mod plugins;
 mod runtime;
 mod script;
+mod selftest;
 mod serve;
 mod telemetry;
 mod vks;
@@ -211,6 +212,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 闭环:  autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]
               [--no-llm] [--probe-only] [--baseline-runs N] [--power-in-verdict auto|on|off]
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
+自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
+       (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
 灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop [pkg] | target <pkg> | status | off} [--keep-prop]
        (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
        gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
@@ -236,7 +239,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)
 设备锁: 碰设备的子命令 (run/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
-       capture/test-batch/cts-fetch/quest/probe/exec/experiment) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
+       capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
        通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h] [--no-devlock]
        锁已在同一 label 手里 (外层 devlock run / optimize) 时原地执行; 没拿到锁不碰设备, 退出 2";
 
@@ -714,6 +717,11 @@ fn main() {
         Some("gray-layer") => {
             // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)
             std::process::exit(graylayer::run_gray_layer(&args[1..]));
+        }
+        Some("selftest") => {
+            // 判定链的已知答案真机自检 (refbench): A/A 误判率、已知变好检出率与 MDE、
+            // 已知变差必须 REJECT、画质作弊必须被画面判据拦下
+            std::process::exit(selftest::run_selftest(&args[1..]));
         }
         Some("autoloop") => {
             // 系统参数全自动闭环 (probe -> 基线 -> 冻结规则 -> 提名 -> ABBA -> 判定 -> 报告)
