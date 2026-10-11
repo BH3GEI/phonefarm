@@ -39,6 +39,11 @@ const FLAGS: &[&str] = &[
     "-DRK_DYNAMIC_UPOP_BUILD=1",
     "-shared",
 ];
+const ADAPTATION_INPUTS: [(&str, &str); 3] = [
+    ("original_candidate.spv", "original.spv"),
+    ("adaptation_descriptor.json", "descriptor.json"),
+    ("adaptation_manifest.json", "manifest.json"),
+];
 
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -90,7 +95,7 @@ fn open_regular(p: &Path) -> Result<fs::File, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
     }
     let f = options
         .open(p)
@@ -301,6 +306,8 @@ struct Descriptor {
     tools: BTreeMap<String, Tool>,
     shader_flags: Vec<String>,
     native_flags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adaptation: Option<Value>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 struct Manifest {
@@ -323,6 +330,10 @@ fn metadata(id: &str, inputs: &BTreeMap<String, String>) -> String {
     format!("#define RK_DYNAMIC_ARTIFACT_METADATA 1\nstatic const char kArtifactId[] = \"{id}\";\nstatic const char kCandidateSourceSha256[] = \"{}\";\nstatic const char kCandidateSpirvSha256[] = \"{}\";\n",inputs["candidate.comp"],inputs["candidate.spv"])
 }
 pub fn verify(dir: &Path) -> Result<Value, String> {
+    let directory_metadata = fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
+    if !directory_metadata.is_dir() || directory_metadata.file_type().is_symlink() {
+        return Err("artifact directory must be a real directory".into());
+    }
     if fs::symlink_metadata(dir.join("manifest.json"))
         .map_err(|e| e.to_string())?
         .file_type()
@@ -339,11 +350,22 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
     {
         return Err("unsupported manifest state/schema".into());
     }
+    let expected_route = if manifest.descriptor.adaptation.is_some() {
+        "adapted_spirv"
+    } else {
+        "compiled_glsl"
+    };
+    if (manifest.descriptor.adaptation.is_some()
+        || manifest.checks.get("candidate_route").is_some())
+        && manifest.checks["candidate_route"] != expected_route
+    {
+        return Err("candidate build route metadata mismatch".into());
+    }
     let descriptor_bytes = json_bytes(&manifest.descriptor)?;
     if manifest.artifact_id != format!("upop-{}", hash(&descriptor_bytes)) {
         return Err("artifact ID does not match frozen descriptor".into());
     }
-    let required_inputs = [
+    let mut required_inputs = vec![
         "candidate.comp",
         "candidate.spv",
         "copyprobe_copy.comp",
@@ -353,6 +375,9 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
         "VkLayer_refknobs.json",
         "copy_spv.h",
     ];
+    if manifest.descriptor.adaptation.is_some() {
+        required_inputs.extend(ADAPTATION_INPUTS.map(|(name, _)| name));
+    }
     if manifest.descriptor.inputs.len() != required_inputs.len()
         || required_inputs
             .iter()
@@ -434,6 +459,12 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
     if upopabi::reflect(&read(&dir.join("candidate.spv"))?)? != manifest.descriptor.abi {
         return Err("reflected ABI mismatch".into());
     }
+    if let Some(origin) = &manifest.descriptor.adaptation {
+        let summary = crate::storageadapter::verify_snapshots(&adaptation_snapshots(dir)?)?;
+        if origin != &summary {
+            return Err("adaptation origin mismatch".into());
+        }
+    }
     elf_arm64(&read(&dir.join(LAYER_NAME))?)?;
     Ok(
         json!({"artifact_id":manifest.artifact_id,"layer_sha256":manifest.layer_sha256,
@@ -473,9 +504,45 @@ fn header_array(out: &mut String, name: &str, bytes: &[u8]) {
     ));
 }
 
-fn build(source: &Path, out: &Path, ndk: &Path, timeout: Duration) -> Result<Value, String> {
+fn adaptation_snapshots(dir: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let mut contents = BTreeMap::new();
+    for (stored, original) in ADAPTATION_INPUTS.into_iter().chain([
+        ("candidate.comp", "original.comp"),
+        ("candidate.spv", "adapted.spv"),
+    ]) {
+        let limit = if original.ends_with(".comp") {
+            SOURCE_LIMIT
+        } else if original.ends_with(".spv") {
+            SPV_LIMIT
+        } else {
+            64 * 1024
+        };
+        contents.insert(original.to_string(), read_limit(&dir.join(stored), limit)?);
+    }
+    Ok(contents)
+}
+fn build(
+    source: Option<&Path>,
+    adaptation: Option<&Path>,
+    out: &Path,
+    ndk: &Path,
+    timeout: Duration,
+) -> Result<Value, String> {
     // Read once; subsequent compilers only see this owned snapshot.
-    let bytes = read_limit(source, SOURCE_LIMIT)?;
+    let (bytes, imported, origin) = if let Some(dir) = adaptation {
+        let (snapshots, summary) = crate::storageadapter::snapshots(dir)?;
+        (
+            snapshots["original.comp"].clone(),
+            Some(snapshots),
+            Some(summary),
+        )
+    } else {
+        (
+            read_limit(source.ok_or("source missing")?, SOURCE_LIMIT)?,
+            None,
+            None,
+        )
+    };
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -490,7 +557,13 @@ fn build(source: &Path, out: &Path, ndk: &Path, timeout: Duration) -> Result<Val
             .map_err(|e| e.to_string())?;
     }
     write(&stage.join("candidate.comp"), &bytes)?;
-    let result = build_stage(&stage, ndk, timeout);
+    if let Some(snapshots) = imported {
+        write(&stage.join("candidate.spv"), &snapshots["adapted.spv"])?;
+        for (stored, original) in ADAPTATION_INPUTS {
+            write(&stage.join(stored), &snapshots[original])?;
+        }
+    }
+    let result = build_stage(&stage, ndk, timeout, origin);
     match result {
         Ok(id) => {
             verify(&stage)?;
@@ -533,7 +606,12 @@ fn build(source: &Path, out: &Path, ndk: &Path, timeout: Duration) -> Result<Val
     }
 }
 
-fn build_stage(stage: &Path, ndk: &Path, timeout: Duration) -> Result<String, String> {
+fn build_stage(
+    stage: &Path,
+    ndk: &Path,
+    timeout: Duration,
+    adaptation: Option<Value>,
+) -> Result<String, String> {
     let tag = if ndk.join("toolchains/llvm/prebuilt/darwin-x86_64").is_dir() {
         "darwin-x86_64"
     } else {
@@ -560,6 +638,14 @@ fn build_stage(stage: &Path, ndk: &Path, timeout: Duration) -> Result<String, St
         "candidate.comp".into(),
         file_hash(&stage.join("candidate.comp"))?,
     );
+    if let Some(origin) = &adaptation {
+        if &crate::storageadapter::verify_snapshots(&adaptation_snapshots(stage)?)? != origin {
+            return Err("adaptation snapshot changed before build".into());
+        }
+        for (stored, _) in ADAPTATION_INPUTS {
+            inputs.insert(stored.into(), file_hash(&stage.join(stored))?);
+        }
+    }
     for name in [
         "vk_layer_refknobs.cpp",
         "artifact_stats.h",
@@ -572,17 +658,21 @@ fn build_stage(stage: &Path, ndk: &Path, timeout: Duration) -> Result<String, St
     }
     let candidate = stage.join("candidate.comp");
     let spv = stage.join("candidate.spv");
-    tools["glslc"].exec(
-        &[
-            "--target-env=vulkan1.0",
-            "-O",
-            pstr(&candidate)?,
-            "-o",
-            pstr(&spv)?,
-        ],
-        &stage.join("candidate_compile.log"),
-        timeout,
-    )?;
+    if adaptation.is_none() {
+        tools["glslc"].exec(
+            &[
+                "--target-env=vulkan1.0",
+                "-O",
+                pstr(&candidate)?,
+                "-o",
+                pstr(&spv)?,
+            ],
+            &stage.join("candidate_compile.log"),
+            timeout,
+        )?;
+    } else {
+        write(&stage.join("candidate_compile.log"), b"adapted_spirv route: exact verified SPIR-V snapshot used; original storage source was NOT recompiled; source/SPIR-V association caller_supplied_unverified\n")?;
+    }
     if file_hash(&candidate)? != inputs["candidate.comp"] {
         return Err("candidate snapshot changed during compile".into());
     }
@@ -621,6 +711,7 @@ fn build_stage(stage: &Path, ndk: &Path, timeout: Duration) -> Result<String, St
             .map(|s| s.to_string())
             .chain(["-I<snapshot>".into(), "-llog".into()])
             .collect(),
+        adaptation,
     };
     let descriptor_bytes = json_bytes(&descriptor)?;
     let id = format!("upop-{}", hash(&descriptor_bytes));
@@ -701,6 +792,11 @@ fn build_stage(stage: &Path, ndk: &Path, timeout: Duration) -> Result<String, St
     ] {
         files.insert(name.into(), file_hash(&stage.join(name))?);
     }
+    let candidate_route = if descriptor.adaptation.is_some() {
+        "adapted_spirv"
+    } else {
+        "compiled_glsl"
+    };
     let manifest = Manifest {
         schema_version: 1,
         artifact_id: id.clone(),
@@ -710,7 +806,7 @@ fn build_stage(stage: &Path, ndk: &Path, timeout: Duration) -> Result<String, St
         descriptor,
         files,
         layer_sha256,
-        checks: json!({"abi_reflected":true,"elf_machine":"AArch64","required_exports":EXPORTS,"needed":needed}),
+        checks: json!({"abi_reflected":true,"elf_machine":"AArch64","required_exports":EXPORTS,"needed":needed,"candidate_route":candidate_route}),
     };
     write(&stage.join("manifest.json"), &json_bytes(&manifest)?)?;
     Ok(id)
@@ -730,10 +826,16 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 fn cli(args: &[String]) -> Result<Value, String> {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("adapt-storage" | "verify-adaptation")
+    ) {
+        return crate::storageadapter::cli(args);
+    }
     let command = args
         .first()
         .map(String::as_str)
-        .ok_or("expected build, inspect or verify")?;
+        .ok_or("expected build, inspect, verify, adapt-storage or verify-adaptation")?;
     let mut opts = BTreeMap::new();
     let mut i = 1;
     while i < args.len() {
@@ -749,6 +851,7 @@ fn cli(args: &[String]) -> Result<Value, String> {
             "--spirv",
             "--artifact",
             "--timeout-seconds",
+            "--adapted-artifact",
         ]
         .contains(&key.as_str())
         {
@@ -765,10 +868,16 @@ fn cli(args: &[String]) -> Result<Value, String> {
     }
     let get = |k| opts.get(k).copied().ok_or_else(|| format!("missing {k}"));
     let allowed: &[&str] = match command {
-        "build" => &["--source", "--out", "--ndk", "--timeout-seconds"],
+        "build" => &[
+            "--source",
+            "--adapted-artifact",
+            "--out",
+            "--ndk",
+            "--timeout-seconds",
+        ],
         "inspect" => &["--spirv"],
         "verify" => &["--artifact"],
-        _ => return Err("expected build, inspect or verify".into()),
+        _ => return Err("expected build, inspect, verify, adapt-storage or verify-adaptation".into()),
     };
     if opts.keys().any(|k| !allowed.contains(k)) {
         return Err("argument does not apply to subcommand".into());
@@ -779,6 +888,9 @@ fn cli(args: &[String]) -> Result<Value, String> {
         ),
         "verify" => verify(Path::new(get("--artifact")?)),
         "build" => {
+            if opts.contains_key("--source") == opts.contains_key("--adapted-artifact") {
+                return Err("build requires exactly one of --source or --adapted-artifact".into());
+            }
             let default = std::env::var("REFBENCH_NDK").unwrap_or_else(|_| {
                 format!(
                     "{}/ndk/28.2.13676358",
@@ -796,7 +908,8 @@ fn cli(args: &[String]) -> Result<Value, String> {
                 return Err("timeout must be 1..120 seconds".into());
             }
             build(
-                Path::new(get("--source")?),
+                opts.get("--source").map(|s| Path::new(*s)),
+                opts.get("--adapted-artifact").map(|s| Path::new(*s)),
                 Path::new(get("--out")?),
                 Path::new(opts.get("--ndk").copied().unwrap_or(&default)),
                 Duration::from_secs(seconds),

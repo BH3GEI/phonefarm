@@ -17,6 +17,10 @@ sha2 = "0.10"
 rspirv = "0.13"
 libc = "0.2"
 
+[dev-dependencies]
+# Matches GOL's real GLSL→SPIR-V path; wgsl-in is needed by Naga30's feature gate.
+naga = { version = "30.0", default-features = false, features = ["glsl-in", "wgsl-in", "spv-out"] }
+
 [profile.release]
 strip = true
 lto = true
