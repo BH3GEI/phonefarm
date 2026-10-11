@@ -106,6 +106,11 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     })
 }
 
+/// `adb get-state` 的回包 (含 `#adb_exit=N` 尾巴) 是否表示在线。
+fn device_online(out: &str) -> bool {
+    adb_ok(out) && crate::graylayer::GrayLayer::adb_stdout(out).trim() == "device"
+}
+
 fn log(msg: &str) {
     println!("[autoloop] {msg}");
 }
@@ -824,7 +829,9 @@ pub fn run_autoloop(args: &[String]) -> i32 {
     };
     let serial = a.serial.clone();
 
-    if adb(&serial, &["get-state"], 15).trim() != "device" {
+    // adb() 恒在输出尾部追加 `#adb_exit=N`, 比之前先剥掉 —— 直接 trim 比 "device"
+    // 永远不等, Rust 版 autoloop 因此一上来就报「设备不在线」退出
+    if !device_online(&adb(&serial, &["get-state"], 15)) {
         log("设备不在线");
         return 2;
     }
@@ -1321,6 +1328,14 @@ pub fn run_autoloop(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use crate::sysparam::{build_whitelist, parse_probe};
+
+    #[test]
+    fn get_state_reply_with_exit_token_counts_as_online() {
+        assert!(device_online("device\n#adb_exit=0"));
+        assert!(!device_online("offline\n#adb_exit=0"));
+        assert!(!device_online("#adb_exit=1"));
+        assert!(!device_online("#adb_exit=timeout"));
+    }
 
     fn args(xs: &[&str]) -> Result<Args, String> {
         parse_args(&xs.iter().map(|x| x.to_string()).collect::<Vec<_>>())
