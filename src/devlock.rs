@@ -82,14 +82,19 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
         return false;
     }
     if matches!(sub, "eval" | "gpu-op") {
-        let unlock = rest.iter().any(|a| a == "--unlock");
-        if let Some(i) = rest.iter().position(|a| a == "--request") {
-            if let Some(p) = rest.get(i + 1) {
-                if !unlock && !std::path::Path::new(p).exists() {
-                    return false;
-                }
-            }
+        // 这两个入口只有两种情况会碰设备: `--unlock` 回滚遗留锁频态, 或 `--request`
+        // 指着一个真实存在的文件。其余 (裸调用、缺参数、请求路径不存在) 都在解析
+        // 那一步就退出 —— 上层探活 (`phonefarm gpu-op` 裸调看认不认子命令) 不能因为
+        // 别人持锁就排两小时队。
+        if rest.iter().any(|a| a == "--unlock") {
+            return true;
         }
+        return match rest.iter().position(|a| a == "--request") {
+            Some(i) => rest
+                .get(i + 1)
+                .is_some_and(|p| std::path::Path::new(p).exists()),
+            None => false,
+        };
     }
     true
 }
@@ -323,6 +328,17 @@ mod tests {
             assert!(!needs_lock(s, &[]), "{s}");
         }
         assert!(!needs_lock("gpu-op", &v(&["--help"])));
+    }
+
+    /// game_opt_loop 的 harness 探活是**裸调** `phonefarm gpu-op` (看认不认这个子命令)。
+    /// 它在解析参数那一步就退出, 碰不到设备; 曾经因为要锁而在别人持锁时排队两小时,
+    /// 把 game_opt_loop 的 cargo test 整个挂住。
+    #[test]
+    fn a_bare_or_requestless_eval_call_does_not_queue() {
+        assert!(!needs_lock("gpu-op", &[]));
+        assert!(!needs_lock("eval", &[]));
+        assert!(!needs_lock("gpu-op", &v(&["--serial", "S", "--json"])));
+        assert!(!needs_lock("eval", &v(&["--request"])));
     }
 
     /// 上层探活拿一个不存在的请求路径问 eval 认不认 `--request`: 它碰不到设备,
