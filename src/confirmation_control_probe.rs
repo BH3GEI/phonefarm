@@ -26,7 +26,7 @@ fn parse(bytes: &[u8]) -> Result<ProbeRequest, String> {
             r.temperature_profile_id
                 .as_deref()
                 .unwrap_or("legacy_cold_v1"),
-            "legacy_cold_v1" | "loaded_steady_v1"
+            "legacy_cold_v1" | "loaded_steady_v1" | "capability_absolute_v1"
         ),
         "unknown receiver temperature profile ID",
     )?;
@@ -70,10 +70,16 @@ pub(super) fn frozen_names(dir: &Path) -> Result<BTreeSet<String>, String> {
     .into_iter()
     .map(String::from)
     .collect::<BTreeSet<_>>();
-    if req.temperature_profile_id.as_deref() == Some("loaded_steady_v1") {
+    if matches!(
+        req.temperature_profile_id.as_deref(),
+        Some("loaded_steady_v1" | "capability_absolute_v1")
+    ) {
         for name in temperature::frozen_names() {
             names.insert((*name).into());
         }
+    }
+    if req.temperature_profile_id.as_deref() == Some("capability_absolute_v1") {
+        names.insert("thermal-purpose.txt".into());
     }
     Ok(names)
 }
@@ -118,8 +124,14 @@ fn validate(dir: &Path) -> Result<ProbeRequest, String> {
                 .unwrap_or("legacy_cold_v1"),
         "control temperature preset differs",
     )?;
-    if r.temperature_profile_id.as_deref() == Some("loaded_steady_v1") {
-        temperature::load_frozen(dir)?;
+    match r.temperature_profile_id.as_deref() {
+        Some("loaded_steady_v1") => {
+            temperature::load_frozen(dir)?;
+        }
+        Some("capability_absolute_v1") => {
+            temperature::load_capability_frozen(dir)?;
+        }
+        _ => {}
     }
     Ok(r)
 }
@@ -181,7 +193,11 @@ pub(super) fn run(path: &Path, out: &Path, execute: bool) -> Result<Value, Strin
     let req = parse(&bytes)?;
     let artifact_bytes = bounded(&req.candidate, 2 * 1024 * 1024)?;
     let a = candidate(&artifact_bytes)?;
-    let loaded = req.temperature_profile_id.as_deref() == Some("loaded_steady_v1");
+    let capability = req.temperature_profile_id.as_deref() == Some("capability_absolute_v1");
+    let loaded = matches!(
+        req.temperature_profile_id.as_deref(),
+        Some("loaded_steady_v1" | "capability_absolute_v1")
+    );
     if req.transport.kind == "adb" && !execute {
         return Ok(
             json!({"status":"VALIDATED_ONLY","scope":"configuration_readback_only","device_executed":false,"eligible":false}),
@@ -249,9 +265,11 @@ pub(super) fn run(path: &Path, out: &Path, execute: bool) -> Result<Value, Strin
     }
     // Loaded restore ownership starts at the steady baseline state, before any remote write.
     let temperature = if loaded {
-        Some(temperature::freeze_loaded(
-            &mut t, &lease, &out, &serial, &boot,
-        )?)
+        Some(if capability {
+            temperature::freeze_capability(&mut t, &lease, &out, &serial, &boot)?
+        } else {
+            temperature::freeze_loaded(&mut t, &lease, &out, &serial, &boot)?
+        })
     } else {
         None
     };
@@ -325,6 +343,9 @@ pub(super) fn run(path: &Path, out: &Path, execute: bool) -> Result<Value, Strin
         files.push("thermal_sample.sh".into());
         // Complete the shared frozen thermal tool set; this endpoint never starts a sampler.
         files.push("thermal_sampler.sh".into());
+        if capability {
+            files.push("thermal-purpose.txt".into());
+        }
     }
     let names = frozen_names(&out)?;
     freeze(&out, &names.iter().map(String::as_str).collect::<Vec<_>>())?;
@@ -335,7 +356,11 @@ pub(super) fn run(path: &Path, out: &Path, execute: bool) -> Result<Value, Strin
     install(&mut t, &lease, &out, &remote, &token, &boot, &files)?;
     verify_remote(&mut t, &lease, &out, &state)?;
     let cold_receipt = if let Some(ref thermal) = temperature {
-        temperature::loaded_snapshot(&mut t, &lease, &out, thermal, "pre-control")?
+        if capability {
+            temperature::capability_snapshot(&mut t, &lease, &out, thermal, "pre-control")?
+        } else {
+            temperature::loaded_snapshot(&mut t, &lease, &out, thermal, "pre-control")?
+        }
     } else {
         cold(&mut t, &lease, &out, req.transport.kind == "fake", &now())?
     };
@@ -397,7 +422,7 @@ pub(super) fn run(path: &Path, out: &Path, execute: bool) -> Result<Value, Strin
     let report = json!({"schema":"phonefarm/control_probe_report@1",
         "status":if req.transport.kind=="fake"{"SIMULATED_CONTROL_RESTORED"}else{"CONTROL_RESTORED"},
         "scope":"configuration_readback_only","evidence_origin":t.origin,"actual_serial":serial,"boot_id":boot,
-        "hold_seconds":11,"temperature_profile_id":req.temperature_profile_id.as_deref().unwrap_or("legacy_cold_v1"),"temperature":thermal_hold,"cold":cold_receipt,"receipts":refs,"closure":closure,
+        "hold_seconds":11,"temperature_profile_id":req.temperature_profile_id.as_deref().unwrap_or("legacy_cold_v1"),"temperature":thermal_hold,"cold":if capability{Value::Null}else{cold_receipt.clone()},"thermal_admission":if capability{cold_receipt}else{Value::Null},"temperature_reference_purpose":if capability{"diagnostic_only_no_comparison"}else{"existing_preset"},"receipts":refs,"closure":closure,
         "eligible":false,"experiment_eligible":false,"real_game_optimization_proven":false,"promotion_allowed":false,
         "actual_clock_sustained_proven":false,"power_window_verified":false});
     save_json(&out, "control-report.json", &report)?;

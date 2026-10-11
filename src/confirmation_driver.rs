@@ -1353,6 +1353,10 @@ fn prepared(dir: &Path) -> Result<(Request, Value), String> {
 }
 fn collect(dir: &Path, frozen_path: &Path, execute: bool) -> Result<Value, String> {
     let dir = dir.canonicalize().map_err(|e| e.to_string())?;
+    require(
+        read_json(&dir.join("request.json"))?["temperature_profile_id"] != "capability_absolute_v1",
+        "control-only absolute capability session cannot collect performance observations",
+    )?;
     let (req, state) = prepared(&dir)?;
     let p = read_json(&dir.join("plan.json"))?;
     let admission = read_json(&dir.join("admission.json"))?;

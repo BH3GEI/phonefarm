@@ -1228,3 +1228,134 @@ release_master() {{ :; }}
         }
     }
 }
+
+#[test]
+fn absolute_capability_accepts_diagnostic_fluctuation_without_any_performance_upgrade() {
+    let f = F::new(false);
+    control_request(&f, "fake");
+    let mut req = f.read("control-request.json");
+    req["temperature_profile_id"] = json!("capability_absolute_v1");
+    f.write("control-request.json", &req);
+    let (code, v) = f.call(
+        &[
+            "probe-controls",
+            "--request",
+            "control-request.json",
+            "--out",
+            "absolute",
+        ],
+        "capability_fluctuating",
+    );
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["status"], "SIMULATED_CONTROL_RESTORED");
+    assert_eq!(v["temperature"]["stable_reference_required"], false);
+    assert_eq!(v["temperature"]["completion"]["samples"], 4);
+    assert_eq!(
+        v["temperature"]["diagnostic_reference"]["schema"],
+        "phonefarm/thermal_capability_diagnostics@1"
+    );
+    assert_eq!(
+        v["temperature_reference_purpose"],
+        "diagnostic_only_no_comparison"
+    );
+    for key in [
+        "eligible",
+        "experiment_eligible",
+        "real_game_optimization_proven",
+        "promotion_allowed",
+        "actual_clock_sustained_proven",
+    ] {
+        assert_eq!(v[key], false);
+    }
+    assert_eq!(v["evidence_origin"], "synthetic");
+    assert!(!f.dir.join("absolute/plan.json").exists());
+    assert!(!f.dir.join("legacy/devlock.d").exists());
+    let (code, refusal) = f.call(
+        &[
+            "collect",
+            "--session",
+            "absolute",
+            "--frozen",
+            "missing.json",
+        ],
+        "",
+    );
+    assert_eq!(code, 1);
+    assert!(refusal["error"]
+        .as_str()
+        .unwrap()
+        .contains("control-only absolute capability"));
+    let f = F::new(false);
+    let mut r = f.read("request.json");
+    r["temperature_profile_id"] = json!("capability_absolute_v1");
+    f.write("request.json", &r);
+    let (code, v) = f.prepare("");
+    assert_eq!(code, 1, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("temperature profile"));
+    assert!(!f.dir.join("argv.jsonl").exists());
+}
+#[test]
+fn absolute_capability_bad_evidence_and_unknown_restore_still_block() {
+    for fail in [
+        "thermal_missing",
+        "thermal_wrong_unit",
+        "thermal_severe",
+        "thermal_override",
+        "thermal_short_admission",
+        "control_hold_hot",
+        "control_hold_severe",
+        "control_hold_incomplete",
+        "restore",
+        "closure_unknown",
+    ] {
+        let f = F::new(false);
+        control_request(&f, "fake");
+        let mut r = f.read("control-request.json");
+        r["temperature_profile_id"] = json!("capability_absolute_v1");
+        f.write("control-request.json", &r);
+        let (code, v) = f.call(
+            &[
+                "probe-controls",
+                "--request",
+                "control-request.json",
+                "--out",
+                "absolute",
+            ],
+            fail,
+        );
+        assert_eq!(code, 1, "{fail}: {v}");
+        assert_eq!(v["eligible"], false);
+        assert!(!f.dir.join("absolute/control-report.json").exists());
+        if fail.starts_with("control_hold") || ["restore", "closure_unknown"].contains(&fail) {
+            assert!(
+                f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists(),
+                "{fail}"
+            );
+        } else {
+            assert!(!f.dir.join("absolute/initial.snapshot").exists(), "{fail}");
+            assert!(!f.dir.join("legacy/devlock.d").exists(), "{fail}");
+        }
+    }
+}
+#[test]
+fn old_loaded_profile_still_rejects_three_point_one_degree_range_before_control() {
+    let f = F::new(false);
+    control_request(&f, "fake");
+    let mut r = f.read("control-request.json");
+    r["temperature_profile_id"] = json!("loaded_steady_v1");
+    f.write("control-request.json", &r);
+    let (code, v) = f.call(
+        &[
+            "probe-controls",
+            "--request",
+            "control-request.json",
+            "--out",
+            "loaded",
+        ],
+        "thermal_drift_31",
+    );
+    assert_eq!(code, 1, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("thermally stable"));
+    assert!(!f.dir.join("loaded/initial.snapshot").exists());
+    assert!(!f.dir.join("legacy/devlock.d").exists());
+}

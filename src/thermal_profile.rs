@@ -158,7 +158,7 @@ fn type_matches(s: &SensorMetadata) -> bool {
 pub fn resolve(id: &str, metadata: &[SensorMetadata]) -> ThermalResult<Profile> {
     let loaded = match id {
         "legacy_cold_v1" => false,
-        "loaded_steady_v1" => true,
+        "loaded_steady_v1" | "capability_absolute_v1" => true,
         _ => return Err("unknown receiver temperature profile".into()),
     };
     if metadata.is_empty() || metadata.len() > MAX_SENSORS {
@@ -317,7 +317,7 @@ fn assess(profile: &Profile, sample: &Sample, admission: bool) -> ThermalResult<
     if actual != expected {
         reasons.push("missing or unexpected sensor reading paths".into());
     }
-    if profile.id == "loaded_steady_v1" && !matches!(sample.thermal_status, Some(0..=2)) {
+    if profile.id != "legacy_cold_v1" && !matches!(sample.thermal_status, Some(0..=2)) {
         reasons.push("Android thermal status unknown or severe".into());
     }
     let mut normalized = BTreeMap::new();
@@ -392,6 +392,25 @@ pub fn evaluate_window(profile: &Profile, samples: &[Sample]) -> ThermalResult<W
 }
 
 pub fn freeze_reference_band(profile: &Profile, warmup: &[Sample]) -> ThermalResult<ReferenceBand> {
+    if profile.id == "capability_absolute_v1" {
+        return Err(
+            "control capability diagnostics cannot establish a performance reference".into(),
+        );
+    }
+    freeze_band(profile, warmup, true)
+}
+
+pub fn freeze_capability_diagnostics(
+    profile: &Profile,
+    warmup: &[Sample],
+) -> ThermalResult<ReferenceBand> {
+    if profile.id != "capability_absolute_v1" {
+        return Err("absolute capability diagnostics require their explicit preset".into());
+    }
+    freeze_band(profile, warmup, false)
+}
+
+fn freeze_band(profile: &Profile, warmup: &[Sample], stable: bool) -> ThermalResult<ReferenceBand> {
     let report = evaluate_window(profile, warmup)?;
     if !report.compliant
         || warmup.len() < profile.window.warmup_min_samples
@@ -408,7 +427,7 @@ pub fn freeze_reference_band(profile: &Profile, warmup: &[Sample]) -> ThermalRes
             .collect();
         let lo = values.iter().copied().fold(f64::INFINITY, f64::min);
         let hi = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        if hi - lo > profile.window.warmup_max_range_c {
+        if stable && hi - lo > profile.window.warmup_max_range_c {
             return Err(format!("warmup is not thermally stable: {}", s.path));
         }
         if profile.id == "legacy_cold_v1" && hi >= s.admission_cap_c {
@@ -424,7 +443,12 @@ pub fn freeze_reference_band(profile: &Profile, warmup: &[Sample]) -> ThermalRes
         );
     }
     Ok(ReferenceBand {
-        schema: "phonefarm/thermal_reference@1".into(),
+        schema: if stable {
+            "phonefarm/thermal_reference@1"
+        } else {
+            "phonefarm/thermal_capability_diagnostics@1"
+        }
+        .into(),
         profile_sha256: profile_sha256(profile)?,
         bands,
         warmup: warmup.to_vec(),
@@ -696,5 +720,36 @@ mod tests {
         let frozen = serde_json::to_vec(&p).unwrap();
         let q: Profile = serde_json::from_slice(&frozen).unwrap();
         assert_eq!(profile_sha256(&p).unwrap(), profile_sha256(&q).unwrap());
+    }
+    #[test]
+    fn capability_absolute_retains_caps_integrity_but_not_performance_stability() {
+        let cap = resolve("capability_absolute_v1", &metadata()).unwrap();
+        let loaded = resolve("loaded_steady_v1", &metadata()).unwrap();
+        let mut w = warmup(&cap);
+        let path = cap
+            .sensors
+            .iter()
+            .find(|s| s.domain == Domain::Cpu)
+            .unwrap()
+            .path
+            .clone();
+        w[1].readings.insert(path.clone(), 83100.);
+        assert!(freeze_reference_band(&loaded, &w).is_err());
+        let d = freeze_capability_diagnostics(&cap, &w).unwrap();
+        assert_eq!(d.schema, "phonefarm/thermal_capability_diagnostics@1");
+        assert!(freeze_reference_band(&cap, &w).is_err());
+        assert!(evaluate_against_reference(&cap, &d, &w).is_err());
+        assert!(freeze_capability_diagnostics(&loaded, &w).is_err());
+        assert!(freeze_capability_diagnostics(&cap, &w[..5]).is_err());
+        w[2].thermal_status = Some(3);
+        assert!(freeze_capability_diagnostics(&cap, &w).is_err());
+        w[2].thermal_status = Some(2);
+        w[2].readings.insert(path.clone(), 120000.);
+        assert!(freeze_capability_diagnostics(&cap, &w).is_err());
+        w[2].readings.remove(&path);
+        assert!(freeze_capability_diagnostics(&cap, &w).is_err());
+        let mut m = metadata();
+        m[0].unit = Unit::Unknown;
+        assert!(resolve("capability_absolute_v1", &m).is_err());
     }
 }
