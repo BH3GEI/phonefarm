@@ -15,6 +15,8 @@ use std::{
 };
 #[path = "confirmation_control_probe.rs"]
 mod control_probe;
+#[path = "confirmation_fixed_tools.rs"]
+mod fixed_tools;
 #[path = "confirmation_temperature.rs"]
 pub(crate) mod temperature;
 const CAP: u64 = 128 * 1024 * 1024;
@@ -458,7 +460,60 @@ fn frozen_names(dir: &Path) -> Result<BTreeSet<String>, String> {
     if read_json(&dir.join("request.json"))?["temperature_profile_id"] == "loaded_steady_v1" {
         names.extend(temperature::frozen_names().iter().map(|s| (*s).to_owned()));
     }
+    names.extend(fixed_tools::FROZEN_NAMES.map(String::from));
     Ok(names)
+}
+fn remote_tool_names(dir: &Path) -> Result<BTreeSet<String>, String> {
+    let request = read_json(&dir.join("request.json"))?;
+    let control = request["schema"] == "phonefarm/control_probe_request@1";
+    require(
+        control || request["schema"] == "phonefarm/confirmation_driver_request@1",
+        "unknown fixed tool purpose",
+    )?;
+    let count = read_json(&dir.join("candidate.json"))?["payload"]["params"]
+        .as_object()
+        .ok_or("missing fixed tool control count")?
+        .len();
+    let preset = request["temperature_profile_id"].as_str();
+    fixed_tools::names(
+        control,
+        matches!(preset, Some("loaded_steady_v1" | "capability_absolute_v1")),
+        preset == Some("capability_absolute_v1"),
+        count,
+    )
+}
+fn bundle_from_state(dir: &Path) -> Result<fixed_tools::Bundle, String> {
+    let state = read_json(&dir.join("state.json"))?;
+    fixed_tools::validate_frozen(
+        dir,
+        &remote_tool_names(dir)?,
+        state["remote"]
+            .as_str()
+            .ok_or("missing fixed tool remote")?,
+        state["token"].as_str().ok_or("missing fixed tool owner")?,
+        state["boot_id"].as_str().ok_or("missing fixed tool boot")?,
+    )
+}
+fn freeze_tool_bundle(dir: &Path, files: &[String]) -> Result<(), String> {
+    let names = remote_tool_names(dir)?;
+    require(
+        files.len() == names.len() && files.iter().cloned().collect::<BTreeSet<_>>() == names,
+        "remote install files differ from receiver fixed set",
+    )?;
+    let state = read_json(&dir.join("state.json"))?;
+    let bundle = fixed_tools::compile(
+        dir,
+        &names,
+        state["remote"]
+            .as_str()
+            .ok_or("missing fixed tool remote")?,
+        state["token"].as_str().ok_or("missing fixed tool owner")?,
+        state["boot_id"].as_str().ok_or("missing fixed tool boot")?,
+    )?;
+    save(dir, "tools.manifest.json", &bundle.manifest_bytes)?;
+    save(dir, "tools.install.sh", &bundle.installer)?;
+    save(dir, "tools.verify.sh", &bundle.verifier)?;
+    Ok(())
 }
 fn verify(dir: &Path) -> Result<(), String> {
     let v = read_json(&dir.join("inputs.manifest.json"))?;
@@ -477,6 +532,7 @@ fn verify(dir: &Path) -> Result<(), String> {
             "frozen input bytes changed",
         )?;
     }
+    bundle_from_state(dir)?;
     Ok(())
 }
 fn prepared_names(dir: &Path) -> Result<BTreeSet<String>, String> {
@@ -552,51 +608,30 @@ fn install(
     boot: &str,
     files: &[String],
 ) -> Result<(), String> {
+    verify(dir)?;
+    let bundle = bundle_from_state(dir)?;
+    require(
+        bundle.manifest.remote == remote
+            && bundle.manifest.token == token
+            && bundle.manifest.boot_id == boot
+            && files.len() == bundle.manifest.count
+            && files.iter().cloned().collect::<BTreeSet<_>>() == remote_tool_names(dir)?,
+        "fixed tool installation identity/set changed",
+    )?;
     journal(
         dir,
         json!({"event":"remote_install_intent","remote":remote,"token":token,"boot_id":boot,"files":files,"at":now()}),
     )?;
-    checked(
+    let receipt = checked(
         t,
-        "install_owner",
-        &format!(
-            "set -eu; umask 077; mkdir {}; printf '%s\\n' {} > {}/owner; sync",
-            quote(remote),
-            quote(&format!("{token} {boot}")),
-            quote(remote)
-        ),
-        None,
-        10,
+        "install_fixed_tools",
+        "sh",
+        Some(&dir.join("tools.install.sh")),
+        30,
         65536,
         lease,
     )?;
-    for name in files {
-        require(safe(name), "unsafe frozen filename")?;
-        let cmd=format!("set -eu; test ! -e {}/session.closed; test \"$(cat {}/owner)\" = {}; test \"$(cat /proc/sys/kernel/random/boot_id)\" = {}; cat > {}/{}; sync",quote(remote),quote(remote),quote(&format!("{token} {boot}")),quote(boot),quote(remote),quote(name));
-        checked(
-            t,
-            "install_file",
-            &cmd,
-            Some(&dir.join(name)),
-            15,
-            65536,
-            lease,
-        )?;
-        let read = checked(
-            t,
-            "verify_remote_file",
-            &format!("cat {}/{}", quote(remote), quote(name)),
-            None,
-            15,
-            CAP,
-            lease,
-        )?;
-        require(
-            read == bounded(&dir.join(name), CAP)?,
-            "remote frozen file bytes differ",
-        )?;
-    }
-    Ok(())
+    bundle.accept_install(&receipt)
 }
 fn verify_remote(
     t: &mut Transport,
@@ -605,45 +640,21 @@ fn verify_remote(
     state: &Value,
 ) -> Result<(), String> {
     verify(dir)?;
-    let hashes = read_json(&dir.join("inputs.manifest.json"))?;
-    for (name, _) in hashes["hashes"]
-        .as_object()
-        .ok_or("missing input manifest")?
-    {
-        if matches!(
-            name.as_str(),
-            "worker.sh"
-                | "bootstrap.sh"
-                | "snapshot.sh"
-                | "sample_env.sh"
-                | "thermal_sample.sh"
-                | "thermal_sampler.sh"
-                | "workload.sh"
-                | "restore.tsv"
-                | "candidate.plan.tsv"
-        ) || name.starts_with("ftrace-")
-            || name.starts_with("probe_") && name.ends_with(".plan.tsv")
-        {
-            let actual = checked(
-                t,
-                "verify_remote_file",
-                &format!(
-                    "cat {}/{}",
-                    quote(state["remote"].as_str().ok_or("missing remote")?),
-                    quote(name)
-                ),
-                None,
-                15,
-                CAP,
-                lease,
-            )?;
-            require(
-                actual == bounded(&dir.join(name), CAP)?,
-                "remote frozen execution bytes changed/unknown",
-            )?;
-        }
-    }
-    Ok(())
+    let bundle = bundle_from_state(dir)?;
+    require(
+        state == &read_json(&dir.join("state.json"))?,
+        "fixed tool verification state changed",
+    )?;
+    let actual = checked(
+        t,
+        "verify_fixed_tools",
+        "sh",
+        Some(&dir.join("tools.verify.sh")),
+        30,
+        65536,
+        lease,
+    )?;
+    bundle.accept_verify(&actual)
 }
 fn worker(
     t: &mut Transport,
@@ -1121,7 +1132,9 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         save(&out, &name, plan.as_bytes())?;
         files.push(name);
     }
+    freeze_tool_bundle(&out, &files)?;
     let mut frozenfiles = files.clone();
+    frozenfiles.extend(fixed_tools::FROZEN_NAMES.map(String::from));
     frozenfiles.extend(
         [
             "request.json",
