@@ -50,6 +50,7 @@ pub fn build(
         "inject",
         "gpu_level",
         "power_rail",
+        "fan",
         "notes",
     ];
     for (k, v) in c.as_object().ok_or("conditions must be object")? {
@@ -66,11 +67,17 @@ pub fn build(
             return Err(format!("shader workload.{k} unsupported"));
         }
     }
-    let inject = opt_bool(&c["inject"], "conditions.inject", false)?
-        || opt_bool(&p["inject"], "payload.inject", false)?;
-    if inject {
+    // GOL always serializes fan:String. `unknown` states a measurement gap, not a control.
+    let fan = opt_str(&c["fan"], "conditions.fan")?;
+    if fan.is_some_and(|v| v != "unknown") {
+        return Err(
+            "shader fan control unsupported; only unknown/null declaration is accepted".into(),
+        );
+    }
+    if opt_bool(&c["inject"], "conditions.inject", false)? {
         return Err("shader inject=true unsupported: only built-in headless/refbench postfx route is implemented".into());
     }
+    let injection = resolve_injection(&p["inject"], carrier, p["track"].as_str())?;
     if !opt_bool(&c["require_root"], "conditions.require_root", true)? {
         return Err(
             "shader require_root=false unsupported: frequency control requires root".into(),
@@ -177,7 +184,7 @@ pub fn build(
     let resolved = json!({"carrier":carrier,"seconds":seconds,"frames":frames,"intensity":intensity,
         "script": if carrier == "refbench" { "sr_pipeline" } else { "" },"serial":serial,
         "cool_c":cool,"require_root":true,"require_discharging":discharge,
-        "charging_suspend":{"enabled":suspend_enabled,"node":null},"inject":false,
+        "charging_suspend":{"enabled":suspend_enabled,"node":null},"inject":injection,"fan":null,
         "power_rail":rail,"gpu_level":gpu_level,"quality_reference":reference});
     let request = json!({"version":1,"candidate_id":req["candidate_id"],"track":p["track"],
         "serial":serial,"package":req["package"],"replay_script":script,"shader_path":p["shader_path"],
@@ -186,7 +193,7 @@ pub fn build(
         // replay_seconds has no consumer on refbench; explicitly recorded null in resolved_config.
         "protocol":{"cool_c":cool,"replay_seconds":seconds.unwrap_or(1),"rounds":req["protocol"]["rounds"],
             "alternating":req["protocol"]["alternating"],"p_threshold":req["protocol"]["p_threshold"]},
-        "v2_context":{"conditions_requested":c,"workload_requested":w,"resolved_config":resolved}});
+        "v2_context":{"conditions_requested":c,"workload_requested":w,"injection_requested":p["inject"],"resolved_config":resolved}});
     let mut args = vec![
         "--json".into(),
         "--carrier".into(),
@@ -219,6 +226,40 @@ pub fn build(
     })
 }
 
+/// The typed GOL contract uses Inject{via,layer}; old bool false/null means no extra route.
+/// A native injection is implemented only by refbench's SR postfx scene, never a black-box hook.
+fn resolve_injection(v: &Value, carrier: &str, track: Option<&str>) -> Result<Value, String> {
+    if v.is_null() || v == &json!(false) {
+        return Ok(json!(false));
+    }
+    if v == &json!(true) {
+        return Err(
+            "shader inject=true unsupported: use typed carrier_native route for refbench SR".into(),
+        );
+    }
+    let obj = v
+        .as_object()
+        .ok_or("payload.inject must be Inject{via,layer}/false/null")?;
+    for (k, val) in obj {
+        if !["via", "layer"].contains(&k.as_str()) && !val.is_null() {
+            return Err(format!("payload.inject.{k} unsupported"));
+        }
+    }
+    let via = opt_str(&v["via"], "payload.inject.via")?.ok_or("payload.inject.via missing")?;
+    if via != "carrier_native" {
+        return Err(format!(
+            "shader inject.via={via} unsupported: no Vulkan-layer shader injection implementation"
+        ));
+    }
+    if !v["layer"].is_null() {
+        return Err("carrier_native does not consume inject.layer".into());
+    }
+    if carrier != "refbench" || track != Some("sr") {
+        return Err("carrier_native only implements refbench sr_pipeline/sr postfx; no headless/game/frame_gen injection".into());
+    }
+    Ok(json!({"via":"carrier_native","layer":null}))
+}
+
 /// A shader bench PASS only passes its operator checks. Neither route proves a game improvement.
 pub fn qualification_scope(carrier: Option<&str>) -> Value {
     json!({"stage":"experiment","eligible":false,"can_claim_improvement":false,
@@ -232,8 +273,8 @@ pub fn abort(req: &Value, reason: &str, resolved: Option<&Value>) -> Value {
     json!({"version":2,"kind":"shader","candidate_id":req["candidate_id"],"status":"ABORT",
         "source":"phonefarm","metrics":{"operator_latency_ms":null,"fps_p95_ms":null,"power_watt":null,"psnr_db":null},
         "verdict":{"is_pareto_improvement":false,"p_value":1.0,"reason":reason},
-        "conditions_requested":req["conditions"],"workload_requested":req["workload"],
-        "resolved_config":resolved,"conditions_observed":{"arms":[],"root_verified":null,"restored":null,"power_window_verified":false},
+        "conditions_requested":req["conditions"],"workload_requested":req["workload"],"injection_requested":req["payload"]["inject"],
+        "resolved_config":resolved,"conditions_observed":{"arms":[],"fan":null,"root_verified":null,"restored":null,"power_window_verified":false},
         "qualification":qualification_scope(req["workload"]["carrier"].as_str()),
         "measurement_scope":if req["workload"]["carrier"]=="headless" {"operator_benchmark_only"} else {"refbench_measurement_only"},
         "unavailable":[reason]})
@@ -275,6 +316,35 @@ mod tests {
             p.request["v2_context"]["conditions_requested"],
             r["conditions"]
         );
+    }
+    #[test]
+    fn typed_gol_native_route_does_not_turn_unknown_fan_into_observation() {
+        let r: Value =
+            serde_json::from_str(include_str!("../examples/gol_shader_native_request.json"))
+                .unwrap();
+        let p = build(&r, None, None).unwrap();
+        assert_eq!(p.resolved["inject"]["via"], "carrier_native");
+        assert_eq!(p.resolved["fan"], Value::Null);
+        assert_eq!(
+            p.request["v2_context"]["conditions_requested"]["fan"],
+            "unknown"
+        );
+        assert_eq!(
+            p.request["v2_context"]["injection_requested"],
+            r["payload"]["inject"]
+        );
+        for (carrier, track, via, layer) in [
+            ("headless", "sr", "carrier_native", Value::Null),
+            ("refbench", "frame_gen", "carrier_native", Value::Null),
+            ("refbench", "sr", "vulkan_layer", Value::Null),
+            ("refbench", "sr", "carrier_native", json!("some-layer")),
+        ] {
+            let mut unsupported = r.clone();
+            unsupported["workload"]["carrier"] = json!(carrier);
+            unsupported["payload"]["track"] = json!(track);
+            unsupported["payload"]["inject"] = json!({"via":via,"layer":layer});
+            assert!(build(&unsupported, None, None).is_err());
+        }
     }
     #[test]
     fn rejects_conditions_without_implementation() {
