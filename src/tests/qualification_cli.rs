@@ -336,3 +336,33 @@ esac
     assert!(!t.0.join("out/snap_before_probe.txt").exists());
     assert_eq!(nonroot["status"], "ABORT");
 }
+
+#[cfg(unix)]
+#[test]
+fn capability_scratch_reservation_failure_is_unknown_before_transport() {
+    let t = Scratch::new();
+    let adb = fake_adb(&t);
+    let log = t.0.join("adb.log");
+    let not_a_directory = t.0.join("not-a-directory");
+    std::fs::write(&not_a_directory, b"sentinel").unwrap();
+    let p = t.write("request.json", &request());
+    let o = cmd(&t)
+        .args(["eval", "--request"])
+        .arg(p)
+        .args(["--serial", "fixture-device", "--out"])
+        .arg(t.0.join("out"))
+        .env("ADB_BIN", adb)
+        .env("QUALIFICATION_ADB_LOG", &log)
+        .env("TMPDIR", &not_a_directory)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = report(&o);
+    assert_eq!(r["status"], "ABORT");
+    assert_eq!(r["qualification"]["probe_allowed"], false);
+    let root_check = r["qualification"]["checks"].as_array().unwrap()
+        .iter().find(|c| c["id"] == "root").unwrap();
+    assert_eq!(root_check["state"], "unknown");
+    assert!(!log.exists(), "no transport when its output cannot be isolated");
+    assert_eq!(std::fs::read(&not_a_directory).unwrap(), b"sentinel");
+}
