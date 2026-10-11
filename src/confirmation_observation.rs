@@ -1,0 +1,1079 @@
+//! Read-only reconstruction of one confirmation observation. Never an optimization verdict.
+use crate::{autoloop, eval, looptrace, pyjson, qualification, sysparam};
+use chrono::{DateTime, FixedOffset};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
+
+const JSON_LIMIT: u64 = 2 * 1024 * 1024;
+const RAW_LIMIT: u64 = 128 * 1024 * 1024;
+const TOTAL_LIMIT: u64 = 512 * 1024 * 1024;
+fn hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+fn digest_ok(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+fn require(ok: bool, reason: &str) -> Result<(), String> {
+    if ok {
+        Ok(())
+    } else {
+        Err(reason.into())
+    }
+}
+fn time(s: &str) -> Result<DateTime<FixedOffset>, String> {
+    DateTime::parse_from_rfc3339(s).map_err(|e| format!("invalid driver timestamp: {e}"))
+}
+fn regular_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let before = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    require(
+        before.is_file() && !before.file_type().is_symlink() && before.len() <= limit,
+        "evidence must be a bounded regular file",
+    )?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A path can be replaced between stat and open. FIFO must not block, symlink must not be followed.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let f = options.open(path).map_err(|e| e.to_string())?;
+    let opened = f.metadata().map_err(|e| e.to_string())?;
+    require(
+        opened.is_file() && opened.len() <= limit,
+        "opened evidence is not a bounded regular file",
+    )?;
+    let mut bytes = Vec::new();
+    f.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    require(
+        bytes.len() as u64 <= limit,
+        "evidence size limit exceeded during read",
+    )?;
+    Ok(bytes)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileRef {
+    path: String,
+    sha256: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Bundle {
+    schema: String,
+    run: FileRef,
+    baseline_admission: FileRef,
+    frozen_plan: FileRef,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Conditions {
+    schema: String,
+    device_serial: String,
+    device_boot_id: String,
+    snapshot_cpu_policies: Vec<String>,
+    render_comm: String,
+    capture_seconds: u64,
+    frozen_at: String,
+    policy: qualification::Policy,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Artifact {
+    kind: String,
+    payload: SysparamPayload,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SysparamPayload {
+    #[serde(default)]
+    why: Option<String>,
+    params: BTreeMap<String, String>,
+    plan: Vec<PlanEntry>,
+    #[serde(default)]
+    whitelist: Option<Value>,
+    deny_keywords: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanEntry {
+    kind: String,
+    path: String,
+    value: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Raw {
+    trace: FileRef,
+    env: FileRef,
+    workload_exit: FileRef,
+    sampler_exit: FileRef,
+    capture_exit: FileRef,
+    restore_exit: FileRef,
+    root_id: FileRef,
+    boot_id: FileRef,
+    cold: FileRef,
+    probe: FileRef,
+    snapshot_before: FileRef,
+    snapshot_at_run: FileRef,
+    snapshot_after_run: FileRef,
+    snapshot_restored: FileRef,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Run {
+    schema: String,
+    evidence_origin: String,
+    phase: String,
+    run_id: String,
+    pair_id: Option<String>,
+    sample_role: String,
+    device_serial: String,
+    started_at: String,
+    finished_at: String,
+    conditions: FileRef,
+    artifact: FileRef,
+    raw: Raw,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Cold {
+    checked_at: String,
+    zone: String,
+    c: f64,
+    waited_s: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Admission {
+    schema: String,
+    conditions: FileRef,
+    baseline_artifact: FileRef,
+    runs: Vec<FileRef>,
+}
+
+// These field orders mirror GOL PR29's serde tuple fingerprint. Value maps must not reorder Plan.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Frozen {
+    schema: String,
+    registered_at: String,
+    plan: Plan,
+    sha256: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Plan {
+    baseline_artifact_sha256: String,
+    candidate_artifact_sha256: String,
+    conditions_sha256: String,
+    baseline_admission_sha256: String,
+    exploration_run_ids: Vec<String>,
+    exploration_artifact_sha256: Vec<String>,
+    pairs: usize,
+    schedule: Vec<PlannedPair>,
+    family_alpha: f64,
+    paired_t_assumptions_acknowledged: bool,
+    metrics: Vec<MetricRule>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlannedPair {
+    pair_id: String,
+    a_run_id: String,
+    b_run_id: String,
+    baseline_first: bool,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetricRule {
+    name: String,
+    direction: String,
+    scale: String,
+    minimum_improvement: Option<f64>,
+    maximum_regression: f64,
+}
+
+/// Own the bytes once: hashing and parsing use the same read, including repeated file refs.
+#[derive(Default)]
+struct Reader {
+    bytes: BTreeMap<PathBuf, Vec<u8>>,
+    hashes: BTreeMap<String, String>,
+}
+impl Reader {
+    fn path(base: &Path, r: &FileRef) -> Result<PathBuf, String> {
+        require(
+            digest_ok(&r.sha256),
+            "file reference requires lowercase SHA-256",
+        )?;
+        let p = Path::new(&r.path);
+        require(
+            !r.path.is_empty() && p.components().all(|c| matches!(c, Component::Normal(_))),
+            "file reference must be a relative path without traversal",
+        )?;
+        let mut result = base.to_path_buf();
+        for c in p.components() {
+            result.push(c);
+            let m = std::fs::symlink_metadata(&result)
+                .map_err(|e| format!("{}: {e}", result.display()))?;
+            require(!m.file_type().is_symlink(), "symlink evidence rejected")?;
+        }
+        Ok(result)
+    }
+    fn read(&mut self, base: &Path, r: &FileRef, limit: u64) -> Result<(PathBuf, Vec<u8>), String> {
+        let p = Self::path(base, r)?;
+        if !self.bytes.contains_key(&p) {
+            let m = std::fs::symlink_metadata(&p).map_err(|e| e.to_string())?;
+            require(
+                m.is_file() && m.len() <= limit,
+                "evidence must be a bounded regular file",
+            )?;
+            require(
+                self.bytes.values().map(|b| b.len() as u64).sum::<u64>() + m.len() <= TOTAL_LIMIT,
+                "evidence bundle total byte limit exceeded",
+            )?;
+            let bytes = regular_bytes(&p, limit)?;
+            require(bytes.len() as u64 <= limit, "evidence size limit exceeded")?;
+            require(
+                self.bytes.values().map(|b| b.len() as u64).sum::<u64>() + bytes.len() as u64
+                    <= TOTAL_LIMIT,
+                "evidence bundle total byte limit exceeded",
+            )?;
+            self.bytes.insert(p.clone(), bytes);
+        }
+        let bytes = self.bytes.get(&p).unwrap();
+        require(
+            bytes.len() as u64 <= limit && hash(bytes) == r.sha256,
+            &format!("changed evidence bytes: {}", p.display()),
+        )?;
+        self.hashes
+            .insert(p.display().to_string(), r.sha256.clone());
+        Ok((p, bytes.clone()))
+    }
+    fn json<T: DeserializeOwned>(
+        &mut self,
+        base: &Path,
+        r: &FileRef,
+    ) -> Result<(PathBuf, T), String> {
+        let (p, bytes) = self.read(base, r, JSON_LIMIT)?;
+        let v = serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", p.display()))?;
+        Ok((p, v))
+    }
+    fn text(&mut self, base: &Path, r: &FileRef) -> Result<String, String> {
+        let (_, b) = self.read(base, r, RAW_LIMIT)?;
+        String::from_utf8(b).map_err(|e| e.to_string())
+    }
+}
+
+fn conditions_valid(c: &Conditions) -> Result<(), String> {
+    require(
+        c.schema == "phonefarm/confirmation_conditions@1",
+        "unknown conditions schema",
+    )?;
+    require(
+        !c.device_serial.trim().is_empty()
+            && !c.device_boot_id.trim().is_empty()
+            && !c.render_comm.trim().is_empty()
+            && (2..=600).contains(&c.capture_seconds),
+        "known device/boot/render thread and capture duration 2..600 required",
+    )?;
+    time(&c.frozen_at)?;
+    let policies: BTreeSet<_> = c.snapshot_cpu_policies.iter().collect();
+    require(
+        !policies.is_empty()
+            && policies.len() == c.snapshot_cpu_policies.len()
+            && policies.len() <= 32
+            && policies.iter().all(|s| {
+                s.strip_prefix("policy")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            }),
+        "freeze a known unique CPU policy coverage list",
+    )?;
+    c.policy.validate()?;
+    require(
+        c.policy.cool_c.is_some() && c.policy.temp_cap_c.is_some(),
+        "temperature conditions unknown",
+    )?;
+    require(
+        c.policy.goal != qualification::Goal::DisplaySmoothness && !c.policy.require_quality,
+        "v1 supports sysparam submit-proxy measurements, not display or quality-changing routes",
+    )
+}
+const SNAPSHOT_FIXED_KEYS: &[&str] = &[
+    "ftrace.tracing_on",
+    "ftrace.current_tracer",
+    "ftrace.buffer_size_kb",
+    "ftrace.set_event",
+    "kgsl.min_pwrlevel",
+    "kgsl.max_pwrlevel",
+    "kgsl.default_pwrlevel",
+    "kgsl.thermal_pwrlevel",
+    "kgsl.force_clk_on",
+    "kgsl.force_rail_on",
+    "kgsl.force_bus_on",
+    "kgsl.force_no_nap",
+    "kgsl.idle_timer",
+    "kgsl.max_gpuclk",
+    "kgsl.pwrscale",
+    "kgsl.bus_split",
+    "kgsl.perfcounter",
+    "kgsl.devfreq_governor",
+    "kgsl.devfreq_min_freq",
+    "kgsl.devfreq_max_freq",
+    "bus.DDR.boost_freq",
+    "bus.DDR.hw_max_freq",
+    "bus.DDR.hw_min_freq",
+    "bus.LLCC.boost_freq",
+    "bus.LLCC.hw_max_freq",
+    "bus.LLCC.hw_min_freq",
+    "wm.size",
+    "wm.density",
+    "settings.peak_refresh_rate",
+    "settings.min_refresh_rate",
+    "settings.refresh_rate_mode",
+];
+fn snapshot(s: &str, policies: &[String]) -> Result<BTreeMap<String, String>, String> {
+    require(
+        eval::adb_ok(s)
+            && s.starts_with("# device_snapshot v1\n")
+            && s.lines().any(|l| l == "# end"),
+        "snapshot missing completion/ADB receipt",
+    )?;
+    let mut result: BTreeMap<String, String> = BTreeMap::new();
+    let mut ended = false;
+    for l in s.lines().skip(1) {
+        if l == "# end" {
+            require(!ended, "duplicate snapshot end")?;
+            ended = true;
+            continue;
+        }
+        if l == "#adb_exit=0" && ended {
+            continue;
+        }
+        require(!ended, "snapshot data after end")?;
+        let (k, v) = l.split_once('=').ok_or("malformed snapshot row")?;
+        require(
+            !k.is_empty() && result.insert(k.into(), v.into()).is_none(),
+            "duplicate/empty snapshot key",
+        )?;
+    }
+    for k in [
+        "ftrace.tracing_on",
+        "ftrace.current_tracer",
+        "ftrace.buffer_size_kb",
+        "ftrace.set_event",
+    ] {
+        require(
+            result
+                .get(k)
+                .is_some_and(|v| (k == "ftrace.set_event" || !v.is_empty()) && v != "<unreadable>"),
+            "snapshot missing readable tracing restoration domain",
+        )?;
+    }
+    require(
+        SNAPSHOT_FIXED_KEYS
+            .iter()
+            .all(|key| result.contains_key(*key)),
+        "snapshot missing fixed device_snapshot v1 domain",
+    )?;
+    for policy in policies {
+        for suffix in ["governor", "scaling_min", "scaling_max"] {
+            require(
+                result.contains_key(&format!("cpu.{policy}.{suffix}")),
+                "snapshot missing declared CPU policy domain",
+            )?;
+        }
+    }
+    require(
+        matches!(result["ftrace.tracing_on"].as_str(), "0" | "1")
+            && result["ftrace.buffer_size_kb"]
+                .parse::<u64>()
+                .is_ok_and(|n| n > 0),
+        "invalid tracing state receipt",
+    )?;
+    Ok(result)
+}
+fn control(
+    a: &Artifact,
+    probe: &str,
+    before: &str,
+    active: &str,
+    after: &str,
+    c: &Conditions,
+) -> Result<(), String> {
+    require(a.kind == "sysparam", "unsupported artifact kind")?;
+    let probe_map = sysparam::parse_probe(probe);
+    let recorded_policies: BTreeSet<_> = probe_map
+        .get("cpu.policies")
+        .unwrap_or("")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("policy{s}"))
+        .collect();
+    require(
+        recorded_policies == c.snapshot_cpu_policies.iter().cloned().collect(),
+        "probe CPU policy inventory differs from frozen snapshot coverage",
+    )?;
+    let b = snapshot(before, &c.snapshot_cpu_policies)?;
+    let during = snapshot(active, &c.snapshot_cpu_policies)?;
+    let end = snapshot(after, &c.snapshot_cpu_policies)?;
+    require(
+        during == end && b.keys().eq(during.keys()),
+        "control snapshot changed/missing between sample boundaries",
+    )?;
+    let cand: Vec<_> = a
+        .payload
+        .params
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if cand.is_empty() {
+        return require(
+            a.payload.plan.is_empty() && b == during,
+            "baseline must not apply hidden controls",
+        );
+    }
+    let wl = sysparam::build_whitelist(&sysparam::parse_probe(probe));
+    let (ok, why) = sysparam::validate_candidate(&cand, &wl);
+    require(ok, &why)?;
+    let proposed = "# loop_v1 sysparam plan\n".to_owned()
+        + &a.payload
+            .plan
+            .iter()
+            .map(|e| format!("{}\t{}\t{}\n", e.kind, e.path, e.value))
+            .collect::<String>();
+    require(
+        sysparam::plan_text(&cand, &wl)? == proposed,
+        "artifact plan differs from whitelist-resolved params",
+    )?;
+    // GOL metadata is preserved in the artifact hash but never replaces receiver-owned rules/probe.
+    let _ = (
+        &a.payload.why,
+        &a.payload.whitelist,
+        &a.payload.deny_keywords,
+    );
+    let mut expected = b.clone();
+    for (id, value) in &cand {
+        let spec = sysparam::wl_get(&wl, id).ok_or("missing whitelist spec")?;
+        let key = autoloop::snapshot_key_of(&spec.kind, &spec.path)
+            .ok_or("control has no snapshot coverage")?;
+        require(
+            b.get(&key)
+                .is_some_and(|x| !x.is_empty() && x != "<unreadable>"),
+            "control prior value unreadable",
+        )?;
+        expected.insert(key, value.clone());
+    }
+    for key in autoloop::touched_keys(&cand, &wl) {
+        require(
+            b.get(&key)
+                .is_some_and(|x| !x.is_empty() && x != "<unreadable>"),
+            "touched sibling missing/unreadable",
+        )?;
+    }
+    require(
+        expected == during,
+        "requested control not read back, or hidden state changed",
+    )
+}
+fn trace_bounds(text: &str) -> Option<(f64, f64)> {
+    let l = text
+        .lines()
+        .find(|l| l.starts_with("#loop_v1_meta capture_start_uptime="))?;
+    let field = |key: &str| {
+        l.split_whitespace()
+            .find_map(|s| s.strip_prefix(key))?
+            .parse::<f64>()
+            .ok()
+    };
+    let (a, b) = (
+        field("capture_start_uptime=")?,
+        field("capture_end_uptime=")?,
+    );
+    (a.is_finite() && b.is_finite() && a >= 0. && b > a).then_some((a, b))
+}
+struct LoadedRun {
+    manifest: Run,
+    conditions: Conditions,
+    parsed: Value,
+    gates: BTreeMap<String, bool>,
+    issues: Vec<String>,
+    checks: Vec<qualification::Check>,
+    uptime: (f64, f64),
+    env_window: sysparam::SampleWindow,
+    start: DateTime<FixedOffset>,
+    end: DateTime<FixedOffset>,
+}
+impl LoadedRun {
+    fn valid(&self) -> bool {
+        self.issues.is_empty()
+            && self.gates.values().all(|x| *x)
+            && self.checks.iter().all(|c| c.state == "pass")
+    }
+}
+fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, String> {
+    let (p, run): (_, Run) = reader.json(base, r)?;
+    let base = p.parent().ok_or("run has no parent directory")?;
+    require(
+        run.schema == "phonefarm/run_one_bundle@1",
+        "requires raw single-run bundle, not aggregate qualification",
+    )?;
+    let (_, c): (_, Conditions) = reader.json(base, &run.conditions)?;
+    conditions_valid(&c)?;
+    let (_, artifact): (_, Artifact) = reader.json(base, &run.artifact)?;
+    let start = time(&run.started_at)?;
+    let end = time(&run.finished_at)?;
+    require(
+        start > time(&c.frozen_at)?
+            && end > start
+            && (end - start).num_milliseconds() as f64 >= c.capture_seconds as f64 * 1000.,
+        "invalid run/conditions chronology",
+    )?;
+    require(
+        run.device_serial == c.device_serial
+            && !run.run_id.trim().is_empty()
+            && matches!(run.sample_role.as_str(), "baseline" | "candidate")
+            && matches!(run.phase.as_str(), "admission" | "confirmation"),
+        "run identity/role invalid",
+    )?;
+    let trace = reader.text(base, &run.raw.trace)?;
+    let env = reader.text(base, &run.raw.env)?;
+    let root = reader.text(base, &run.raw.root_id)?;
+    let boot = reader.text(base, &run.raw.boot_id)?;
+    let probe = reader.text(base, &run.raw.probe)?;
+    let before = reader.text(base, &run.raw.snapshot_before)?;
+    let active = reader.text(base, &run.raw.snapshot_at_run)?;
+    let after = reader.text(base, &run.raw.snapshot_after_run)?;
+    let restored = reader.text(base, &run.raw.snapshot_restored)?;
+    let (_, cold): (_, Cold) = reader.json(base, &run.raw.cold)?;
+    let exit = |reader: &mut Reader, r: &FileRef| -> Result<i64, String> {
+        reader
+            .text(base, r)?
+            .trim()
+            .parse()
+            .map_err(|_| "invalid saved process exit code".into())
+    };
+    let workload_exit = exit(reader, &run.raw.workload_exit)?;
+    let sampler_exit = exit(reader, &run.raw.sampler_exit)?;
+    let capture_exit = exit(reader, &run.raw.capture_exit)?;
+    let restore_exit = exit(reader, &run.raw.restore_exit)?;
+    let parsed = looptrace::parse(&trace, &c.render_comm);
+    let summary: Value =
+        serde_json::from_str(&pyjson::dumps(&parsed.summarize())).map_err(|e| e.to_string())?;
+    let mut env_stats: Value = serde_json::from_str(&pyjson::dumps(&sysparam::env_stats(&env)))
+        .map_err(|e| e.to_string())?;
+    let soc_zones = env.lines().filter(|l| l.starts_with("ENV ")).all(|l| {
+        l.split_whitespace().nth(7).is_some_and(|zone| {
+            zone.starts_with("cpu-") || zone.starts_with("cpullc") || zone.starts_with("gpuss")
+        })
+    });
+    env_stats["thermal_window_verified"] =
+        json!(soc_zones && env_stats["thermal_window_verified"] == true);
+    let uptime = trace_bounds(&trace).ok_or("missing raw trace capture window")?;
+    let env_window = sysparam::sample_window(&env);
+    let host_elapsed = (end - start).num_milliseconds() as f64 / 1000.;
+    let window_ok = sampler_exit == 0
+        && capture_exit == 0
+        && sysparam::trace_window_covered(&env_window, &trace, c.capture_seconds)
+        && env_window.duration_s.is_some_and(|dur| dur <= host_elapsed)
+        && env_window
+            .first_uptime
+            .zip(env_window.last_uptime)
+            .is_some_and(|(a, b)| b - a <= host_elapsed)
+        && parsed.span_s >= c.capture_seconds as f64 - 1.
+        && parsed.span_s <= uptime.1 - uptime.0 + 0.01;
+    env_stats["trace_window_verified"] = json!(window_ok);
+    let frame = qualification::frame_evidence(&summary);
+    let sample = json!({"summary":summary,"env":env_stats,"workload_exit":workload_exit,
+        "frame_evidence":frame,"raw_trace_sha256":run.raw.trace.sha256});
+    let mut issues = vec![];
+    if run.evidence_origin != "recorded_device" && run.evidence_origin != "live_device" {
+        issues
+            .push("synthetic/unknown origin cannot validate a recorded device observation".into());
+    }
+    if boot.trim() != c.device_boot_id {
+        issues.push("device boot identity differs from conditions".into());
+    }
+    let mut gates = BTreeMap::new();
+    let uids: Vec<_> = root
+        .split_whitespace()
+        .filter(|s| s.starts_with("uid="))
+        .collect();
+    gates.insert(
+        "root_verified".into(),
+        uids.len() == 1
+            && uids
+                .first()
+                .is_some_and(|s| s.starts_with("uid=0(") || *s == "uid=0"),
+    );
+    let applied = control(&artifact, &probe, &before, &active, &after, &c);
+    if let Err(e) = &applied {
+        issues.push(e.clone());
+    }
+    gates.insert("control_verified".into(), applied.is_ok());
+    let cold_at = time(&cold.checked_at)?;
+    let cold_ok = cold.c.is_finite()
+        && cold.c > 0.
+        && c.policy.cool_c.is_some_and(|cap| cold.c < cap)
+        && (cold.zone.starts_with("cpu-")
+            || cold.zone.starts_with("cpullc")
+            || cold.zone.starts_with("gpuss"))
+        && cold_at <= start
+        && (start - cold_at).num_milliseconds() <= 60_000;
+    let _ = cold.waited_s; // recorded diagnostic only, never evidence of temperature.
+    gates.insert("cold_verified".into(), cold_ok);
+    gates.insert("trace_window_verified".into(), window_ok);
+    gates.insert("workload_succeeded".into(), workload_exit == 0);
+    gates.insert(
+        "restore_verified".into(),
+        restore_exit == 0
+            && snapshot(&before, &c.snapshot_cpu_policies).is_ok()
+            && snapshot(&restored, &c.snapshot_cpu_policies).is_ok()
+            && eval::snapshots_identical(&before, &restored),
+    );
+    let mut checks = vec![];
+    qualification::runs_checks(
+        &mut checks,
+        std::slice::from_ref(&sample),
+        "sample",
+        &c.policy,
+    );
+    Ok(LoadedRun {
+        manifest: run,
+        conditions: c,
+        parsed: sample,
+        gates,
+        issues,
+        checks,
+        uptime,
+        env_window,
+        start,
+        end,
+    })
+}
+
+fn frozen_valid(f: &Frozen, c: &Conditions) -> Result<(), String> {
+    require(
+        f.schema == "game_opt_loop/confirmation_plan@1"
+            && hash(
+                &serde_json::to_vec(&(&f.schema, &f.registered_at, &f.plan))
+                    .map_err(|e| e.to_string())?,
+            ) == f.sha256,
+        "frozen plan fingerprint differs from GOL typed contract",
+    )?;
+    let p = &f.plan;
+    require(
+        [
+            &p.baseline_artifact_sha256,
+            &p.candidate_artifact_sha256,
+            &p.conditions_sha256,
+            &p.baseline_admission_sha256,
+            &f.sha256,
+        ]
+        .iter()
+        .all(|s| digest_ok(s)),
+        "invalid frozen SHA-256",
+    )?;
+    require(
+        p.pairs == c.policy.required_pairs as usize
+            && p.family_alpha == c.policy.alpha
+            && p.paired_t_assumptions_acknowledged
+            && p.schedule.len() == p.pairs,
+        "frozen pair/alpha contract differs from receiver policy",
+    )?;
+    let exploration: BTreeSet<_> = p.exploration_run_ids.iter().collect();
+    require(
+        !exploration.is_empty()
+            && exploration.len() == p.exploration_run_ids.len()
+            && exploration.iter().all(|s| !s.trim().is_empty()),
+        "unique exploration IDs required",
+    )?;
+    require(
+        !p.exploration_artifact_sha256.is_empty()
+            && p.exploration_artifact_sha256.iter().all(|s| digest_ok(s)),
+        "exploration raw hashes required",
+    )?;
+    let mut ids = BTreeSet::new();
+    let mut pairs = BTreeSet::new();
+    for s in &p.schedule {
+        require(
+            !s.pair_id.trim().is_empty() && pairs.insert(&s.pair_id),
+            "duplicate/empty frozen pair",
+        )?;
+        for id in [&s.a_run_id, &s.b_run_id] {
+            require(
+                !id.trim().is_empty() && !exploration.contains(id) && ids.insert(id),
+                "reused/exploration frozen run ID",
+            )?;
+        }
+    }
+    let first = p.schedule.iter().filter(|s| s.baseline_first).count();
+    require(
+        first.abs_diff(p.pairs - first) <= 1,
+        "frozen schedule must be counterbalanced",
+    )?;
+    let mut names = BTreeSet::new();
+    let mut receiver_metrics = BTreeSet::new();
+    let mut primary = false;
+    require(
+        !p.metrics.is_empty() && p.metrics.len() <= 32,
+        "known frozen metrics required",
+    )?;
+    for m in &p.metrics {
+        let receiver_name = match m.name.as_str() {
+            "fps_mean" => "fps_mean",
+            "frame_p95_ms" | "fps_p95_ms" => "frame_p95",
+            "power_watt" => "power_w_mean",
+            _ => return Err("unsupported frozen metric".into()),
+        };
+        require(
+            receiver_metrics.insert(receiver_name.to_owned()),
+            "duplicate aliases of the same receiver metric",
+        )?;
+        require(
+            names.insert(&m.name)
+                && matches!(
+                    (m.name.as_str(), m.direction.as_str()),
+                    ("power_watt" | "frame_p95_ms" | "fps_p95_ms", "lower")
+                        | ("fps_mean", "higher")
+                )
+                && matches!(m.scale.as_str(), "percent" | "absolute")
+                && m.maximum_regression.is_finite()
+                && m.maximum_regression >= 0.,
+            "invalid metric rule",
+        )?;
+        if let Some(n) = m.minimum_improvement {
+            require(
+                n.is_finite() && n > 0.,
+                "improvement target must be positive finite",
+            )?;
+            primary |= n > 0.;
+        }
+        require(
+            m.name != "power_watt" || c.policy.goal == qualification::Goal::RenderEfficiency,
+            "power target requires the receiver battery efficiency policy",
+        )?;
+    }
+    require(
+        receiver_metrics == c.policy.required_metrics.iter().cloned().collect(),
+        "frozen plan must include every receiver goal metric; no silent narrowing",
+    )?;
+    require(primary, "freeze at least one improvement target")
+}
+
+struct Admitted {
+    qualification: Value,
+    capture_end: f64,
+    env_end: f64,
+}
+fn admission(
+    reader: &mut Reader,
+    base: &Path,
+    r: &FileRef,
+    f: &Frozen,
+    c: &Conditions,
+) -> Result<Admitted, String> {
+    require(
+        r.sha256 == f.plan.baseline_admission_sha256,
+        "admission document differs from frozen registration",
+    )?;
+    let (path, a): (_, Admission) = reader.json(base, r)?;
+    let base = path.parent().ok_or("admission has no directory")?;
+    require(
+        a.schema == "phonefarm/confirmation_baseline_admission@1"
+            && a.conditions.sha256 == f.plan.conditions_sha256
+            && a.baseline_artifact.sha256 == f.plan.baseline_artifact_sha256,
+        "admission must bind raw baselines and matching conditions/artifact",
+    )?;
+    reader.read(base, &a.conditions, JSON_LIMIT)?;
+    reader.read(base, &a.baseline_artifact, JSON_LIMIT)?;
+    require(
+        (3..=32).contains(&a.runs.len()),
+        "admission requires 3..32 raw baseline runs",
+    )?;
+    let registered = time(&f.registered_at)?;
+    let mut seen_ids = BTreeSet::new();
+    let mut raw_seen = BTreeSet::new();
+    let mut baseline = vec![];
+    let mut previous: Option<(DateTime<FixedOffset>, f64, f64)> = None;
+    for r in &a.runs {
+        let run = load_run(reader, base, r)?;
+        let m = &run.manifest;
+        require(
+            run.valid()
+                && m.phase == "admission"
+                && m.sample_role == "baseline"
+                && m.pair_id.is_none()
+                && m.conditions.sha256 == a.conditions.sha256
+                && m.artifact.sha256 == a.baseline_artifact.sha256
+                && run.conditions.device_serial == c.device_serial
+                && run.conditions.device_boot_id == c.device_boot_id,
+            "baseline admission arm not independently valid or identity changed",
+        )?;
+        require(
+            run.end < registered
+                && previous.is_none_or(|(end, uptime,env_end)| run.start > end && run.uptime.0 > uptime
+                    && run.env_window.first_uptime.is_some_and(|t|t>env_end)),
+            "baselines must have independent host/capture/ENV windows and finish before registration",
+        )?;
+        require(
+            seen_ids.insert(m.run_id.clone()) && f.plan.exploration_run_ids.contains(&m.run_id),
+            "baseline IDs reused or absent from frozen exploration exclusion",
+        )?;
+        for raw in [&m.raw.trace.sha256, &m.raw.env.sha256] {
+            require(
+                raw_seen.insert(raw.clone()) && f.plan.exploration_artifact_sha256.contains(raw),
+                "baseline raw artifacts reused or absent from frozen exploration exclusion",
+            )?;
+        }
+        previous = Some((
+            run.end,
+            run.uptime.1,
+            run.env_window
+                .last_uptime
+                .ok_or("missing baseline ENV window")?,
+        ));
+        baseline.push(run.parsed);
+    }
+    let mut e = qualification::Evidence::new(
+        qualification::Stage::Experiment,
+        c.policy.clone(),
+        qualification::Capabilities {
+            backend: "adb".into(),
+            root: Some(true),
+            trace_available: Some(true),
+            measurement_available: Some(true),
+            control_verified: Some(true),
+        },
+    );
+    // Booleans above/below come only after every raw baseline gate has passed, not the input JSON.
+    e.evidence_origin = "recorded_device".into();
+    e.workload_verified = Some(true);
+    e.cold_ok = Some(true);
+    e.restored = Some(true);
+    e.baseline = baseline;
+    let q = qualification::evaluate(&e)?;
+    let (_, capture_end, env_end) = previous.ok_or("missing baseline window")?;
+    Ok(Admitted {
+        qualification: serde_json::to_value(q).map_err(|e| e.to_string())?,
+        capture_end,
+        env_end,
+    })
+}
+
+fn blank() -> Value {
+    json!({"schema":"phonefarm/confirmation_observation@1","source":"phonefarm","status":"BLOCKED",
+        "qualification":{"stage":"experiment","eligible":false,"evidence_origin":"unknown","claim_scope":"none"},
+        "sample_qualification":{"schema":"phonefarm/confirmation_sample_qualification@1","valid_observation":false,
+          "gates":{"root_verified":false,"control_verified":false,"cold_verified":false,"trace_window_verified":false,
+          "workload_succeeded":false,"restore_verified":false,"baseline_admission_verified":false},"baseline_admission_sha256":null},
+        "confirmation_binding":null,"metrics":{"fps_mean":null,"frame_p95_ms":null,"fps_p95_ms":null,"power_watt":null},
+        "measurement_window":null,
+        "metric_provenance":{},"issues":[],"checks":[],"artifact_hashes":{},
+        "real_game_optimization_proven":false,"promotion_allowed":false,
+        "source_attestation":"driver declarations and exact raw bytes checked; device identity, acquisition and chronology not attested",
+        "control_validation_scope":"snapshot readback at both sampling boundaries only; sustained control not verified",
+        "restore_validation_scope":"byte equality of all device_snapshot v1 fixed domains plus frozen declared CPU policy domains; unreadable untouched fields and unlisted device nodes are not observed",
+        "limitations":["GPU submit cadence proxy is not present/display FPS","no quality, deployment or real-game optimization proof",
+          "trace_window_verified checks capture uptime metadata and ENV coverage; ftrace event clock/location not verified; submit span is duration only",
+          "battery mean is over the complete sampler window covering the trace, not cropped to event timestamps",
+          "existing run_once directories need heldout-driver receipts; missing context is BLOCKED"]})
+}
+fn reconstruct(path: &Path, reader: &mut Reader, out: &mut Value) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    require(
+        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= JSON_LIMIT,
+        "bundle must be a bounded regular file",
+    )?;
+    let bytes = regular_bytes(path, JSON_LIMIT)?;
+    require(bytes.len() as u64 <= JSON_LIMIT, "bundle too large")?;
+    let b: Bundle = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("bundle missing driver context or invalid: {e}"))?;
+    require(
+        b.schema == "phonefarm/confirmation_bundle@1",
+        "unknown confirmation bundle schema",
+    )?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    let (_, f): (_, Frozen) = reader.json(base, &b.frozen_plan)?;
+    let run = load_run(reader, base, &b.run)?;
+    let m = &run.manifest;
+    let c = &run.conditions;
+    out["qualification"]["evidence_origin"] = json!(if matches!(
+        m.evidence_origin.as_str(),
+        "recorded_device" | "live_device"
+    ) {
+        "recorded_device"
+    } else {
+        m.evidence_origin.as_str()
+    });
+    out["sample_qualification"]["gates"] = json!(run.gates);
+    out["sample_qualification"]["gates"]["baseline_admission_verified"] = json!(false);
+    out["sample_qualification"]["baseline_admission_sha256"] = json!(b.baseline_admission.sha256);
+    out["checks"] = json!(run.checks);
+    out["issues"] = json!(run.issues);
+    out["metrics"] = json!({"fps_mean":qualification::metric(&run.parsed,"fps_mean"),
+        "frame_p95_ms":qualification::metric(&run.parsed,"frame_p95"),"fps_p95_ms":qualification::metric(&run.parsed,"frame_p95"),
+        "power_watt":qualification::metric(&run.parsed,"power_w_mean")});
+    let mut frame = run.parsed["frame_evidence"].clone();
+    frame["raw_sha256"] = json!(m.raw.trace.sha256);
+    out["metric_provenance"] = json!({"fps_mean":frame,"frame_p95_ms":frame,"fps_p95_ms":frame,
+        "power_watt":{"source":"battery_sysfs","rail":run.parsed["env"]["power_rail"],
+            "window_verified":run.parsed["env"]["power_window_verified"] == true && run.gates["trace_window_verified"],
+            "discharging":run.parsed["env"]["on_battery"] == true,"raw_sha256":m.raw.env.sha256}});
+    out["confirmation_binding"] = json!({"pair_id":m.pair_id,"run_id":m.run_id,"sample_role":m.sample_role,
+        "aggregation_level":"single_run","artifact_sha256":m.artifact.sha256,"conditions_sha256":m.conditions.sha256,
+        "frozen_plan_sha256":f.sha256,"started_at":m.started_at,"finished_at":m.finished_at,
+        "raw_artifacts":{"trace_sha256":m.raw.trace.sha256,"env_sha256":m.raw.env.sha256}});
+    out["measurement_window"] = json!({"schema":"phonefarm/measurement_window@1","device_serial":c.device_serial,
+        "boot_id":c.device_boot_id,"capture_start_uptime_s":run.uptime.0,"capture_end_uptime_s":run.uptime.1,
+        "env_start_uptime_s":run.env_window.first_uptime,"env_end_uptime_s":run.env_window.last_uptime,
+        "env_duration_s":run.env_window.duration_s,"env_interval_s":run.env_window.interval_s,
+        "clock_scope":"capture_metadata_and_env_proc_uptime"});
+    frozen_valid(&f, c)?;
+    require(
+        m.phase == "confirmation"
+            && run.start > time(&f.registered_at)?
+            && m.conditions.sha256 == f.plan.conditions_sha256,
+        "run is not a post-registration confirmation arm under frozen conditions",
+    )?;
+    let selected = if m.sample_role == "baseline" {
+        &f.plan.baseline_artifact_sha256
+    } else {
+        &f.plan.candidate_artifact_sha256
+    };
+    require(
+        &m.artifact.sha256 == selected
+            && f.plan.schedule.iter().any(|p| {
+                m.pair_id.as_ref() == Some(&p.pair_id)
+                    && &m.run_id
+                        == if m.sample_role == "baseline" {
+                            &p.a_run_id
+                        } else {
+                            &p.b_run_id
+                        }
+            }),
+        "role/run/pair/artifact differs from frozen schedule",
+    )?;
+    for raw in [&m.raw.trace.sha256, &m.raw.env.sha256] {
+        require(
+            !f.plan.exploration_artifact_sha256.contains(raw),
+            "confirmation reuses baseline/exploration raw artifact",
+        )?;
+    }
+    require(
+        m.raw.trace.sha256 != m.raw.env.sha256,
+        "trace/env raw bytes reused",
+    )?;
+    let admitted = admission(reader, base, &b.baseline_admission, &f, c)?;
+    require(
+        run.uptime.0 > admitted.capture_end && run.env_window.first_uptime.is_some_and(|t|t>admitted.env_end),
+        "same-boot confirmation capture uptime and entire ENV window must follow all admission windows",
+    )?;
+    let q = admitted.qualification;
+    let admission_ok =
+        q["experiment_allowed"] == true && q["eligible"] == false && q["stage"] == "experiment";
+    out["baseline_admission_qualification"] = q;
+    out["sample_qualification"]["gates"]["baseline_admission_verified"] = json!(admission_ok);
+    let valid = run.valid()
+        && admission_ok
+        && f.plan.metrics.iter().all(|r| {
+            out["metrics"][&r.name]
+                .as_f64()
+                .is_some_and(|v| v.is_finite() && v > 0.)
+        });
+    if valid {
+        out["status"] = json!("VALID_OBSERVATION");
+        out["sample_qualification"]["valid_observation"] = json!(true);
+        out["qualification"]["claim_scope"] = json!(if c.policy.goal
+            == qualification::Goal::RenderEfficiency
+        {
+            "one recorded sysparam experiment observation; submit-proxy render metrics and verified battery window, no improvement verdict"
+        } else {
+            "one recorded sysparam experiment observation; submit-proxy cadence only, no display/power/improvement verdict"
+        });
+    } else {
+        out["issues"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("one or more raw sample/metric/source gates failed"));
+    }
+    Ok(())
+}
+
+pub fn produce(path: &Path) -> Value {
+    let mut out = blank();
+    let mut reader = Reader::default();
+    if let Err(e) = reconstruct(path, &mut reader, &mut out) {
+        out["issues"].as_array_mut().unwrap().push(json!(e));
+    }
+    out["artifact_hashes"] = json!(reader.hashes);
+    out
+}
+pub fn run_confirmation_observation(args: &[String]) -> i32 {
+    let mut input = None;
+    let mut output = None;
+    let mut error = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bundle" | "--out" if i + 1 < args.len() => {
+                let slot = if args[i] == "--bundle" {
+                    &mut input
+                } else {
+                    &mut output
+                };
+                if slot.replace(PathBuf::from(&args[i + 1])).is_some() {
+                    error = Some("duplicate option".into());
+                }
+                i += 2;
+            }
+            "--json" => {
+                i += 1;
+            }
+            _ => {
+                error = Some(format!("unknown/missing argument: {}", args[i]));
+                break;
+            }
+        }
+    }
+    let mut out = if let Some(path) = input {
+        produce(&path)
+    } else {
+        error = Some("use confirmation-observation --bundle B.json --out R.json".into());
+        blank()
+    };
+    if let Some(e) = error {
+        out = blank();
+        out["issues"] = json!([e]);
+    }
+    let bytes = serde_json::to_vec_pretty(&out).unwrap();
+    if let Some(path) = output {
+        let saved = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(path)?;
+            f.write_all(&bytes)?;
+            f.write_all(b"\n")?;
+            f.sync_all()
+        })();
+        if let Err(e) = saved {
+            eprintln!("cannot save immutable observation: {e}");
+            return 1;
+        }
+    } else {
+        eprintln!("--out is required to archive the observation");
+        return 1;
+    }
+    println!("{}", String::from_utf8(bytes).unwrap());
+    i32::from(out["status"] != "VALID_OBSERVATION")
+}

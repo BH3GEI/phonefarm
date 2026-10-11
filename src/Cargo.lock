@@ -344,6 +344,7 @@ dependencies = [
  "chrono",
  "flate2",
  "image",
+ "libc",
  "quick-xml",
  "regex",
  "serde",

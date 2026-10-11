@@ -28,6 +28,7 @@ mod parallel;
 mod device;
 mod eval;
 mod qualification;
+mod confirmation_observation;
 mod fold;
 mod gamepad;
 mod grayab;
@@ -203,6 +204,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
 资格:  qualify --from evidence.json --json (纯离线资格评估；通过不等于优化成功)
+       confirmation-observation --bundle B.json --out R.json (单轮原始记录验收，始终不授优化结论)
 评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
        (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
         shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
@@ -707,6 +709,9 @@ fn main() {
         }
         Some("qualify") => {
             std::process::exit(qualification::run_qualify(&args[1..]));
+        }
+        Some("confirmation-observation") => {
+            std::process::exit(confirmation_observation::run_confirmation_observation(&args[1..]));
         }
         Some("eval") => {
             // game_opt_loop 评测请求的唯一入口 (v2 信封 shader/sysparam/gray; v1 扁平兼容)
