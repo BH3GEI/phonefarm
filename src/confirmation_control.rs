@@ -496,7 +496,8 @@ mod tests {
             } else {
                 ""
             };
-            let script = format!("set -eu\nD={}; R={}\n{checks}\n{group_check}\n{consumers}\n{fault}\nif {call}; then printf RESTORE_ALLOWED; else printf UNKNOWN; fi\n",
+            // The actual worker sets MODE before these shared ownership consumers run.
+            let script = format!("set -eu\nD={}; R={}; MODE=sample\n{checks}\n{group_check}\n{consumers}\n{fault}\nif {call}; then printf RESTORE_ALLOWED; else printf UNKNOWN; fi\n",
                 crate::confirmation_transport::quote(dir.to_str().unwrap()),
                 crate::confirmation_transport::quote(run.to_str().unwrap()));
             let output = std::process::Command::new("/bin/sh")
