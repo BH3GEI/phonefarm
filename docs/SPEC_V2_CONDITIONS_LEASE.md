@@ -34,6 +34,13 @@ quality_reference 优先 payload，再 conditions；同时给不同值拒绝。
 没有 display/present 采集，不把 refbench 的 KGSL proxy 说成真实显示帧率。
 不支持的请求在设备操作前给 v2 ABORT；非 PASS gpu-op 的合法报告仍保留。
 refbench 返回帧数、params.frames/intensity、scene/run_id 必须对应请求，且 postfx.active 必须逐臂对应；缺字段留 null 并 ABORT。
+
+refbench 原生 LR/HR 导出的 run 带 `capture_mode="quality_only"` 和
+`performance_eligible=false`：额外 HR draw、readback 和同步会改变负载。
+gpuop 的 legacy/v2 路径都必须在纳入性能样本前拒绝此类 run。
+当前普通性能合同只接受这两个字段均缺省的旧/默认 refbench 回包；
+任一字段出现（包括 null、类型错误、未识别模式或单独的 true）都 ABORT，
+不能自行推断新模式是正常性能路径。原始字段保留在 observed 回读中。
 频率控制读回缺失/不符、前后供电门槛未满足、停充恢复失败也 ABORT。
 
 `measurement_scope` = `operator_benchmark_only` / `refbench_measurement_only`。
