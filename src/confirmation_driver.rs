@@ -13,6 +13,10 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+#[path = "confirmation_control_probe.rs"]
+mod control_probe;
+#[path = "confirmation_temperature.rs"]
+pub(crate) mod temperature;
 const CAP: u64 = 128 * 1024 * 1024;
 const WORKER: &str = include_str!("../loop_v1/tools/confirmation_worker.sh");
 const BOOTSTRAP: &str = include_str!("../loop_v1/tools/confirmation_bootstrap.sh");
@@ -90,6 +94,10 @@ struct Request {
     candidate: PathBuf,
     schedule: Vec<Pair>,
     paired_t_assumptions_acknowledged: bool,
+    #[serde(default)]
+    temperature_profile_id: Option<String>,
+    #[serde(default)]
+    goal: Option<Goal>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -181,6 +189,19 @@ fn request(path: &Path) -> Result<(Request, Vec<u8>, Vec<u8>, Vec<u8>), String> 
             && (5..=32).contains(&req.schedule.len()),
         "capture/lead/pairs outside receiver bounds",
     )?;
+    require(
+        matches!(
+            req.temperature_profile_id
+                .as_deref()
+                .unwrap_or("legacy_cold_v1"),
+            "legacy_cold_v1" | "loaded_steady_v1"
+        ),
+        "unknown receiver temperature profile ID",
+    )?;
+    require(
+        req.goal != Some(Goal::DisplaySmoothness),
+        "driver supports explicit render_efficiency/render_cadence only; display not verified",
+    )?;
     let mut ids = BTreeSet::new();
     for (i, p) in req.schedule.iter().enumerate() {
         require(
@@ -232,6 +253,9 @@ fn roots() -> Result<(PathBuf, PathBuf, Duration), String> {
     Ok((root, legacy, Duration::from_millis(ms)))
 }
 fn start_transport(dir: &Path, req: &Request, phase: &str) -> Result<Transport, String> {
+    start_transport_target(dir, &req.transport, phase)
+}
+fn start_transport_target(dir: &Path, target: &Target, phase: &str) -> Result<Transport, String> {
     let p = dir.join(phase);
     fs::create_dir(&p).map_err(|e| e.to_string())?;
     let program = dir.join("transport.snapshot");
@@ -253,8 +277,8 @@ fn start_transport(dir: &Path, req: &Request, phase: &str) -> Result<Transport, 
         input_hashes,
         expected_sha: sha(&bounded(&program, CAP)?),
         program,
-        target: req.transport.target.clone(),
-        origin: if req.transport.kind == "fake" {
+        target: target.target.clone(),
+        origin: if target.kind == "fake" {
             "synthetic"
         } else {
             "live_device"
@@ -392,6 +416,9 @@ fn freeze(dir: &Path, names: &[&str]) -> Result<(), String> {
     Ok(())
 }
 fn frozen_names(dir: &Path) -> Result<BTreeSet<String>, String> {
+    if read_json(&dir.join("request.json"))?["schema"] == "phonefarm/control_probe_request@1" {
+        return control_probe::frozen_names(dir);
+    }
     let artifact = read_json(&dir.join("candidate.json"))?;
     let count = artifact["payload"]["params"]
         .as_object()
@@ -427,6 +454,9 @@ fn frozen_names(dir: &Path) -> Result<BTreeSet<String>, String> {
     .collect::<BTreeSet<_>>();
     for i in 0..count {
         names.insert(format!("probe_{i}.plan.tsv"));
+    }
+    if read_json(&dir.join("request.json"))?["temperature_profile_id"] == "loaded_steady_v1" {
+        names.extend(temperature::frozen_names().iter().map(|s| (*s).to_owned()));
     }
     Ok(names)
 }
@@ -487,10 +517,23 @@ fn prepared_names(dir: &Path) -> Result<BTreeSet<String>, String> {
             "snapshot_at_run.txt",
             "snapshot_after_run.txt",
             "snapshot_restored.txt",
-            "cold.json",
             "run.json",
             "validation.json",
         ] {
+            names.insert(format!("admission_{i}-{suffix}"));
+        }
+        let loaded =
+            read_json(&dir.join("request.json"))?["temperature_profile_id"] == "loaded_steady_v1";
+        for suffix in if loaded {
+            vec![
+                "pre-thermal.raw.tsv",
+                "pre-thermal.json",
+                "thermal_sampler.log",
+                "thermal_sampler_exit.txt",
+            ]
+        } else {
+            vec!["cold.json"]
+        } {
             names.insert(format!("admission_{i}-{suffix}"));
         }
     }
@@ -569,6 +612,8 @@ fn verify_remote(
                 | "bootstrap.sh"
                 | "snapshot.sh"
                 | "sample_env.sh"
+                | "thermal_sample.sh"
+                | "thermal_sampler.sh"
                 | "workload.sh"
                 | "restore.tsv"
                 | "candidate.plan.tsv"
@@ -741,7 +786,13 @@ fn sample(
     )?;
     let fake = req.transport.kind == "fake";
     let (mut started, virtual_finished) = stamp(fake, phase, index, frozen);
-    let cold = cold(t, lease, dir, fake, &started)?;
+    let loaded = req.temperature_profile_id.as_deref() == Some("loaded_steady_v1");
+    let cold = if loaded {
+        let thermal = temperature::load_frozen(dir)?;
+        temperature::loaded_snapshot(t, lease, dir, &thermal, &format!("{id}-pre"))?
+    } else {
+        cold(t, lease, dir, fake, &started)?
+    };
     if !fake {
         started = now();
     }
@@ -806,7 +857,21 @@ fn sample(
             &snap_bytes(pull(t, lease, state, id, &format!("{key}.txt"))?)?,
         )?;
     }
-    raw["cold"] = save_json(dir, &format!("{id}-cold.json"), &cold)?;
+    if loaded {
+        raw["thermal_admission"] = file_ref(dir, &format!("{id}-pre-thermal.raw.tsv"))?;
+        for (key, file) in [
+            ("thermal_window", "thermal_sampler.log"),
+            ("thermal_sampler_exit", "thermal_sampler_exit.txt"),
+        ] {
+            raw[key] = save(
+                dir,
+                &format!("{id}-{file}"),
+                &pull(t, lease, state, id, file)?,
+            )?;
+        }
+    } else {
+        raw["cold"] = save_json(dir, &format!("{id}-cold.json"), &cold)?;
+    }
     raw["probe"] = file_ref(dir, "probe.txt")?;
     let finished = if fake { virtual_finished } else { now() };
     let artifact = if role == "baseline" {
@@ -814,7 +879,7 @@ fn sample(
     } else {
         "candidate.json"
     };
-    let r = json!({"schema":"phonefarm/run_one_bundle@1","evidence_origin":if fake{"synthetic"}else{"live_device"},"phase":phase,"run_id":id,"pair_id":pair,"sample_role":role,"device_serial":actual.0,"started_at":started,"finished_at":finished,"conditions":file_ref(dir,"conditions.json")?,"artifact":file_ref(dir,artifact)?,"raw":raw});
+    let r = json!({"schema":if loaded{"phonefarm/run_one_bundle@2"}else{"phonefarm/run_one_bundle@1"},"evidence_origin":if fake{"synthetic"}else{"live_device"},"phase":phase,"run_id":id,"pair_id":pair,"sample_role":role,"device_serial":actual.0,"started_at":started,"finished_at":finished,"conditions":file_ref(dir,"conditions.json")?,"artifact":file_ref(dir,artifact)?,"raw":raw});
     let name = format!("{id}-run.json");
     let reference = save_json(dir, &name, &r)?;
     let validity = observation::validate_raw_run(&dir.join(&name))?;
@@ -857,10 +922,51 @@ fn plan(dir: &Path, req: &Request, admission: &Value, runs: &[Value]) -> Result<
         for k in ["trace", "env"] {
             artifacts.push(raw["raw"][k]["sha256"].clone());
         }
+        if req.temperature_profile_id.as_deref() == Some("loaded_steady_v1") {
+            for k in ["thermal_admission", "thermal_window"] {
+                artifacts.push(raw["raw"][k]["sha256"].clone());
+            }
+        }
     }
+    let mut p = json!({"baseline_artifact_sha256":file_ref(dir,"baseline.json")?["sha256"],"candidate_artifact_sha256":file_ref(dir,"candidate.json")?["sha256"],"conditions_sha256":file_ref(dir,"conditions.json")?["sha256"],"baseline_admission_sha256":admission["sha256"],"exploration_run_ids":["admission_0","admission_1","admission_2"],"exploration_artifact_sha256":artifacts,"pairs":req.schedule.len(),"schedule":req.schedule,"family_alpha":0.05,"paired_t_assumptions_acknowledged":true,"metrics":[{"name":"frame_p95_ms","direction":"lower","scale":"percent","minimum_improvement":1.0,"maximum_regression":1.0},{"name":"fps_mean","direction":"higher","scale":"percent","minimum_improvement":null,"maximum_regression":1.0},{"name":"power_watt","direction":"lower","scale":"percent","minimum_improvement":null,"maximum_regression":1.0}]});
+    if req.goal == Some(Goal::RenderCadence) {
+        p["metrics"].as_array_mut().ok_or("metrics")?.pop();
+    }
+    if req.temperature_profile_id.as_deref() == Some("loaded_steady_v1") {
+        p["temperature_contract"] = temperature_contract(dir)?;
+    }
+    Ok(p)
+}
+
+fn temperature_contract(dir: &Path) -> Result<Value, String> {
+    let thermal = temperature::load_frozen(dir)?;
     Ok(
-        json!({"baseline_artifact_sha256":file_ref(dir,"baseline.json")?["sha256"],"candidate_artifact_sha256":file_ref(dir,"candidate.json")?["sha256"],"conditions_sha256":file_ref(dir,"conditions.json")?["sha256"],"baseline_admission_sha256":admission["sha256"],"exploration_run_ids":["admission_0","admission_1","admission_2"],"exploration_artifact_sha256":artifacts,"pairs":req.schedule.len(),"schedule":req.schedule,"family_alpha":0.05,"paired_t_assumptions_acknowledged":true,"metrics":[{"name":"frame_p95_ms","direction":"lower","scale":"percent","minimum_improvement":1.0,"maximum_regression":1.0},{"name":"fps_mean","direction":"higher","scale":"percent","minimum_improvement":null,"maximum_regression":1.0},{"name":"power_watt","direction":"lower","scale":"percent","minimum_improvement":null,"maximum_regression":1.0}]}),
+        json!({"profile_id":"loaded_steady_v1","receiver_policy_version":2,
+        "profile_sha256":crate::thermal_profile::profile_sha256(&thermal.profile)?,
+        "reference_sha256":file_ref(dir,"thermal_reference.json")?["sha256"],
+        "thermal_contract_sha256":file_ref(dir,"thermal-evidence.json")?["sha256"]}),
     )
+}
+fn receiver_policy(dir: &Path, req: &Request) -> Result<Policy, String> {
+    if req.temperature_profile_id.as_deref() == Some("loaded_steady_v1") {
+        let tc = temperature_contract(dir)?;
+        Ok(Policy::new_loaded(
+            req.goal.unwrap_or(Goal::RenderEfficiency),
+            req.schedule.len() as u32,
+            false,
+            tc["profile_sha256"].as_str().ok_or("profile hash")?.into(),
+            tc["reference_sha256"]
+                .as_str()
+                .ok_or("reference hash")?
+                .into(),
+        ))
+    } else {
+        Ok(Policy::new(
+            req.goal.unwrap_or(Goal::RenderEfficiency),
+            req.schedule.len() as u32,
+            false,
+        ))
+    }
 }
 fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
     let (req, requestbytes, workloadbytes, artifactbytes) = request(path)?;
@@ -904,9 +1010,13 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         "workload.sh",
         workload(&workloadbytes, &req)?.as_bytes(),
     )?;
-    let policy = Policy::new(Goal::RenderEfficiency, req.schedule.len() as u32, false);
-    let contract = json!({"schema":"phonefarm/heldout_sampling_contract@1","policy":policy,"request_sha256":sha(&requestbytes),"workload_sha256":sha(&workloadbytes),"candidate_sha256":sha(&artifactbytes),"worker_sha256":sha(WORKER.as_bytes()),"bootstrap_sha256":sha(BOOTSTRAP.as_bytes()),"snapshot_sha256":sha(SNAPSHOT.as_bytes()),"probe_sha256":sha(PROBE.as_bytes()),"env_sha256":sha(ENV.as_bytes()),"cold_sha256":sha(COLD.as_bytes()),"transport_sha256":file_ref(&out,"transport.snapshot")?["sha256"],"primary_improvement_percent":1.0,"maximum_regression_percent":1.0,"family_alpha":0.05,"clock_scope":if req.transport.kind=="fake"{"synthetic_virtual_timing"}else{"host_utc_and_device_proc_uptime_separate"}});
-    save_json(&out, "sampling-contract.json", &contract)?;
+    let mut policy = Policy::new(
+        req.goal.unwrap_or(Goal::RenderEfficiency),
+        req.schedule.len() as u32,
+        false,
+    );
+    let mut contract = json!({"schema":"phonefarm/heldout_sampling_contract@1","policy":policy,"request_sha256":sha(&requestbytes),"workload_sha256":sha(&workloadbytes),"candidate_sha256":sha(&artifactbytes),"worker_sha256":sha(WORKER.as_bytes()),"bootstrap_sha256":sha(BOOTSTRAP.as_bytes()),"snapshot_sha256":sha(SNAPSHOT.as_bytes()),"probe_sha256":sha(PROBE.as_bytes()),"env_sha256":sha(ENV.as_bytes()),"cold_sha256":sha(COLD.as_bytes()),"transport_sha256":file_ref(&out,"transport.snapshot")?["sha256"],"primary_improvement_percent":1.0,"maximum_regression_percent":1.0,"family_alpha":0.05,"clock_scope":if req.transport.kind=="fake"{"synthetic_virtual_timing"}else{"host_utc_and_device_proc_uptime_separate"}});
+
     let (root, legacy, timeout) = roots()?;
     let mut lease = Lease::acquire(
         &root,
@@ -917,6 +1027,11 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
     )?;
     let mut t = start_transport(&out, &req, "prepare-commands")?;
     let (serial, boot) = identity(&mut t, &lease, &req.package)?;
+    let loaded = req.temperature_profile_id.as_deref() == Some("loaded_steady_v1");
+    if loaded {
+        // Freeze the actual loaded restore state only after baseline-only warmup.
+        temperature::freeze_loaded(&mut t, &lease, &out, &serial, &boot)?;
+    }
     let probe = checked(
         &mut t,
         "readonly_probe",
@@ -978,7 +1093,19 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
     let remote = format!("/data/local/tmp/phonefarm-confirmation-{token}");
     let state = json!({"schema":"phonefarm/confirmation_driver_state@1","serial":serial,"boot_id":boot,"target":req.transport.target,"token":token,"remote":remote,"policies":policies,"transport_origin":t.origin});
     save_json(&out, "state.json", &state)?;
-    let c = json!({"schema":"phonefarm/confirmation_conditions@1","device_serial":serial,"device_boot_id":boot,"snapshot_cpu_policies":policies,"render_comm":req.render_comm,"capture_seconds":req.capture_seconds,"frozen_at":if req.transport.kind=="fake"{(chrono::Utc::now()-chrono::Duration::hours(4)).to_rfc3339()}else{now()},"policy":policy,"sampling_contract_sha256":file_ref(&out,"sampling-contract.json")?["sha256"]});
+    if loaded {
+        files.push("thermal_sample.sh".into());
+        files.push("thermal_sampler.sh".into());
+        policy = receiver_policy(&out, &req)?;
+        contract["schema"] = json!("phonefarm/heldout_sampling_contract@2");
+        contract["policy"] = serde_json::to_value(&policy).map_err(|e| e.to_string())?;
+        contract["temperature_contract"] = temperature_contract(&out)?;
+    }
+    save_json(&out, "sampling-contract.json", &contract)?;
+    let mut c = json!({"schema":if loaded{"phonefarm/confirmation_conditions@2"}else{"phonefarm/confirmation_conditions@1"},"device_serial":serial,"device_boot_id":boot,"snapshot_cpu_policies":policies,"render_comm":req.render_comm,"capture_seconds":req.capture_seconds,"frozen_at":if req.transport.kind=="fake"{(chrono::Utc::now()-chrono::Duration::hours(4)).to_rfc3339()}else{now()},"policy":policy,"sampling_contract_sha256":file_ref(&out,"sampling-contract.json")?["sha256"]});
+    if loaded {
+        c["thermal_contract"] = file_ref(&out, "thermal-evidence.json")?;
+    }
     save_json(&out, "conditions.json", &c)?;
     save_json(
         &out,
@@ -1008,6 +1135,11 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
         .into_iter()
         .map(String::from),
     );
+    if loaded {
+        frozenfiles.extend(temperature::frozen_names().iter().map(|s| (*s).to_owned()));
+    }
+    frozenfiles.sort();
+    frozenfiles.dedup();
     freeze(
         &out,
         &frozenfiles.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -1120,12 +1252,7 @@ fn validate_contract(dir: &Path, req: &Request) -> Result<(), String> {
     let c = read_json(&dir.join("sampling-contract.json"))?;
     require(
         c["policy"]
-            == serde_json::to_value(Policy::new(
-                Goal::RenderEfficiency,
-                req.schedule.len() as u32,
-                false,
-            ))
-            .map_err(|e| e.to_string())?
+            == serde_json::to_value(receiver_policy(dir, req)?).map_err(|e| e.to_string())?
             && c["primary_improvement_percent"] == 1.0
             && c["maximum_regression_percent"] == 1.0
             && c["family_alpha"] == 0.05,
@@ -1162,6 +1289,21 @@ fn validate_contract(dir: &Path, req: &Request) -> Result<(), String> {
         "workload executable differs from frozen source",
     )?;
     let conditions = read_json(&dir.join("conditions.json"))?;
+    if req.temperature_profile_id.as_deref() == Some("loaded_steady_v1") {
+        require(
+            c["schema"] == "phonefarm/heldout_sampling_contract@2"
+                && c["temperature_contract"] == temperature_contract(dir)?
+                && conditions["schema"] == "phonefarm/confirmation_conditions@2"
+                && conditions["thermal_contract"] == file_ref(dir, "thermal-evidence.json")?,
+            "loaded receiver contract mismatch",
+        )?;
+    } else {
+        require(
+            c["schema"] == "phonefarm/heldout_sampling_contract@1"
+                && conditions["schema"] == "phonefarm/confirmation_conditions@1",
+            "legacy receiver contract changed",
+        )?;
+    }
     require(
         conditions["sampling_contract_sha256"]
             == file_ref(dir, "sampling-contract.json")?["sha256"]
@@ -1325,6 +1467,9 @@ fn collect(dir: &Path, frozen_path: &Path, execute: bool) -> Result<Value, Strin
 }
 fn reconcile(dir: &Path, execute: bool) -> Result<Value, String> {
     require(execute, "explicit reconcile requires --execute")?;
+    if read_json(&dir.join("request.json"))?["schema"] == "phonefarm/control_probe_request@1" {
+        return control_probe::reconcile(dir);
+    }
     let dir = dir.canonicalize().map_err(|e| e.to_string())?;
     verify(&dir)?;
     let req: Request =
@@ -1404,7 +1549,9 @@ pub fn run_confirmation_driver(args: &[String]) -> i32 {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "prepare" | "collect" | "reconcile" if mode.is_none() => mode = Some(args[i].clone()),
+            "prepare" | "collect" | "reconcile" | "probe-controls" if mode.is_none() => {
+                mode = Some(args[i].clone())
+            }
             "--execute" => execute = true,
             "--request" | "--out" | "--session" | "--frozen" if i + 1 < args.len() => {
                 let value = PathBuf::from(&args[i + 1]);
@@ -1423,7 +1570,7 @@ pub fn run_confirmation_driver(args: &[String]) -> i32 {
     let result = if let Some(e) = err {
         Err(e)
     } else {
-        match mode.as_deref(){Some("prepare") if req.is_some()&&out.is_some()&&session.is_none()&&frozen.is_none()=>prepare(req.as_deref().unwrap(),out.as_deref().unwrap(),execute),Some("collect") if session.is_some()&&frozen.is_some()&&req.is_none()&&out.is_none()=>collect(session.as_deref().unwrap(),frozen.as_deref().unwrap(),execute),Some("reconcile") if session.is_some()&&req.is_none()&&out.is_none()&&frozen.is_none()=>reconcile(session.as_deref().unwrap(),execute),_=>Err("use prepare --request R --out NEW | collect --session S --frozen F | reconcile --session S --execute".into())}
+        match mode.as_deref(){Some("probe-controls") if req.is_some()&&out.is_some()&&session.is_none()&&frozen.is_none()=>control_probe::run(req.as_deref().unwrap(),out.as_deref().unwrap(),execute),Some("prepare") if req.is_some()&&out.is_some()&&session.is_none()&&frozen.is_none()=>prepare(req.as_deref().unwrap(),out.as_deref().unwrap(),execute),Some("collect") if session.is_some()&&frozen.is_some()&&req.is_none()&&out.is_none()=>collect(session.as_deref().unwrap(),frozen.as_deref().unwrap(),execute),Some("reconcile") if session.is_some()&&req.is_none()&&out.is_none()&&frozen.is_none()=>reconcile(session.as_deref().unwrap(),execute),_=>Err("use prepare --request R --out NEW | collect --session S --frozen F | reconcile --session S --execute".into())}
     };
     match result {
         Ok(v) => {

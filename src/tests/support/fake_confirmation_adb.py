@@ -43,6 +43,19 @@ cpu.policy0.scaling_max=1000
 cpu.policy0.scaling_min=100
 # end
 '''
+def thermal_hal():
+    status='3' if fail=='thermal_severe' else '2'
+    out=f'IsStatusOverride: false\nThermal Status: {status}\nHAL Ready: true\n'
+    for ty,name,t in [(0,'CPU0',95),(1,'GPU0',95),(2,'battery',80),(3,'skin',60)]:
+        out+=f'TemperatureThreshold{{mType={ty}, mName={name}, mHotThrottlingThresholds=[NaN, NaN, NaN, {t}.0, NaN, NaN, 115.0], mColdThrottlingThresholds=[]}}\n'
+    return out
+def thermal_raw(step=5,up=None):
+    up=state.get('thermal_uptime',2000.) if up is None else up;state['thermal_uptime']=up+step
+    out=f'#phonefarm_thermal_sample v1\nUPTIME\t{up}\n'
+    for path,v in [('/sys/class/thermal/thermal_zone0/temp',80000),('/sys/class/thermal/thermal_zone1/temp',60000),('/sys/class/thermal/thermal_zone2/temp',50000),('/sys/class/power_supply/battery/temp',390)]:
+        if fail=='thermal_missing' and 'battery' in path:continue
+        out+=f'TEMP\t{path}\t{v}\n'
+    return out+'#hal_begin\n'+thermal_hal()+'#hal_end\n#end\n'
 args=sys.argv[1:];assert args[:2]==['-s','fake-target'] and args[2]=='shell'
 cmd=shlex.split(args[3]);assert cmd[:2]==['su','-c']; cmd=cmd[2]; data=sys.stdin.buffer.read()
 with (root/'argv.jsonl').open('a') as f:f.write(json.dumps({'argv':args,'command':cmd,'stdin':data.decode(),'simulation':True})+'\n')
@@ -58,11 +71,24 @@ if fail=='root' and cmd.startswith('set -eu; id;'):
 if cmd.startswith('set -eu; id;'):
     print('uid=0(root) gid=0(root)');print('fake-serial');print('changed-boot' if fail=='boot' else 'fake-boot');print('/system/bin/setsid')
 elif cmd=='dumpsys activity activities': print('mResumedActivity: ActivityRecord x '+('com.example.crashed/.Home' if fail=='foreground' else 'com.example.game/.Game')+' t1')
+elif cmd=='timeout 8 dumpsys thermalservice':sys.stdout.write(thermal_hal())
 elif cmd=='sh':
-    if b'# device_snapshot' in data: sys.stdout.write(state['snapshot'])
+    if b'#phonefarm_thermal_metadata v1' in data:
+        print('#phonefarm_thermal_metadata v1\nBOOT\tfake-boot')
+        for i,ty,dom,t in [(0,'cpu-0','cpu',108000),(1,'gpuss-0','gpu',95000),(2,'skin-msm-therm','skin',60000)]:
+            print(f'SENSOR\t/sys/class/thermal/thermal_zone{i}/temp\t{ty}\t{dom}\tmilli_celsius\nTRIP\t/sys/class/thermal/thermal_zone{i}/temp\tpassive\t{t}')
+        print('SENSOR\t/sys/class/power_supply/battery/temp\tbattery\tbattery\tdeci_celsius\n#end')
+    elif b'#phonefarm_thermal_sample v1' in data:
+        count=data.count(b'sh -c') or 1
+        for n in range(count):sys.stdout.write(thermal_raw(5,1045977.+state['runs']*20 if count==1 else None))
+        if fail=='loaded_cpu_drift' and count>=6:
+            state['snapshot_before_warmup']=state['snapshot']
+            state['snapshot']=state['snapshot'].replace('cpu.policy0.scaling_max=1000','cpu.policy0.scaling_max=600')
+    elif b'# device_snapshot' in data: sys.stdout.write(state['snapshot'])
     elif b'probe_sysparam' in data:
         print('# probe_sysparam v1\ncpu.policies=0')
-        print('cpu.policy0.avail_freqs=100 300 600 1000\ncpu.policy0.avail_governors=schedutil performance\ncpu.policy0.scaling_min_freq.cur=100\ncpu.policy0.scaling_max_freq.cur=1000\ncpu.policy0.scaling_governor.cur=schedutil')
+        max_freq='600' if 'cpu.policy0.scaling_max=600' in state['snapshot'] else '1000'
+        print(f'cpu.policy0.avail_freqs=100 300 600 1000\ncpu.policy0.avail_governors=schedutil performance\ncpu.policy0.scaling_min_freq.cur=100\ncpu.policy0.scaling_max_freq.cur={max_freq}\ncpu.policy0.scaling_governor.cur=schedutil')
         print('gpu.num_pwrlevels=6\ngpu.min_pwrlevel.cur=5\ngpu.max_pwrlevel.cur=0\ngpu.devfreq_path=/sys/class/kgsl/kgsl-3d0/devfreq\ngpu.devfreq.avail_freqs=100 300 600 1000\ngpu.devfreq.avail_governors=msm-adreno-tz performance\ngpu.devfreq.min_freq.cur=100\ngpu.devfreq.max_freq.cur=1000\ngpu.devfreq.governor.cur=msm-adreno-tz')
         for bus in ['DDR','LLCC']:print(f'bus.{bus}.boost_freq.cur=0\nbus.{bus}.hw_min_freq=100\nbus.{bus}.hw_max_freq=1000\nbus.{bus}.avail_freqs=100 300 600 1000')
         print('setting.system.peak_refresh_rate.read_exit=0\nsetting.system.min_refresh_rate.read_exit=0\nsetting.system.refresh_rate_mode.read_exit=0\ndisplay.modes=fps=60,fps=120\nsetting.system.peak_refresh_rate.cur=120\nsetting.system.min_refresh_rate.cur=60\nsetting.system.refresh_rate_mode.cur=0\nsetting.system.all_refresh_rate=60 120\nsetting.system.refresh_rate_mode.base_fps=60\n# end')
@@ -82,15 +108,21 @@ elif cmd.startswith('setsid sh ') and '/worker.sh ' in cmd:
     words=shlex.split(cmd)[1:]; d,token,boot,mode,run=words[2:7];r=d+'/'+run
     assert state['files'][d+'/owner'].strip()==token+' '+boot
     if d+'/session.closed' in state['files']:sys.exit(86)
-    if fail=='probe' and mode=='probe':sys.exit(74)
+    if fail=='probe' and mode in ['probe','control_probe']:sys.exit(74)
     if fail=='workload' and mode=='sample':sys.exit(91)
-    if mode=='probe':
-        for name in ['snapshot_before','snapshot_restored']:
-            state['files'][r+'/'+name+'.txt']=state['snapshot'];state['files'][r+'/'+name+'.exit']='0\n'
+    if mode in ['probe','control_probe']:
+        names=['snapshot_before','snapshot_at_run','snapshot_after_run','snapshot_restored'] if mode=='control_probe' else ['snapshot_before','snapshot_restored']
+        for name in names:
+            snap=state['snapshot']
+            if fail=='restore' and name=='snapshot_restored':snap=snap.replace('kgsl.force_clk_on=0','kgsl.force_clk_on=1')
+            state['files'][r+'/'+name+'.txt']=snap;state['files'][r+'/'+name+'.exit']='0\n'
         key,kind,path,val=state['files'][d+'/'+run+'.plan.tsv'].strip().split('\t')
         receipt=f'{key}.writable=yes\n{key}.effect=live\n{key}.effect_restored=yes\n'
         if key=='setting.system.refresh_rate_mode':receipt+=f'{key}.mode{val}_fps=120 (readback={val})\n'
-        state['files'][r+'/probe_receipt.txt']=receipt;print('PROBE_COMPLETE')
+        state['files'][r+'/probe_receipt.txt']=receipt
+        if mode=='control_probe' and d+'/thermal_sample.sh' in state['files']:
+            state['files'][r+'/thermal_hold.raw.tsv']=''.join(thermal_raw(5) for _ in range(4))
+        print('PROBE_COMPLETE')
     elif mode=='sample':
         duration,lead,envdur=int(words[7]),int(words[8]),int(words[9]);role=words[10]
         base=1045978.0+state['runs']*20;state['runs']+=1
@@ -103,6 +135,15 @@ elif cmd.startswith('setsid sh ') and '/worker.sh ' in cmd:
         if fail=='power':env=env.replace('Discharging','Charging')
         if fail=='env':env=env.replace('#sample_env done\n','')
         state['files'][r+'/sampler.log']=env
+        if d+'/thermal_sampler.sh' in state['files']:
+            start=base-.5;dur=envdur+3
+            series=''.join(thermal_raw(1,start+n) for n in range(dur+1))
+            series+=f'#phonefarm_thermal_window_complete dur={dur} interval=1 start={start} end={start+dur+.05} samples={dur+1}\n'
+            if fail=='thermal_window_short':series=series.replace('samples=', 'invalid_samples=')
+            if fail=='thermal_window_hot':series=series.replace('\t80000\n','\t92000\n')
+            state['files'][r+'/thermal_sampler.log']=series
+            state['files'][r+'/thermal_sampler_exit.txt']='1\n' if fail=='thermal_sampler_exit' else '0\n'
+
         for name in ['workload_exit','sampler_exit','capture_exit','restore_exit']:state['files'][r+'/'+name+'.txt']='0\n'
         state['files'][r+'/root_id.txt']='uid=0(root) gid=0(root)\n';state['files'][r+'/boot_id.txt']=boot+'\n'
         active=state['snapshot']
@@ -120,7 +161,7 @@ elif cmd.startswith('setsid sh ') and '/worker.sh ' in cmd:
             if fail=='active' and name=='snapshot_after_run':snap=snap.replace('kgsl.force_clk_on=0','kgsl.force_clk_on=1')
             state['files'][r+'/'+name+'.txt']=snap;state['files'][r+'/'+name+'.exit']='0\n'
         state['files'][r+'/quiescence.txt']='OWNED_GROUPS_ABSENT\n';print('SAMPLE_COMPLETE')
-    elif mode=='reconcile':
+    elif mode in ['reconcile','reconcile_controls']:
         state['files'][r+'/snapshot_restored.txt']=state['snapshot'];state['files'][r+'/snapshot_restored.exit']='0\n';state['files'][r+'/restore_exit.txt']='0\n';state['files'][r+'/quiescence.txt']='OWNED_GROUPS_ABSENT\n';print('RECONCILE_COMPLETE')
         state['files'][d+'/session.closed']=token+' '+boot+' '+run
         if fail=='closure_unknown':

@@ -87,6 +87,8 @@ struct Conditions {
     policy: qualification::Policy,
     #[serde(default)]
     sampling_contract_sha256: Option<String>,
+    #[serde(default)]
+    thermal_contract: Option<FileRef>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,12 +125,30 @@ struct Raw {
     restore_exit: FileRef,
     root_id: FileRef,
     boot_id: FileRef,
-    cold: FileRef,
+    #[serde(default)]
+    cold: Option<FileRef>,
+    #[serde(default)]
+    thermal_admission: Option<FileRef>,
+    #[serde(default)]
+    thermal_window: Option<FileRef>,
+    #[serde(default)]
+    thermal_sampler_exit: Option<FileRef>,
     probe: FileRef,
     snapshot_before: FileRef,
     snapshot_at_run: FileRef,
     snapshot_after_run: FileRef,
     snapshot_restored: FileRef,
+}
+fn unique_raw_artifacts(raw: &Raw) -> Vec<&String> {
+    let mut hashes = vec![&raw.trace.sha256, &raw.env.sha256];
+    if let Some(r) = &raw.thermal_admission {
+        hashes.push(&r.sha256);
+    }
+    if let Some(r) = &raw.thermal_window {
+        hashes.push(&r.sha256);
+    }
+    // Plain exit-code files such as "0\n" legitimately have the same bytes across arms.
+    hashes
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,6 +206,35 @@ struct Plan {
     family_alpha: f64,
     paired_t_assumptions_acknowledged: bool,
     metrics: Vec<MetricRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    temperature_contract: Option<TemperatureContract>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TemperatureContract {
+    profile_id: String,
+    receiver_policy_version: u32,
+    profile_sha256: String,
+    reference_sha256: String,
+    thermal_contract_sha256: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrozenThermalEvidence {
+    schema: String,
+    actual_serial: String,
+    boot_id: String,
+    rules_frozen_at: String,
+    warmup_started_at: String,
+    warmup_finished_at: String,
+    metadata_raw: FileRef,
+    hal_raw: FileRef,
+    warmup_raw: FileRef,
+    profile: FileRef,
+    reference: FileRef,
+    profile_sha256: String,
+    reference_sha256: String,
+    clock_scope: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -284,7 +333,14 @@ fn conditions_valid(c: &Conditions) -> Result<(), String> {
         "invalid sampling contract fingerprint",
     )?;
     require(
-        c.schema == "phonefarm/confirmation_conditions@1",
+        (c.schema == "phonefarm/confirmation_conditions@1"
+            && c.policy.version == 1
+            && c.thermal_contract.is_none())
+            || (c.schema == "phonefarm/confirmation_conditions@2"
+                && c.policy.version == 2
+                && c.thermal_contract
+                    .as_ref()
+                    .is_some_and(|r| digest_ok(&r.sha256))),
         "unknown conditions schema",
     )?;
     require(
@@ -308,7 +364,7 @@ fn conditions_valid(c: &Conditions) -> Result<(), String> {
     )?;
     c.policy.validate()?;
     require(
-        c.policy.cool_c.is_some() && c.policy.temp_cap_c.is_some(),
+        c.policy.version == 2 || (c.policy.cool_c.is_some() && c.policy.temp_cap_c.is_some()),
         "temperature conditions unknown",
     )?;
     require(
@@ -528,15 +584,242 @@ impl LoadedRun {
             && self.checks.iter().all(|c| c.state == "pass")
     }
 }
+fn temperature_contract(c: &Conditions) -> Result<Option<TemperatureContract>, String> {
+    if c.policy.version == 1 {
+        return Ok(None);
+    }
+    Ok(Some(TemperatureContract {
+        profile_id: c
+            .policy
+            .temperature_profile_id
+            .clone()
+            .ok_or("loaded profile missing")?,
+        receiver_policy_version: 2,
+        profile_sha256: c
+            .policy
+            .temperature_profile_sha256
+            .clone()
+            .ok_or("loaded profile hash missing")?,
+        reference_sha256: c
+            .policy
+            .thermal_reference_sha256
+            .clone()
+            .ok_or("loaded reference hash missing")?,
+        thermal_contract_sha256: c
+            .thermal_contract
+            .as_ref()
+            .ok_or("loaded raw contract missing")?
+            .sha256
+            .clone(),
+    }))
+}
+struct LoadedThermal {
+    admission_ok: bool,
+    window_ok: bool,
+    issues: Vec<String>,
+}
+fn loaded_thermal(
+    reader: &mut Reader,
+    base: &Path,
+    c: &Conditions,
+    run: &Run,
+    env: &sysparam::SampleWindow,
+    capture: (f64, f64),
+    start: DateTime<FixedOffset>,
+    end: DateTime<FixedOffset>,
+) -> Result<LoadedThermal, String> {
+    use crate::confirmation_driver::temperature;
+    use crate::thermal_profile;
+    require(
+        run.raw.cold.is_none(),
+        "legacy cold receipt cannot replace loaded admission",
+    )?;
+    let binding = temperature_contract(c)?.ok_or("loaded binding missing")?;
+    let contract_ref = c
+        .thermal_contract
+        .as_ref()
+        .ok_or("thermal evidence missing")?;
+    let (path, frozen): (_, FrozenThermalEvidence) = reader.json(base, contract_ref)?;
+    let frozen_base = path.parent().ok_or("thermal evidence directory missing")?;
+    require(
+        frozen.schema == "phonefarm/frozen_thermal_evidence@1"
+            && frozen.actual_serial == c.device_serial
+            && frozen.boot_id == c.device_boot_id
+            && frozen.profile_sha256 == binding.profile_sha256
+            && frozen.reference_sha256 == binding.reference_sha256
+            && frozen.reference.sha256 == binding.reference_sha256,
+        "thermal evidence identity/profile/reference binding changed",
+    )?;
+    let clock_scope = if run.evidence_origin == "synthetic" {
+        "synthetic_virtual_timing"
+    } else {
+        "host_utc_and_device_proc_uptime_separate"
+    };
+    require(
+        frozen.clock_scope == clock_scope,
+        "thermal producer clock scope unknown/mixed",
+    )?;
+    let rules = time(&frozen.rules_frozen_at)?;
+    let warm_start = time(&frozen.warmup_started_at)?;
+    let warm_end = time(&frozen.warmup_finished_at)?;
+    require(
+        rules <= warm_start
+            && warm_start < warm_end
+            && warm_end < time(&c.frozen_at)?
+            && time(&c.frozen_at)? < start,
+        "thermal rules/reference were not frozen before arm chronology",
+    )?;
+    let metadata = reader.text(frozen_base, &frozen.metadata_raw)?;
+    let hal = reader.text(frozen_base, &frozen.hal_raw)?;
+    let warmup = reader.text(frozen_base, &frozen.warmup_raw)?;
+    let reconstructed = temperature::reconstruct_raw(&metadata, &hal, &warmup, &c.device_boot_id)?;
+    let (_, profile): (_, thermal_profile::Profile) = reader.json(frozen_base, &frozen.profile)?;
+    let (_, reference): (_, thermal_profile::ReferenceBand) =
+        reader.json(frozen_base, &frozen.reference)?;
+    require(
+        profile == reconstructed.profile
+            && reference == reconstructed.reference
+            && thermal_profile::profile_sha256(&profile)? == binding.profile_sha256
+            && profile.id == binding.profile_id,
+        "stored thermal profile/reference differs from original raw reconstruction",
+    )?;
+    let warm_last = reference
+        .warmup
+        .last()
+        .ok_or("empty reconstructed warmup")?
+        .uptime_s;
+    let warm_span = warm_last - reference.warmup.first().ok_or("empty warmup")?.uptime_s;
+    require(
+        (warm_end - warm_start).num_milliseconds() as f64 / 1000. + 0.01 >= warm_span,
+        "thermal warmup device span exceeds retained host window",
+    )?;
+    let paths = profile
+        .sensors
+        .iter()
+        .map(|s| s.path.clone())
+        .collect::<Vec<_>>();
+    let admission_ref = run
+        .raw
+        .thermal_admission
+        .as_ref()
+        .ok_or("loaded pre-arm raw reading missing")?;
+    let admission_raw = reader.text(base, admission_ref)?;
+    let admission = temperature::samples(&admission_raw, &paths)?;
+    require(
+        admission.len() == 1,
+        "pre-arm thermal receipt must contain one complete snapshot",
+    )?;
+    let window_ref = run
+        .raw
+        .thermal_window
+        .as_ref()
+        .ok_or("loaded full thermal window missing")?;
+    let window_raw = reader.text(base, window_ref)?;
+    let (samples, completion) = temperature::parse_window_raw(&window_raw, &paths)?;
+    let thermal_exit = reader
+        .text(
+            base,
+            run.raw
+                .thermal_sampler_exit
+                .as_ref()
+                .ok_or("thermal sampler exit missing")?,
+        )?
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| "thermal sampler exit malformed")?;
+    require(
+        samples.len() >= 2 && samples.len() <= 512,
+        "loaded thermal window count outside bounds",
+    )?;
+    let first = samples.first().unwrap().uptime_s;
+    let last = samples.last().unwrap().uptime_s;
+    let numeric = |key: &str| {
+        completion[key]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or("thermal completion value missing/nonfinite")
+    };
+    let dur = numeric("duration_s")?;
+    let ivl = numeric("interval_s")?;
+    let begin = numeric("start_uptime_s")?;
+    let finish = numeric("end_uptime_s")?;
+    let count = completion["samples"]
+        .as_u64()
+        .ok_or("thermal completion count malformed")?;
+    let env_first = env.first_uptime.ok_or("ENV first uptime missing")?;
+    let env_last = env.last_uptime.ok_or("ENV last uptime missing")?;
+    let env_duration = env.duration_s.ok_or("ENV duration missing")?;
+    let pre = admission[0].uptime_s;
+    let host_span = (end - start).num_milliseconds() as f64 / 1000.;
+    let admission_report = thermal_profile::evaluate_snapshot(&profile, &admission[0])?;
+    let in_reference = profile.sensors.iter().all(|s| {
+        admission_report
+            .normalized_c
+            .get(&s.path)
+            .zip(reference.bands.get(&s.path))
+            .is_some_and(|(c, b)| *c >= b.low_c && *c <= b.high_c)
+    });
+    let admission_ok = admission_report.compliant
+        && in_reference
+        && warm_last < pre
+        && pre <= first
+        && pre <= env_first
+        && env_first - pre <= 60.;
+    let assessed = thermal_profile::evaluate_against_reference(&profile, &reference, &samples)?;
+    let window_ok = thermal_exit == 0
+        && assessed.compliant
+        && env.complete
+        && ivl == 1.
+        && dur == env_duration + 3.
+        && count == samples.len() as u64
+        && begin <= first
+        && first - begin <= ivl
+        && finish >= last
+        && finish - last <= 6.
+        && last - first >= dur - ivl
+        && finish - begin <= dur + 9.
+        && first >= pre
+        && first <= env_first
+        && last >= env_last
+        && first <= capture.0
+        && last >= capture.1
+        && samples
+            .windows(2)
+            .all(|w| w[1].uptime_s - w[0].uptime_s >= ivl * 0.5)
+        && last - first <= host_span
+        && finish - begin <= host_span;
+    let mut issues = Vec::new();
+    if !admission_ok {
+        issues.push("loaded pre-arm snapshot/reference/chronology failed".into());
+    }
+    if !window_ok {
+        issues.push("loaded typed thermal readings do not cover the complete ENV/capture window under the frozen reference".into());
+    }
+    issues.extend(assessed.reasons);
+    Ok(LoadedThermal {
+        admission_ok,
+        window_ok,
+        issues,
+    })
+}
 fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, String> {
     let (p, run): (_, Run) = reader.json(base, r)?;
     let base = p.parent().ok_or("run has no parent directory")?;
-    require(
-        run.schema == "phonefarm/run_one_bundle@1",
-        "requires raw single-run bundle, not aggregate qualification",
-    )?;
     let (_, c): (_, Conditions) = reader.json(base, &run.conditions)?;
     conditions_valid(&c)?;
+    require(
+        (run.schema == "phonefarm/run_one_bundle@1" && c.policy.version == 1)
+            || (run.schema == "phonefarm/run_one_bundle@2" && c.policy.version == 2),
+        "requires raw single-run bundle under its versioned conditions, not aggregate qualification",
+    )?;
+    if c.policy.version == 1 {
+        require(
+            run.raw.thermal_admission.is_none()
+                && run.raw.thermal_window.is_none()
+                && run.raw.thermal_sampler_exit.is_none(),
+            "legacy bundle cannot include loaded receipts",
+        )?;
+    }
     let (_, artifact): (_, Artifact) = reader.json(base, &run.artifact)?;
     let start = time(&run.started_at)?;
     let end = time(&run.finished_at)?;
@@ -562,7 +845,6 @@ fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, 
     let active = reader.text(base, &run.raw.snapshot_at_run)?;
     let after = reader.text(base, &run.raw.snapshot_after_run)?;
     let restored = reader.text(base, &run.raw.snapshot_restored)?;
-    let (_, cold): (_, Cold) = reader.json(base, &run.raw.cold)?;
     let exit = |reader: &mut Reader, r: &FileRef| -> Result<i64, String> {
         reader
             .text(base, r)?
@@ -588,6 +870,26 @@ fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, 
         json!(soc_zones && env_stats["thermal_window_verified"] == true);
     let uptime = trace_bounds(&trace).ok_or("missing raw trace capture window")?;
     let env_window = sysparam::sample_window(&env);
+    let thermal = if c.policy.version == 2 {
+        Some(loaded_thermal(
+            reader,
+            base,
+            &c,
+            &run,
+            &env_window,
+            uptime,
+            start,
+            end,
+        )?)
+    } else {
+        None
+    };
+    if let Some(t) = &thermal {
+        env_stats["thermal_profile_verified"] = json!(t.admission_ok);
+        env_stats["temperature_profile_sha256"] = json!(c.policy.temperature_profile_sha256);
+        env_stats["thermal_reference_sha256"] = json!(c.policy.thermal_reference_sha256);
+        env_stats["thermal_window_verified"] = json!(t.window_ok);
+    }
     let host_elapsed = (end - start).num_milliseconds() as f64 / 1000.;
     let window_ok = sampler_exit == 0
         && capture_exit == 0
@@ -604,6 +906,9 @@ fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, 
     let sample = json!({"summary":summary,"env":env_stats,"workload_exit":workload_exit,
         "frame_evidence":frame,"raw_trace_sha256":run.raw.trace.sha256});
     let mut issues = vec![];
+    if let Some(t) = &thermal {
+        issues.extend(t.issues.clone());
+    }
     if run.evidence_origin != "recorded_device" && run.evidence_origin != "live_device" {
         issues
             .push("synthetic/unknown origin cannot validate a recorded device observation".into());
@@ -628,17 +933,26 @@ fn load_run(reader: &mut Reader, base: &Path, r: &FileRef) -> Result<LoadedRun, 
         issues.push(e.clone());
     }
     gates.insert("control_verified".into(), applied.is_ok());
-    let cold_at = time(&cold.checked_at)?;
-    let cold_ok = cold.c.is_finite()
-        && cold.c > 0.
-        && c.policy.cool_c.is_some_and(|cap| cold.c < cap)
-        && (cold.zone.starts_with("cpu-")
-            || cold.zone.starts_with("cpullc")
-            || cold.zone.starts_with("gpuss"))
-        && cold_at <= start
-        && (start - cold_at).num_milliseconds() <= 60_000;
-    let _ = cold.waited_s; // recorded diagnostic only, never evidence of temperature.
-    gates.insert("cold_verified".into(), cold_ok);
+    if let Some(t) = &thermal {
+        gates.insert("thermal_profile_verified".into(), t.admission_ok);
+        gates.insert("thermal_window_verified".into(), t.window_ok);
+    } else {
+        let (_, cold): (_, Cold) = reader.json(
+            base,
+            run.raw.cold.as_ref().ok_or("legacy cold receipt missing")?,
+        )?;
+        let cold_at = time(&cold.checked_at)?;
+        let cold_ok = cold.c.is_finite()
+            && cold.c > 0.
+            && c.policy.cool_c.is_some_and(|cap| cold.c < cap)
+            && (cold.zone.starts_with("cpu-")
+                || cold.zone.starts_with("cpullc")
+                || cold.zone.starts_with("gpuss"))
+            && cold_at <= start
+            && (start - cold_at).num_milliseconds() <= 60_000;
+        let _ = cold.waited_s;
+        gates.insert("cold_verified".into(), cold_ok);
+    }
     gates.insert("trace_window_verified".into(), window_ok);
     gates.insert("workload_succeeded".into(), workload_exit == 0);
     gates.insert(
@@ -679,6 +993,10 @@ fn frozen_valid(f: &Frozen, c: &Conditions) -> Result<(), String> {
         "frozen plan fingerprint differs from GOL typed contract",
     )?;
     let p = &f.plan;
+    require(
+        p.temperature_contract == temperature_contract(c)?,
+        "frozen thermal identity differs from versioned receiver conditions",
+    )?;
     require(
         [
             &p.baseline_artifact_sha256,
@@ -837,7 +1155,7 @@ fn admission(
             seen_ids.insert(m.run_id.clone()) && f.plan.exploration_run_ids.contains(&m.run_id),
             "baseline IDs reused or absent from frozen exploration exclusion",
         )?;
-        for raw in [&m.raw.trace.sha256, &m.raw.env.sha256] {
+        for raw in unique_raw_artifacts(&m.raw) {
             require(
                 raw_seen.insert(raw.clone()) && f.plan.exploration_artifact_sha256.contains(raw),
                 "baseline raw artifacts reused or absent from frozen exploration exclusion",
@@ -866,7 +1184,11 @@ fn admission(
     // Booleans above/below come only after every raw baseline gate has passed, not the input JSON.
     e.evidence_origin = "recorded_device".into();
     e.workload_verified = Some(true);
-    e.cold_ok = Some(true);
+    if c.policy.version == 1 {
+        e.cold_ok = Some(true);
+    } else {
+        e.thermal_admission_verified = Some(true);
+    }
     e.restored = Some(true);
     e.baseline = baseline;
     let q = qualification::evaluate(&e)?;
@@ -915,6 +1237,14 @@ fn reconstruct(path: &Path, reader: &mut Reader, out: &mut Value) -> Result<(), 
     let run = load_run(reader, base, &b.run)?;
     let m = &run.manifest;
     let c = &run.conditions;
+    if c.policy.version == 2 {
+        out["schema"] = json!("phonefarm/confirmation_observation@2");
+        out["sample_qualification"]["schema"] =
+            json!("phonefarm/confirmation_sample_qualification@2");
+        out["qualification"]["version"] = json!(2);
+        out["qualification"]["policy"] =
+            serde_json::to_value(&c.policy).map_err(|e| e.to_string())?;
+    }
     out["qualification"]["evidence_origin"] = json!(if matches!(
         m.evidence_origin.as_str(),
         "recorded_device" | "live_device"
@@ -928,19 +1258,45 @@ fn reconstruct(path: &Path, reader: &mut Reader, out: &mut Value) -> Result<(), 
     out["sample_qualification"]["baseline_admission_sha256"] = json!(b.baseline_admission.sha256);
     out["checks"] = json!(run.checks);
     out["issues"] = json!(run.issues);
+    let power_qualified = c.policy.goal == qualification::Goal::RenderEfficiency
+        && run.parsed["env"]["power_rail"] == "battery"
+        && run.parsed["env"]["power_window_verified"] == true
+        && run.parsed["env"]["on_battery"] == true
+        && run.gates["trace_window_verified"];
+    let measured_power = if power_qualified {
+        qualification::metric(&run.parsed, "power_w_mean")
+    } else {
+        None
+    };
     out["metrics"] = json!({"fps_mean":qualification::metric(&run.parsed,"fps_mean"),
         "frame_p95_ms":qualification::metric(&run.parsed,"frame_p95"),"fps_p95_ms":qualification::metric(&run.parsed,"frame_p95"),
-        "power_watt":qualification::metric(&run.parsed,"power_w_mean")});
+        "power_watt":measured_power});
     let mut frame = run.parsed["frame_evidence"].clone();
     frame["raw_sha256"] = json!(m.raw.trace.sha256);
     out["metric_provenance"] = json!({"fps_mean":frame,"frame_p95_ms":frame,"fps_p95_ms":frame,
         "power_watt":{"source":"battery_sysfs","rail":run.parsed["env"]["power_rail"],
+            "qualified_for_comparison":power_qualified,
             "window_verified":run.parsed["env"]["power_window_verified"] == true && run.gates["trace_window_verified"],
             "discharging":run.parsed["env"]["on_battery"] == true,"raw_sha256":m.raw.env.sha256}});
     out["confirmation_binding"] = json!({"pair_id":m.pair_id,"run_id":m.run_id,"sample_role":m.sample_role,
         "aggregation_level":"single_run","artifact_sha256":m.artifact.sha256,"conditions_sha256":m.conditions.sha256,
         "frozen_plan_sha256":f.sha256,"started_at":m.started_at,"finished_at":m.finished_at,
         "raw_artifacts":{"trace_sha256":m.raw.trace.sha256,"env_sha256":m.raw.env.sha256}});
+    if let Some(t) = temperature_contract(c)? {
+        out["confirmation_binding"]["thermal_contract"] =
+            serde_json::to_value(t).map_err(|e| e.to_string())?;
+        for (key, r) in [
+            ("thermal_admission_sha256", m.raw.thermal_admission.as_ref()),
+            ("thermal_window_sha256", m.raw.thermal_window.as_ref()),
+            (
+                "thermal_sampler_exit_sha256",
+                m.raw.thermal_sampler_exit.as_ref(),
+            ),
+        ] {
+            out["confirmation_binding"]["raw_artifacts"][key] =
+                json!(r.ok_or("loaded raw binding missing")?.sha256);
+        }
+    }
     out["measurement_window"] = json!({"schema":"phonefarm/measurement_window@1","device_serial":c.device_serial,
         "boot_id":c.device_boot_id,"capture_start_uptime_s":run.uptime.0,"capture_end_uptime_s":run.uptime.1,
         "env_start_uptime_s":run.env_window.first_uptime,"env_end_uptime_s":run.env_window.last_uptime,
@@ -971,15 +1327,16 @@ fn reconstruct(path: &Path, reader: &mut Reader, out: &mut Value) -> Result<(), 
             }),
         "role/run/pair/artifact differs from frozen schedule",
     )?;
-    for raw in [&m.raw.trace.sha256, &m.raw.env.sha256] {
+    for raw in unique_raw_artifacts(&m.raw) {
         require(
             !f.plan.exploration_artifact_sha256.contains(raw),
             "confirmation reuses baseline/exploration raw artifact",
         )?;
     }
+    let raw_hashes = unique_raw_artifacts(&m.raw);
     require(
-        m.raw.trace.sha256 != m.raw.env.sha256,
-        "trace/env raw bytes reused",
+        raw_hashes.iter().collect::<BTreeSet<_>>().len() == raw_hashes.len(),
+        "independent trace/env/thermal reading raw bytes reused",
     )?;
     let admitted = admission(reader, base, &b.baseline_admission, &f, c)?;
     require(

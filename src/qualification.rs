@@ -44,6 +44,12 @@ pub struct Policy {
     pub monotonic_max_ratio: f64,
     pub minimum_pairs_for_conclusion: u32,
     pub alpha: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature_profile_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_reference_sha256: Option<String>,
 }
 
 impl Policy {
@@ -61,10 +67,51 @@ impl Policy {
             monotonic_max_ratio: 0.90,
             minimum_pairs_for_conclusion: 5,
             alpha: 0.05,
+            temperature_profile_id: None,
+            temperature_profile_sha256: None,
+            thermal_reference_sha256: None,
         }
     }
+    pub fn new_loaded(
+        goal: Goal,
+        required_pairs: u32,
+        require_quality: bool,
+        profile_sha256: String,
+        reference_sha256: String,
+    ) -> Self {
+        let mut p = Self::new(goal, required_pairs, require_quality);
+        p.version = 2;
+        p.temp_cap_c = None;
+        p.cool_c = None;
+        p.temperature_profile_id = Some("loaded_steady_v1".into());
+        p.temperature_profile_sha256 = Some(profile_sha256);
+        p.thermal_reference_sha256 = Some(reference_sha256);
+        p
+    }
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 || self.required_metrics != self.goal.metrics() {
+        let digest = |s: &Option<String>| {
+            s.as_ref().is_some_and(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+        };
+        let thermal_valid = match self.version {
+            1 => {
+                self.temperature_profile_id.is_none()
+                    && self.temperature_profile_sha256.is_none()
+                    && self.thermal_reference_sha256.is_none()
+            }
+            2 => {
+                self.temp_cap_c.is_none()
+                    && self.cool_c.is_none()
+                    && self.temperature_profile_id.as_deref() == Some("loaded_steady_v1")
+                    && digest(&self.temperature_profile_sha256)
+                    && digest(&self.thermal_reference_sha256)
+            }
+            _ => false,
+        };
+        if !thermal_valid || self.required_metrics != self.goal.metrics() {
             return Err("资格规则版本/required_metrics 与收端冻结目标不符".into());
         }
         if !(1..=32).contains(&self.required_pairs) {
@@ -118,6 +165,8 @@ pub struct Evidence {
     pub workload_verified: Option<bool>,
     #[serde(default)]
     pub cold_ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_admission_verified: Option<bool>,
     #[serde(default)]
     pub restored: Option<bool>,
     #[serde(default)]
@@ -137,13 +186,14 @@ fn unknown_origin() -> String {
 impl Evidence {
     pub fn new(stage: Stage, policy: Policy, device: Capabilities) -> Self {
         Self {
-            version: 1,
+            version: policy.version,
             stage,
             evidence_origin: "live_device".into(),
             policy,
             device,
             workload_verified: None,
             cold_ok: None,
+            thermal_admission_verified: None,
             restored: None,
             quality_verified: None,
             baseline: vec![],
@@ -226,17 +276,33 @@ pub(crate) fn runs_checks(checks: &mut Vec<Check>, runs: &[Value], label: &str, 
                 "必需指标必须每轮完整且有限正数",
             );
         }
-        check(
-            checks,
-            format!("{prefix}.thermal"),
-            policy
-                .temp_cap_c
-                .map(|cap| metric(run, "soc_temp_max_c").is_some_and(|x| x <= cap)),
-            format!(
-                "每轮热区必须有效且 <= 冻结 temp_cap_c={:?}",
-                policy.temp_cap_c
-            ),
-        );
+        if policy.version == 1 {
+            check(
+                checks,
+                format!("{prefix}.thermal"),
+                policy
+                    .temp_cap_c
+                    .map(|cap| metric(run, "soc_temp_max_c").is_some_and(|x| x <= cap)),
+                format!(
+                    "每轮热区必须有效且 <= 冻结 temp_cap_c={:?}",
+                    policy.temp_cap_c
+                ),
+            );
+        } else {
+            let env = &run["env"];
+            check(
+                checks,
+                format!("{prefix}.thermal"),
+                Some(
+                    env["thermal_profile_verified"] == true
+                        && env["temperature_profile_sha256"].as_str()
+                            == policy.temperature_profile_sha256.as_deref()
+                        && env["thermal_reference_sha256"].as_str()
+                            == policy.thermal_reference_sha256.as_deref(),
+                ),
+                "typed thermal limits and frozen reference must be reconstructed from raw receipts",
+            );
+        }
         check(
             checks,
             format!("{prefix}.thermal_window"),
@@ -303,8 +369,8 @@ fn statistically_reachable(policy: &Policy) -> bool {
 
 /// Pure, deterministic: no devices, clock, random numbers or fallbacks for unknown facts.
 pub fn evaluate(e: &Evidence) -> Result<Report, String> {
-    if e.version != 1 {
-        return Err("资格证据仅认 version=1".into());
+    if !matches!(e.version, 1 | 2) || e.version != e.policy.version {
+        return Err("资格证据版本必须与冻结规则一致".into());
     }
     e.policy.validate()?;
     let mut checks = vec![];
@@ -359,12 +425,27 @@ pub fn evaluate(e: &Evidence) -> Result<Report, String> {
             e.workload_verified,
             "不能只凭脚本退出成功认定负载执行",
         );
-        check(
-            &mut checks,
-            "cold",
-            e.policy.cool_c.and(e.cold_ok),
-            "冷机未知或超时不能宣称条件相同",
-        );
+        if e.policy.version == 1 {
+            check(
+                &mut checks,
+                "cold",
+                e.policy.cool_c.and(e.cold_ok),
+                "冷机未知或超时不能宣称条件相同",
+            );
+        } else {
+            check(
+                &mut checks,
+                "thermal_admission",
+                e.thermal_admission_verified,
+                "loaded admission requires raw typed readings under a pre-frozen stable reference",
+            );
+            check(
+                &mut checks,
+                "thermal_policy_scope",
+                Some(e.cold_ok.is_none()),
+                "a legacy cold flag cannot replace loaded thermal evidence",
+            );
+        }
         check(
             &mut checks,
             "restored",
@@ -437,7 +518,7 @@ pub fn evaluate(e: &Evidence) -> Result<Report, String> {
         .map(|r| r["frame_evidence"].clone())
         .collect();
     Ok(Report {
-        version: 1,
+        version: e.version,
         stage: e.stage,
         status: status.into(),
         probe_allowed,
@@ -596,6 +677,67 @@ pub fn run_qualify(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn loaded_policy_has_typed_hashes_without_caller_caps_or_legacy_upgrade() {
+        let old = Policy::new(Goal::RenderEfficiency, 5, false);
+        let old_json = serde_json::to_value(&old).unwrap();
+        assert!(old_json.get("temperature_profile_id").is_none());
+        assert!(old.validate().is_ok());
+        let mut loaded = Policy::new_loaded(
+            Goal::RenderEfficiency,
+            5,
+            false,
+            "ab".repeat(32),
+            "cd".repeat(32),
+        );
+        assert!(loaded.validate().is_ok());
+        loaded.cool_c = Some(90.);
+        assert!(loaded.validate().is_err());
+        loaded.cool_c = None;
+        loaded.thermal_reference_sha256 = Some("unknown".into());
+        assert!(loaded.validate().is_err());
+        loaded.thermal_reference_sha256 = Some("cd".repeat(32));
+        loaded.version = 1;
+        assert!(loaded.validate().is_err());
+    }
+    #[test]
+    fn loaded_evidence_needs_derived_admission_and_each_bound_typed_window() {
+        let mut e = ready();
+        e.policy = Policy::new_loaded(
+            e.policy.goal,
+            e.policy.required_pairs,
+            false,
+            "ab".repeat(32),
+            "cd".repeat(32),
+        );
+        e.version = 2;
+        e.cold_ok = None;
+        e.thermal_admission_verified = Some(true);
+        for run in e
+            .baseline
+            .iter_mut()
+            .chain(&mut e.control)
+            .chain(&mut e.candidate)
+        {
+            run["env"]["thermal_profile_verified"] = json!(true);
+            run["env"]["temperature_profile_sha256"] = json!("ab".repeat(32));
+            run["env"]["thermal_reference_sha256"] = json!("cd".repeat(32));
+            // A high CPU maximum has no battery/skin meaning and is not the v2 gate.
+            run["env"]["soc_temp_max_c"] = json!(80.);
+        }
+        assert!(evaluate(&e).unwrap().eligible);
+        e.cold_ok = Some(true);
+        assert!(!evaluate(&e).unwrap().eligible);
+        e.cold_ok = None;
+        e.thermal_admission_verified = None;
+        assert!(!evaluate(&e).unwrap().eligible);
+        e.thermal_admission_verified = Some(true);
+        e.candidate[0]["env"]["thermal_reference_sha256"] = json!("ef".repeat(32));
+        assert!(!evaluate(&e).unwrap().eligible);
+        e.candidate[0]["env"]["thermal_reference_sha256"] = json!("cd".repeat(32));
+        e.candidate[0]["env"]["thermal_window_verified"] = json!(false);
+        assert!(!evaluate(&e).unwrap().eligible);
+    }
     pub fn ready() -> Evidence {
         let mut e: Evidence =
             serde_json::from_str(include_str!("../examples/qualification_ready.json")).unwrap();
