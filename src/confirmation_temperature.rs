@@ -455,17 +455,80 @@ pub(crate) fn parse_window_raw(
 }
 fn warmup_script(profile: &crate::thermal_profile::Profile) -> Result<String, String> {
     let point = sampling_script(profile, None)?;
-    let mut script = String::from("#!/system/bin/sh\nset -eu\n");
+    let mut script = format!("#!/system/bin/sh\nset -eu\n{}", clock_helpers()?);
     for i in 0..7 {
-        script += &format!("sh -c {}\n", quote(&point));
+        script += &format!("if point=$(sh -c {}); then :; else code=$?; printf '%s\\n' \"$point\"; exit \"$code\"; fi\n printf '%s\\n' \"$point\"\nprevious=$(thermal_point_uptime \"$point\") || exit 81\n", quote(&point));
         if i < 6 {
-            script += "sleep 5\n";
+            script += "thermal_wait_until \"$(thermal_deadline \"$previous\" 5)\" \"$(thermal_deadline \"$previous\" 6)\" \"$previous\" || exit 81\n";
         }
     }
     Ok(script)
 }
-fn window_script() -> &'static str {
-    "#!/system/bin/sh\nset -eu\ndur=${1:?duration}; interval=${2:?interval}\ncase $dur in ''|*[!0-9]*) exit 81;; esac\n[ \"$dur\" -ge 2 ] && [ \"$dur\" -le 1000 ] && [ \"$interval\" = 1 ] || exit 81\nD=$(dirname \"$0\"); start=$(cut -d' ' -f1 /proc/uptime); n=0\nwhile :; do\n  point=$(sh \"$D/thermal_sample.sh\"); printf '%s\\n' \"$point\"; n=$((n+1))\n  if [ \"$n\" = 1 ]; then printf '%s\\n' \"$start\" > \"${3:?ready receipt}\"; fi\n  end=$(cut -d' ' -f1 /proc/uptime)\n  up=$(printf '%s\\n' \"$point\" | awk -F '\\t' '$1==\"UPTIME\"{print $2}'); \n  if awk -v a=\"$start\" -v b=\"$up\" -v d=\"$dur\" 'BEGIN{exit !(b-a>=d)}'; then break; fi\n  sleep 1\ndone\nprintf '#phonefarm_thermal_window_complete dur=%s interval=%s start=%s end=%s samples=%s\\n' \"$dur\" \"$interval\" \"$start\" \"$end\" \"$n\"\n"
+fn clock_helpers() -> Result<&'static str, String> {
+    WORKER
+        .split_once("#phonefarm_thermal_clock_begin\n")
+        .and_then(|(_, rest)| rest.split_once("#phonefarm_thermal_clock_end\n"))
+        .map(|(body, _)| body)
+        .ok_or_else(|| "trusted worker thermal clock helper missing".into())
+}
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+    use std::process::Command;
+    fn host_clock_script(body: &str) -> std::process::Output {
+        // Only the /proc/uptime reader is adapted to the host monotonic clock.
+        // The frozen worker's actual scheduling functions execute unchanged.
+        let script = format!(
+            "set -eu\n{}\ncut() {{ python3 -c 'import time; print(time.monotonic())'; }}\n{body}",
+            clock_helpers().unwrap()
+        );
+        Command::new("sh").arg("-c").arg(script).output().unwrap()
+    }
+    #[test]
+    fn real_slow_body_uses_remaining_wait_instead_of_post_query_sleep() {
+        let out = host_clock_script(
+            r#"start=$(thermal_uptime)
+sleep .45
+thermal_wait_until "$(thermal_deadline "$start" 0.5)" "$(thermal_deadline "$start" 0.9)" "$start"
+end=$(thermal_uptime)
+awk -v a="$start" -v b="$end" 'BEGIN {exit !(b-a>=.5 && b-a<=.9)}'
+start=$(thermal_uptime)
+sleep .45; sleep .5
+end=$(thermal_uptime)
+awk -v a="$start" -v b="$end" 'BEGIN {exit !(b-a>.9)}'
+printf 'deadline_body_passed_legacy_delay_exceeded_budget\n'
+"#,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("deadline_body_passed"));
+    }
+    #[test]
+    fn actual_overrun_and_backward_unknown_clocks_refuse_without_catchup() {
+        let overrun = host_clock_script(
+            r#"start=$(thermal_uptime)
+sleep 1.05
+thermal_wait_until "$(thermal_deadline "$start" 0.5)" "$(thermal_deadline "$start" 0.9)" "$start"
+printf 'must_not_collect_next_point\n'
+"#,
+        );
+        assert!(!overrun.status.success());
+        assert!(!String::from_utf8_lossy(&overrun.stdout).contains("must_not_collect"));
+        for value in ["99", "NaN"] {
+            let out = host_clock_script(&format!(
+                "cut() {{ printf '%s\\n' '{value}'; }}\nthermal_wait_until 105 106 100\nprintf 'must_not_collect_next_point\\n'\n"
+            ));
+            assert!(!out.status.success());
+            assert!(!String::from_utf8_lossy(&out.stdout).contains("must_not_collect"));
+        }
+    }
+}
+fn window_script() -> Result<String, String> {
+    Ok(format!("#!/system/bin/sh\nset -eu\n{}{}", clock_helpers()?,
+    "dur=${1:?duration}; interval=${2:?interval}\ncase $dur in ''|*[!0-9]*) exit 81;; esac\n[ \"$dur\" -ge 2 ] && [ \"$dur\" -le 1000 ] && [ \"$interval\" = 1 ] || exit 81\nD=$(dirname \"$0\"); start=$(thermal_uptime) || exit 81; n=0\nwhile :; do\n  if point=$(sh \"$D/thermal_sample.sh\"); then :; else code=$?; printf '%s\\n' \"$point\"; exit \"$code\"; fi\n  printf '%s\\n' \"$point\"; n=$((n+1))\n  if [ \"$n\" = 1 ]; then printf '%s\\n' \"$start\" > \"${3:?ready receipt}\"; fi\n  end=$(thermal_uptime) || exit 81\n  up=$(thermal_point_uptime \"$point\") || exit 81\n  if awk -v a=\"$start\" -v b=\"$up\" -v d=\"$dur\" 'BEGIN{exit !(b-a>=d)}'; then break; fi\n  thermal_wait_until \"$(thermal_deadline \"$up\" \"$interval\")\" \"$(thermal_deadline \"$up\" 6)\" \"$up\" || exit 81\ndone\nprintf '#phonefarm_thermal_window_complete dur=%s interval=%s start=%s end=%s samples=%s\\n' \"$dur\" \"$interval\" \"$start\" \"$end\" \"$n\"\n"))
 }
 pub(super) fn frozen_names() -> &'static [&'static str] {
     &[
@@ -632,7 +695,7 @@ pub(super) fn freeze_loaded(
     save(dir, "thermal_sample.sh", script.as_bytes())?;
     t.input_hashes
         .insert(dir.join("thermal_sample.sh"), sha(script.as_bytes()));
-    save(dir, "thermal_sampler.sh", window_script().as_bytes())?;
+    save(dir, "thermal_sampler.sh", window_script()?.as_bytes())?;
     let rules = read_json(&dir.join("thermal-rules.json"))?;
     save_json(
         dir,
@@ -707,7 +770,7 @@ pub(super) fn load_frozen(dir: &Path) -> Result<FrozenTemperature, String> {
             == warmup_script(&profile)?.as_bytes()
             && rules["warmup_script_sha256"] == sha(warmup_script(&profile)?.as_bytes())
             && bounded(&dir.join("thermal_sampler.sh"), 2 * 1024 * 1024)?
-                == window_script().as_bytes(),
+                == window_script()?.as_bytes(),
         "thermal frozen executable differs",
     )?;
     let evidence = read_json(&dir.join("thermal-evidence.json"))?;

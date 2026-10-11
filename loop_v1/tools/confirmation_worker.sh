@@ -8,6 +8,25 @@ case "$TOKEN:$RUN" in *[!a-zA-Z0-9_:-]*) exit 70 ;; esac
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT" ] || exit 72
 [ ! -e "$D/session.closed" ] || exit 86
 R="$D/$RUN"
+#phonefarm_thermal_clock_begin
+thermal_uptime() {
+  v=$(cut -d' ' -f1 /proc/uptime) || return 1
+  awk -v v="$v" 'BEGIN {if (v !~ /^[0-9]+([.][0-9]+)?$/) exit 1; print v}'
+}
+thermal_deadline() {
+  awk -v a="$1" -v d="$2" 'BEGIN {if (a !~ /^[0-9]+([.][0-9]+)?$/ || d !~ /^[0-9]+([.][0-9]+)?$/) exit 1; printf "%.6f\n", a+d}'
+}
+thermal_point_uptime() {
+  printf '%s\n' "$1" | awk -F '\t' '$1=="UPTIME" {n++; v=$2} END {if (n!=1 || v !~ /^[0-9]+([.][0-9]+)?$/) exit 1; print v}'
+}
+thermal_wait_until() {
+  desired=$1; latest=$2; previous=$3; current=$(thermal_uptime) || return 1
+  delay=$(awk -v a="$current" -v d="$desired" -v l="$latest" -v p="$previous" 'BEGIN {if (a !~ /^[0-9]+([.][0-9]+)?$/ || d !~ /^[0-9]+([.][0-9]+)?$/ || l !~ /^[0-9]+([.][0-9]+)?$/ || p !~ /^[0-9]+([.][0-9]+)?$/ || p>d || d>l || a<p || a>l) exit 1; if (d>a) printf "%.6f\n", d-a+0.02; else print 0}') || return 1
+  [ "$delay" = 0 ] || sleep "$delay" || return 1
+  current=$(thermal_uptime) || return 1
+  awk -v a="$current" -v d="$desired" -v l="$latest" 'BEGIN {exit !(a>=d && a<=l)}'
+}
+#phonefarm_thermal_clock_end
 intent() {
   [ ! -e "$D/session.closed" ] || exit 86
   [ "$(cat "$D/owner")" = "$TOKEN $BOOT" ] || exit 71
@@ -308,19 +327,30 @@ case "$MODE" in
     intent mkdir "$R" ''; mkdir "$R"
     trap 'cleanup_failure' EXIT INT TERM
     snapshot snapshot_before
-    if [ -f "$D/thermal_sample.sh" ]; then sh "$D/thermal_sample.sh" >> "$R/thermal_hold.raw.tsv"; fi
+    if [ -f "$D/thermal_sample.sh" ]; then
+      if thermal_point=$(sh "$D/thermal_sample.sh"); then :; else thermal_code=$?; printf '%s\n' "$thermal_point" >> "$R/thermal_hold.raw.tsv"; exit "$thermal_code"; fi
+      printf '%s\n' "$thermal_point" >> "$R/thermal_hold.raw.tsv"
+      thermal_previous=$(thermal_point_uptime "$thermal_point") || exit 81
+    fi
     apply_plan "$D/$RUN.plan.tsv"
+    if [ -f "$D/thermal_sample.sh" ]; then thermal_hold_start=$(thermal_uptime) || exit 81; fi
     [ "$MODE" != control_probe ] || snapshot snapshot_at_run
-    sleep 1
+    if [ -f "$D/thermal_sample.sh" ]; then
+      thermal_wait_until "$(thermal_deadline "$thermal_hold_start" 1)" "$(thermal_deadline "$thermal_previous" 6)" "$thermal_previous" || exit 81
+    else sleep 1; fi
     while IFS="$(printf '\t')" read -r key kind path value; do
       [ "$(read_value "$kind" "$path")" = "$value" ] || exit 74
     done < "$D/$RUN.plan.tsv"
     if [ -f "$D/thermal_sample.sh" ]; then
-      sh "$D/thermal_sample.sh" >> "$R/thermal_hold.raw.tsv"
-      sleep 5
-      sh "$D/thermal_sample.sh" >> "$R/thermal_hold.raw.tsv"
-      sleep 5
-      sh "$D/thermal_sample.sh" >> "$R/thermal_hold.raw.tsv"
+      if thermal_point=$(sh "$D/thermal_sample.sh"); then :; else thermal_code=$?; printf '%s\n' "$thermal_point" >> "$R/thermal_hold.raw.tsv"; exit "$thermal_code"; fi
+      printf '%s\n' "$thermal_point" >> "$R/thermal_hold.raw.tsv"
+      thermal_previous=$(thermal_point_uptime "$thermal_point") || exit 81
+      for thermal_offset in 6 11; do
+        thermal_wait_until "$(thermal_deadline "$thermal_hold_start" "$thermal_offset")" "$(thermal_deadline "$thermal_previous" 6)" "$thermal_previous" || exit 81
+        if thermal_point=$(sh "$D/thermal_sample.sh"); then :; else thermal_code=$?; printf '%s\n' "$thermal_point" >> "$R/thermal_hold.raw.tsv"; exit "$thermal_code"; fi
+        printf '%s\n' "$thermal_point" >> "$R/thermal_hold.raw.tsv"
+        thermal_previous=$(thermal_point_uptime "$thermal_point") || exit 81
+      done
     else sleep 10; fi
     while IFS="$(printf '\t')" read -r key kind path value; do
       [ "$(read_value "$kind" "$path")" = "$value" ] || exit 75
