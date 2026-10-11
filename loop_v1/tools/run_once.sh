@@ -13,7 +13,7 @@ LABEL="${1:?用法: run_once.sh <标签> <输出目录> [旋钮脚本]}"
 OUTDIR="${2:?缺输出目录}"
 KNOB="${3:-}"
 
-# 下面五项 (以及 COMM) 都可由环境变量覆盖, 缺省值即原先的硬编码值 —— 这样 auto/autoloop.py
+# 下面五项都可由环境变量覆盖, 缺省值即原先的硬编码值 —— 这样 auto/autoloop.py
 # 能在 git worktree 里复用同一个脚本, 不必复制一份。
 SERIAL="${SERIAL:-91253241019A}"
 PKG="${PKG:-com.miHoYo.Yuanshen}"
@@ -55,9 +55,7 @@ wait "$WL_PID" || echo "[$LABEL] 警告: 负载脚本非零退出"
 adb -s "$SERIAL" pull "/data/local/tmp/loop_v1_$LABEL.txt" "$OUTDIR/trace.txt" >/dev/null 2>&1
 adb -s "$SERIAL" shell "rm -f /data/local/tmp/loop_v1_$LABEL.txt" >/dev/null 2>&1
 
-# 渲染线程名: 缺省按 Unity (UnityGfxDeviceW) 解析; 非 Unity 游戏由 COMM 指定
-# (phonefarm onboard 从 ftrace 里数出来, 记在游戏档案 workload.render_comm)
-"$PF" parse-trace "$OUTDIR/trace.txt" ${COMM:+--comm "$COMM"} > "$OUTDIR/summary.json"
+"$PF" parse-trace "$OUTDIR/trace.txt" > "$OUTDIR/summary.json"
 
 # 5) 轮末快照 (与轮内对比, 确认采集器自己没留痕)
 adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDIR/snap_after_run.txt" 2>&1

@@ -746,6 +746,12 @@ fn save_jpg(img: &image::RgbImage, path: &Path, width: u32) {
 
 /// 找 / 编 OCR 工具 (仓库根的 ./ocr, 源码 ocr.swift)。
 fn ocr_bin() -> Result<PathBuf, String> {
+    // --ocr 给的现成可执行 (手机节点上用 pf-node 跑本机构建时, 连同它一起上传)
+    if let Some(p) = std::env::var_os("PF_OCR_BIN").map(PathBuf::from) {
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
     let root = repo_root();
     let bin = root.join("ocr");
     if bin.is_file() {
@@ -1388,7 +1394,7 @@ pub fn enter_scene(serial: &str, pkg: &str, out: &Path) -> Result<Value, String>
 const USAGE: &str = "用法: phonefarm onboard --package <包名> [--serial S] [--out 目录]
         [--rounds 5] [--seconds 30] [--max-steps 60] [--timeout 600]
         [--enter-only] [--no-cold] [--no-guest] [--no-consent] [--no-charge-suspend]
-        [--vlm-calls 4] [--keep-foreground]
+        [--vlm-calls 4] [--keep-foreground] [--ocr <ocr 可执行>]
   完整接入: 冷启动 → 进门 → 进游戏探针 → 生成负载 → 校准 → 渲染线程 → N 轮实测 → profile.json
   --enter-only: 只把游戏带进游戏场景 (不冷启动, 不测), 退出码 0=在游戏里 3=需要人 1=失败";
 
@@ -1444,6 +1450,10 @@ fn parse_args(a: &[String]) -> Result<Args, String> {
             "--no-consent" => r.policy.allow_consent = false,
             "--no-charge-suspend" => r.suspend = false,
             "--keep-foreground" => r.keep_fg = true,
+            "--ocr" => {
+                let p = it.next().ok_or("--ocr 要一个路径")?;
+                std::env::set_var("PF_OCR_BIN", p);
+            }
             "--json" => {}
             o => return Err(format!("不认识的参数 {o}\n{USAGE}")),
         }

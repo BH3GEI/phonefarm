@@ -687,7 +687,6 @@ pub(crate) fn run_one_with(
         .env("CAPDUR", seconds.to_string())
         .env("WL", workload)
         .env("PKG", pkg)
-        .env("COMM", comm.unwrap_or(""))
         .env(
             "PATH",
             format!(
@@ -725,6 +724,15 @@ pub(crate) fn run_one_with(
     };
     let mut m = json!({ "label": label, "run_once_rc": rc });
     let sp = outdir.join("summary.json");
+    // 指定了渲染线程: 在本进程里按它重解析 trace.txt, 覆盖 run_once.sh 按 Unity 缺省解析出的
+    // summary.json。放在这里而不是给 run_once.sh 加参数, 是为了换个仓库根 (手机节点上的
+    // main 版脚本) 也照样生效。
+    if let Some(c) = comm.filter(|c| !c.is_empty()) {
+        if let Ok(b) = std::fs::read(outdir.join("trace.txt")) {
+            let d = crate::looptrace::parse(&String::from_utf8_lossy(&b), c);
+            std::fs::write(&sp, crate::pyjson::dumps(&d.summarize())).map_err(|e| e.to_string())?;
+        }
+    }
     match std::fs::read_to_string(&sp).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
         Some(s) => {
             m["summary"] = s;
