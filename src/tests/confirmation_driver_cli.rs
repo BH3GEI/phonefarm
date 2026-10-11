@@ -783,7 +783,7 @@ fn capability_root_hot_gate_precedes_install_and_failure_keeps_recovery() {
         assert_eq!(v["eligible"], false);
         let argv = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
         if failure == "root" || failure == "cold" {
-            assert!(!argv.contains("mkdir /data/local/tmp"));
+            assert!(!argv.contains("#phonefarm_fixed_tools_install v1"));
             assert!(!f.dir.join("legacy/devlock.d").exists());
         } else {
             assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
@@ -903,7 +903,7 @@ fn loaded_capability_missing_typed_sensor_and_severe_hal_cannot_install_or_write
         assert_eq!(code, 1, "{fail}: {v}");
         assert!(!f.dir.join("legacy/devlock.d").exists());
         let argv = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
-        assert!(!argv.contains("mkdir /data/local/tmp"));
+        assert!(!argv.contains("#phonefarm_fixed_tools_install v1"));
     }
 }
 
@@ -1143,10 +1143,11 @@ fn loaded_restore_target_is_post_warmup_state_before_remote_writes_for_probe_and
         let installation = commands
             .iter()
             .position(|v| {
-                v["command"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("set -eu; umask 077; mkdir ")
+                v["command"].as_str().unwrap() == "sh"
+                    && v["stdin"]
+                        .as_str()
+                        .unwrap()
+                        .contains("#phonefarm_fixed_tools_install v1")
             })
             .unwrap();
         assert!(warmup < snapshot && snapshot < installation);
@@ -1167,7 +1168,140 @@ fn loaded_prepare_checks_fresh_profile_after_install_before_first_control_write(
     let argv = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
     assert!(argv.contains("mkdir "));
     assert!(!argv.contains("'probe' 'probe_0'"));
-    assert!(!f.dir.join("session/admission-0-bundle.json").exists());
+    assert!(!f.dir.join("session/admission_0-run.json").exists());
+}
+
+#[test]
+fn fixed_tools_loaded_prepare_batches_two_calls_and_freshly_rechecks_each_baseline() {
+    let f = F::new(false);
+    let mut req = f.read("request.json");
+    req["temperature_profile_id"] = json!("loaded_steady_v1");
+    req["goal"] = json!("render_cadence");
+    f.write("request.json", &req);
+    let (code, v) = f.prepare("");
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["eligible"], false);
+    let manifest = f.read("session/tools.manifest.json");
+    assert_eq!(manifest["count"], 14);
+    assert_eq!(manifest["files"].as_array().unwrap().len(), 14);
+    let raw =
+        std::fs::read_to_string(f.dir.join("session/prepare-commands/journal.jsonl")).unwrap();
+    let events = raw
+        .lines()
+        .map(|s| serde_json::from_str::<Value>(s).unwrap())
+        .collect::<Vec<_>>();
+    let intents = events
+        .iter()
+        .filter(|v| v["event"] == "command_intent")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        intents
+            .iter()
+            .filter(|v| v["operation"] == "install_fixed_tools")
+            .count(),
+        1
+    );
+    // One full acceptance after install; each of the three baselines independently re-verifies actual files.
+    assert_eq!(
+        intents
+            .iter()
+            .filter(|v| v["operation"] == "verify_fixed_tools")
+            .count(),
+        4
+    );
+    assert!(!intents.iter().any(|v| matches!(
+        v["operation"].as_str(),
+        Some("install_file" | "install_owner" | "verify_remote_file")
+    )));
+    let remote = f.read("fake-state.json");
+    let d = f.read("session/state.json")["remote"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for file in manifest["files"].as_array().unwrap() {
+        let name = file["name"].as_str().unwrap();
+        let bytes = remote["files"][format!("{d}/{name}")]
+            .as_str()
+            .unwrap()
+            .as_bytes();
+        assert_eq!(file["sha256"], sha(bytes));
+        assert_eq!(file["bytes"], bytes.len());
+    }
+    for i in 0..3 {
+        assert!(f
+            .dir
+            .join(format!("session/admission_{i}-run.json"))
+            .exists());
+    }
+}
+
+#[test]
+fn fixed_tools_partial_install_or_corruption_never_runs_probe_and_reconcile_keeps_barrier() {
+    for fail in [
+        "batch_partial_install",
+        "batch_corrupt_remote",
+        "batch_truncated_verify",
+    ] {
+        let f = F::new(false);
+        let (code, v) = f.prepare(fail);
+        assert_eq!(code, 1, "{fail}: {v}");
+        assert_eq!(v["status"], "BLOCKED");
+        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        assert!(!f.dir.join("session/admission_0-run.json").exists());
+        let argv = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
+        assert!(!argv.contains("'probe' 'probe_0'"));
+        let (code, v) = f.call(
+            &["reconcile", "--session", "session"],
+            if fail == "batch_truncated_verify" {
+                fail
+            } else {
+                ""
+            },
+        );
+        assert_eq!(code, 1, "{fail}: {v}");
+        assert_eq!(v["status"], "BLOCKED");
+        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        let actual = f.read("fake-state.json");
+        let remote = f.read("session/state.json")["remote"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(actual["files"].get(format!("{remote}/owner")).is_some());
+        assert!(actual["files"]
+            .get(format!("{remote}/session.closed"))
+            .is_none());
+    }
+}
+
+#[test]
+fn fixed_tools_collect_and_reconcile_do_not_reuse_old_install_acceptance() {
+    let f = F::new(false);
+    let (code, v) = f.prepare("");
+    assert_eq!(code, 0, "{v}");
+    f.freeze();
+    let mut device = f.read("fake-state.json");
+    let remote = f.read("session/state.json")["remote"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let key = format!("{remote}/worker.sh");
+    let old = device["files"][&key].as_str().unwrap().to_owned();
+    device["files"][&key] = json!("X".to_owned() + &old[1..]);
+    f.write("fake-state.json", &device);
+    let (code, v) = f.collect();
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["status"], "BLOCKED");
+    assert!(!f.dir.join("session/a0-run.json").exists());
+    assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    let before = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
+    assert!(!before.contains("'sample' 'a0'"));
+    let (code, v) = f.call(&["reconcile", "--session", "session"], "");
+    assert_eq!(code, 1, "{v}");
+    assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    let actual = f.read("fake-state.json");
+    assert!(actual["files"]
+        .get(format!("{remote}/session.closed"))
+        .is_none());
 }
 
 #[test]

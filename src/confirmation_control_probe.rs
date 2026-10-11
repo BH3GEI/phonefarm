@@ -81,6 +81,7 @@ pub(super) fn frozen_names(dir: &Path) -> Result<BTreeSet<String>, String> {
     if req.temperature_profile_id.as_deref() == Some("capability_absolute_v1") {
         names.insert("thermal-purpose.txt".into());
     }
+    names.extend(fixed_tools::FROZEN_NAMES.map(String::from));
     Ok(names)
 }
 fn validate(dir: &Path) -> Result<ProbeRequest, String> {
@@ -347,6 +348,7 @@ pub(super) fn run(path: &Path, out: &Path, execute: bool) -> Result<Value, Strin
             files.push("thermal-purpose.txt".into());
         }
     }
+    freeze_tool_bundle(&out, &files)?;
     let names = frozen_names(&out)?;
     freeze(&out, &names.iter().map(String::as_str).collect::<Vec<_>>())?;
     validate(&out)?;

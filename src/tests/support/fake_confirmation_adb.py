@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Explicit simulation only. Implements transport receipt protocol, never real-device data."""
-import json, os, pathlib, re, shlex, sys
+import base64, hashlib, json, os, pathlib, re, shlex, sys
 root=pathlib.Path(os.environ['PHONEFARM_FAKE_DEVICE_DIR']); root.mkdir(parents=True,exist_ok=True)
 statepath=root/'fake-state.json'
 if statepath.exists(): state=json.loads(statepath.read_text())
@@ -119,7 +119,37 @@ elif cmd.startswith('set -eu; test ') and 'HELPER_ABSENT' in cmd:
 elif cmd.startswith('set -eu; test ') and 'chmod 700' in cmd:
     assert any(k.endswith('/render_reader.elf') for k in state['files'])
 elif cmd=='sh':
-    if b'#phonefarm_thermal_metadata v1' in data:
+    if data.startswith(b'#!/system/bin/sh\n#phonefarm_fixed_tools_'):
+        # Simulation is explicitly synthetic. Real template behavior is tested separately with host-owned files.
+        manifest=json.loads(re.search(rb'^#MANIFEST (.+)$',data,re.M).group(1))
+        d=manifest['remote'];owner=manifest['token']+' '+manifest['boot_id']
+        digest=hashlib.sha256(json.dumps(manifest,ensure_ascii=False,indent=2,separators=(',', ': ')).encode()).hexdigest()
+        # Rust pretty JSON and this fixture use the same stable typed field order, no trailing LF.
+        if b'#phonefarm_fixed_tools_install v1' in data:
+            assert d+'/owner' not in state['files']
+            state['files'][d+'/owner']=owner+'\n'
+            blocks=re.findall(rb"write_fixed '([^']+)' ([0-9]+) <<'PHONEFARM_FIXED_BUNDLE_DATA'\n(.*?)PHONEFARM_FIXED_BUNDLE_DATA\n",data,re.S)
+            assert len(blocks)==manifest['count']
+            for i,(name,size,raw) in enumerate(blocks):
+                b=base64.b64decode(b''.join(raw.split()),validate=True);assert len(b)==int(size)
+                state['files'][d+'/'+name.decode()]=b.decode()
+                if fail=='batch_partial_install' and i==1:
+                    statepath.write_text(json.dumps(state));sys.exit(91)
+            if fail=='batch_corrupt_remote':state['files'][d+'/worker.sh']='X'+state['files'][d+'/worker.sh'][1:]
+            print(f"INSTALL_COMPLETE\t{manifest['token']}\t{manifest['boot_id']}\t{digest}\t{manifest['count']}")
+        else:
+            if d+'/session.closed' in state['files']:sys.exit(86)
+            if state['files'].get(d+'/owner')!=owner+'\n':sys.exit(87)
+            print('#phonefarm_fixed_tools_verification v1')
+            print(f'OWNER\t{owner}\nBOOT\t{manifest["boot_id"]}\nBUNDLE\t{digest}')
+            count=0
+            for entry in manifest['files']:
+                value=state['files'].get(d+'/'+entry['name'])
+                if value is None:sys.exit(92)
+                b=value.encode();print(f'FILE\t{entry["name"]}\t{len(b)}\t{hashlib.sha256(b).hexdigest()}');count+=1
+            if fail=='batch_truncated_verify':sys.exit(0)
+            print(f'COUNT\t{count}\n#end')
+    elif b'#phonefarm_thermal_metadata v1' in data:
         print('#phonefarm_thermal_metadata v1\nBOOT\tfake-boot')
         for i,ty,dom,t in [(0,'cpu-0','cpu',108000),(1,'gpuss-0','gpu',95000),(2,'skin-msm-therm','skin',60000)]:
             unit='deci_celsius' if fail=='thermal_wrong_unit' and dom=='cpu' else 'milli_celsius'
