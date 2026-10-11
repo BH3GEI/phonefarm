@@ -245,7 +245,7 @@ fn left_gate(serial: &str, gate_ref: &Path) -> bool {
 }
 
 /// 二进制安全的 `adb exec-out screencap` (PNG 之外的原始 RGBA)。
-fn screencap_raw_bin(serial: &str) -> Vec<u8> {
+pub(crate) fn screencap_raw_bin(serial: &str) -> Vec<u8> {
     std::process::Command::new(crate::eval::adb_path())
         .args(["-s", serial, "exec-out", "screencap"])
         .output()
