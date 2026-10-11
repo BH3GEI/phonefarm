@@ -146,21 +146,41 @@ pub fn run_eval(args: &[String]) -> i32 {
         return 2;
     }
     if let Err(e) = validate_v2(&req) {
-        eprintln!("eval_request v2 校验失败: {e}");
+        if kind == "shader" {
+            println!("{}", crate::shaderplan::abort(&req, &e, None));
+        } else {
+            eprintln!("eval_request v2 校验失败: {e}");
+        }
         return 2;
     }
-    let evidence = a
-        .out
-        .clone()
-        .unwrap_or_else(|| format!("eval_evidence/{}", req["candidate_id"].as_str().unwrap_or("x")));
+    let evidence = a.out.clone().unwrap_or_else(|| {
+        format!(
+            "eval_evidence/{}",
+            req["candidate_id"].as_str().unwrap_or("x")
+        )
+    });
     // serial: CLI --serial 优先, 否则请求体里的 (game_opt_loop 的驱动把 --serial
     // 放进请求体而不是命令行)
     let serial = a
         .serial
         .clone()
         .or_else(|| req["serial"].as_str().map(String::from));
+    if kind == "shader" {
+        return eval_shader_v2(&req, &a);
+    }
+    let _lease = match crate::devlease::Lease::target(serial.as_deref(), "eval") {
+        Ok(v) => v,
+        Err(e) => {
+            let mut r = base_report(&req, kind);
+            r["verdict"]["reason"] = json!(e);
+            r["qualification"] = json!({"stage":"experiment","eligible":false,"can_claim_improvement":false,"status":"INELIGIBLE","blockers":[e]});
+            println!("{r}");
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let serial = Some(_lease.serial.clone());
     let report = match kind {
-        "shader" => return eval_shader_v2(&req, &a),
         "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence)),
         "gray" => gray_eval(&req, serial.as_deref(), Path::new(&evidence)),
         other => {
@@ -170,6 +190,10 @@ pub fn run_eval(args: &[String]) -> i32 {
     };
     match report {
         Ok(r) => {
+            if let Err(e) = _lease.check() {
+                eprintln!("{e}");
+                return 2;
+            }
             println!("{r}");
             0
         }
@@ -183,106 +207,60 @@ pub fn run_eval(args: &[String]) -> i32 {
 /// v2 shader: 契约规定的收端降级 —— 合成等价的 v1 请求转交 gpu-op,
 /// 回包补上 version/kind/conditions_observed。
 fn eval_shader_v2(req: &Value, a: &EvalArgs) -> i32 {
-    let dir = a
-        .out
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
-    let _ = std::fs::create_dir_all(&dir);
-    // v1 的 cool_c 与 quality_baseline_db 是必填数字, 表达不了 "null = 不等冷 /
-    // 没给地板"。冻结条件纪律下不允许接收端偷偷挑数值顶替, 缺了就明说降级失败。
-    let cool_c = req["conditions"]["cool_c"]
-        .as_f64()
-        .or(req["protocol"]["cool_c"].as_f64());
-    let Some(cool_c) = cool_c.filter(|x| *x > 0.0 && *x < 100.0) else {
-        eprintln!(
-            "v2 shader 降级失败: conditions.cool_c={} 而 v1 (gpu-op) 必须有一个等冷目标温度 (0,100)。\n\
-             冻结条件纪律下收端不代填数值, 请在请求里显式给 conditions.cool_c",
-            serde_json::to_string(&req["conditions"]["cool_c"]).unwrap_or_default()
-        );
-        return 2;
-    };
-    let Some(qbase) = req["payload"]["quality_baseline_db"].as_f64() else {
-        eprintln!("v2 shader 降级失败: payload.quality_baseline_db=null 而 v1 (gpu-op) 必须有画质地板数值。\n\
-                   收端不代填, 请显式给出");
-        return 2;
-    };
-    let v1 = json!({
-        "version": 1,
-        "candidate_id": req["candidate_id"],
-        "track": req["payload"]["track"],
-        "package": req["package"],
-        // workload: headless 载体量的是算子自身耗时, replay_seconds 不参与;
-        // refbench 载体每臂渲染 frames 帧
-        "replay_script": req["workload"]["script"].as_str().unwrap_or(""),
-        "shader_path": req["payload"]["shader_path"],
-        "spirv_path": req["payload"]["spirv_path"],
-        "budget_ms": req["payload"]["budget_ms"],
-        "quality_baseline_db": qbase,
-        "incumbent_latency_ms": req["payload"]["incumbent_latency_ms"],
-        "quality_reference": req["payload"]["quality_reference"]
-            .as_str()
-            .or(req["conditions"]["quality_reference"].as_str()),
-        "protocol": {
-            "cool_c": cool_c,
-            "replay_seconds": req["workload"]["seconds"].as_i64()
-                .or(req["protocol"]["replay_seconds"].as_i64())
-                .unwrap_or(30),
-            "rounds": req["protocol"]["rounds"],
-            "alternating": req["protocol"]["alternating"],
-            "p_threshold": req["protocol"]["p_threshold"],
-        }
-    });
-    let v1_path = Path::new(&dir).join("_eval_v1_request.json");
-    if let Err(e) = std::fs::write(&v1_path, serde_json::to_string(&v1).unwrap_or_default()) {
-        eprintln!("写不了降级请求 {}: {e}", v1_path.display());
-        return 2;
-    }
-    // 转交 gpu-op, 捕获 stdout (回包是纯 JSON; 进度走 stderr)
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm"));
-    let mut cmd = Command::new(&exe);
-    cmd.arg("gpu-op")
-        .arg("--request")
-        .arg(&v1_path)
-        .arg("--json");
-    if let Some(s) = &a.serial {
-        cmd.arg("--serial").arg(s);
-    }
-    if let Some(r) = &a.power_rail {
-        cmd.arg("--power-rail").arg(r);
-    }
-    if let Some(o) = &a.out {
-        cmd.arg("--out").arg(o);
-    }
-    let out = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("起不了 gpu-op: {e}");
-            return 2;
-        }
-    };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    if !out.status.success() {
-        // gpu-op 校验/预检失败: 它的 stderr 已经把原因说清了, 原样透传退出码
-        eprint!("{}", String::from_utf8_lossy(&out.stderr));
-        return out.status.code().unwrap_or(2);
-    }
-    // 回包补 v2 字段: 上层按 kind 对账, 对不上要整份作废, 所以必须补
-    let mut report: Value = match serde_json::from_str(stdout.trim()) {
+    let plan = match crate::shaderplan::build(req, a.serial.as_deref(), a.power_rail.as_deref()) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("gpu-op 回包不是合法 JSON: {e}\n{stdout}");
+            println!("{}", crate::shaderplan::abort(req, &e, None));
             return 2;
         }
     };
-    if let Some(obj) = report.as_object_mut() {
-        obj.insert("version".into(), json!(2));
-        obj.insert("kind".into(), json!("shader"));
-        // conditions 是意图, conditions_observed 是事实; shader 通路暂只回显意图,
-        // 真值 (起跑温度/等冷是否超时) 由 gpu-op 的进度日志给出, 尚未结构化
-        obj.insert("conditions_observed".into(), json!(req["conditions"]));
+    let dir = a.out.clone().map(PathBuf::from).unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("phonefarm-eval-{}", std::process::id()))
+    });
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        println!(
+            "{}",
+            crate::shaderplan::abort(
+                req,
+                &format!("evidence directory: {e}"),
+                Some(&plan.resolved)
+            )
+        );
+        return 2;
     }
-    println!("{report}");
-    0
+    let path = dir.join(format!("_eval_v1_request_{}.json", std::process::id()));
+    if let Err(e) = std::fs::write(&path, plan.request.to_string()) {
+        println!(
+            "{}",
+            crate::shaderplan::abort(
+                req,
+                &format!("adapter request write: {e}"),
+                Some(&plan.resolved)
+            )
+        );
+        return 2;
+    }
+    let mut args = plan.args;
+    args.extend([
+        "--request".into(),
+        path.to_string_lossy().into_owned(),
+        "--out".into(),
+        dir.to_string_lossy().into_owned(),
+    ]);
+    // Same process: gpu-op owns one lease and emits the v2 envelope on measured outcomes.
+    // Exit 1 is still a valid non-PASS report. Exit 2 means unverified conditions, hence ABORT.
+    let rc = crate::gpuop::run_gpu_op(&args);
+    if rc == 2 {
+        println!(
+            "{}",
+            crate::shaderplan::abort(
+                req,
+                "gpu-op execution/conditions failed; see stderr",
+                Some(&plan.resolved)
+            )
+        );
+    }
+    rc
 }
 
 fn delegate_gpu_op(
@@ -1457,12 +1435,13 @@ bus.DDR.boost_freq.effect=live\n";
                         "incumbent_latency_ms": null, "quality_reference": null}
         });
         assert!(validate_ok(&req));
-        // 与 eval_shader_v2 里同一份映射, 这里直接复刻关键字段核对
-        let v1_cool = req["conditions"]["cool_c"].as_f64().or(req["protocol"]["cool_c"].as_f64());
-        assert_eq!(v1_cool, Some(42.0)); // conditions 优先
-        assert_eq!(req["payload"]["budget_ms"], json!(4.0));
-        let qref = req["payload"]["quality_reference"].as_str().or(req["conditions"]["quality_reference"].as_str());
-        assert_eq!(qref, Some("/tmp/ref_dir")); // payload 优先, 两者取其有
+        let plan = crate::shaderplan::build(&req,None,None).unwrap();
+        assert_eq!(plan.request["protocol"]["cool_c"],42.0);
+        assert_eq!(plan.request["budget_ms"],4.0);
+        assert_eq!(plan.request["quality_reference"],"/tmp/ref_dir");
+        let args=crate::gpuop::parse_args(&[plan.args,vec!["--request".into(),"x".into()]].concat()).unwrap();
+        assert_eq!(args.carrier,crate::gpuop::Carrier::Refbench);
+        assert_eq!(args.frames,300); assert_eq!(args.intensity,2);
     }
 
     // ── 报告装配 ──

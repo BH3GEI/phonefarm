@@ -93,7 +93,8 @@ fn arm(
     outdir: &Path,
     workload: &Path,
     seconds: u64,
-    pf_bin: &str,
+    _pf_bin: &str,
+    lease: &crate::devlease::Lease,
 ) -> Result<(), String> {
     eprintln!("── 臂 {label} (rewrite={}) ──", rewrite as u8);
     let _ = gl.off();
@@ -107,15 +108,27 @@ fn arm(
     gl.mount_mode(mode, "com.miHoYo.Yuanshen", false)?;
     launch_to_world_layered(serial)?;
     // 功耗与帧数据同窗口采: run_once 的采集窗口是 t=6..36s, 这里 t=10 起采约 12s
-    let pf = pf_bin.to_string();
     let power_path = outdir.join("power.json");
     let s2 = serial.to_string();
-    let sampler = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(10));
-        spawn_perf(&pf, &s2, &power_path);
-    });
-    let _ = run_one(serial, label, outdir, seconds, workload, "com.miHoYo.Yuanshen");
-    let _ = sampler.join();
+    std::thread::scope(|scope| {
+        let sampler = scope.spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            sample_perf_under_lease(&s2, &power_path, lease)
+        });
+        let result = run_one(
+            serial,
+            label,
+            outdir,
+            seconds,
+            workload,
+            "com.miHoYo.Yuanshen",
+        );
+        let sampled = sampler
+            .join()
+            .map_err(|_| "nested sampler panicked".to_string())?;
+        result?;
+        sampled
+    })?;
     // 层自报落盘
     let marker = su(
         serial,
@@ -125,7 +138,10 @@ fn arm(
     std::fs::write(outdir.join("knobs_layer_out.json"), marker.trim()).ok();
     eprintln!(
         "  层自报: {}",
-        crate::graylayer::GrayLayer::adb_stdout(&marker).chars().take(320).collect::<String>()
+        crate::graylayer::GrayLayer::adb_stdout(&marker)
+            .chars()
+            .take(320)
+            .collect::<String>()
     );
     // 轮次有效性自检: 原神每帧发 2 次 cmdbatch, spf 必须是 2; 帧时按游戏内帧率
     // 设置分两档判 (60 帧档 ~16.7ms, 30 帧档 ~33.3ms)
@@ -137,32 +153,38 @@ fn arm(
             eprintln!(
                 "  自检: spf={spf} p50={p50}ms fps={} -> {}",
                 v["fps_mean"],
-                if ok { "有效" } else { "可疑, 该轮建议丢弃" }
+                if ok {
+                    "有效"
+                } else {
+                    "可疑, 该轮建议丢弃"
+                }
             );
         }
     }
     Ok(())
 }
 
-fn spawn_perf(pf_bin: &str, serial: &str, out: &Path) {
-    let f = std::fs::File::create(out).ok();
-    let _ = std::process::Command::new(pf_bin)
-        .args([
-            "perf",
-            "--serial",
-            serial,
-            "--app",
-            "com.miHoYo.Yuanshen",
-            "--rounds",
-            "8",
-            "--power-rail",
-            "battery",
-            "--suspend-charging",
-            "--json",
-        ])
-        .stdout(f.map(|f| f.into()).unwrap_or(std::process::Stdio::null()))
-        .stderr(std::process::Stdio::null())
-        .status();
+fn sample_perf_under_lease(
+    serial: &str,
+    out: &Path,
+    lease: &crate::devlease::Lease,
+) -> Result<(), String> {
+    let args = [
+        "--serial",
+        serial,
+        "--app",
+        "com.miHoYo.Yuanshen",
+        "--rounds",
+        "8",
+        "--power-rail",
+        "battery",
+        "--suspend-charging",
+        "--json",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect::<Vec<_>>();
+    crate::perfsrc::perf_to_file_under_lease(&args, lease, out)
 }
 
 /// 无层臂: 不推 .so 干净基线。进世界判定用截帧亮度差 (与"门"页比, >40% 判离开)。
@@ -337,6 +359,10 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
         eprintln!("--mode 只认 loadop|copyprobe");
         return 2;
     }
+    let _lease = match crate::devlease::Lease::target(Some(&serial), "gray-ab") {
+        Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
+    };
+    serial = _lease.serial.clone();
     let probes = std::env::var("PROBES").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let gl = GrayLayer::new(&serial);
     let workload = match crate::eval::resolve_path("knobs/gray/workload_spin_touch_v1.json") {
@@ -353,10 +379,10 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
     let _ = std::fs::create_dir_all(&out);
     if mode == "loadop" {
         for i in 1..=pairs {
-            if let Err(e) = arm(&serial, &gl, &format!("ctrl{i}"), false, &out.join(format!("ctrl{i}")), &workload, 30, &pf_bin) {
+            if let Err(e) = arm(&serial, &gl, &format!("ctrl{i}"), false, &out.join(format!("ctrl{i}")), &workload, 30, &pf_bin, &_lease) {
                 eprintln!("ctrl{i} 作废: {e}");
             }
-            if let Err(e) = arm(&serial, &gl, &format!("knob{i}"), true, &out.join(format!("knob{i}")), &workload, 30, &pf_bin) {
+            if let Err(e) = arm(&serial, &gl, &format!("knob{i}"), true, &out.join(format!("knob{i}")), &workload, 30, &pf_bin, &_lease) {
                 eprintln!("knob{i} 作废: {e}");
             }
         }
@@ -383,6 +409,7 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
         }
     }
     let _ = gl.off();
+    if let Err(e) = _lease.check() { eprintln!("{e}"); return 2; }
     println!("全部完成, 证据: {}", out.display());
     0
 }

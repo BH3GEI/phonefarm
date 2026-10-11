@@ -428,10 +428,10 @@ impl BatteryState {
     /// `Not charging` 而不是 `Discharging`; 而 `current_now` 在充放平衡的瞬间会过零。
     /// 只有「没在充电」且「电流确实是放电方向」才算数。
     pub fn on_battery(&self) -> bool {
-        if self.status.eq_ignore_ascii_case("Charging") {
-            return false;
-        }
-        matches!(self.current_ua, Some(c) if c < 0)
+        // Unknown/missing status is not proof of discharge even if current is negative.
+        let status = self.status.trim().to_ascii_lowercase();
+        matches!(status.as_str(), "discharging" | "not charging" | "full")
+            && matches!(self.current_ua, Some(c) if c < 0)
     }
 
     /// 人能读的一句话, 进 `unavailable` 的原因里。
@@ -942,6 +942,13 @@ mod tests {
     use super::*;
 
     // ── 电池状态: 功耗读数算不算数全看它 ──
+
+    #[test]
+    fn unknown_battery_status_never_certifies_discharge() {
+        for status in ["", "Unknown", "NA", "manufacturer-custom"] {
+            assert!(!BatteryState { status:status.into(), current_ua:Some(-200_000), capacity_pct:Some(80) }.on_battery());
+        }
+    }
 
     fn bat(status: &str, cur: i64, cap: i64) -> BatteryState {
         BatteryState { status: status.into(), current_ua: Some(cur), capacity_pct: Some(cap) }
