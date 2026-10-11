@@ -512,6 +512,84 @@ pub(crate) fn snapshot(serial: &str) -> String {
     su(serial, &format!("sh {DEV_TMP}/device_snapshot.sh"), 60)
 }
 
+/// 施加后隔多少秒回读 (knobs/DESIGN.md: 厂商性能服务约 10 秒内改回)。
+const READBACK_AFTER_S: u64 = 12;
+
+/// 读回 plan 里每一项当前值的一条 shell 命令。输出每行 `<路径>=<值>`。
+pub(crate) fn readback_cmd(plan: &str) -> String {
+    let mut parts = Vec::new();
+    for line in plan.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 3 {
+            continue;
+        }
+        match f[0] {
+            "sysfs" => parts.push(format!("echo \"{}=$(cat {} 2>/dev/null)\"", f[1], f[1])),
+            "setting" => {
+                let (ns, key) = f[1].split_once(':').unwrap_or(("system", f[1]));
+                parts.push(format!("echo \"{}=$(settings get {ns} {key} 2>/dev/null)\"", f[1]))
+            }
+            _ => {}
+        }
+    }
+    parts.join("; ")
+}
+
+/// 回读对不上的项: (路径, 写的值, 读回的值)。读不到的也算对不上 (守没守住说不清就不算守住)。
+pub(crate) fn readback_mismatches(plan: &str, out: &str) -> Vec<(String, String, String)> {
+    let got: std::collections::BTreeMap<&str, &str> = out
+        .lines()
+        .filter_map(|l| l.trim().split_once('='))
+        .collect();
+    let mut bad = Vec::new();
+    for line in plan.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 3 || !matches!(f[0], "sysfs" | "setting") {
+            continue;
+        }
+        let want = f[2].trim();
+        let have = got.get(f[1]).map(|v| v.trim()).unwrap_or("<读不到>");
+        if have != want {
+            bad.push((f[1].to_string(), want.to_string(), have.to_string()));
+        }
+    }
+    bad
+}
+
+/// 厂商性能服务自己会动的快照键 (频率边界)。
+fn vendor_managed(key: &str) -> bool {
+    matches!(
+        key,
+        "kgsl.max_pwrlevel" | "kgsl.min_pwrlevel" | "kgsl.thermal_pwrlevel" | "kgsl.max_gpuclk"
+            | "kgsl.devfreq_min_freq" | "kgsl.devfreq_max_freq"
+    ) || (key.starts_with("cpu.policy") && (key.ends_with(".scaling_max") || key.ends_with(".scaling_min")))
+}
+
+/// 快照前后的差异, 分成 (厂商服务会动的, 其余)。每项 `键: 前 → 后`。
+pub(crate) fn split_snapshot_diff(before: &str, after: &str) -> (Vec<String>, Vec<String>) {
+    let parse = |s: &str| -> std::collections::BTreeMap<String, String> {
+        s.lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with("#adb_exit"))
+            .filter_map(|l| l.split_once('=').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
+            .collect()
+    };
+    let (a, b) = (parse(before), parse(after));
+    let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let (mut vendor, mut other) = (Vec::new(), Vec::new());
+    for k in keys {
+        let (x, y) = (a.get(k).map(String::as_str).unwrap_or("<无>"), b.get(k).map(String::as_str).unwrap_or("<无>"));
+        if x != y {
+            let line = format!("{k}: {x} → {y}");
+            if vendor_managed(k) {
+                vendor.push(line);
+            } else {
+                other.push(line);
+            }
+        }
+    }
+    (vendor, other)
+}
+
 // ══════════════ 报告装配 ══════════════
 
 fn base_report(req: &Value, kind: &str) -> Value {
@@ -984,6 +1062,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
     let mut curtailed: Option<Value> = None;
 
+    let mut contested: Vec<Value> = Vec::new();
     'pairs: for i in 1..=rounds {
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             if arm == "knob" {
@@ -1004,6 +1083,17 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                 }
             }
             let label = format!("sp_{arm}{i}");
+            // 施加后隔十几秒回读一次 (knobs/DESIGN.md: 写得进不等于守得住, 厂商性能服务
+            // perf2-hal / zperfcubeservice 会在约 10 秒内把 GPU/CPU 频率边界改回去)。
+            // 两臂都读 —— 只在改写臂读的话, 那一次 adb 调用本身就成了两臂之间的差别。
+            let rb_cmd = readback_cmd(&plan);
+            let rb_thread = {
+                let (serial, cmd) = (serial.to_string(), rb_cmd.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(READBACK_AFTER_S));
+                    su(&serial, &cmd, 30)
+                })
+            };
             let res = run_one_with(
                 serial,
                 &label,
@@ -1013,6 +1103,22 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                 pkg,
                 req["workload"]["render_comm"].as_str(),
             );
+            let rb_mid = rb_thread.join().unwrap_or_default();
+            let mut arm_contested: Vec<String> = Vec::new();
+            if arm == "knob" {
+                // 负载跑完、还原之前再读一次: 守住了整段测量才算数
+                let rb_end = su(serial, &rb_cmd, 30);
+                for (when, out) in [("+12s", &rb_mid), ("末尾", &rb_end)] {
+                    for (path, want, got) in readback_mismatches(&plan, out) {
+                        arm_contested.push(format!("{path}: 写 {want} {when}回读 {got}"));
+                    }
+                }
+                std::fs::write(
+                    evidence.join(format!("knob{i}_readback.txt")),
+                    format!("# +{READBACK_AFTER_S}s\n{rb_mid}\n# 末尾\n{rb_end}\n"),
+                )
+                .ok();
+            }
             if arm == "knob" {
                 let r = restore(serial);
                 if r.contains("KNOB_RESTORE_FAIL") && restore_fail.is_none() {
@@ -1030,7 +1136,12 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                     }
                     if abort_reason.is_none() {
                         if arm == "knob" {
-                            knob_runs.push(m);
+                            if arm_contested.is_empty() {
+                                knob_runs.push(m);
+                            } else {
+                                // 守不住的那一臂量的不是这组参数: 不进统计, 单列计数
+                                contested.push(json!({"round": i, "nodes": arm_contested}));
+                            }
                         } else {
                             ctrl_runs.push(m);
                         }
@@ -1080,12 +1191,20 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let snap_after = snapshot(serial);
     std::fs::write(evidence.join("snap_after.txt"), &snap_after).map_err(|e| e.to_string())?;
     let snapshot_identical = snap_before == snap_after;
+    // 快照对不上时分两类: 厂商性能服务自己会改的频率边界 (它在游戏过程中主动压/抬, 与我们
+    // 无关; 我们写过的节点由 restore 逐项写回并回读核对, 失败另有 KNOB_RESTORE_FAIL), 和其余。
+    // 只有其余的键变了才判留痕作废。前者如实记进报告。
+    let (vendor_drift, other_drift) = split_snapshot_diff(&snap_before, &snap_after);
 
     report["conditions_observed"] = json!({
         "temp_cap_c": req["conditions"]["temp_cap_c"],
         "apply_ok": apply_ok,
         "snapshot_identical": snapshot_identical,
         "restored": restore_fail.is_none(),
+        // 改写臂里有几臂被厂商服务抢回 (施加后 +12s 或负载末尾回读对不上), 这几臂没进统计
+        "contested_arms": contested.len(),
+        "contested": contested,
+        "snapshot_vendor_drift": vendor_drift,
         "snapshot_diff": if snapshot_identical { Value::Null } else {
             json!([
                 format!("before {} 行 / after {} 行, 逐行比对不相等 (全文见 evidence_dir)",
@@ -1104,16 +1223,33 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         report["verdict"]["reason"] = json!(reason);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
-    if !snapshot_identical {
-        report["verdict"]["reason"] = json!("轮末设备快照与轮前不一致, 留痕");
+    if !other_drift.is_empty() {
+        report["verdict"]["reason"] = json!(format!("轮末设备快照与轮前不一致, 留痕: {}", other_drift.join("; ")));
         if suspended_via.is_some() {
             let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         }
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
+    if knob_runs.is_empty() && !contested.is_empty() {
+        report["verdict"]["reason"] = json!(format!(
+            "改写臂 {} 臂全部被厂商性能服务抢回 (施加后回读对不上, contested), 没有一臂量的是这组参数",
+            contested.len()
+        ));
+        if suspended_via.is_some() {
+            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
+        }
+        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+    }
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
     report["verdict"] = verdict;
+    if !contested.is_empty() {
+        let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
+        report["verdict"]["reason"] = json!(format!(
+            "{r} (另有 {} 臂改写被厂商性能服务抢回, 没进统计)",
+            contested.len()
+        ));
+    }
     if let Some(note) = curtailed {
         // 构造上不可能: 截断只在「任何指标都已不可能显著改善」时发生, 部分数据的 p
         // 不会低于跑满的下界 (src/curtail.rs)。真出现了就是实现错了, 别把它当 KEEP 发出去。
@@ -1979,6 +2115,42 @@ mod path_tests {
         }
         assert_eq!(psnr_rgba(&a, &c), Some(PSNR_IDENTICAL_DB));
         assert_eq!(psnr_rgba(&a, &a[..128]), None, "尺寸不同比不了");
+    }
+
+    // ── sysparam: 回读与快照分类 ──
+
+    const PLAN: &str = "sysfs\t/sys/class/kgsl/kgsl-3d0/min_pwrlevel\t3\nsetting\tsystem:refresh_rate_mode\t2\n";
+
+    #[test]
+    fn readback_reads_every_plan_item() {
+        let c = readback_cmd(PLAN);
+        assert!(c.contains("cat /sys/class/kgsl/kgsl-3d0/min_pwrlevel"));
+        assert!(c.contains("settings get system refresh_rate_mode"));
+    }
+
+    /// 写 3 读回 17 (厂商服务抢回) 或读不到, 都算守不住; 对上了不报。
+    #[test]
+    fn readback_mismatches_flag_contested_and_unreadable_nodes() {
+        let ok = "/sys/class/kgsl/kgsl-3d0/min_pwrlevel=3\nsystem:refresh_rate_mode=2\n#adb_exit=0";
+        assert!(readback_mismatches(PLAN, ok).is_empty());
+        let bad = "/sys/class/kgsl/kgsl-3d0/min_pwrlevel=17\n#adb_exit=0";
+        let m = readback_mismatches(PLAN, bad);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0], ("/sys/class/kgsl/kgsl-3d0/min_pwrlevel".into(), "3".into(), "17".into()));
+        assert_eq!(m[1].2, "<读不到>");
+    }
+
+    /// 只有厂商服务会动的频率边界变了 → 不判留痕; 别的键变了 → 判留痕。
+    #[test]
+    fn snapshot_diff_separates_vendor_managed_keys() {
+        let a = "# device_snapshot v1\nkgsl.max_pwrlevel=0\ncpu.policy6.scaling_max=1497600\ncpu.policy6.governor=walt\nftrace.tracing_on=0\n#adb_exit=0";
+        let b = "# device_snapshot v1\nkgsl.max_pwrlevel=17\ncpu.policy6.scaling_max=1382400\ncpu.policy6.governor=walt\nftrace.tracing_on=0\n#adb_exit=0";
+        let (v, o) = split_snapshot_diff(a, b);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert!(o.is_empty());
+        let c = b.replace("governor=walt", "governor=performance");
+        let (_, o) = split_snapshot_diff(a, &c);
+        assert_eq!(o, vec!["cpu.policy6.governor: walt → performance".to_string()]);
     }
 }
 
