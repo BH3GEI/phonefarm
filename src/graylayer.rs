@@ -25,6 +25,9 @@ const UPOP_PROP: &str = "debug.knobs.upop"; // 1 = 真超分算子 (gen1_loc3)
 pub(crate) const FA_PROP: &str = "debug.knobs.frameaudit"; // 1 = 一帧步骤清单 (只读, 隐含 passdump)
 pub(crate) const FA_TS_PROP: &str = "debug.knobs.frameaudit_ts"; // 1 = 步骤清单另插 GPU 时间戳
 pub(crate) const FA_GO_PROP: &str = "debug.knobs.frameaudit_go"; // 改成新编号 = 抓一次
+pub(crate) const STOREOP_PROP: &str = "debug.knobs.storeop"; // "<sig>:<i>,..." / "ds" / 0 (#91)
+pub(crate) const STOREOP_LIVE_PROP: &str = "debug.knobs.storeop_live"; // 1 = 孪生 pass 现场切换
+pub(crate) const STOREOP_ON_PROP: &str = "debug.knobs.storeop_on"; // 现场切换时的开/关
 const SO: &str = "libVkLayer_refknobs.so";
 const STATE: &str = "/data/local/tmp/knobs_layer_state"; // "把 .so 推进了哪个包"
 
@@ -34,6 +37,8 @@ pub struct GrayLayer {
     serial: String,
     /// 显式指定的层 .so (测未合并的层; 缺省用 knobs/gray/build/out/ 下的产物)
     so: Option<String>,
+    /// storeop 改写规则与是否现场切换; None = 显式关掉 (每一档都写一遍, 不留上一轮的残值)
+    storeop: Option<(String, bool)>,
 }
 
 impl GrayLayer {
@@ -41,11 +46,18 @@ impl GrayLayer {
         Self {
             serial: serial.to_string(),
             so: None,
+            storeop: None,
         }
     }
 
     pub fn with_so(mut self, so: Option<String>) -> Self {
         self.so = so;
+        self
+    }
+
+    /// storeop 改写规则 (见层里 parse_storeop_prop); live = 孪生 pass 现场切换, 初始为关
+    pub fn with_storeop(mut self, rule: Option<String>, live: bool) -> Self {
+        self.storeop = rule.map(|r| (r, live));
         self
     }
 
@@ -216,8 +228,12 @@ impl GrayLayer {
     }
 
     fn setprops_fa(&self, loadop: &str, dump: &str, cp: &str, upop: &str, fa: &str, fa_ts: &str) {
+        let (rule, live) = match &self.storeop {
+            Some((r, l)) => (r.as_str(), if *l { "1" } else { "0" }),
+            None => ("0", "0"),
+        };
         self.ashell(
-            &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}; setprop {FA_PROP} {fa}; setprop {FA_TS_PROP} {fa_ts}; setprop {FA_GO_PROP} 0'"),
+            &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}; setprop {FA_PROP} {fa}; setprop {FA_TS_PROP} {fa_ts}; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} \"{rule}\"; setprop {STOREOP_LIVE_PROP} {live}; setprop {STOREOP_ON_PROP} 0'"),
             15,
         );
     }
@@ -285,7 +301,7 @@ impl GrayLayer {
             "debug.vulkan.layers = [{}]",
             self.getprop("debug.vulkan.layers")
         ));
-        for p in [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, FA_PROP, FA_TS_PROP, FA_GO_PROP] {
+        for p in [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, FA_PROP, FA_TS_PROP, FA_GO_PROP, STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP] {
             l.push(format!("{p}  = [{}]", self.getprop(p)));
         }
         let st = Self::adb_stdout(
@@ -309,7 +325,7 @@ impl GrayLayer {
     pub fn off(&self) -> String {
         self.ashell(
             &format!(
-                "su -c 'setprop debug.vulkan.layers \"\"; setprop {LOADOP_PROP} 0; setprop {DUMP_PROP} 0; setprop {CP_PROP} 0; setprop {UPOP_PROP} 0; setprop {FA_PROP} 0; setprop {FA_TS_PROP} 0; setprop {FA_GO_PROP} 0'"
+                "su -c 'setprop debug.vulkan.layers \"\"; setprop {LOADOP_PROP} 0; setprop {DUMP_PROP} 0; setprop {CP_PROP} 0; setprop {UPOP_PROP} 0; setprop {FA_PROP} 0; setprop {FA_TS_PROP} 0; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} 0; setprop {STOREOP_LIVE_PROP} 0; setprop {STOREOP_ON_PROP} 0'"
             ),
             15,
         );
