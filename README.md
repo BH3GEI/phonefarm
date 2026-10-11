@@ -51,6 +51,32 @@
 设备是共享资源，跑之前用设备锁 `devlock` 抢占：拿锁、后台心跳续期、跑完释放，
 被占着时排队而不是绕过去硬跑。两个任务同时压一台手机，两边的数都作废。
 
+锁脚本在仓库里：[`tools/devlock`](tools/devlock)（zsh，macOS；原子 mkdir + 心跳 + 排队，
+锁文件默认在 `/private/tmp/claude-501/`，`DEVLOCK_DIR` 可改）。安装成命令行工具：
+
+```bash
+mkdir -p ~/.local/bin && ln -sf "$PWD/tools/devlock" ~/.local/bin/devlock
+devlock status                      # 谁持有、谁在排队
+devlock run <label> -- <命令…>       # 拿锁 → 每 60 秒心跳 → 跑命令 → 释放 (命令里拿得到 DEVLOCK_LABEL)
+```
+
+碰设备的子命令（`eval` / `gpu-op` / `gray-layer` / `gray-ab` / `autoloop` / `perf` / `capture` /
+`script` / `bench` / `run` 等，完整清单见 `src/devlock.rs`）**自己拿锁**：排队等到轮到自己、
+跑的时候每 60 秒心跳、退出时释放，不必再在外面包一层 `devlock run`。
+
+```bash
+./phonefarm eval --request r.json --json --lock-label core   # label 缺省取 $DEVLOCK_LABEL, 再缺省 phonefarm
+./phonefarm gray-layer off --lock-wait 30m                   # 最多排 30 分钟 (缺省 2h), 没轮到就退出 2, 不碰设备
+```
+
+- lead 用 `devlock queue <l1> <l2> …` 预排了队列时，`--lock-label` 必须用队列里那个名字，
+  自己起新名字会排到队尾。
+- 锁已经在同一个 label 手里（外层 `devlock run <label>`、上层 `game_opt_loop optimize`）时原地执行，
+  心跳与释放归外层，不会自己等自己。
+- 不拿锁的：`fleet`（只读快照，别人持锁时自动降成只读 sysfs）、`devices`、`keepalive`、`serve`、
+  以及所有纯离线的解析/报告类子命令。`--no-devlock` 可以显式跳过（只在确实没人共用这台手机时用）。
+- 进程被 Ctrl-C 杀掉时来不及释放，锁会在心跳停 600 秒后被当成废弃、由下一个人接管（有日志）。
+
 ---
 
 ## 📌 先读这两份

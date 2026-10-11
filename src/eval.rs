@@ -717,6 +717,55 @@ pub(crate) fn run_one(
     Ok(m)
 }
 
+/// [`run_one`] 回包里并进判定视图的 env 字段 (sample_env.sh → [`sysparam::env_stats`])。
+pub(crate) const RUN_ENV_KEYS: [&str; 16] = [
+    "power_w_mean",
+    "power_w_median",
+    "power_now_w_mean",
+    "power_now_plausible",
+    "power_vi_w_mean",
+    "usb_input_w_mean",
+    "current_now_ua_mean",
+    "voltage_now_uv_mean",
+    "power_rail",
+    "battery_status",
+    "battery_charging",
+    "power_usable_reason",
+    "soc_temp_max_c",
+    "soc_temp_mean_c",
+    "n_samples",
+    "fan_state",
+];
+
+/// 判定/统计用的单轮视图: summary 字段展平, 再并上 env 的功耗/温度字段
+/// (与旧 Python `m.update(summary); m.update(env_stats)` 同形)。
+///
+/// 只取 `m["summary"]` 是错的: parse-trace 的 summary 里**没有** `power_w_mean` 与
+/// `soc_temp_max_c` —— 那样功耗永远「缺数据」、温度上限永远不触发, 而报告看着一切正常。
+pub(crate) fn run_view(m: &Value) -> PyVal {
+    let mut obj: Vec<(String, PyVal)> = Vec::new();
+    if let Some(s) = m["summary"].as_object() {
+        for (k, v) in s {
+            obj.push((k.clone(), to_pyval(v)));
+        }
+    }
+    if let Some(e) = m["env"].as_object() {
+        for k in RUN_ENV_KEYS {
+            if let Some(v) = e.get(k) {
+                obj.push((k.to_string(), to_pyval(v)));
+            }
+        }
+    }
+    PyVal::Obj(obj)
+}
+
+/// 一轮的 SoC 结温峰值。来源是 sample_env (env), 不是 parse-trace 的 summary。
+pub(crate) fn run_soc_temp_max(m: &Value) -> Option<f64> {
+    m["env"]["soc_temp_max_c"]
+        .as_f64()
+        .or_else(|| m["summary"]["soc_temp_max_c"].as_f64())
+}
+
 fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
     let Some(serial) = serial else {
         return Err("kind=sysparam 需要真机: 请加 --serial (或设备唯一在线时省略)".into());
@@ -883,7 +932,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
             match res {
                 Ok(m) => {
                     // 温度上限: 超了这一组作废
-                    let t = m["summary"]["soc_temp_max_c"].as_f64();
+                    let t = run_soc_temp_max(&m);
                     if let (Some(t), Some(cap)) = (t, req["conditions"]["temp_cap_c"].as_f64()) {
                         if t > cap {
                             abort_reason = Some(format!("{arm} 臂第 {i} 轮 SoC 结温 {t}C 超过上限 {cap}C"));
@@ -965,8 +1014,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
         runs.iter()
             .filter_map(|r| {
                 let label = r["label"].as_str()?.to_string();
-                let v = to_pyval(&r["summary"]);
-                Some((label, v))
+                Some((label, run_view(r)))
             })
             .collect()
     };
@@ -1056,16 +1104,17 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     let temps: Vec<f64> = knob_runs
         .iter()
         .chain(ctrl_runs.iter())
-        .filter_map(|r| r["summary"]["soc_temp_max_c"].as_f64())
+        .filter_map(run_soc_temp_max)
         .collect();
     let mut m = report["metrics"].take();
     m["fps_p95_ms"] = json!(f(&knob_runs, "frame_p95"));
     m["frame_p95_ms"] = json!(f(&knob_runs, "frame_p95"));
     m["fps_mean"] = json!(f(&knob_runs, "fps_mean"));
     m["soc_temp_max_c"] = json!(temps.iter().cloned().reduce(f64::max));
-    // 功耗: 只在放电态均值可信时给
+    // 功耗: 只在放电态均值可信时给; 与帧时一样取候选臂全部轮的均值, 不取最后一轮
     let power = if on_battery_all {
-        knob_runs.last().and_then(|r| r["env"]["power_w_mean"].as_f64())
+        let xs: Vec<f64> = knob_runs.iter().filter_map(|r| r["env"]["power_w_mean"].as_f64()).collect();
+        (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
     } else {
         None
     };
@@ -1505,6 +1554,32 @@ bus.DDR.boost_freq.effect=live\n";
         assert!(!reachable(3, 0.05 / 3.0));
         assert!(!reachable(1, 0.5));
         assert!(!reachable(0, 0.5));
+    }
+
+    /// 功耗与结温来自 sample_env (env), parse-trace 的 summary 里没有这两项。
+    /// 判定视图只读 summary 的话, 功耗永远「缺数据」、70 °C 温度上限永远不触发。
+    #[test]
+    fn run_view_carries_power_and_temp_from_env() {
+        let m = json!({
+            "label": "sp_knob1",
+            "summary": {"frame_p95": 19.5, "fps_mean": 59.2},
+            "env": {"power_w_mean": 4.7, "soc_temp_max_c": 55.1, "on_battery": true},
+        });
+        assert!(m["summary"].get("power_w_mean").is_none());
+        let v = run_view(&m);
+        assert_eq!(v.get("power_w_mean").and_then(|x| x.as_f64()), Some(4.7));
+        assert_eq!(v.get("frame_p95").and_then(|x| x.as_f64()), Some(19.5));
+        assert_eq!(run_soc_temp_max(&m), Some(55.1));
+
+        // 两臂各两轮: 功耗这一项要真的比得出来, 不能落成「样本不足」
+        let arm = |p: f64| -> Vec<Run> {
+            (0..2)
+                .map(|i| (format!("r{i}"), run_view(&json!({"summary": {}, "env": {"power_w_mean": p + i as f64 * 0.01}}))))
+                .collect()
+        };
+        let cmp = loopstat::compare(&arm(4.7), &arm(5.2), "power_w_mean");
+        assert!(cmp.get("error").is_none());
+        assert!(cmp.get("diff_mean").and_then(|x| x.as_f64()).unwrap() > 0.4);
     }
 
     /// binder 归一化那套不归 gray: gray 的开关白名单才是闸门, 已在上面的单测里。
