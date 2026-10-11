@@ -1,0 +1,23 @@
+{
+ "contract_version": 1,
+ "app_version": "0.1.0",
+ "run_id": "cal_wg0_2",
+ "scene": "sr_pipeline",
+ "declared_bottleneck": "fragment+compute",
+ "effective_knobs": {"postfx": "on"},
+ "postfx": {"active": true, "shader_path": "/data/local/tmp/phonefarm_selftest/wg0_it64_ds1.spv", "shader_bytes": 2948, "lo": [1280, 720], "hi": [1920, 1080], "workgroup": [16, 16, 1]},
+ "params": {"frames": 3000, "intensity": 1, "rt_width": 1280, "rt_height": 720},
+ "render_thread_name": "RefbenchRender",
+ "driver_submit_thread_name": "RefbenchDrv",
+ "renamed_driver_threads": 1,
+ "gpu_name": "Adreno (TM) 840",
+ "swapchain": {"present_mode": "MAILBOX", "format": "R8G8B8A8_UNORM", "width": 2688, "height": 1216, "image_count": 5, "pre_transform": "0x2"},
+ "passes": [
+  {"name": "scene_lowres", "target": "rtLo", "load_op": "DONT_CARE", "store_op": "STORE", "width": 1280, "height": 720, "format": "R8G8B8A8_UNORM"},
+  {"name": "postfx_compute", "target": "rtHi", "load_op": "NONE", "store_op": "STORE", "width": 1920, "height": 1080, "format": "R8G8B8A8_UNORM"},
+  {"name": "present_blit", "target": "swapchain", "load_op": "DONT_CARE", "store_op": "STORE", "width": 2688, "height": 1216, "format": "R8G8B8A8_UNORM"}
+ ],
+ "debug_labels_supported": true,
+ "frames_submitted": 3000,
+ "clean_exit": true
+}

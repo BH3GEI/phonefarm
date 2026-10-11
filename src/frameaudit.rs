@@ -31,6 +31,11 @@ use std::path::{Path, PathBuf};
 
 const USAGE: &str = "用法:
   phonefarm frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 本机层.so] [--pkg 包名] [--serial S]
+      [--tap \"x,y;x,y\"] [--settle 秒] [--extras \"intent extras\"]
+      (非原神: 不判大世界, 确认层在出帧后依次点击再等 settle 秒; Megacity 例:
+       --pkg com.unity.megacity.metro --extras \"--es scene city_static --es frames 100000\")
+  phonefarm frame-audit storeop-check --rule <sig:i,...> --out <目录> [--rounds N] [--so 本机层.so] [--serial S]
+      (storeop 开关机制验证: 同一局里现场开/关, 同位置同视角截图逐像素比对 + effective 命中 + 不崩)
   phonefarm frame-audit analyze <knobs_frameaudit.json>... [--md 输出.md] [--json 输出.json]";
 
 // ── VkFormat → 每像素字节 (颜色或深度部分, 模板部分) ──
@@ -612,7 +617,9 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
             continue;
         }
         let (n, dead, _unk) = pass_prod.get(&i).copied().unwrap_or((0, 0, 0));
-        if n == dead {
+        // pass 里开了查询 (遮挡查询最常见): 产出是查询结果, 不写附件也不是白画
+        let queries = u(&ev.raw, "qo") + u(&ev.raw, "qx");
+        if n == dead && queries == 0 {
             let bytes: f64 = ev.raw["att"].as_array().unwrap().iter().map(|a| {
                 let (a1, a2, a3, a4) = t.att_bytes(ev, a);
                 a1 + a2 + a3 + a4
@@ -626,11 +633,12 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
                 ms: ev.ms,
                 certain: false,
                 why: format!(
-                    "{} 产出的 {} 块内容{}; draw {} 笔 (不确定点: fragment 里写 storage buffer 层看不见)",
+                    "{} 产出的 {} 块内容{}; draw {} 笔, pass 内无查询 (不确定点: fragment 里写 storage buffer 层看不见{})",
                     ev_sig(ev),
                     n,
                     if n == 0 { "一块都不存回显存" } else { "全部没人读" },
-                    u(&ev.raw, "dr") + u(&ev.raw, "dri") + u(&ev.raw, "drn")
+                    u(&ev.raw, "dr") + u(&ev.raw, "dri") + u(&ev.raw, "drn"),
+                    if ev.raw.get("qo").is_none() { "; 这份抓取的层还不记查询, 也看不见查询" } else { "" }
                 ),
             });
         }
@@ -743,6 +751,7 @@ pub(crate) fn frame_stats(t: &Timeline, f: usize) -> Value {
     let (mut draws, mut load_b, mut store_b, mut ms_sum, mut timed, mut passes) = (0u64, 0.0, 0.0, 0.0, 0u64, 0u64);
     let mut lo_load = 0u64;
     let mut empty_pass = 0u64;
+    let mut query_passes = 0u64;
     for ev in &t.evs[lo..hi] {
         *kinds.entry(ev.kind.clone()).or_default() += 1;
         if ev.kind == "pass" {
@@ -751,6 +760,9 @@ pub(crate) fn frame_stats(t: &Timeline, f: usize) -> Value {
             draws += d;
             if d == 0 && u(&ev.raw, "ca") == 0 {
                 empty_pass += 1;
+            }
+            if u(&ev.raw, "qo") + u(&ev.raw, "qx") > 0 {
+                query_passes += 1;
             }
             for a in ev.raw["att"].as_array().cloned().unwrap_or_default() {
                 let (a1, a2, a3, a4) = t.att_bytes(ev, &a);
@@ -775,6 +787,7 @@ pub(crate) fn frame_stats(t: &Timeline, f: usize) -> Value {
         "pass_ms_sum": (ms_sum * 1000.0).round() / 1000.0,
         "draws": draws,
         "empty_passes": empty_pass,
+        "query_passes": query_passes,
         "load_attachments": lo_load,
         "model_load_mb": (load_b / 1e6 * 100.0).round() / 100.0,
         "model_store_mb": (store_b / 1e6 * 100.0).round() / 100.0,
@@ -915,6 +928,52 @@ pub(crate) fn analyze(paths: &[PathBuf]) -> Result<(String, Value), String> {
 
 // ── 真机抓帧 ──
 
+/// 把游戏带到要抓的画面。原神走既有流程 (等登录页 → 点门 → 按每帧 pass 数判大世界);
+/// 别的游戏不猜: 先确认层真在出帧 (marker 的 frames 在涨), 依次点 `taps` 里的坐标
+/// (每点之后等 5 秒), 再等 `settle` 秒让场景稳定。
+fn reach_scene(serial: &str, pkg: &str, taps: &[(u32, u32)], settle: u64) -> Result<(), String> {
+    if pkg == "com.miHoYo.Yuanshen" && taps.is_empty() {
+        crate::grayab::launch_to_world_layered(serial)?;
+        std::thread::sleep(std::time::Duration::from_secs(settle.min(60)));
+        return Ok(());
+    }
+    let frames = || -> i64 {
+        let m = su(serial, &format!("cat /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json /data/data/{pkg}/knobs_layer_out.json 2>/dev/null"), 30);
+        let body = GrayLayer::adb_stdout(&m);
+        regex::Regex::new(r#""frames":([0-9]+)"#).ok().and_then(|re| re.captures(body).and_then(|c| c[1].parse().ok())).unwrap_or(-1)
+    };
+    let mut f0 = -1;
+    for _ in 0..30 {
+        f0 = frames();
+        if f0 >= 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    if f0 < 0 {
+        return Err(format!("{pkg} 的层 marker 没出现: 层没挂上 (或不是 Vulkan 游戏)"));
+    }
+    for (x, y) in taps {
+        let _ = adb(serial, &["shell", &format!("input tap {x} {y}")], 30);
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(settle));
+    let f1 = frames();
+    if f1 <= f0 {
+        return Err(format!("{pkg} 的 present 计数不涨 ({f0} -> {f1}): 游戏没在出帧"));
+    }
+    Ok(())
+}
+
+fn parse_taps(s: &str) -> Vec<(u32, u32)> {
+    s.split(';')
+        .filter_map(|p| {
+            let (x, y) = p.split_once(',')?;
+            Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+        })
+        .collect()
+}
+
 const FA_FILES: [&str; 3] = [
     "/storage/emulated/0/Android/data/{pkg}/files/knobs_frameaudit.json",
     "/data/data/{pkg}/knobs_frameaudit.json",
@@ -946,16 +1005,15 @@ fn screencap(serial: &str, dst: &Path) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn capture(serial: &str, out: &Path, so: Option<String>, ts: bool, captures: u32, gap: u64, pkg: &str) -> Result<(), String> {
+fn capture(serial: &str, out: &Path, so: Option<String>, ts: bool, captures: u32, gap: u64, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
-    let gl = GrayLayer::new(serial).with_so(so);
+    let gl = GrayLayer::new(serial).with_so(so).with_launch_extras(extras);
     let _ = gl.off();
     let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
     let mode = if ts { "frameaudit-ts" } else { "frameaudit" };
     let res = (|| -> Result<Vec<Value>, String> {
         gl.mount_mode(mode, pkg, false)?;
-        crate::grayab::launch_to_world_layered(serial)?;
-        std::thread::sleep(std::time::Duration::from_secs(15));
+        reach_scene(serial, pkg, taps, settle)?;
         let mut got = Vec::new();
         for go in 1..=captures {
             let t0 = chrono::Local::now().to_rfc3339();
@@ -994,6 +1052,150 @@ fn capture(serial: &str, out: &Path, so: Option<String>, ts: bool, captures: u32
     });
     let _ = std::fs::write(out.join("capture_meta.json"), serde_json::to_string_pretty(&meta).unwrap_or_default());
     res.map(|_| ())
+}
+
+// ── storeop 开关的画面验证 ──
+
+/// screencap 裸帧: 头 12 或 16 字节 (w, h, fmt[, colorspace]) + RGBA
+pub(crate) fn parse_raw(d: &[u8]) -> Option<(usize, usize, &[u8])> {
+    if d.len() < 12 {
+        return None;
+    }
+    let w = u32::from_le_bytes(d[0..4].try_into().ok()?) as usize;
+    let h = u32::from_le_bytes(d[4..8].try_into().ok()?) as usize;
+    let n = w * h * 4;
+    let off = if d.len() >= 16 + n { 16 } else if d.len() >= 12 + n { 12 } else { return None };
+    Some((w, h, &d[off..off + n]))
+}
+
+/// 两张同尺寸截图在区域内的差异: (任一通道差 > 8 的像素占比 %, 平均每通道绝对差, 最大通道差)。
+/// excl = 排除的矩形 (UI)。
+pub(crate) fn pixel_diff(a: &[u8], b: &[u8], w: usize, rect: (usize, usize, usize, usize), excl: &[(usize, usize, usize, usize)]) -> (f64, f64, u8) {
+    let (x0, y0, x1, y1) = rect;
+    let (mut n, mut nd, mut sum, mut mx) = (0u64, 0u64, 0u64, 0u8);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if excl.iter().any(|&(ex0, ey0, ex1, ey1)| x >= ex0 && x < ex1 && y >= ey0 && y < ey1) {
+                continue;
+            }
+            let o = (y * w + x) * 4;
+            let mut big = false;
+            for c in 0..3 {
+                let dd = (a[o + c] as i16 - b[o + c] as i16).unsigned_abs() as u8;
+                sum += dd as u64;
+                mx = mx.max(dd);
+                if dd > 8 {
+                    big = true;
+                }
+            }
+            if big {
+                nd += 1;
+            }
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return (0.0, 0.0, 0);
+    }
+    (nd as f64 * 100.0 / n as f64, sum as f64 / (n * 3) as f64, mx)
+}
+
+/// 按比例给出要排除的 UI 区域 (左上小地图、顶部图标条、右侧队伍、右下技能/UID、左下聊天/状态)
+fn ui_rects(w: usize, h: usize) -> Vec<(usize, usize, usize, usize)> {
+    let f = |a: f64, b: f64, c: f64, d: f64| ((a * w as f64) as usize, (b * h as f64) as usize, (c * w as f64) as usize, (d * h as f64) as usize);
+    vec![
+        f(0.0, 0.0, 0.20, 0.32),  // 小地图
+        f(0.0, 0.0, 1.0, 0.10),   // 顶部图标条 / 网络延迟数字
+        f(0.82, 0.10, 1.0, 0.55), // 右侧队伍头像
+        f(0.62, 0.55, 1.0, 1.0),  // 右下技能区 + UID
+        f(0.0, 0.70, 0.62, 1.0),  // 左下聊天 / 血条 / 摇杆
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<Value, String> {
+    std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
+    let gl = GrayLayer::new(serial).with_so(so).with_storeop(Some(rule.to_string()), true).with_launch_extras(extras);
+    let _ = gl.off();
+    let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    let set_on = |on: bool| {
+        su(serial, &format!("setprop {} {}", crate::graylayer::STOREOP_ON_PROP, if on { 1 } else { 0 }), 15);
+        // 层每 30 帧读一次开关; 等 3 秒 (≥ 90 帧) 足够生效并让画面稳定
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    };
+    let res = (|| -> Result<Value, String> {
+        gl.mount_mode("frameaudit", pkg, false)?;
+        reach_scene(serial, pkg, taps, settle)?;
+        // 关/开交替: off on off on ... off, 每段 3 张 (间隔约 1 秒)
+        let mut phases: Vec<(bool, Vec<Vec<u8>>)> = Vec::new();
+        for k in 0..(2 * rounds + 1) {
+            let on = k % 2 == 1;
+            set_on(on);
+            let mut shots = Vec::new();
+            for _ in 0..3 {
+                shots.push(crate::grayab::screencap_raw_bin(serial));
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            if k <= 1 {
+                screencap(serial, &out.join(if on { "shot_on.png" } else { "shot_off.png" }));
+            }
+            phases.push((on, shots));
+        }
+        // 开着时抓一次步骤清单 (证明孪生 pass 真换上: 被改附件的 storeOp 应显示 DONT_CARE)
+        set_on(true);
+        su(serial, &format!("setprop {FA_GO_PROP} 1"), 15);
+        let fa_ok = pull_audit(serial, pkg, 1, &out.join("fa_on.json")).is_ok();
+        set_on(false);
+        let alive = !GrayLayer::adb_stdout(&adb(serial, &["shell", &format!("pidof {pkg}")], 15)).trim().is_empty();
+        let m = su(serial, &format!("cat /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json 2>/dev/null"), 30);
+        let marker_txt = GrayLayer::adb_stdout(&m).to_string();
+        let _ = std::fs::write(out.join("layer_marker.json"), &marker_txt);
+        let marker: Value = serde_json::from_str(marker_txt.trim()).unwrap_or(Value::Null);
+        let crash = GrayLayer::adb_stdout(&su(serial, &format!("logcat -b crash -d -t 200 2>/dev/null | grep -c {pkg}"), 30)).trim().parse::<u64>().unwrap_or(0);
+
+        // ── 比对 (在节点上算, 只带回数字) ──
+        let mut rows = Vec::new();
+        let get = |p: usize, i: usize| parse_raw(&phases[p].1[i]);
+        let Some((w, h, _)) = get(0, 1) else { return Err("截图解析失败".into()) };
+        let full = (0, 0, w, h);
+        let excl = ui_rects(w, h);
+        let mut cmp = |label: String, kind: &str, a: (usize, usize), b: (usize, usize)| {
+            if let (Some((_, _, pa)), Some((_, _, pb))) = (get(a.0, a.1), get(b.0, b.1)) {
+                let (pct, mad, mx) = pixel_diff(pa, pb, w, full, &excl);
+                rows.push(json!({"pair": label, "kind": kind, "diff_px_pct": (pct * 1000.0).round() / 1000.0, "mean_abs": (mad * 1000.0).round() / 1000.0, "max": mx}));
+            }
+        };
+        for p in 0..phases.len() {
+            // 同一段内相隔 1 秒的两张: 纯动画噪声
+            cmp(format!("段{p}({}) 第1张~第2张", if phases[p].0 { "开" } else { "关" }), "noise_1s", (p, 0), (p, 1));
+            if p + 1 < phases.len() {
+                // 相邻两段: 一关一开
+                cmp(format!("段{p}~段{}", p + 1), "off_vs_on", (p, 1), (p + 1, 1));
+            }
+            if p + 2 < phases.len() {
+                // 隔一段: 同状态 (关~关 或 开~开), 时间间隔与「关~开」相当的噪声底
+                cmp(format!("段{p}~段{}", p + 2), "same_state", (p, 1), (p + 2, 1));
+            }
+        }
+        let eff = marker["effective"].as_array().cloned().unwrap_or_default();
+        let hit = eff.iter().filter(|e| e["begins"].as_u64().unwrap_or(0) > 0).count();
+        Ok(json!({
+            "rule": rule, "screen": [w, h], "rounds": rounds,
+            "effective": eff, "effective_hit": hit,
+            "game_alive": alive, "crash_log_lines": crash, "frameaudit_on_captured": fa_ok,
+            "diffs": rows,
+        }))
+    })();
+    let off = gl.off();
+    let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    let mut v = match res {
+        Ok(v) => v,
+        Err(e) => json!({"error": e}),
+    };
+    v["restore"] = json!(off);
+    let _ = std::fs::write(out.join("storeop_check.json"), serde_json::to_string_pretty(&v).unwrap_or_default());
+    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    if v.get("error").is_some() { Err(v["error"].to_string()) } else { Ok(v) }
 }
 
 pub fn run_frame_audit(args: &[String]) -> i32 {
@@ -1048,6 +1250,7 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                 .unwrap_or_else(|_| std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into()));
             let (mut out, mut so, mut ts, mut captures, mut gap) = (None, None, false, 3u32, 20u64);
             let mut pkg = "com.miHoYo.Yuanshen".to_string();
+            let (mut taps, mut settle, mut extras) = (Vec::new(), None::<u64>, None::<String>);
             let mut it = rest.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -1058,18 +1261,59 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                     "--gap" => gap = it.next().and_then(|x| x.parse().ok()).unwrap_or(gap),
                     "--pkg" => pkg = it.next().cloned().unwrap_or(pkg),
                     "--serial" => serial = it.next().cloned().unwrap_or(serial),
+                    "--tap" => taps = it.next().map(|s| parse_taps(s)).unwrap_or_default(),
+                    "--settle" => settle = it.next().and_then(|x| x.parse().ok()),
+                    "--extras" => extras = it.next().cloned(),
                     other => {
                         eprintln!("不认识的参数 {other:?}\n{USAGE}");
                         return 2;
                     }
                 }
             }
+            let settle = settle.unwrap_or(if pkg == "com.miHoYo.Yuanshen" { 15 } else { 60 });
             let Some(out) = out else {
                 eprintln!("{USAGE}");
                 return 2;
             };
-            match capture(&serial, Path::new(&out), so, ts, captures.max(1), gap, &pkg) {
+            match capture(&serial, Path::new(&out), so, ts, captures.max(1), gap, &pkg, &taps, settle, extras) {
                 Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        }
+        "storeop-check" => {
+            let mut serial = std::env::var("REFBENCH_SERIAL")
+                .unwrap_or_else(|_| std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into()));
+            let (mut out, mut so, mut rule, mut rounds) = (None, None, None, 2u32);
+            let mut pkg = "com.miHoYo.Yuanshen".to_string();
+            let (mut taps, mut settle, mut extras) = (Vec::new(), None::<u64>, None::<String>);
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--out" => out = it.next().cloned(),
+                    "--so" => so = it.next().cloned(),
+                    "--rule" => rule = it.next().cloned(),
+                    "--rounds" => rounds = it.next().and_then(|x| x.parse().ok()).unwrap_or(rounds),
+                    "--pkg" => pkg = it.next().cloned().unwrap_or(pkg),
+                    "--serial" => serial = it.next().cloned().unwrap_or(serial),
+                    "--tap" => taps = it.next().map(|s| parse_taps(s)).unwrap_or_default(),
+                    "--settle" => settle = it.next().and_then(|x| x.parse().ok()),
+                    "--extras" => extras = it.next().cloned(),
+                    other => {
+                        eprintln!("不认识的参数 {other:?}\n{USAGE}");
+                        return 2;
+                    }
+                }
+            }
+            let settle = settle.unwrap_or(if pkg == "com.miHoYo.Yuanshen" { 20 } else { 60 });
+            let (Some(out), Some(rule)) = (out, rule) else {
+                eprintln!("{USAGE}");
+                return 2;
+            };
+            match storeop_check(&serial, Path::new(&out), so, &rule, rounds.max(1), &pkg, &taps, settle, extras) {
+                Ok(_) => 0,
                 Err(e) => {
                     eprintln!("{e}");
                     1
@@ -1175,6 +1419,28 @@ mod tests {
         assert!(!fs.iter().any(|x| x.rule == "transient_ok" && x.why.contains("图#2")), "{fs:#?}");
     }
 
+    /// 只测深度、不写回任何附件、但开了遮挡查询的 pass (原神 rp112 的形态) 不算白画
+    #[test]
+    fn occlusion_query_pass_is_not_dead() {
+        let mut j = fixture();
+        for f in j["frames"].as_array_mut().unwrap() {
+            let evs = f["submits"][0]["cbs"][0]["ev"].as_array_mut().unwrap();
+            let q = json!({"k":"pass","rp":7,"w":100,"h":100,"dr":11,"qo":11,"qx":0,
+                "att":[{"i":2,"m":0,"l":0,"f":129,"s":1,"lo":0,"st":1000301000,"slo":0,"sst":1000301000,"il":3,"fl":3,"ro":1}]});
+            evs.insert(1, q.clone());
+            let mut q2 = q;
+            q2["qo"] = json!(0);
+            q2["rp"] = json!(8);
+            evs.insert(2, q2);
+        }
+        let t = Timeline::from_json(&j).unwrap();
+        let fs = find(&t);
+        let dead_eps: Vec<usize> = fs.iter().filter(|x| x.rule == "dead_pass" && x.frame == 0).map(|x| x.ev).collect();
+        assert!(!dead_eps.contains(&1), "带遮挡查询的不报: {fs:#?}");
+        assert!(dead_eps.contains(&2), "不带查询的照报: {fs:#?}");
+        assert_eq!(frame_stats(&t, 0)["query_passes"], json!(1));
+    }
+
     #[test]
     fn needed_load_is_not_flagged() {
         // #3 改成上一帧有人 STORE 过 (去掉 discard) → LOAD 是需要的
@@ -1229,6 +1495,41 @@ mod tests {
         assert!(md.contains("| 0 | pass rp1 |"));
         assert_eq!(js[0]["frames"].as_array().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn raw_header_12_or_16() {
+        let mut d = vec![];
+        d.extend_from_slice(&2u32.to_le_bytes());
+        d.extend_from_slice(&1u32.to_le_bytes());
+        d.extend_from_slice(&1u32.to_le_bytes());
+        d.extend_from_slice(&[1, 2, 3, 255, 4, 5, 6, 255]);
+        assert_eq!(parse_raw(&d).unwrap().2, &[1, 2, 3, 255, 4, 5, 6, 255]);
+        let mut d16 = d[..12].to_vec();
+        d16.extend_from_slice(&0u32.to_le_bytes());
+        d16.extend_from_slice(&[1, 2, 3, 255, 4, 5, 6, 255]);
+        assert_eq!(parse_raw(&d16).unwrap().2, &[1, 2, 3, 255, 4, 5, 6, 255]);
+    }
+
+    #[test]
+    fn pixel_diff_counts_and_excludes() {
+        // 4x1: 第 0 像素差 20 (算不同), 第 1 像素差 5 (不算), 第 3 像素差 100 但被排除
+        let a = vec![0u8; 16];
+        let mut b = vec![0u8; 16];
+        b[0] = 20;
+        b[4] = 5;
+        b[12] = 100;
+        let (pct, mad, mx) = pixel_diff(&a, &b, 4, (0, 0, 4, 1), &[(3, 0, 4, 1)]);
+        assert!((pct - 100.0 / 3.0).abs() < 1e-9);
+        assert!((mad - 25.0 / 9.0).abs() < 1e-9);
+        assert_eq!(mx, 20);
+    }
+
+    #[test]
+    fn taps_parse() {
+        assert_eq!(parse_taps("1342,651; 10,20"), vec![(1342, 651), (10, 20)]);
+        assert!(parse_taps("").is_empty());
+        assert_eq!(parse_taps("x,1;3,4"), vec![(3, 4)]);
     }
 
     #[test]

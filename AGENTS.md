@@ -113,7 +113,13 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ```bash
 ./phonefarm eval --request <eval_request.json> --serial S --json      # 评测唯一入口: v1 转交 gpu-op; v2 按 kind 路由 shader/sysparam/gray
                                                                      # sysparam 真机已验证 (probe + 1 候选端到端, optimize 可直连);
+                                                                     # sysparam 改写臂施加后 +12s 与负载末尾各回读一次, 对不上 = 被厂商性能服务抢回 (contested),
+                                                                     #   那一臂不进统计, conditions_observed.contested_arms 单列; 快照里只有厂商服务会动的
+                                                                     #   频率边界 (kgsl.*pwrlevel、cpu.*.scaling_max/min) 变了不判留痕, 记进 snapshot_vendor_drift
                                                                      # gray 命中口径已对齐 (hits = effective[].begins 之和, 真机实测 9195); 注意游戏必须先进入渲染态, 否则 require_hit 如实 ABORT
+                                                                     # gray 改写: loadop_dont_care / storeop_dont_care (scope="<frame-audit sig 前缀≥8位>:<附件下标>", 可多条);
+                                                                     #   每轮两臂负载前同位置截图比 PSNR, 低于 payload.image_check.min_psnr_db (缺省 30) → ABORT「画面出错」;
+                                                                     #   过了才做统计判定 (可判 PASS/REJECT), psnr_db = 最差一轮。真机未验证
 ./phonefarm gpu-op --request <eval_request.json> --serial S --json   # shader 通路的实现本体 (等冷+锁频+A/B/A/B+Welch t 检验)
 ./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
 ```
