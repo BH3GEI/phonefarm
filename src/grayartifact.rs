@@ -372,6 +372,7 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
         "copyprobe_copy.spv",
         "vk_layer_refknobs.cpp",
         "artifact_stats.h",
+        "dispatch_ownership.h",
         "VkLayer_refknobs.json",
         "copy_spv.h",
     ];
@@ -392,6 +393,7 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
         "copyprobe_copy.spv",
         "vk_layer_refknobs.cpp",
         "artifact_stats.h",
+        "dispatch_ownership.h",
         "copy_spv.h",
         "artifact_metadata.h",
         "VkLayer_refknobs.json",
@@ -649,6 +651,7 @@ fn build_stage(
     for name in [
         "vk_layer_refknobs.cpp",
         "artifact_stats.h",
+        "dispatch_ownership.h",
         "copyprobe_copy.comp",
         "VkLayer_refknobs.json",
     ] {

@@ -11,6 +11,9 @@
 //
 // 自包含: 只 include <vulkan/vulkan.h>, layer 协商所需的少量结构体按稳定 ABI 就地声明,
 // 不依赖 vk_layer.h 是否在 NDK 里。
+#if defined(RK_LIFETIME_HOST_FIXTURE) && defined(__ANDROID__)
+#error "Host lifetime contracts are forbidden in Android artifacts"
+#endif
 #include <vulkan/vulkan.h>
 #include <android/log.h>
 #include <atomic>
@@ -21,6 +24,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <utility>
 #include <sys/system_properties.h>
 #include <unistd.h>
 #include "artifact_stats.h"
@@ -117,6 +121,10 @@ struct DevDisp {
     PFN_vkGetDeviceProcAddr gdpa = nullptr;
     PFN_vkDestroyDevice DestroyDevice = nullptr;
     PFN_vkCmdBeginRenderPass CmdBeginRenderPass = nullptr;
+    PFN_vkCmdEndRenderPass CmdEndRenderPass = nullptr;
+    PFN_vkCmdNextSubpass CmdNextSubpass = nullptr;
+    PFN_vkCmdEndRenderPass2 CmdEndRenderPass2 = nullptr;
+    PFN_vkCmdNextSubpass2 CmdNextSubpass2 = nullptr;
     PFN_vkCmdBeginRenderPass2 CmdBeginRenderPass2 = nullptr;
     PFN_vkQueuePresentKHR QueuePresentKHR = nullptr;
     PFN_vkCreateRenderPass CreateRenderPass = nullptr;
@@ -132,6 +140,12 @@ struct DevDisp {
     PFN_vkUpdateDescriptorSets UpdateDescriptorSets = nullptr;
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets = nullptr;
     PFN_vkBeginCommandBuffer BeginCommandBuffer = nullptr;
+    PFN_vkEndCommandBuffer EndCommandBuffer = nullptr;
+    PFN_vkCreateCommandPool CreateCommandPool = nullptr;
+    PFN_vkResetDescriptorPool ResetDescriptorPool = nullptr;
+    PFN_vkCreateSampler CreateSampler = nullptr;
+    PFN_vkDestroySampler DestroySampler = nullptr;
+    std::vector<VkQueueFlags> queue_flags;
     PFN_vkCmdExecuteCommands CmdExecuteCommands = nullptr;
     PFN_vkQueueSubmit QueueSubmit = nullptr;
     PFN_vkFreeCommandBuffers FreeCommandBuffers = nullptr;
@@ -241,17 +255,10 @@ struct CopyProbe {
     VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
     VkPipelineLayout pl = VK_NULL_HANDLE;
     VkPipeline pipe = VK_NULL_HANDLE;
-    VkDescriptorPool pool = VK_NULL_HANDLE;
-    VkDescriptorSet cset = VK_NULL_HANDLE;     // compute 自己的 set: binding0=src, binding1=dst
-    VkImage dst = VK_NULL_HANDLE;
-    VkDeviceMemory mem = VK_NULL_HANDLE;
-    VkImageView dst_view = VK_NULL_HANDLE;
-    uint32_t w = 0, h = 0, fmt = 0;
-    VkImage src_img = VK_NULL_HANDLE;          // 本帧拷贝的源 (pass 49 的颜色附件)
+    bool asset_mode_upop = false;
+    uint32_t w = 0, h = 0, fmt = 0; // Last recorded dimensions, marker only.
     uint64_t copies = 0, subs = 0;
     bool disabled = false;
-    // 游戏 set -> (克隆集, 克隆时的写代数)。游戏每更新一次原 set, 代数 +1, 下次克隆重建。
-    std::map<VkDescriptorSet, std::pair<VkDescriptorSet, uint64_t>> clones;
 };
 static CopyProbe g_cp;
 static std::map<VkDescriptorSet, uint64_t> g_set_gen;   // UpdateDescriptorSets 里递增
@@ -282,6 +289,9 @@ static std::map<VkCommandBuffer, int> g_cb_draw_idx;          // 本 pass 内第
 static std::map<VkCommandBuffer, std::vector<VkImageView>> g_cb_prev_att;  // 上一个非送显 pass 的附件
 static std::string g_composite_report;                        // 只填一次
 static std::map<VkCommandBuffer, bool> g_cb_cur_is_swap;
+
+static void cp_disable(const char *);
+#include "dispatch_ownership.h"
 
 static uint64_t pass_key(VkRenderPass rp, uint32_t w, uint32_t h) {
     uint64_t seq = 0;
@@ -388,13 +398,16 @@ static void write_marker() {
     }
     {
         std::lock_guard<std::mutex> lk(g_mtx);
-        json += std::string(",\"upop_artifact\":{\"artifact_id\":\"") + kArtifactId
-            + "\",\"source_sha256\":\"" + kCandidateSourceSha256
-            + "\",\"spirv_sha256\":\"" + kCandidateSpirvSha256
-            + "\",\"requested\":" + (g_upop ? "true" : "false")
-            + ",\"disabled_state\":" + (g_cp.disabled ? "true" : "false")
-            + ",\"queue_submission_api\":\"vkQueueSubmit\",\"gpu_completion_proven\":false,\"counts\":"
-            + g_artifact_stats.json() + "}";
+        json += std::string(",\"upop_artifact\":{\"artifact_id\":\"") + kArtifactId +
+                "\",\"source_sha256\":\"" + kCandidateSourceSha256 + "\",\"spirv_sha256\":\"" +
+                kCandidateSpirvSha256 + "\",\"requested\":" + (g_upop ? "true" : "false") +
+                ",\"disabled_state\":" + (g_cp.disabled ? "true" : "false") +
+                ",\"queue_submission_api\":\"vkQueueSubmit\",\"gpu_completion_proven\":false,"
+                "\"counts\":" +
+                g_artifact_stats.json() +
+                ",\"ownership_scope\":\"recording_generation_per_dispatch\",\"deployable\":false,"
+                "\"evaluation_eligible\":false,\"ineligible_reason\":\"" +
+                rk_lifetime::refusal + "\"}";
     }
     json += "}";
 
@@ -430,7 +443,8 @@ static PFN_vkVoidFunction dispatch_device(VkDevice, const char*);
 
 // 记一个 render pass 的形状 (附件数 / 格式 / loadOp / finalLayout) 与它的创建序号
 template <typename FmtFn, typename LoadFn, typename FinFn>
-static void record_rp(VkRenderPass rp, uint64_t seq, uint32_t n, FmtFn fmt, LoadFn load, FinFn fin) {
+static void record_rp(VkDevice dev, VkRenderPass rp, uint64_t seq, uint32_t n, FmtFn fmt,
+                      LoadFn load, FinFn fin) {
     RpInfo ri; ri.n_att = n;
     for (uint32_t i = 0; i < n; i++) {
         ri.fmt.push_back(fmt(i)); ri.loadop.push_back(load(i));
@@ -439,6 +453,8 @@ static void record_rp(VkRenderPass rp, uint64_t seq, uint32_t n, FmtFn fmt, Load
     std::lock_guard<std::mutex> lk(g_mtx);
     g_rp_info[rp] = std::move(ri);
     g_rp_seq[rp] = seq;
+    rk_lifetime::remember(rk_lifetime::render_passes, std::make_pair(dev, rp),
+                          ++rk_lifetime::next_epoch);
 }
 
 // 应用问"这个物理设备有哪些扩展?"时, 只有 pLayerName 指名道姓问本层, 才轮到我们回答
@@ -540,6 +556,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     DevDisp d;
     d.gdpa = gdpa;
     d.DestroyDevice = (PFN_vkDestroyDevice)gdpa(*pDev, "vkDestroyDevice");
+    d.CmdEndRenderPass = (PFN_vkCmdEndRenderPass)gdpa(*pDev, "vkCmdEndRenderPass");
+    d.CmdNextSubpass = (PFN_vkCmdNextSubpass)gdpa(*pDev, "vkCmdNextSubpass");
+    d.CmdEndRenderPass2 = (PFN_vkCmdEndRenderPass2)gdpa(*pDev, "vkCmdEndRenderPass2");
+    if (!d.CmdEndRenderPass2)
+        d.CmdEndRenderPass2 = (PFN_vkCmdEndRenderPass2)gdpa(*pDev, "vkCmdEndRenderPass2KHR");
+    d.CmdNextSubpass2 = (PFN_vkCmdNextSubpass2)gdpa(*pDev, "vkCmdNextSubpass2");
+    if (!d.CmdNextSubpass2)
+        d.CmdNextSubpass2 = (PFN_vkCmdNextSubpass2)gdpa(*pDev, "vkCmdNextSubpass2KHR");
     d.CmdBeginRenderPass = (PFN_vkCmdBeginRenderPass)gdpa(*pDev, "vkCmdBeginRenderPass");
     d.CmdBeginRenderPass2 = (PFN_vkCmdBeginRenderPass2)gdpa(*pDev, "vkCmdBeginRenderPass2");
     d.QueuePresentKHR = (PFN_vkQueuePresentKHR)gdpa(*pDev, "vkQueuePresentKHR");
@@ -568,6 +592,23 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     d.DestroyFramebuffer = (PFN_vkDestroyFramebuffer)gdpa(*pDev, "vkDestroyFramebuffer");
     d.DestroyImage = (PFN_vkDestroyImage)gdpa(*pDev, "vkDestroyImage");
     d.DestroyImageView = (PFN_vkDestroyImageView)gdpa(*pDev, "vkDestroyImageView");
+    d.EndCommandBuffer = (PFN_vkEndCommandBuffer)gdpa(*pDev, "vkEndCommandBuffer");
+    d.CreateCommandPool = (PFN_vkCreateCommandPool)gdpa(*pDev, "vkCreateCommandPool");
+    d.ResetDescriptorPool = (PFN_vkResetDescriptorPool)gdpa(*pDev, "vkResetDescriptorPool");
+    d.CreateSampler = (PFN_vkCreateSampler)gdpa(*pDev, "vkCreateSampler");
+    d.DestroySampler = (PFN_vkDestroySampler)gdpa(*pDev, "vkDestroySampler");
+    auto families = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)gipa(
+        inst, "vkGetPhysicalDeviceQueueFamilyProperties");
+    if (families) {
+        uint32_t count = 0;
+        families(phys, &count, nullptr);
+        if (count <= 64) {
+            std::vector<VkQueueFamilyProperties> props(count);
+            families(phys, &count, props.data());
+            for (uint32_t i = 0; i < count && i < props.size(); ++i)
+                d.queue_flags.push_back(props[i].queueFlags);
+        }
+    }
     d.dev = *pDev;
     d.phys = phys;
     d.CreateShaderModule = (PFN_vkCreateShaderModule)gdpa(*pDev, "vkCreateShaderModule");
@@ -597,15 +638,16 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocat
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return; d = it->second; g_dev.erase(it); }
     write_marker();  // 收尾再落一次最终计数
-    bool owned_probe = g_cp.dev == dev;
-    if (g_cp.dev == dev) {   // copyprobe 自建对象随 device 一起收
-        if (g_cp.dst) { d.DestroyImageView(dev, g_cp.dst_view, nullptr); d.DestroyImage(dev, g_cp.dst, nullptr); d.FreeMemory(dev, g_cp.mem, nullptr); }
-        if (g_cp.pipe) { d.DestroyPipeline(dev, g_cp.pipe, nullptr); d.DestroyPipelineLayout(dev, g_cp.pl, nullptr);
-                         d.DestroyDescriptorPool(dev, g_cp.pool, nullptr); d.DestroyDescriptorSetLayout(dev, g_cp.dsl, nullptr);
-                         d.DestroyShaderModule(dev, g_cp.sm, nullptr); }
-        g_cp = CopyProbe{};
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        rk_lifetime::destroy_device(dev, d);
+        if (g_cp.dev == dev) {
+            rk_lifetime::destroy_assets(d);
+            g_cp = CopyProbe{};
+        }
+        if (g_dev.empty())
+            g_artifact_stats.clear_pending();
     }
-    { std::lock_guard<std::mutex> lk(g_mtx); if (owned_probe || g_dev.empty()) g_artifact_stats.clear_pending(); }
     if (d.DestroyDevice) d.DestroyDevice(dev, a);
 }
 
@@ -645,10 +687,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
     uint64_t idx = g_rp_created++;
     if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0) {
         VkResult r0 = d.CreateRenderPass(dev, ci, a, out);
-        if (r0 == VK_SUCCESS && g_dump_passes && ci) record_rp(*out, idx, ci->attachmentCount,
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
+        if (r0 == VK_SUCCESS && g_dump_passes && ci)
+            record_rp(
+                dev, *out, idx, ci->attachmentCount,
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].format; },
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].loadOp; },
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].finalLayout; });
         return r0;
     }
 
@@ -662,10 +706,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
     }
     if (hits.empty()) {
         VkResult r0 = d.CreateRenderPass(dev, ci, a, out);
-        if (r0 == VK_SUCCESS && g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
+        if (r0 == VK_SUCCESS && g_dump_passes)
+            record_rp(
+                dev, *out, idx, ci->attachmentCount,
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].format; },
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].loadOp; },
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].finalLayout; });
         return r0;
     }
 
@@ -685,10 +731,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
             g_effective.push_back(h);
         }
     }
-    if (g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
-        [&](uint32_t i){ return (uint32_t)atts[i].format; },
-        [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
-        [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
+    if (g_dump_passes)
+        record_rp(
+            dev, *out, idx, ci->attachmentCount,
+            [&](uint32_t i) { return (uint32_t)atts[i].format; },
+            [&](uint32_t i) { return (uint32_t)atts[i].loadOp; },
+            [&](uint32_t i) { return (uint32_t)atts[i].finalLayout; });
     RK_LOG("改写 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
            (unsigned long long)idx, hits.size());
     return r;
@@ -704,10 +752,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
     uint64_t idx = g_rp_created++;
     if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0) {
         VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
-        if (r0 == VK_SUCCESS && g_dump_passes && ci) record_rp(*out, idx, ci->attachmentCount,
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
+        if (r0 == VK_SUCCESS && g_dump_passes && ci)
+            record_rp(
+                dev, *out, idx, ci->attachmentCount,
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].format; },
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].loadOp; },
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].finalLayout; });
         return r0;
     }
 
@@ -720,10 +770,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
     }
     if (hits.empty()) {
         VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
-        if (r0 == VK_SUCCESS && g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
-            [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].finalLayout; });
+        if (r0 == VK_SUCCESS && g_dump_passes)
+            record_rp(
+                dev, *out, idx, ci->attachmentCount,
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].format; },
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].loadOp; },
+                [&](uint32_t i) { return (uint32_t)ci->pAttachments[i].finalLayout; });
         return r0;
     }
 
@@ -743,10 +795,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
             g_effective.push_back(h);
         }
     }
-    if (g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
-        [&](uint32_t i){ return (uint32_t)atts[i].format; },
-        [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
-        [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
+    if (g_dump_passes)
+        record_rp(
+            dev, *out, idx, ci->attachmentCount,
+            [&](uint32_t i) { return (uint32_t)atts[i].format; },
+            [&](uint32_t i) { return (uint32_t)atts[i].loadOp; },
+            [&](uint32_t i) { return (uint32_t)atts[i].finalLayout; });
     RK_LOG("改写2 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
            (unsigned long long)idx, hits.size());
     return r;
@@ -780,6 +834,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyRenderPass(
         g_rewritten.erase(rp);
         // 句柄会复用: 这三张表不一起擦, 新建的 pass 拿到旧句柄值就继承死者的 seq/形状 (评审 #8)
         g_rp_seq.erase(rp);
+        rk_lifetime::render_passes.erase({dev, rp});
         g_rp_info.erase(rp);
     }
     d.DestroyRenderPass(dev, rp, a);
@@ -793,6 +848,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateImage(
     VkResult r = d.CreateImage(dev, ci, a, out);
     if (r == VK_SUCCESS && ci && g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
+        rk_lifetime::created_image(dev, *out, *ci);
         g_img[*out] = ImgInfo{ci->extent.width, ci->extent.height, (uint32_t)ci->format, (uint32_t)ci->usage};
     }
     return r;
@@ -805,6 +861,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateImageView(
     if (r == VK_SUCCESS && ci && g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_view[*out] = ci->image;
+        rk_lifetime::created_view(dev, *out, *ci);
     }
     return r;
 }
@@ -834,6 +891,10 @@ static VKAPI_ATTR void VKAPI_CALL rk_UpdateDescriptorSets(
         }
     }
     d.UpdateDescriptorSets(dev, nw, w, nc, c);
+    if (g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        rk_lifetime::updated_sets(dev, nw, w, nc, c);
+    }
 }
 // copyprobe 克隆集需要原 layout 的 binding 清单
 static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDescriptorSetLayout(
@@ -845,6 +906,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDescriptorSetLayout(
     VkResult r = d.CreateDescriptorSetLayout(dev, ci, a, out);
     if (r == VK_SUCCESS && ci && g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
+        rk_lifetime::created_layout(dev, *out, *ci);
         auto& v = g_layout_bindings[*out];
         for (uint32_t i = 0; i < ci->bindingCount; i++) {
             const VkDescriptorSetLayoutBinding& b = ci->pBindings[i];
@@ -862,6 +924,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_AllocateDescriptorSets(
     VkResult r = d.AllocateDescriptorSets(dev, ai, out);
     if (r == VK_SUCCESS && ai && g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
+        rk_lifetime::allocated_sets(dev, *ai, out);
         for (uint32_t i = 0; i < ai->descriptorSetCount; i++) {
             g_set_layout[out[i]] = ai->pSetLayouts[i];
             g_pool_sets[ai->descriptorPool].push_back(out[i]);
@@ -878,6 +941,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDescriptorPool(
     if (!dev_of(key(dev), &d) || !d.DestroyDescriptorPool) { RK_LOG_ONCE("DestroyDescriptorPool: 无下层"); return; }
     if (g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
+        rk_lifetime::invalidate_pool(dev, pool, true);
         auto it = g_pool_sets.find(pool);
         if (it != g_pool_sets.end()) {
             for (auto set : it->second) {
@@ -893,6 +957,12 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBindDescriptorSets(
     uint32_t n, const VkDescriptorSet* sets, uint32_t ndyn, const uint32_t* dyn) {
     DevDisp d;
     if (!dev_of(key(cb), &d) || !d.CmdBindDescriptorSets) { RK_LOG_ONCE("CmdBindDescriptorSets: 无下层"); return; }
+    if (bp == VK_PIPELINE_BIND_POINT_COMPUTE) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto it = rk_lifetime::cbs.find(cb);
+        if (it != rk_lifetime::cbs.end())
+            ++it->second.compute_mutation;
+    }
     if (g_dump_passes && sets && bp == VK_PIPELINE_BIND_POINT_GRAPHICS) {
         std::lock_guard<std::mutex> lk(g_mtx);
         auto& v = g_cb_sets[cb];
@@ -930,6 +1000,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateFramebuffer(
     VkResult r = d.CreateFramebuffer(dev, ci, a, out);
     if (r == VK_SUCCESS && ci && g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
+        auto live_rp = rk_lifetime::render_passes.find({dev, ci->renderPass});
+        rk_lifetime::remember(rk_lifetime::framebuffers, std::make_pair(dev, *out),
+                              rk_lifetime::Framebuffer{
+                                  ++rk_lifetime::next_epoch, ci->renderPass,
+                                  live_rp == rk_lifetime::render_passes.end() ? 0 : live_rp->second,
+                                  !ci->pNext && !ci->flags && ci->layers == 1});
         g_fb_info[*out] = FbInfo{ci->width, ci->height, ci->renderPass};
         std::vector<VkImageView> att;
         for (uint32_t i = 0; i < ci->attachmentCount; i++) att.push_back(ci->pAttachments[i]);
@@ -1073,275 +1149,19 @@ static void cp_disable(const char* reason) {
     else g_artifact_stats.disable(reason);
 #endif
 }
-static void cp_fail(const char* what, VkResult r) {
-    RK_LOG("copyprobe 停用: %s -> %d", what, (int)r);
-    cp_disable(what);
+// Same ownership path is used by production and host fixtures. Unknown contracts refuse injection.
+static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp &d, VkRenderPass rp,
+                               const std::vector<VkImageView> &views) {
+    rk_lifetime::inject(cb, d, rp, views);
 }
-
-// 建齐 compute 那套 (幂等; 尺寸变了重建 dst)。调用方必须持 g_mtx。
-static bool copyprobe_ensure(VkDevice dev, const DevDisp& d, uint32_t w, uint32_t h, uint32_t fmt) {
-    if (g_cp.dev != VK_NULL_HANDLE && g_cp.dev != dev) {
-        cp_disable("multiple_vulkan_devices_unsupported"); return false;
-    }
-    if (g_cp.disabled) return false;
-#ifdef RK_DYNAMIC_UPOP_BUILD
-    if (!g_upop) { cp_disable("dynamic_upop_not_requested"); return false; }
-#endif
-    if (fmt != VK_FORMAT_R8G8B8A8_UNORM) {   // 算子写死 rgba8, 格式不符不猜
-        RK_LOG_ONCE("copyprobe 停用: src fmt=%u 不是 R8G8B8A8_UNORM, 算子不适用", fmt);
-        cp_disable("unsupported_rgba8_format"); return false;
-    }
-    const unsigned char* spv = g_upop ? kUpopSpv : kCopySpv;
-    unsigned int spv_len = g_upop ? kUpopSpvLen : kCopySpvLen;
-    if (spv_len == 0) { RK_LOG_ONCE("copyprobe 停用: 内嵌 SPV 为空 (构建没编 shader?)"); cp_disable("empty_spirv"); return false; }
-    VkResult r;
-    if (g_cp.pipe == VK_NULL_HANDLE) {
-        VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        smci.codeSize = spv_len; smci.pCode = (const uint32_t*)spv;
-        r = d.CreateShaderModule(dev, &smci, nullptr, &g_cp.sm);
-        if (r != VK_SUCCESS) { cp_fail("CreateShaderModule", r); return false; }
-
-        VkDescriptorSetLayoutBinding lb[2]{};
-        lb[0].binding = 0; lb[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        lb[0].descriptorCount = 1; lb[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        lb[1].binding = 1; lb[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        lb[1].descriptorCount = 1; lb[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        VkDescriptorSetLayoutCreateInfo dlci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        dlci.bindingCount = 2; dlci.pBindings = lb;
-        r = d.CreateDescriptorSetLayout(dev, &dlci, nullptr, &g_cp.dsl);
-        if (r != VK_SUCCESS) { cp_fail("CreateDescriptorSetLayout", r); return false; }
-
-        VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        plci.setLayoutCount = 1; plci.pSetLayouts = &g_cp.dsl;
-        r = d.CreatePipelineLayout(dev, &plci, nullptr, &g_cp.pl);
-        if (r != VK_SUCCESS) { cp_fail("CreatePipelineLayout", r); return false; }
-
-        VkComputePipelineCreateInfo cpci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        cpci.stage.module = g_cp.sm; cpci.stage.pName = "main";
-        cpci.layout = g_cp.pl;
-        r = d.CreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, nullptr, &g_cp.pipe);
-        if (r != VK_SUCCESS) { cp_fail("CreateComputePipelines", r); return false; }
-        if (g_upop) ++g_artifact_stats.pipeline_created;
-
-        // 池子要同时装: compute set + 每帧克隆的游戏 set。克隆集里可能有游戏的任何
-        // 描述符类型, 全类型留余量; FREE_BIT 让换下来的旧克隆能还回池子 (游戏每帧
-        // 重写原 set 时代数就涨, 不还的话 60fps 下十几秒就把 maxSets 耗尽)。
-        VkDescriptorPoolSize ps[8]{};
-        ps[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; ps[0].descriptorCount = 2048;
-        ps[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          ps[1].descriptorCount = 256;
-        ps[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         ps[2].descriptorCount = 2048;
-        ps[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;         ps[3].descriptorCount = 512;
-        ps[4].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;          ps[4].descriptorCount = 1024;
-        ps[5].type = VK_DESCRIPTOR_TYPE_SAMPLER;                ps[5].descriptorCount = 1024;
-        ps[6].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;       ps[6].descriptorCount = 256;
-        ps[7].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; ps[7].descriptorCount = 256;
-        VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        dpci.maxSets = 1024; dpci.poolSizeCount = 8; dpci.pPoolSizes = ps;
-        r = d.CreateDescriptorPool(dev, &dpci, nullptr, &g_cp.pool);
-        if (r != VK_SUCCESS) { cp_fail("CreateDescriptorPool", r); return false; }
-
-        VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        dsai.descriptorPool = g_cp.pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &g_cp.dsl;
-        r = d.AllocateDescriptorSets(dev, &dsai, &g_cp.cset);
-        if (r != VK_SUCCESS) { cp_fail("AllocateDescriptorSets(compute)", r); return false; }
-        g_cp.dev = dev;
-        RK_LOG("copyprobe: compute pipeline 建好了");
-    }
-    if (g_cp.w != w || g_cp.h != h) {   // dst 与 src 同尺寸同格式: 逐纹素拷贝, 不是放大
-        if (g_cp.dst != VK_NULL_HANDLE) {
-            d.DestroyImageView(dev, g_cp.dst_view, nullptr);
-            d.DestroyImage(dev, g_cp.dst, nullptr);
-            d.FreeMemory(dev, g_cp.mem, nullptr);
-            g_cp.dst = VK_NULL_HANDLE;
-        }
-        VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        ici.imageType = VK_IMAGE_TYPE_2D; ici.format = (VkFormat)fmt;
-        ici.extent = {w, h, 1}; ici.mipLevels = 1; ici.arrayLayers = 1;
-        ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        r = d.CreateImage(dev, &ici, nullptr, &g_cp.dst);
-        if (r != VK_SUCCESS) { cp_fail("CreateImage(dst)", r); return false; }
-        VkMemoryRequirements mr{}; {   // vkGetImageMemoryRequirements 还没挂, 走 gdpa 现取
-            auto fn = (PFN_vkGetImageMemoryRequirements)d.gdpa(dev, "vkGetImageMemoryRequirements");
-            if (!fn) { cp_fail("vkGetImageMemoryRequirements 拿不到", VK_ERROR_INITIALIZATION_FAILED); return false; }
-            fn(dev, g_cp.dst, &mr);
-        }
-        VkPhysicalDeviceMemoryProperties mp{};
-        d.GetPhysMemProps(d.phys, &mp);
-        uint32_t mt = UINT32_MAX;
-        for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
-            if ((mr.memoryTypeBits & (1u << i)) &&
-                (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { mt = i; break; }
-        if (mt == UINT32_MAX) { cp_fail("没有 DEVICE_LOCAL 显存类型", VK_ERROR_INITIALIZATION_FAILED); return false; }
-        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        mai.allocationSize = mr.size; mai.memoryTypeIndex = mt;
-        r = d.AllocateMemory(dev, &mai, nullptr, &g_cp.mem);
-        if (r != VK_SUCCESS) { cp_fail("AllocateMemory", r); return false; }
-        r = d.BindImageMemory(dev, g_cp.dst, g_cp.mem, 0);
-        if (r != VK_SUCCESS) { cp_fail("BindImageMemory", r); return false; }
-        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        vci.image = g_cp.dst; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = (VkFormat)fmt;
-        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        r = d.CreateImageView(dev, &vci, nullptr, &g_cp.dst_view);
-        if (r != VK_SUCCESS) { cp_fail("CreateImageView(dst)", r); return false; }
-        g_cp.w = w; g_cp.h = h; g_cp.fmt = fmt;
-        RK_LOG("copyprobe: dst image %ux%u fmt=%u 建好了", w, h, fmt);
-    }
-    return true;
-}
-
-// 合成 pass 开始时 (转发 BeginRenderPass 之前) 注入拷贝。调用方必须持 g_mtx。
-static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPass prev_rp,
-                               const std::vector<VkImageView>& prev_att) {
-    (void)prev_rp;   // 布局判断改走"游戏自己已 transition"论证, 见下; 参数留着备用
-    if (g_cp.disabled || prev_att.empty()) return;
-    // 源图 = 上一个渲染分辨率 pass 的颜色附件
-    auto vi = g_view.find(prev_att[0]);
-    if (vi == g_view.end()) return;
-    VkImage src = vi->second;
-    auto ii = g_img.find(src);
-    if (ii == g_img.end()) return;
-    const ImgInfo& im = ii->second;
-    if (!(im.usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { RK_LOG_ONCE("copyprobe 停用: src 不可采样"); cp_disable("source_not_sampled"); return; }
-    // 布局: 游戏在 pass 50 里用普通采样描述符读 src, 而 src 又不是 pass 50 framebuffer
-    // 的附件 (fb 2141x969 vs src 2140x968 尺寸不符, 挂不上) —— 所以游戏必定在 pass 49
-    // 结束之后、pass 50 开始之前自己插了 transition barrier 把它转成可采样布局,
-    // 否则游戏自己就是非法采样。我们注入的位置在 pass 50 begin 处, 排在游戏那道
-    // barrier 之后, src 已经是 SHADER_READ_ONLY_OPTIMAL, 我们只做执行依赖不动布局。
-    // (上一版拿 pass 49 的 finalLayout=COLOR_ATTACHMENT_OPTIMAL 当注入时布局, 错了:
-    //  那是渲染 pass 结束时的布局, 不是合成 pass 开始时的布局。2026-09-23 实测。)
-    uint32_t src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    // copy 探针: dst 与 src 同尺寸 (逐纹素拷贝)。upop: dst 是送显分辨率 (放大就是算子干的活)。
-    uint32_t dw = im.w, dh = im.h;
-    if (g_upop) {
-        if (!g_swap_w || !g_swap_h) return;   // swapchain 还没建, 首几帧跳过
-        dw = g_swap_w; dh = g_swap_h;
-    }
-    if (!copyprobe_ensure(d.dev, d, dw, dh, im.fmt)) return;
-
-    // compute set 绑上本帧的 src: view 直接用 pass 49 颜色附件的 view, sampler 从
-    // 游戏对 src 的既有描述符写里拿 (combined image sampler 必须带 sampler)。
-    VkSampler src_samp = VK_NULL_HANDLE; VkImageView src_view = prev_att[0];
-    for (auto& kv : g_set_views) {
-        for (auto& bv : kv.second)
-            if (bv.second == src_view) { auto si = g_set_samplers[kv.first].find(bv.first);
-                if (si != g_set_samplers[kv.first].end()) src_samp = si->second; }
-        if (src_samp) break;
-    }
-    if (!src_samp) return;   // 游戏还没写过引用 src 的描述符, 本帧跳过 (首帧常见)
-
-    VkDescriptorImageInfo dii[2]{};
-    dii[0] = {src_samp, src_view, (VkImageLayout)src_layout};
-    dii[1] = {VK_NULL_HANDLE, g_cp.dst_view, VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet wr[2]{};
-    for (int i = 0; i < 2; i++) {
-        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = g_cp.cset;
-        wr[i].dstBinding = (uint32_t)i; wr[i].descriptorCount = 1;
-        wr[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-                                      : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        wr[i].pImageInfo = &dii[i];
-    }
-    d.UpdateDescriptorSets(d.dev, 2, wr, 0, nullptr);
-
-    // 注入: 三条命令全走下层直调, 不再回本层钩子 (避免递归/重复计数)
-    VkImageMemoryBarrier b[2]{};
-    b[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-    b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    b[0].oldLayout = (VkImageLayout)src_layout; b[0].newLayout = (VkImageLayout)src_layout;
-    b[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b[0].image = src; b[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    b[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b[1].srcAccessMask = 0; b[1].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    b[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    b[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b[1].image = g_cp.dst; b[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
-    d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pipe);
-    d.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pl, 0, 1, &g_cp.cset, 0, nullptr);
-    d.CmdDispatch(cb, (g_cp.w + 15) / 16, (g_cp.h + 15) / 16, 1);
-    if (g_upop) g_artifact_stats.record(reinterpret_cast<uintptr_t>(cb));
-    VkImageMemoryBarrier b2{};
-    b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    b2.oldLayout = VK_IMAGE_LAYOUT_GENERAL; b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b2.image = g_cp.dst; b2.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b2);
-    g_cp.src_img = src;
-    g_cp.copies++;
-}
-
-// 游戏在合成 pass 里绑描述符时: 哪个 set 引用了本帧的 src, 就换成它的克隆
-// (逐 binding 拷贝, 只把 src 那一个绑定改指 dst)。调用方必须持 g_mtx。
-static VkDescriptorSet copyprobe_clone(VkCommandBuffer, const DevDisp& d, VkDescriptorSet game_set) {
-    if (g_cp.disabled || g_cp.src_img == VK_NULL_HANDLE) return game_set;
-    // 这个 set 里哪个绑定引用了 src?
-    auto sv = g_set_views.find(game_set);
-    if (sv == g_set_views.end()) return game_set;
-    uint32_t target_key = UINT32_MAX;
-    for (auto& bv : sv->second) {
-        auto vi = g_view.find(bv.second);
-        if (vi != g_view.end() && vi->second == g_cp.src_img) { target_key = bv.first; break; }
-    }
-    if (target_key == UINT32_MAX) return game_set;
-    auto li = g_set_layout.find(game_set);
-    if (li == g_set_layout.end()) return game_set;
-    VkDescriptorSetLayout layout = li->second;
-    auto bi = g_layout_bindings.find(layout);
-    if (bi == g_layout_bindings.end()) return game_set;
-    uint64_t gen = g_set_gen[game_set];
-    auto ci = g_cp.clones.find(game_set);
-    if (ci == g_cp.clones.end() || ci->second.second != gen) {
-        VkDescriptorSet clone = VK_NULL_HANDLE;
-        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        ai.descriptorPool = g_cp.pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &layout;
-        VkResult r = d.AllocateDescriptorSets(d.dev, &ai, &clone);
-        if (r != VK_SUCCESS) { cp_fail("AllocateDescriptorSets(clone)", r); return game_set; }
-        // 逐 binding 全量拷贝原 set, 再单独覆写 src 那一个
-        std::vector<VkCopyDescriptorSet> copies;
-        for (auto& lb : bi->second) {
-            if ((lb.binding << 8) == (target_key & ~0xFFu)) continue;   // 目标 binding 跳过
-            VkCopyDescriptorSet c{};
-            c.sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET;
-            c.srcSet = game_set; c.srcBinding = lb.binding; c.srcArrayElement = 0;
-            c.dstSet = clone;    c.dstBinding = lb.binding; c.dstArrayElement = 0;
-            c.descriptorCount = lb.count;
-            copies.push_back(c);
-        }
-        if (!copies.empty()) d.UpdateDescriptorSets(d.dev, 0, nullptr, (uint32_t)copies.size(), copies.data());
-        // 覆写: 同 binding 的同一 arrayElem, 换 view 不换 sampler
-        VkSampler samp = VK_NULL_HANDLE;
-        auto smi = g_set_samplers.find(game_set);
-        if (smi != g_set_samplers.end()) { auto it = smi->second.find(target_key); if (it != smi->second.end()) samp = it->second; }
-        if (!samp) return game_set;
-        VkDescriptorImageInfo dii{samp, g_cp.dst_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkWriteDescriptorSet w{};
-        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w.dstSet = clone;
-        w.dstBinding = target_key >> 8; w.dstArrayElement = target_key & 0xFF;
-        w.descriptorCount = 1; w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w.pImageInfo = &dii;
-        d.UpdateDescriptorSets(d.dev, 1, &w, 0, nullptr);
-        if (ci != g_cp.clones.end()) {
-            d.FreeDescriptorSets(d.dev, g_cp.pool, 1, &ci->second.first);
-            ci->second = {clone, gen};
-        } else g_cp.clones[game_set] = {clone, gen};
-        if (g_cp.clones.size() > 512) { RK_LOG_ONCE("copyprobe: 克隆表超 512, 停用防爆"); cp_disable("descriptor_clone_limit"); return game_set; }
-        ci = g_cp.clones.find(game_set);
-    }
-    g_cp.subs++;
-    return ci->second.first;
+static VkDescriptorSet copyprobe_clone(VkCommandBuffer cb, const DevDisp &d, VkDescriptorSet set) {
+    return rk_lifetime::clone(cb, d, set);
 }
 
 // 把 (render pass 形状) 与 (framebuffer 宽高) 关联起来, 按 (pass, 宽, 高) 聚合计数,
 // 并在采样帧里记下有序序列 —— "第几个 pass、多大、什么格式" 就是从这儿读出来的。
-static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi, const DevDisp& d) {
+static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo *bi, const DevDisp &d,
+                      bool inline_contents) {
     if (!g_dump_passes || !bi) return;
     std::lock_guard<std::mutex> lk(g_mtx);
     uint32_t w = bi->renderArea.extent.width, h = bi->renderArea.extent.height;
@@ -1359,6 +1179,13 @@ static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi, const
     { auto& v = g_cb_passes[cb]; if (v.size() < 256) v.push_back(k); }   // 录制清单, 提交时折算成执行
     g_cb_draw_idx[cb] = 0;                       // 进新 pass, draw 序号归零
     g_cb_sets[cb].clear();                       // 只统计"在本 pass 内绑定"的描述符, 避免把上一个 pass 的算进来
+    auto owner = rk_lifetime::cbs.find(cb);
+    if (owner != rk_lifetime::cbs.end()) {
+        owner->second.active = SIZE_MAX;
+        owner->second.target_framebuffer = bi->framebuffer;
+        owner->second.inline_contents = inline_contents;
+        owner->second.inside_pass = true;
+    }
     bool is_swap = (w == g_swap_w && h == g_swap_h);
     auto ai = g_fb_att.find(bi->framebuffer);
     if (!is_swap && ai != g_fb_att.end()) {
@@ -1367,8 +1194,10 @@ static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi, const
     }
     if (is_swap) {
         g_cb_cur_is_swap[cb] = true;
-        if (g_copyprobe || g_upop) copyprobe_dispatch(cb, d, g_cb_prev_rp.count(cb) ? g_cb_prev_rp[cb] : VK_NULL_HANDLE,
-                                            g_cb_prev_att.count(cb) ? g_cb_prev_att[cb] : std::vector<VkImageView>{});
+        if (g_copyprobe || g_upop)
+            copyprobe_dispatch(cb, d, bi->renderPass,
+                               g_cb_prev_att.count(cb) ? g_cb_prev_att[cb]
+                                                       : std::vector<VkImageView>{});
     } else g_cb_cur_is_swap[cb] = false;
     if (g_sampling && g_frame_seq.size() < 400) {
         uint64_t seq = 0; auto si = g_rp_seq.find(bi->renderPass);
@@ -1389,7 +1218,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass(
     }
     g_rp++;
     note_begin(bi ? bi->renderPass : VK_NULL_HANDLE);
-    note_pass(cb, bi, d);
+    note_pass(cb, bi, d, c == VK_SUBPASS_CONTENTS_INLINE);
     d.CmdBeginRenderPass(cb, bi, c);
 }
 static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass2(
@@ -1403,60 +1232,119 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass2(
     }
     g_rp++;
     note_begin(bi ? bi->renderPass : VK_NULL_HANDLE);
-    note_pass(cb, bi, d);       // 与 CmdBeginRenderPass 一致, 漏了它 RenderPass2 开的 pass 就不进表
+    note_pass(cb, bi, d,
+              si &&
+                  si->contents == VK_SUBPASS_CONTENTS_INLINE); // 与 CmdBeginRenderPass 一致, 漏了它
+                                                               // RenderPass2 开的 pass 就不进表
     d.CmdBeginRenderPass2(cb, bi, si);
 }
+static void clear_cb_observer(VkCommandBuffer cb) {
+    g_cb_cur.erase(cb);
+    g_cb_sets.erase(cb);
+    g_cb_draw_idx.erase(cb);
+    g_cb_prev_att.erase(cb);
+    g_cb_prev_rp.erase(cb);
+    g_cb_cur_is_swap.erase(cb);
+    g_cb_passes.erase(cb);
+}
+
 // 二级命令缓冲里的 draw 没有自己的 BeginRenderPass —— 当前 pass 从继承信息里拿 (评审 #9:
 // 不然录进 secondary 的 draw 在 g_cb_cur 里匹配不上, draws 系统性偏低, 按 draw 数找
 // "放大那一步"会选错 pass)。顺手在每次重录开始时清掉这条 cb 的旧状态 (评审 #10 的兜底:
 // cb 反复重录时这些 per-cb 表才不会只增不减)。
-static VKAPI_ATTR VkResult VKAPI_CALL rk_BeginCommandBuffer(VkCommandBuffer cb, const VkCommandBufferBeginInfo* bi) {
+static VKAPI_ATTR VkResult VKAPI_CALL rk_BeginCommandBuffer(VkCommandBuffer cb,
+                                                            const VkCommandBufferBeginInfo *bi) {
     DevDisp d;
     if (!dev_of(key(cb), &d) || !d.BeginCommandBuffer) {
-        RK_LOG_ONCE("BeginCommandBuffer: 无下层"); return VK_ERROR_INITIALIZATION_FAILED;
+        RK_LOG_ONCE("BeginCommandBuffer: 无下层");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    VkResult result = d.BeginCommandBuffer(cb, bi);
+    if (result != VK_SUCCESS) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto it = rk_lifetime::cbs.find(cb);
+        if (it != rk_lifetime::cbs.end())
+            it->second.uncertain = true;
+        if (g_copyprobe || g_upop)
+            rk_lifetime::reject("begin_command_buffer_failed");
+        return result;
     }
     if (g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
-        g_cb_cur.erase(cb); g_cb_sets.erase(cb); g_cb_draw_idx.erase(cb);
-        g_cb_prev_att.erase(cb); g_cb_cur_is_swap.erase(cb); g_cb_passes.erase(cb);
-        if (bi && (bi->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) && bi->pInheritanceInfo) {
-            const VkCommandBufferInheritanceInfo* inh = bi->pInheritanceInfo;
-            uint32_t w = 0, h = 0;   // inheritance 的 framebuffer 允许是 VK_NULL_HANDLE, 那就只有 0x0
+        clear_cb_observer(cb);
+        if (bi && (bi->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) &&
+            bi->pInheritanceInfo) {
+            const VkCommandBufferInheritanceInfo *inh = bi->pInheritanceInfo;
+            uint32_t w = 0, h = 0; // inheritance 的 framebuffer 允许是 VK_NULL_HANDLE, 那就只有 0x0
             auto fi = g_fb_info.find(inh->framebuffer);
-            if (fi != g_fb_info.end()) { w = fi->second.w; h = fi->second.h; }
+            if (fi != g_fb_info.end()) {
+                w = fi->second.w;
+                h = fi->second.h;
+            }
             uint64_t k = pass_key(inh->renderPass, w, h);
-            auto& st = g_pass_stat[k];
+            auto &st = g_pass_stat[k];
             if (!st.begins) {
-                st.w = w; st.h = h;
+                st.w = w;
+                st.h = h;
                 auto ri = g_rp_info.find(inh->renderPass);
-                if (ri != g_rp_info.end()) { st.n_att = ri->second.n_att; st.fmt = ri->second.fmt; }
+                if (ri != g_rp_info.end()) {
+                    st.n_att = ri->second.n_att;
+                    st.fmt = ri->second.fmt;
+                }
             }
             st.begins++;
             g_cb_cur[cb] = k;
             g_cb_draw_idx[cb] = 0;
             g_cb_cur_is_swap[cb] = false;
-            { auto& v = g_cb_passes[cb]; if (v.size() < 256) v.push_back(k); }
+            {
+                auto &v = g_cb_passes[cb];
+                if (v.size() < 256)
+                    v.push_back(k);
+            }
         }
     }
-    VkResult result = d.BeginCommandBuffer(cb, bi);
-    if (result == VK_SUCCESS && g_upop) {
-        std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.reset(reinterpret_cast<uintptr_t>(cb));
+    if (g_copyprobe || g_upop) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto it = rk_lifetime::cbs.find(cb);
+        if (it == rk_lifetime::cbs.end())
+            rk_lifetime::reject("unknown_command_buffer_identity");
+        else {
+            rk_lifetime::retire(it->second, d);
+            it->second.recording_epoch = ++rk_lifetime::next_epoch;
+            it->second.flags = bi ? bi->flags : 0;
+            it->second.recording = true;
+        }
+    }
+    if (g_upop) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_artifact_stats.reset(reinterpret_cast<uintptr_t>(cb));
     }
     return result;
 }
 
 // 二级缓冲被执行时, 它录的 pass 并入主缓冲的录制清单 —— 提交主缓冲时才算执行 (评审 #4/#9)
-static VKAPI_ATTR void VKAPI_CALL rk_CmdExecuteCommands(VkCommandBuffer cb, uint32_t n, const VkCommandBuffer* cbs) {
+static VKAPI_ATTR void VKAPI_CALL rk_CmdExecuteCommands(VkCommandBuffer cb, uint32_t n,
+                                                        const VkCommandBuffer *cbs) {
     DevDisp d;
-    if (!dev_of(key(cb), &d) || !d.CmdExecuteCommands) { RK_LOG_ONCE("CmdExecuteCommands: 无下层"); return; }
+    if (!dev_of(key(cb), &d) || !d.CmdExecuteCommands) {
+        RK_LOG_ONCE("CmdExecuteCommands: 无下层");
+        return;
+    }
     if (g_dump_passes && cbs) {
         std::lock_guard<std::mutex> lk(g_mtx);
-        auto& v = g_cb_passes[cb];
+        auto &v = g_cb_passes[cb];
         for (uint32_t i = 0; i < n; i++) {
-            if (g_upop) g_artifact_stats.inherit(reinterpret_cast<uintptr_t>(cb), reinterpret_cast<uintptr_t>(cbs[i]));
+            if (g_upop)
+                g_artifact_stats.inherit(reinterpret_cast<uintptr_t>(cb),
+                                         reinterpret_cast<uintptr_t>(cbs[i]));
             auto it = g_cb_passes.find(cbs[i]);
-            if (it == g_cb_passes.end()) continue;
-            for (uint64_t k : it->second) { if (v.size() >= 256) break; v.push_back(k); }
+            if (it == g_cb_passes.end())
+                continue;
+            for (uint64_t k : it->second) {
+                if (v.size() >= 256)
+                    break;
+                v.push_back(k);
+            }
         }
     }
     d.CmdExecuteCommands(cb, n, cbs);
@@ -1464,97 +1352,198 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdExecuteCommands(VkCommandBuffer cb, uint
 
 // begins 数的是录制, 不是执行; 真正的"这个 pass 每帧都在跑"要看提交 (评审 #4)。
 // 提交时把每条 cb 录过的 pass 记进本帧集合, present 时统一折算成 frames_seen。
-static VKAPI_ATTR VkResult VKAPI_CALL rk_QueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo* si, VkFence fence) {
+static VKAPI_ATTR VkResult VKAPI_CALL rk_QueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo *si,
+                                                     VkFence fence) {
     DevDisp d;
-    if (!dev_of(key(q), &d) || !d.QueueSubmit) { RK_LOG_ONCE("QueueSubmit: 无下层"); return VK_ERROR_INITIALIZATION_FAILED; }
+    if (!dev_of(key(q), &d) || !d.QueueSubmit) {
+        RK_LOG_ONCE("QueueSubmit: 无下层");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     if (g_dump_passes && si) {
         std::lock_guard<std::mutex> lk(g_mtx);
         for (uint32_t i = 0; i < n; i++)
             for (uint32_t j = 0; j < si[i].commandBufferCount; j++) {
                 auto it = g_cb_passes.find(si[i].pCommandBuffers[j]);
                 if (it != g_cb_passes.end())
-                    for (uint64_t k : it->second) g_frame_seen.insert(k);
+                    for (uint64_t k : it->second)
+                        g_frame_seen.insert(k);
             }
     }
     uint64_t submitted = 0;
     if (g_upop && si) {
         std::vector<uintptr_t> cbs;
-        for (uint32_t i = 0; i < n; ++i) if (si[i].pCommandBuffers)
-            for (uint32_t j = 0; j < si[i].commandBufferCount; ++j)
-                cbs.push_back(reinterpret_cast<uintptr_t>(si[i].pCommandBuffers[j]));
-        std::lock_guard<std::mutex> lk(g_mtx); submitted = g_artifact_stats.submitted_count(cbs);
+        for (uint32_t i = 0; i < n; ++i)
+            if (si[i].pCommandBuffers)
+                for (uint32_t j = 0; j < si[i].commandBufferCount; ++j)
+                    cbs.push_back(reinterpret_cast<uintptr_t>(si[i].pCommandBuffers[j]));
+        std::lock_guard<std::mutex> lk(g_mtx);
+        submitted = g_artifact_stats.submitted_count(cbs);
     }
     VkResult result = d.QueueSubmit(q, n, si, fence);
-    if (g_upop) { std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.submit_result(submitted, result == VK_SUCCESS); }
+    if (g_upop) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_artifact_stats.submit_result(submitted, result == VK_SUCCESS);
+    }
     return result;
 }
 
 // cb 被释放时摘掉它的全部 per-cb 状态 (评审 #10: 这些 map 跑在游戏进程里, 只增不减会无限涨)
-static VKAPI_ATTR void VKAPI_CALL rk_FreeCommandBuffers(VkDevice dev, VkCommandPool pool, uint32_t n, const VkCommandBuffer* cbs) {
+static VKAPI_ATTR void VKAPI_CALL rk_FreeCommandBuffers(VkDevice dev, VkCommandPool pool,
+                                                        uint32_t n, const VkCommandBuffer *cbs) {
     DevDisp d;
-    if (!dev_of(key(dev), &d) || !d.FreeCommandBuffers) { RK_LOG_ONCE("FreeCommandBuffers: 无下层"); return; }
+    if (!dev_of(key(dev), &d) || !d.FreeCommandBuffers) {
+        RK_LOG_ONCE("FreeCommandBuffers: 无下层");
+        return;
+    }
+    d.FreeCommandBuffers(dev, pool, n, cbs);
     if (g_dump_passes && cbs) {
         std::lock_guard<std::mutex> lk(g_mtx);
         for (uint32_t i = 0; i < n; i++) {
-            if (g_upop) g_artifact_stats.free(reinterpret_cast<uintptr_t>(cbs[i]));
-            g_cb_cur.erase(cbs[i]); g_cb_sets.erase(cbs[i]); g_cb_draw_idx.erase(cbs[i]);
-            g_cb_prev_att.erase(cbs[i]); g_cb_cur_is_swap.erase(cbs[i]); g_cb_passes.erase(cbs[i]);
+            auto owner = rk_lifetime::cbs.find(cbs[i]);
+            if (owner != rk_lifetime::cbs.end()) {
+                rk_lifetime::retire(owner->second, d);
+                rk_lifetime::cbs.erase(owner);
+            }
+            if (g_upop)
+                g_artifact_stats.free(reinterpret_cast<uintptr_t>(cbs[i]));
+            clear_cb_observer(cbs[i]);
         }
     }
-    d.FreeCommandBuffers(dev, pool, n, cbs);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL rk_AllocateCommandBuffers(VkDevice dev, const VkCommandBufferAllocateInfo* ci, VkCommandBuffer* cbs) {
+static VKAPI_ATTR VkResult VKAPI_CALL rk_AllocateCommandBuffers(
+    VkDevice dev, const VkCommandBufferAllocateInfo *ci, VkCommandBuffer *cbs) {
     DevDisp d;
-    if (!dev_of(key(dev), &d) || !d.AllocateCommandBuffers) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!dev_of(key(dev), &d) || !d.AllocateCommandBuffers)
+        return VK_ERROR_INITIALIZATION_FAILED;
     VkResult result = d.AllocateCommandBuffers(dev, ci, cbs);
     if (result == VK_SUCCESS && ci && cbs) {
         std::lock_guard<std::mutex> lk(g_mtx);
-        for (uint32_t i = 0; i < ci->commandBufferCount; ++i)
-            g_artifact_stats.allocated(reinterpret_cast<uintptr_t>(cbs[i]), reinterpret_cast<uintptr_t>(ci->commandPool));
+        for (uint32_t i = 0; i < ci->commandBufferCount; ++i) {
+            g_artifact_stats.allocated(reinterpret_cast<uintptr_t>(cbs[i]),
+                                       reinterpret_cast<uintptr_t>(ci->commandPool));
+            rk_lifetime::CB cb;
+            cb.dev = dev;
+            cb.pool = ci->commandPool;
+            cb.level = ci->level;
+            cb.allocation = ++rk_lifetime::next_epoch;
+            auto p = rk_lifetime::command_pools.find({dev, ci->commandPool});
+            if (p != rk_lifetime::command_pools.end())
+                cb.pool_epoch = p->second.epoch;
+            rk_lifetime::remember(rk_lifetime::cbs, cbs[i], cb);
+        }
     }
     return result;
 }
-static VKAPI_ATTR VkResult VKAPI_CALL rk_ResetCommandBuffer(VkCommandBuffer cb, VkCommandBufferResetFlags flags) {
+static VKAPI_ATTR VkResult VKAPI_CALL rk_ResetCommandBuffer(VkCommandBuffer cb,
+                                                            VkCommandBufferResetFlags flags) {
     DevDisp d;
-    if (!dev_of(key(cb), &d) || !d.ResetCommandBuffer) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!dev_of(key(cb), &d) || !d.ResetCommandBuffer)
+        return VK_ERROR_INITIALIZATION_FAILED;
     VkResult result = d.ResetCommandBuffer(cb, flags);
-    if (result == VK_SUCCESS) { std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.reset(reinterpret_cast<uintptr_t>(cb)); }
+    if (result == VK_SUCCESS) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_artifact_stats.reset(reinterpret_cast<uintptr_t>(cb));
+        clear_cb_observer(cb);
+        auto it = rk_lifetime::cbs.find(cb);
+        if (it != rk_lifetime::cbs.end())
+            rk_lifetime::retire(it->second, d);
+    } else {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto it = rk_lifetime::cbs.find(cb);
+        if (it != rk_lifetime::cbs.end())
+            it->second.uncertain = true;
+        if (g_copyprobe || g_upop)
+            rk_lifetime::reject("reset_command_buffer_failed");
+    }
     return result;
 }
-static VKAPI_ATTR VkResult VKAPI_CALL rk_ResetCommandPool(VkDevice dev, VkCommandPool pool, VkCommandPoolResetFlags flags) {
+static VKAPI_ATTR VkResult VKAPI_CALL rk_ResetCommandPool(VkDevice dev, VkCommandPool pool,
+                                                          VkCommandPoolResetFlags flags) {
     DevDisp d;
-    if (!dev_of(key(dev), &d) || !d.ResetCommandPool) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!dev_of(key(dev), &d) || !d.ResetCommandPool)
+        return VK_ERROR_INITIALIZATION_FAILED;
     VkResult result = d.ResetCommandPool(dev, pool, flags);
-    if (result == VK_SUCCESS) { std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.reset_pool(reinterpret_cast<uintptr_t>(pool)); }
+    if (result == VK_SUCCESS) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_artifact_stats.reset_pool(reinterpret_cast<uintptr_t>(pool));
+        for (auto &cb : rk_lifetime::cbs)
+            if (cb.second.dev == dev && cb.second.pool == pool) {
+                rk_lifetime::retire(cb.second, d);
+                clear_cb_observer(cb.first);
+            }
+    }
+    if (result != VK_SUCCESS && (g_copyprobe || g_upop)) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (auto &cb : rk_lifetime::cbs)
+            if (cb.second.dev == dev && cb.second.pool == pool)
+                cb.second.uncertain = true;
+        rk_lifetime::reject("reset_command_pool_failed");
+    }
     return result;
 }
-static VKAPI_ATTR void VKAPI_CALL rk_DestroyCommandPool(VkDevice dev, VkCommandPool pool, const VkAllocationCallbacks* a) {
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyCommandPool(VkDevice dev, VkCommandPool pool,
+                                                        const VkAllocationCallbacks *a) {
     DevDisp d;
-    if (!dev_of(key(dev), &d) || !d.DestroyCommandPool) return;
+    if (!dev_of(key(dev), &d) || !d.DestroyCommandPool)
+        return;
     d.DestroyCommandPool(dev, pool, a);
-    std::lock_guard<std::mutex> lk(g_mtx); g_artifact_stats.reset_pool(reinterpret_cast<uintptr_t>(pool), true);
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_artifact_stats.reset_pool(reinterpret_cast<uintptr_t>(pool), true);
+    for (auto it = rk_lifetime::cbs.begin(); it != rk_lifetime::cbs.end();)
+        if (it->second.dev == dev && it->second.pool == pool) {
+            rk_lifetime::retire(it->second, d);
+            clear_cb_observer(it->first);
+            it = rk_lifetime::cbs.erase(it);
+        } else
+            ++it;
+    rk_lifetime::command_pools.erase({dev, pool});
 }
 
 // 同理: image / view / framebuffer 销毁时摘表 (评审 #10)。
 // 注意 g_set_views 里可能还指着已销毁的 view —— 不级联清 (view 表先摘, 溯源时 g_view/g_img
 // 查不到自然跳过, 不会读到假数据)。
-static VKAPI_ATTR void VKAPI_CALL rk_DestroyFramebuffer(VkDevice dev, VkFramebuffer fb, const VkAllocationCallbacks* a) {
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyFramebuffer(VkDevice dev, VkFramebuffer fb,
+                                                        const VkAllocationCallbacks *a) {
     DevDisp d;
-    if (!dev_of(key(dev), &d) || !d.DestroyFramebuffer) { RK_LOG_ONCE("DestroyFramebuffer: 无下层"); return; }
-    { std::lock_guard<std::mutex> lk(g_mtx); g_fb_info.erase(fb); g_fb_att.erase(fb); }
+    if (!dev_of(key(dev), &d) || !d.DestroyFramebuffer) {
+        RK_LOG_ONCE("DestroyFramebuffer: 无下层");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_fb_info.erase(fb);
+        g_fb_att.erase(fb);
+        rk_lifetime::framebuffers.erase({dev, fb});
+    }
     d.DestroyFramebuffer(dev, fb, a);
 }
-static VKAPI_ATTR void VKAPI_CALL rk_DestroyImage(VkDevice dev, VkImage img, const VkAllocationCallbacks* a) {
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyImage(VkDevice dev, VkImage img,
+                                                  const VkAllocationCallbacks *a) {
     DevDisp d;
-    if (!dev_of(key(dev), &d) || !d.DestroyImage) { RK_LOG_ONCE("DestroyImage: 无下层"); return; }
-    { std::lock_guard<std::mutex> lk(g_mtx); g_img.erase(img); }
+    if (!dev_of(key(dev), &d) || !d.DestroyImage) {
+        RK_LOG_ONCE("DestroyImage: 无下层");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_img.erase(img);
+        rk_lifetime::images.erase({dev, img});
+    }
     d.DestroyImage(dev, img, a);
 }
-static VKAPI_ATTR void VKAPI_CALL rk_DestroyImageView(VkDevice dev, VkImageView v, const VkAllocationCallbacks* a) {
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyImageView(VkDevice dev, VkImageView v,
+                                                      const VkAllocationCallbacks *a) {
     DevDisp d;
-    if (!dev_of(key(dev), &d) || !d.DestroyImageView) { RK_LOG_ONCE("DestroyImageView: 无下层"); return; }
-    { std::lock_guard<std::mutex> lk(g_mtx); g_view.erase(v); }
+    if (!dev_of(key(dev), &d) || !d.DestroyImageView) {
+        RK_LOG_ONCE("DestroyImageView: 无下层");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_view.erase(v);
+        rk_lifetime::views.erase({dev, v});
+    }
     d.DestroyImageView(dev, v, a);
 }
 
@@ -1583,8 +1572,221 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
     return d.QueuePresentKHR(q, pi);
 }
 
+static void end_target_pass(VkCommandBuffer cb, bool next_subpass) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    auto it = rk_lifetime::cbs.find(cb);
+    if (it != rk_lifetime::cbs.end()) {
+        if (next_subpass && it->second.active != SIZE_MAX)
+            rk_lifetime::reject("unsupported_target_subpass");
+        it->second.active = SIZE_MAX;
+        it->second.inside_pass = next_subpass;
+    }
+    g_cb_cur_is_swap[cb] = false;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdEndRenderPass(VkCommandBuffer cb) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.CmdEndRenderPass)
+        return;
+    d.CmdEndRenderPass(cb);
+    end_target_pass(cb, false);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdNextSubpass(VkCommandBuffer cb,
+                                                    VkSubpassContents contents) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.CmdNextSubpass)
+        return;
+    d.CmdNextSubpass(cb, contents);
+    end_target_pass(cb, true);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdEndRenderPass2(VkCommandBuffer cb,
+                                                       const VkSubpassEndInfo *info) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.CmdEndRenderPass2)
+        return;
+    d.CmdEndRenderPass2(cb, info);
+    end_target_pass(cb, false);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdNextSubpass2(VkCommandBuffer cb,
+                                                     const VkSubpassBeginInfo *begin,
+                                                     const VkSubpassEndInfo *end) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.CmdNextSubpass2)
+        return;
+    d.CmdNextSubpass2(cb, begin, end);
+    end_target_pass(cb, true);
+}
+
+// Ownership metadata callbacks: original API calls always forward before publication/retirement.
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateCommandPool(VkDevice dev,
+                                                           const VkCommandPoolCreateInfo *ci,
+                                                           const VkAllocationCallbacks *a,
+                                                           VkCommandPool *out) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.CreateCommandPool)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = d.CreateCommandPool(dev, ci, a, out);
+    if (r == VK_SUCCESS && ci && g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        bool family = ci->queueFamilyIndex < d.queue_flags.size() &&
+                      (d.queue_flags[ci->queueFamilyIndex] &
+                       (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) ==
+                          (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
+        rk_lifetime::remember(
+            rk_lifetime::command_pools, std::make_pair(dev, *out),
+            rk_lifetime::CommandPool{
+                ++rk_lifetime::next_epoch, ci->flags,
+                !ci->pNext && family &&
+                    !(ci->flags & ~(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT |
+                                    VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT))});
+    }
+    return r;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_EndCommandBuffer(VkCommandBuffer cb) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.EndCommandBuffer)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = d.EndCommandBuffer(cb);
+    std::lock_guard<std::mutex> lk(g_mtx);
+    auto it = rk_lifetime::cbs.find(cb);
+    if (it != rk_lifetime::cbs.end()) {
+        it->second.recording = false;
+        if (r != VK_SUCCESS) {
+            it->second.uncertain = true;
+            rk_lifetime::reject("end_command_buffer_failed");
+        }
+    }
+    return r;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint point,
+                                                     VkPipeline pipeline) {
+    DevDisp d;
+    if (!dev_of(key(cb), &d) || !d.CmdBindPipeline)
+        return;
+    d.CmdBindPipeline(cb, point, pipeline);
+    if (point == VK_PIPELINE_BIND_POINT_COMPUTE) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto it = rk_lifetime::cbs.find(cb);
+        if (it != rk_lifetime::cbs.end())
+            ++it->second.compute_mutation;
+    }
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDescriptorPool(VkDevice dev,
+                                                              const VkDescriptorPoolCreateInfo *ci,
+                                                              const VkAllocationCallbacks *a,
+                                                              VkDescriptorPool *out) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.CreateDescriptorPool)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = d.CreateDescriptorPool(dev, ci, a, out);
+    if (r == VK_SUCCESS && ci && g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        rk_lifetime::remember(
+            rk_lifetime::app_pools, std::make_pair(dev, *out),
+            rk_lifetime::AppPool{
+                ++rk_lifetime::next_epoch,
+                !ci->pNext && !(ci->flags & ~VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT)});
+    }
+    return r;
+}
+static void clear_set_observer(VkDescriptorSet set) {
+    g_set_views.erase(set);
+    g_set_samplers.erase(set);
+    g_set_layout.erase(set);
+    g_set_gen.erase(set);
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_FreeDescriptorSets(VkDevice dev, VkDescriptorPool pool,
+                                                            uint32_t n,
+                                                            const VkDescriptorSet *sets) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.FreeDescriptorSets)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = d.FreeDescriptorSets(dev, pool, n, sets);
+    if (r == VK_SUCCESS) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (uint32_t i = 0; i < n; ++i) {
+            rk_lifetime::sets.erase({dev, sets[i]});
+            clear_set_observer(sets[i]);
+        }
+        auto p = g_pool_sets.find(pool);
+        if (p != g_pool_sets.end())
+            for (uint32_t i = 0; i < n; ++i) {
+                auto &v = p->second;
+                for (auto it = v.begin(); it != v.end();)
+                    if (*it == sets[i])
+                        it = v.erase(it);
+                    else
+                        ++it;
+            }
+    }
+    return r;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_ResetDescriptorPool(VkDevice dev, VkDescriptorPool pool,
+                                                             VkDescriptorPoolResetFlags flags) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.ResetDescriptorPool)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = d.ResetDescriptorPool(dev, pool, flags);
+    if (r == VK_SUCCESS) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        rk_lifetime::invalidate_pool(dev, pool, false);
+        auto p = g_pool_sets.find(pool);
+        if (p != g_pool_sets.end()) {
+            for (auto set : p->second)
+                clear_set_observer(set);
+            g_pool_sets.erase(p);
+        }
+    }
+    return r;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyDescriptorSetLayout(VkDevice dev,
+                                                                VkDescriptorSetLayout layout,
+                                                                const VkAllocationCallbacks *a) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.DestroyDescriptorSetLayout)
+        return;
+    d.DestroyDescriptorSetLayout(dev, layout, a);
+    std::lock_guard<std::mutex> lk(g_mtx);
+    rk_lifetime::layouts.erase({dev, layout});
+    g_layout_bindings.erase(layout);
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateSampler(VkDevice dev, const VkSamplerCreateInfo *ci,
+                                                       const VkAllocationCallbacks *a,
+                                                       VkSampler *out) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.CreateSampler)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = d.CreateSampler(dev, ci, a, out);
+    if (r == VK_SUCCESS && g_dump_passes) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        rk_lifetime::remember(
+            rk_lifetime::samplers, std::make_pair(dev, *out),
+            rk_lifetime::Sampler{++rk_lifetime::next_epoch, ci && !ci->pNext && !ci->flags});
+    }
+    return r;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_DestroySampler(VkDevice dev, VkSampler sampler,
+                                                    const VkAllocationCallbacks *a) {
+    DevDisp d;
+    if (!dev_of(key(dev), &d) || !d.DestroySampler)
+        return;
+    d.DestroySampler(dev, sampler, a);
+    std::lock_guard<std::mutex> lk(g_mtx);
+    rk_lifetime::samplers.erase({dev, sampler});
+}
+
 // ── proc addr 分发 ──
 #define RK_HOOK(n, fn) if (!strcmp(name, n)) return reinterpret_cast<PFN_vkVoidFunction>(fn)
+
+static bool lower_optional_instance(VkInstance instance,const char* name) {
+    if(!instance)return false;
+    InstDisp d;{std::lock_guard<std::mutex> lk(g_mtx);auto it=g_inst.find(key(instance));if(it==g_inst.end())return false;d=it->second;}
+    return d.gipa && d.gipa(instance,name);
+}
+static bool lower_optional_device(VkDevice dev,const char* name) {
+    if(!dev)return false;
+    DevDisp d;if(!dev_of(key(dev),&d))return false;
+    return d.gdpa && d.gdpa(dev,name);
+}
 
 static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* name) {
     RK_HOOK("vkGetInstanceProcAddr", dispatch_instance);
@@ -1615,12 +1817,23 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
         RK_HOOK("vkCreateImageView", rk_CreateImageView);
         RK_HOOK("vkUpdateDescriptorSets", rk_UpdateDescriptorSets);
         RK_HOOK("vkCmdBindDescriptorSets", rk_CmdBindDescriptorSets);
+        if (g_upop || g_copyprobe) {
+            RK_HOOK("vkCmdEndRenderPass", rk_CmdEndRenderPass);
+            RK_HOOK("vkCmdNextSubpass", rk_CmdNextSubpass);
+            if(lower_optional_instance(instance,name)) RK_HOOK("vkCmdEndRenderPass2", rk_CmdEndRenderPass2);
+            if(lower_optional_instance(instance,name)) RK_HOOK("vkCmdEndRenderPass2KHR", rk_CmdEndRenderPass2);
+            if(lower_optional_instance(instance,name)) RK_HOOK("vkCmdNextSubpass2", rk_CmdNextSubpass2);
+            if(lower_optional_instance(instance,name)) RK_HOOK("vkCmdNextSubpass2KHR", rk_CmdNextSubpass2);
+        }
         RK_HOOK("vkCreateFramebuffer", rk_CreateFramebuffer);
         RK_HOOK("vkBeginCommandBuffer", rk_BeginCommandBuffer);
         RK_HOOK("vkCmdExecuteCommands", rk_CmdExecuteCommands);
         RK_HOOK("vkQueueSubmit", rk_QueueSubmit);
         RK_HOOK("vkFreeCommandBuffers", rk_FreeCommandBuffers);
-        if (g_upop) {
+        if (g_upop || g_copyprobe) {
+            RK_HOOK("vkCreateCommandPool", rk_CreateCommandPool);
+            RK_HOOK("vkEndCommandBuffer", rk_EndCommandBuffer);
+            RK_HOOK("vkCmdBindPipeline", rk_CmdBindPipeline);
             RK_HOOK("vkAllocateCommandBuffers", rk_AllocateCommandBuffers);
             RK_HOOK("vkResetCommandBuffer", rk_ResetCommandBuffer);
             RK_HOOK("vkResetCommandPool", rk_ResetCommandPool);
@@ -1632,6 +1845,14 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
         RK_HOOK("vkCreateDescriptorSetLayout", rk_CreateDescriptorSetLayout);
         RK_HOOK("vkAllocateDescriptorSets", rk_AllocateDescriptorSets);
         RK_HOOK("vkDestroyDescriptorPool", rk_DestroyDescriptorPool);
+        if (g_upop || g_copyprobe) {
+            RK_HOOK("vkCreateDescriptorPool", rk_CreateDescriptorPool);
+            RK_HOOK("vkFreeDescriptorSets", rk_FreeDescriptorSets);
+            RK_HOOK("vkResetDescriptorPool", rk_ResetDescriptorPool);
+            RK_HOOK("vkDestroyDescriptorSetLayout", rk_DestroyDescriptorSetLayout);
+            RK_HOOK("vkCreateSampler", rk_CreateSampler);
+            RK_HOOK("vkDestroySampler", rk_DestroySampler);
+        }
     }
     RK_HOOK("vkCreateRenderPass2", rk_CreateRenderPass2);
     RK_HOOK("vkCreateRenderPass2KHR", rk_CreateRenderPass2);
@@ -1660,12 +1881,23 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_HOOK("vkCreateImageView", rk_CreateImageView);
         RK_HOOK("vkUpdateDescriptorSets", rk_UpdateDescriptorSets);
         RK_HOOK("vkCmdBindDescriptorSets", rk_CmdBindDescriptorSets);
+        if (g_upop || g_copyprobe) {
+            RK_HOOK("vkCmdEndRenderPass", rk_CmdEndRenderPass);
+            RK_HOOK("vkCmdNextSubpass", rk_CmdNextSubpass);
+            if(lower_optional_device(dev,name)) RK_HOOK("vkCmdEndRenderPass2", rk_CmdEndRenderPass2);
+            if(lower_optional_device(dev,name)) RK_HOOK("vkCmdEndRenderPass2KHR", rk_CmdEndRenderPass2);
+            if(lower_optional_device(dev,name)) RK_HOOK("vkCmdNextSubpass2", rk_CmdNextSubpass2);
+            if(lower_optional_device(dev,name)) RK_HOOK("vkCmdNextSubpass2KHR", rk_CmdNextSubpass2);
+        }
         RK_HOOK("vkCreateFramebuffer", rk_CreateFramebuffer);
         RK_HOOK("vkBeginCommandBuffer", rk_BeginCommandBuffer);
         RK_HOOK("vkCmdExecuteCommands", rk_CmdExecuteCommands);
         RK_HOOK("vkQueueSubmit", rk_QueueSubmit);
         RK_HOOK("vkFreeCommandBuffers", rk_FreeCommandBuffers);
-        if (g_upop) {
+        if (g_upop || g_copyprobe) {
+            RK_HOOK("vkCreateCommandPool", rk_CreateCommandPool);
+            RK_HOOK("vkEndCommandBuffer", rk_EndCommandBuffer);
+            RK_HOOK("vkCmdBindPipeline", rk_CmdBindPipeline);
             RK_HOOK("vkAllocateCommandBuffers", rk_AllocateCommandBuffers);
             RK_HOOK("vkResetCommandBuffer", rk_ResetCommandBuffer);
             RK_HOOK("vkResetCommandPool", rk_ResetCommandPool);
@@ -1677,6 +1909,14 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_HOOK("vkCreateDescriptorSetLayout", rk_CreateDescriptorSetLayout);
         RK_HOOK("vkAllocateDescriptorSets", rk_AllocateDescriptorSets);
         RK_HOOK("vkDestroyDescriptorPool", rk_DestroyDescriptorPool);
+        if (g_upop || g_copyprobe) {
+            RK_HOOK("vkCreateDescriptorPool", rk_CreateDescriptorPool);
+            RK_HOOK("vkFreeDescriptorSets", rk_FreeDescriptorSets);
+            RK_HOOK("vkResetDescriptorPool", rk_ResetDescriptorPool);
+            RK_HOOK("vkDestroyDescriptorSetLayout", rk_DestroyDescriptorSetLayout);
+            RK_HOOK("vkCreateSampler", rk_CreateSampler);
+            RK_HOOK("vkDestroySampler", rk_DestroySampler);
+        }
     }
     if (dev == VK_NULL_HANDLE) return nullptr;
     DevDisp d;

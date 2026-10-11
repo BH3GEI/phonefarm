@@ -164,6 +164,12 @@ fn fixture_build_archives_snapshot_checks_reuse_and_tampering() {
         serde_json::from_slice::<Value>(&again.stdout).unwrap()["reused"],
         true
     );
+    assert!(m["descriptor"]["inputs"]["dispatch_ownership.h"].is_string());
+    let ownership = fs::read(dir.join("dispatch_ownership.h")).unwrap();
+    fs::write(dir.join("dispatch_ownership.h"), b"changed ownership").unwrap();
+    assert!(!cli(&["verify", "--artifact", path(&dir)]).status.success());
+    fs::write(dir.join("dispatch_ownership.h"), ownership).unwrap();
+    assert!(cli(&["verify", "--artifact", path(&dir)]).status.success());
     fs::write(dir.join("candidate.spv"), b"tampered").unwrap();
     assert!(!cli(&["verify", "--artifact", path(&dir)]).status.success());
     let reuse = build(&temp.0, &n);
