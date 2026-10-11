@@ -1247,7 +1247,7 @@ fn run_arm_retry(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, re
 
 const USAGE: &str = "用法:
   phonefarm selftest calibrate --out <目录> [--levels 0,4000,8000] [--rounds 2] [条件...]
-  phonefarm selftest run --out <目录> --cases <清单> [--pairs 5] [--calib calib.json] [--budget-min 40] [条件...]
+  phonefarm selftest run --out <目录> --cases <清单> [--only 编号,..] [--pairs 5] [--calib calib.json] [--budget-min 40] [条件...]
   phonefarm selftest quality --out <目录> [--pct 5] [--downs 2] [--calib calib.json] [条件...]
   phonefarm selftest report --root <目录> [--ns 5,8,10] [--json]
 
@@ -1263,6 +1263,7 @@ struct Args {
     sub: String,
     out: Option<PathBuf>,
     cases: Option<String>,
+    only: Option<Vec<String>>,
     pairs: usize,
     calib: Option<PathBuf>,
     budget_min: f64,
@@ -1291,6 +1292,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         sub,
         out: None,
         cases: None,
+        only: None,
         pairs: 5,
         calib: None,
         budget_min: 40.0,
@@ -1325,6 +1327,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         match k.as_str() {
             "--out" | "--root" => a.out = it.next().map(PathBuf::from),
             "--cases" => a.cases = it.next().cloned(),
+            "--only" => a.only = it.next().map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()),
             "--pairs" => a.pairs = num(it.next(), k)? as usize,
             "--calib" => a.calib = it.next().map(PathBuf::from),
             "--budget-min" => a.budget_min = num(it.next(), k)?,
@@ -1506,7 +1509,18 @@ fn cmd_run(mut a: Args) -> Result<(), String> {
         std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap_or_default()).map_err(|e| e.to_string())?;
     }
 
-    let todo: Vec<&Case> = cases.iter().filter(|cs| !out.join(&cs.id).join("case_done.json").is_file()).collect();
+    // --only: 分段跑 (每段一个新目录, 本地再合并成一个根给 report)。考题编号由完整清单决定,
+    // 所以各段要给同一份 --cases, 只挑本段要跑的编号; plan.json 各段一字不差, 合并时可核对
+    if let Some(only) = &a.only {
+        if let Some(bad) = only.iter().find(|id| !cases.iter().any(|c| &c.id == *id)) {
+            return Err(format!("--only 里的 {bad} 不在 --cases 展开的考题里"));
+        }
+    }
+    let todo: Vec<&Case> = cases
+        .iter()
+        .filter(|cs| a.only.as_ref().is_none_or(|o| o.contains(&cs.id)))
+        .filter(|cs| !out.join(&cs.id).join("case_done.json").is_file())
+        .collect();
     log(&format!("考题 {} 道, 待跑 {} 道, 每道 {}v{}, frames={}", cases.len(), todo.len(), a.pairs, a.pairs, c.frames));
     if todo.is_empty() {
         return cmd_report(&a);

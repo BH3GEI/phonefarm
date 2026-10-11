@@ -69,6 +69,10 @@ phonefarm selftest report --root D/run --ns 5,8,10           # 不碰设备, 可
   都还原；改之前的值存在 `~/.local/state/phonefarm/`（`PHONEFARM_STATE_DIR` 可改），
   宿主机崩溃重启后下次启动能回滚。`selftest` 和其他碰设备的子命令一样自己拿设备锁
   （`--lock-label`），`selftest report` 不拿锁。
+- **分段跑**（单次持锁 ≤ 45 分钟）：各段给同一份 `--cases` 与同样的条件，用 `--only aa_3,better1_1`
+  挑本段要跑的考题编号、各写一个新目录；之后把各段的考题目录和其中一份 `plan.json` 合到一个根下跑
+  `report`（各段 `plan.json` 一字不差，可核对）。走手机节点时就是每段一个 `pf-node -o … --out @out/…`。
+  同一目录续跑时已完成的考题自动跳过；`--budget-min`（缺省 40）估不下一整道就不开。
 - 证据：原始 ftrace 在设备端先按解析器的预筛条件过滤再拉回、本地 gzip，一臂几百 KB。
 
 **现状（2026-10-11）**：判定、报告、SPIR-V 改写有离线单测（合成证据上三类考题答对、
