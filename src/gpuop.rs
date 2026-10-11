@@ -1616,6 +1616,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             output["kind"] = serde_json::json!("shader");
             output["conditions_requested"] = context["conditions_requested"].clone();
             output["workload_requested"] = context["workload_requested"].clone();
+            output["injection_requested"] = context["injection_requested"].clone();
             let mut resolved = context["resolved_config"].clone();
             resolved["serial"] = serde_json::json!(a.serial);
             resolved["carrier"] = serde_json::json!(a.carrier.as_str());
@@ -1630,7 +1631,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             output["resolved_config"] = resolved;
             output["measurement_scope"] = serde_json::json!(if a.carrier==Carrier::Headless {"operator_benchmark_only"} else {"refbench_measurement_only"});
             output["qualification"] = crate::shaderplan::qualification_scope(Some(a.carrier.as_str()));
-            output["conditions_observed"] = serde_json::json!({"root_verified":true,
+            output["conditions_observed"] = serde_json::json!({"root_verified":true,"fan":null,
                 "arms":observations,"restored":true,"charging_suspended_via":report.power_source.as_ref().and_then(|p| p.charging_suspended_via.as_deref()),
                 "power_probe":report.power_source,"power_window_verified":false});
             output["metric_provenance"] = serde_json::json!({"fps_p95_ms":{

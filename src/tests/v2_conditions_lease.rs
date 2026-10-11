@@ -260,6 +260,55 @@ fn actual_eval_route_writes_consumed_plan_and_honest_abort_without_phone() {
     assert!(!f.legacy().exists());
 }
 #[test]
+fn actual_typed_gol_request_reaches_native_plan_and_blocks_unimplemented_layer_without_device() {
+    // Produced with GOL's real Request::Serialize, including required fan:String and Inject object.
+    // This is an interface fixture; it contains no phone evidence.
+    let f = Fixture::new("gol-typed");
+    let mut req: Value = serde_json::from_str(include_str!(
+        "../../examples/gol_shader_native_request.json"
+    ))
+    .unwrap();
+    let path = f.dir.join("request.json");
+    std::fs::write(&path, req.to_string()).unwrap();
+    let out = f.dir.join("out");
+    let r = f
+        .cmd()
+        .args(["eval", "--request"])
+        .arg(&path)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&r.stdout).unwrap();
+    assert_eq!(r.status.code(), Some(2)); // absent local SPIR-V, not an unsupported GOL envelope
+    assert_eq!(report["status"], "ABORT");
+    assert_eq!(report["resolved_config"]["inject"]["via"], "carrier_native");
+    assert_eq!(report["resolved_config"]["frames"], 370);
+    assert_eq!(report["conditions_requested"]["fan"], "unknown");
+    assert_eq!(report["conditions_observed"]["fan"], Value::Null);
+    assert_eq!(report["injection_requested"], req["payload"]["inject"]);
+    assert_eq!(report["qualification"]["eligible"], false);
+    assert!(!f.dir.join("leases").exists());
+    // A layer hook has no implemented shader consumer, even if the producer advertises it.
+    req["payload"]["inject"]["via"] = json!("vulkan_layer");
+    std::fs::write(&path, req.to_string()).unwrap();
+    let r = f
+        .cmd()
+        .args(["eval", "--request"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&r.stdout).unwrap();
+    assert_eq!(report["status"], "ABORT");
+    assert_eq!(report["resolved_config"], Value::Null);
+    assert!(report["verdict"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("inject.via=vulkan_layer unsupported"));
+    assert!(!f.dir.join("leases").exists());
+    assert!(!f.legacy().exists());
+}
+#[test]
 fn unsupported_injection_returns_specific_abort_before_artifact_or_device() {
     let f = Fixture::new("unsupported");
     let mut req = shader_request();

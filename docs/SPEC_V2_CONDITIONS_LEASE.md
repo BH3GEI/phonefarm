@@ -8,6 +8,9 @@ shader v2 不再启另一个 phonefarm 进程。纯函数生成冻结执行计�
 进程消费。支持 headless 的 seconds；支持 refbench 的 frames/intensity 与内置
 postfx 候选算子路线。serial 的 CLI 覆盖优先于请求，随后解析唯一在线设备并固定。
 quality_reference 优先 payload，再 conditions；同时给不同值拒绝。
+`examples/gol_shader_native_request.json` 由 game_opt_loop 的真实公开 Request 类型序列化
+生成（GOL 76a9f183d990，Conditions.fan 与 ShaderPayload.inject 的类型来自 src/optimize/eval.rs），
+用于跨仓接口回归；假设的候选/缺失 SPIR-V 不包含任何实测或成功部署证据。
 
 | 条件 | 支持范围 |
 |---|---|
@@ -19,10 +22,12 @@ quality_reference 优先 payload，再 conditions；同时给不同值拒绝。
 | require_root | shader 总是要求 root；false 无法执行，明确 ABORT |
 | require_discharging | true 强制逐臂前后电池放电证据；不等于整窗认证 |
 | charging_suspend | enabled=true 转 --suspend-charging；仅自动已知节点，指定 node 拒绝 |
-| inject | false/null：内置 runner/refbench 路线；true 无实现，明确 ABORT |
-| temp_cap_c / lock / 风扇等额外条件 | 尚无完整 shader 实现，非 null 明确 ABORT |
+| payload.inject | 支持 GOL 的对象合同 `{via:"carrier_native",layer:null/省略}`，仅 refbench 的 sr_pipeline/sr postfx；headless、frame_gen、vulkan_layer 及非 null layer 明确 ABORT。兼容旧 false/null；true 明确 ABORT |
+| conditions.inject | 兼容旧 false/null；true 无实现，明确 ABORT |
+| fan | GOL 必需 String 的 unknown（以及省略/null）只声明未知，无风扇控制，resolved/observed 均 null；on/off 等非 unknown 请求明确 ABORT |
+| temp_cap_c / lock 等额外条件 | 尚无完整 shader 实现，非 null 明确 ABORT |
 
-三个字段不混用：`conditions_requested` 原始意图；`resolved_config` 代码确实消费的
+三个字段不混用：`conditions_requested` 原始意图（payload 注入另记 `injection_requested`）；`resolved_config` 代码确实消费的
 配置，不能作为实测；`conditions_observed` 只装手机读回/采样，包括逐臂起跑温度、
 电池前后状态、锁频控制读回、恢复读回。未知留 null；失败没有事实则空列表。
 供电前后检查不能证明整个测量窗始终放电，报告明确 `power_window_verified=false`。

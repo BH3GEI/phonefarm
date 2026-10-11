@@ -10,7 +10,7 @@ cd src && cargo test
 cargo clippy --all-targets
 ```
 
-结果：512 unit tests + 10 integration tests，通过；clippy 完成（仓库既有警告仍存在，
+结果：513 unit tests + 11 integration tests，通过（含真实 GOL 类型序列化合同回归）；clippy 完成（仓库既有警告仍存在，
 新增 devlease/shaderplan/integration test 模块无警告）；git diff --check 通过。
 测试直接执行 Cargo 构建的 phonefarm 二进制，使用隔离临时宿主目录与 fake serial，
 没有借助真实 adb/hdc。一次约 8 秒。
@@ -26,6 +26,7 @@ cargo clippy --all-targets
 | 帧数、载体配置、postfx unknown 或不符不得通过 | gpuop::tests::v2_refbench_actual_unknown_or_mismatch_cannot_pass_conditions |
 | unknown 供电不成为 true | gpuop::tests::unknown_battery_observation_is_null_not_request_echo；hwcond::tests::unknown_battery_status_never_certifies_discharge |
 | 新真实 CLI 不冒充完整游戏资格 | actual_eval_route_writes_consumed_plan_and_honest_abort_without_phone；unsupported_injection_returns_specific_abort_before_artifact_or_device |
+| GOL 必需 fan unknown + Inject 对象通过计划；carrier_native 限白盒 SR，layer 注入拒绝 | typed_gol_native_route_does_not_turn_unknown_fan_into_observation；actual_typed_gol_request_reaches_native_plan_and_blocks_unimplemented_layer_without_device |
 | 两个进程/不同工作目录共享租约，无交错 | two_real_processes_do_not_interleave_across_cwds |
 | 超时与受控错误释放，文件 inode 保留 | timeout_preserves_other_owner_and_failure_releases |
 | kill 父后内核释放，但活 child/未知手机状态仍阻断 | crash_releases_kernel_but_abandoned_owner_blocks_live_child_and_unknown_device |
