@@ -100,3 +100,12 @@ Malformed state must be retained by Drop, normal admission, explicit driver
 reconciliation and manual idle recovery. An operator idle assertion cannot fill
 missing local group identity or clear a malformed/new driver barrier. Marker
 validation itself is neither remote quiescence nor device restoration evidence.
+
+Format-1 recovery is a closed top-level schema: only `format`, `producer`, `pid`,
+`token`, `serial`, `label`, `owner`, `command_pending`, `pending_operation`,
+`child_pid`, `child_pgid`, `recovery_required`, `recovery_context` and
+`previous_owner` are accepted. Unknown fields or another format require an
+upgraded consumer; they must not be discarded by normal admission, Drop,
+manual idle recovery or recovery ownership transfer. This prevents an older
+consumer from silently ignoring a newer recovery barrier. Historical
+`previous_owner` is retained for audit, not used to authorize recovery.

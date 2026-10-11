@@ -70,6 +70,34 @@ fn marker_state(m: &Value) -> Result<(bool, bool), String> {
     if !m.is_object() || m["format"] != 1 || m["producer"] != "phonefarm" {
         return Err("unknown lease marker format/producer".into());
     }
+    // Format-1 is a closed recovery contract, not a bag of optional hints. An older
+    // consumer must not clear a newer barrier that it does not understand.
+    const KEYS: &[&str] = &[
+        "format",
+        "producer",
+        "pid",
+        "token",
+        "serial",
+        "label",
+        "owner",
+        "command_pending",
+        "pending_operation",
+        "child_pid",
+        "child_pgid",
+        "recovery_required",
+        "recovery_context",
+        "previous_owner",
+    ];
+    if let Some(key) = m
+        .as_object()
+        .unwrap()
+        .keys()
+        .find(|key| !KEYS.contains(&key.as_str()))
+    {
+        return Err(format!(
+            "unknown lease marker field {key}; upgrade the recovery consumer"
+        ));
+    }
     let flag = |key: &str| match m.get(key) {
         None => Ok(false),
         Some(v) => v
@@ -786,6 +814,8 @@ mod tests {
     #[test]
     fn corrupt_marker_extensions_block_every_release_and_transfer() {
         let invalid = [
+            ("future_recovery_gate", json!(false)),
+            ("format", json!(2)),
             ("command_pending", json!("true")),
             ("command_pending", Value::Null),
             ("recovery_required", json!("true")),
