@@ -1,0 +1,22 @@
+{
+  "argv": [
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-loaded-v4-796ea31",
+    "lease",
+    "--serial",
+    "c531e0a",
+    "--timeout-ms",
+    "20000",
+    "--",
+    "python3",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/gpu-control-probe-v4-deadline/checkpoint.py",
+    "before"
+  ],
+  "started_unix_s": 1791746734.895921,
+  "finished_unix_s": 1791746736.0354612,
+  "elapsed_s": 1.1395514588803053,
+  "exit_code": 0,
+  "tool_source": "796ea313dfe832d2de77c63fd8a82462b5e96b88",
+  "tool_sha256": "87669fbc6e2ea10da7a51aa1bccb89392b32c79450def3503800d8e28803fcb0",
+  "device_executed": true,
+  "scope": "single_control_before_checkpoint_outside_warmup_hold"
+}

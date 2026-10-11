@@ -1,0 +1,29 @@
+{
+  "source_commit": "796ea313dfe832d2de77c63fd8a82462b5e96b88",
+  "passed_groups": [
+    574,
+    24,
+    18,
+    15,
+    1,
+    10,
+    11,
+    6,
+    12
+  ],
+  "passed_total": 671,
+  "default_clippy_exit": 0,
+  "strict_clippy_clean_claimed": false,
+  "full_gate_source_unchanged": true,
+  "device_executed_in_gate": false,
+  "api_calls": 0,
+  "source_scheduling_review": "primary tasks/oneplus_live_20261012/reporting/thermal-start-deadline-review.md",
+  "historical_e4_669_unchanged": true,
+  "files": {
+    "cargo-test.log": "c4b48dd0947a089f9be9d11fe985090d4bdcddf8be361a9a681eb27669d56322",
+    "cargo-clippy.log": "0cec30a539819757be1bc4b2c5f0984a778411dd8e1208a98017b214af0fba9f",
+    "commands.json": "e5aab0a3b64f151e3d1d97024e4d2794a359362c009c0cf6b00d7f96f29d9448",
+    "source-identities.json": "df3ba36ac8a7a3c0ba89f4a471cfe793c0b08a2a0b18064f27c283ed0af7506d",
+    "result.json": "3f1dc2568c10b251e60db4907c51297157b60c353828cc9c6d139d8b045b6974"
+  }
+}
