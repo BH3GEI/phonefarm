@@ -33,3 +33,46 @@ phonefarm refbench-report --root ../runs_refbench                            # �
 M0 六判据（refbench DESIGN.md §8）：可重复 <0.5% 且单调比 <0.75 · 强度阶梯必须
 推动帧时间 · 旋钮两臂 p<0.05 · 三变体归因与自报一致 · 快照零差异 · 离线回放
 字节一致。
+
+## selftest：判定链的已知答案真机自检
+
+`phonefarm selftest` 在 refbench 上出「答案事先知道」的考题，看现有判定链答得对不对。
+负载是 refbench 仓库的 `selftest/load.spv`（装进 `sr_pipeline` 的 postfx 插槽），
+两臂同一份字节码，只改特化常量「多少个工作组跑重循环」——负载差由构造给定。
+
+| 考题 | 构造 | 应当的判定 |
+|---|---|---|
+| `aa` | 两臂完全相同 | 不判 KEEP，也不报显著变差（误判率应 ≤ α） |
+| `better:<帧时%>` | B 臂少跑若干工作组 | KEEP；多档幅度 → 检出率曲线 → MDE |
+| `worse:<帧时%>` | B 臂多跑若干工作组 | REJECT 且列出显著变差的指标 |
+| `quality` | B 臂少跑 + 采样降分辨率 | 画面判据 POOR_QUALITY；只少跑不降采样的对照不得被拦 |
+
+```
+phonefarm selftest calibrate --out D/cal --levels 0,4000,8000 --rounds 2 --fan-on   # 帧时 ≈ t0 + k·工作组数
+phonefarm selftest run --out D/run --calib D/cal/calib.json \
+    --cases aa*4,better:0.5,better:1,better:2,better:5,worse:2 --pairs 10 --fan-on
+phonefarm selftest quality --out D/q --calib D/cal/calib.json --pct 5 --downs 2
+phonefarm selftest report --root D/run --ns 5,8,10           # 不碰设备, 可离线重算
+```
+
+- **判定不另写统计**：帧时/帧率/功耗走 `loopstat::compare`（精确置换）+ `sysparam::decide`，
+  与 `autoloop` 同一份代码、同一口径（alpha_win = 0.05/K、alpha_regression = 0.05）；
+  判定视图用 `eval::run_view`（summary 并上 env 的功耗/温度）。画面走
+  `phonefarm eval --request`（kind=shader，gpu-op 的画质地板），子进程调用。
+- **报告**：逐题在前 5/8/10 轮上的判定、混淆矩阵（每个 n 一张）、按幅度的检出率表、
+  A/A 噪声（CV）、注入法 MDE（在 A/A 真实噪声上叠已知效应扫 0.25%–10%，只作平滑补充，
+  与实测检出率对不上以实测为准）、每个 n 的时间账（分钟/实验）。
+- 每臂流程与 `eval`/`autoloop` 的 run_one 同构：等冷 → 起负载 → ftrace + sample_env 并行
+  → 解析。ABBA 交替；基础设施失败重试一次（不看量到的数）；量到但算子没生效
+  （`apply_ok=false`）的臂由判定链按 ABORT 处理，不计入。
+- 现场：停充、风扇（`--fan-on`）、可选锁频（`--lock-freq`）都在会话 guard 里，任何返回路径
+  都还原；改之前的值存在 `~/.local/state/phonefarm/`（`PHONEFARM_STATE_DIR` 可改），
+  宿主机崩溃重启后下次启动能回滚。`selftest` 和其他碰设备的子命令一样自己拿设备锁
+  （`--lock-label`），`selftest report` 不拿锁。
+- 证据：原始 ftrace 在设备端先按解析器的预筛条件过滤再拉回、本地 gzip，一臂几百 KB。
+
+**现状（2026-10-11）**：判定、报告、SPIR-V 改写有离线单测（合成证据上三类考题答对、
+报告可复现、缺臂/过热/未生效判 ABORT）；**真机还没有得到一组有效数据**——唯一一次标定
+（13:17）期间手机被拔下转移，测量作废。那次看到的两点要在下次真机时确认：等冷门槛 45 °C
+在当时环境下等不下来（开风扇空闲仍 46–47 °C，每臂白等 240 s）；第一臂抓到的 trace 只有
+约 1 s 且没有 RefbenchDrv 的提交（原因未查清，可能与转移时的异常有关）。

@@ -234,7 +234,7 @@ VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`de
 ```
 loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（Python 工具链，正在往 Rust 收）
   carriers/            测试载体：megacity / vulkan-samples / anki-sponza
-  refbench/            白盒靶子的驱动侧（靶子本身在同级 refbench 仓库）
+  refbench/            白盒靶子的驱动侧（靶子本身在同级 refbench 仓库）；判定链已知答案自检 phonefarm selftest 的用法也在这里
   auto/                自动挑旋钮：白名单探测 → 冻结规则 → 大模型选参 → 逐组对照
 knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，
                        说明见 knobs/README.md；原 HGamey/knobs 仓库已归档并入，shell 正在往 Rust 收）

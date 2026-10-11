@@ -64,7 +64,7 @@ pub const SPEC_DOWNS: u32 = 2;
 pub const FULL_WG: u32 = 8040;
 
 fn spv_words(spv: &[u8]) -> Result<Vec<u32>, String> {
-    if spv.len() < 20 || spv.len() % 4 != 0 {
+    if spv.len() < 20 || !spv.len().is_multiple_of(4) {
         return Err(format!("SPIR-V 长度 {} 不合法", spv.len()));
     }
     let w: Vec<u32> = spv
@@ -290,7 +290,7 @@ pub fn parse_cases(spec: &str, base: Load, calib: Option<&Calib>) -> Result<Vec<
             ("aa", None) => ("aa", base, Some(0.0), "aa".to_string()),
             ("better" | "worse", Some(a)) => {
                 let pct: f64 = a.parse().map_err(|_| format!("幅度不是数: {item}"))?;
-                if !(pct > 0.0) {
+                if pct.is_nan() || pct <= 0.0 {
                     return Err(format!("幅度必须为正 (方向由 better/worse 给): {item}"));
                 }
                 let c = calib.ok_or(format!("{item}: 按帧时幅度出题要先标定 (--calib)"))?;
@@ -405,7 +405,7 @@ pub fn judge_arms(
             &scaled
         }
     };
-    let (ap, bp) = ((runs_view(a), runs_view(b)));
+    let (ap, bp) = (runs_view(a), runs_view(b));
     let comparisons = PyVal::Obj(
         JUDGE_METRICS
             .iter()
