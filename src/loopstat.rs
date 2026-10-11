@@ -510,7 +510,7 @@ pub fn load_runs(pattern: &str) -> Vec<Run> {
 
 // ══════════════ 描述与对比 ══════════════
 
-fn column(runs: &[Run], metric: &str) -> Vec<Num> {
+pub(crate) fn column(runs: &[Run], metric: &str) -> Vec<Num> {
     runs.iter()
         .filter_map(|r| r.1.get(metric).and_then(Num::from_json))
         .collect()
@@ -546,12 +546,25 @@ pub fn describe(runs: &[Run], title: &str) -> PyVal {
 }
 
 pub fn compare(a_runs: &[Run], b_runs: &[Run], metric: &str) -> PyVal {
+    compare_with(a_runs, b_runs, metric, true)
+}
+
+/// 同 [`compare`], 但不算置换置信区间 (`ci95` 为 null)。
+///
+/// 判定 (`sysparam::decide`) 只读 p 值与均值方向, 不读 `ci95`; 区间要再做 401 次精确置换,
+/// 10v10 时一次就是 7400 万次排列。selftest 注入法要在同一份数据上扫几十档效应,
+/// 只要判定结论, 走这条。p 值与其余字段和 [`compare`] 逐字段相同。
+pub fn compare_no_ci(a_runs: &[Run], b_runs: &[Run], metric: &str) -> PyVal {
+    compare_with(a_runs, b_runs, metric, false)
+}
+
+fn compare_with(a_runs: &[Run], b_runs: &[Run], metric: &str, with_ci: bool) -> PyVal {
     let (a, b) = (column(a_runs, metric), column(b_runs, metric));
     if a.len() < 2 || b.len() < 2 {
         return pyobj! { "metric" => metric, "error" => "样本不足" };
     }
     let (p, total) = perm_p_two_sided(&a, &b);
-    let ci = perm_ci(&a, &b, 0.05, 400);
+    let ci = if with_ci { perm_ci(&a, &b, 0.05, 400) } else { None };
     let (ma, mb) = (mean(&a), mean(&b));
     pyobj! {
         "metric" => metric,
@@ -947,6 +960,26 @@ mod tests {
 
     /// 对照源: `loop_v1/runs/` 的 21 轮真实录制 —— 旧 Python 版在同一批 summary.json
     /// 上产出的 describe / compare, 与这里逐字节比。
+    #[test]
+    fn compare_no_ci_differs_only_in_the_interval() {
+        let mk = |xs: &[f64]| -> Vec<Run> {
+            xs.iter()
+                .enumerate()
+                .map(|(i, x)| (format!("r{i}"), PyVal::Obj(vec![("frame_p95".to_string(), PyVal::Float(*x))])))
+                .collect()
+        };
+        let (a, b) = (mk(&[10.0, 10.2, 9.9, 10.1, 10.05]), mk(&[9.6, 9.7, 9.65, 9.8, 9.55]));
+        let full = compare(&a, &b, "frame_p95");
+        let fast = compare_no_ci(&a, &b, "frame_p95");
+        let strip = |v: &PyVal| match v {
+            PyVal::Obj(kv) => kv.iter().filter(|(k, _)| k != "ci95").cloned().collect::<Vec<_>>(),
+            _ => panic!("compare 应返回对象"),
+        };
+        assert_eq!(strip(&full), strip(&fast));
+        assert!(matches!(fast.get("ci95"), Some(PyVal::Null)));
+        assert!(!matches!(full.get("ci95"), Some(PyVal::Null)));
+    }
+
     #[test]
     fn analyze_matches_recorded_golden() {
         let dir = repo_root().join("loop_v1/fixtures");
