@@ -15,6 +15,7 @@
 #include <android/log.h>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -144,6 +145,35 @@ struct DevDisp {
     PFN_vkCmdPipelineBarrier CmdPipelineBarrier = nullptr;
     PFN_vkCmdBindPipeline CmdBindPipeline = nullptr;
     PFN_vkCmdDispatch CmdDispatch = nullptr;
+    // frameaudit: 一帧步骤清单要看的命令 (只读转发) + 时间戳
+    PFN_vkCmdEndRenderPass CmdEndRenderPass = nullptr;
+    PFN_vkCmdEndRenderPass2 CmdEndRenderPass2 = nullptr;
+    PFN_vkCmdNextSubpass CmdNextSubpass = nullptr;
+    PFN_vkCmdNextSubpass2 CmdNextSubpass2 = nullptr;
+    PFN_vkCmdBeginRendering CmdBeginRendering = nullptr;
+    PFN_vkCmdEndRendering CmdEndRendering = nullptr;
+    PFN_vkCmdDrawIndirect CmdDrawIndirect = nullptr;
+    PFN_vkCmdDrawIndexedIndirect CmdDrawIndexedIndirect = nullptr;
+    PFN_vkCmdDispatchIndirect CmdDispatchIndirect = nullptr;
+    PFN_vkCmdCopyImage CmdCopyImage = nullptr;
+    PFN_vkCmdCopyBuffer CmdCopyBuffer = nullptr;
+    PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage = nullptr;
+    PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer = nullptr;
+    PFN_vkCmdResolveImage CmdResolveImage = nullptr;
+    PFN_vkCmdClearColorImage CmdClearColorImage = nullptr;
+    PFN_vkCmdClearDepthStencilImage CmdClearDepthStencilImage = nullptr;
+    PFN_vkCmdClearAttachments CmdClearAttachments = nullptr;
+    PFN_vkCmdFillBuffer CmdFillBuffer = nullptr;
+    PFN_vkCmdUpdateBuffer CmdUpdateBuffer = nullptr;
+    PFN_vkCmdPipelineBarrier2 CmdPipelineBarrier2 = nullptr;
+    PFN_vkQueueSubmit2 QueueSubmit2 = nullptr;
+    PFN_vkGetSwapchainImagesKHR GetSwapchainImagesKHR = nullptr;
+    PFN_vkCreateQueryPool CreateQueryPool = nullptr;
+    PFN_vkDestroyQueryPool DestroyQueryPool = nullptr;
+    PFN_vkCmdResetQueryPool CmdResetQueryPool = nullptr;
+    PFN_vkCmdWriteTimestamp CmdWriteTimestamp = nullptr;
+    PFN_vkGetQueryPoolResults GetQueryPoolResults = nullptr;
+    float ts_period_ns = 0.f;                               // VkPhysicalDeviceLimits::timestampPeriod
     VkDevice dev = VK_NULL_HANDLE;
     VkPhysicalDevice phys = VK_NULL_HANDLE;                 // 查显存类型用
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysMemProps = nullptr;  // instance 级, CreateDevice 时经 gipa 取
@@ -166,11 +196,19 @@ static std::atomic<uint64_t> g_rp{0};
 static bool g_rewrite_loadop = false;
 static bool g_copyprobe = false;   // debug.knobs.copyprobe=1: 1:1 拷贝探针 (是改写, 非只读)
 static bool g_upop = false;        // debug.knobs.upop=1: 真超分算子 (gen1_loc3), dst 是送显分辨率
+// debug.knobs.frameaudit=1: 只读的「一帧步骤清单」(每个 pass 的附件/尺寸/格式/loadOp/storeOp、
+// pass 之外的拷贝/清屏/blit/resolve/dispatch、draw 数、描述符引用了哪些图), 隐含 passdump 溯源。
+// 不改任何渲染; 带 debug.knobs.frameaudit_ts=1 时另在 pass 前后插 GPU 时间戳 (只多写查询, 不碰画面)。
+static bool g_frameaudit = false;
+static bool g_frameaudit_ts = false;
 static std::atomic<uint64_t> g_rp_created{0};   // 第几个被创建的 render pass (自报里的 pass 序号)
 
 struct Effective {
     uint64_t pass;        // render pass 创建序号
     uint32_t attachment;  // 该 pass 里的第几个 attachment
+    const char* field;    // "loadOp" / "storeOp" / "stencilStoreOp"
+    const char* from;
+    const char* to;
     // 这个被改写的 pass 被 vkCmdBeginRenderPass **录制**了多少次。
     // 注意是录制不是提交: 应用若预录命令缓冲反复提交, 这个数会偏小(录一次提交五千次);
     // 录了却没提交则会偏大。refbench 每帧重录, 所以那里的数字精确。
@@ -178,6 +216,85 @@ struct Effective {
     uint64_t begins;
 };
 static std::vector<Effective> g_effective;
+
+// ── 改写: StoreOp STORE → DONT_CARE（阶段 2「去掉多余写回」开关）──
+// 分块 GPU 上，一个 pass 结束时把附件从 tile 写回显存要花带宽；之后没人再读的附件（典型是深度/模板）
+// 写回纯属浪费。属性 debug.knobs.storeop 取值：
+//   "ds"                  所有被 subpass 当深度/模板用的附件，storeOp 与 stencilStoreOp 的 STORE → DONT_CARE
+//   "<sig>:<i>[,<sig>:<i>…]"  只改特征码以 <sig> 开头（≥ 8 位十六进制，取自 frame-audit 的 "sig"）的 pass 的第 i 个附件
+//   空 / "0"               关
+// 送显的附件（finalLayout = PRESENT_SRC）永远不改。是否真被用上照旧看 effective[].begins。
+// 风险：之后若有 pass 采样了被改的附件，画面会出错 —— 所以阶段 2 必须配画面比对，不能只看帧时。
+static int g_storeop_mode = 0;                                  // 0 关 / 1 ds / 2 指定
+static std::vector<std::pair<std::string, uint32_t>> g_storeop_pick;   // (sig 前缀, 附件下标)
+static std::map<VkRenderPass, uint64_t> g_rp_sig;               // 改写前原始描述的特征码
+
+// pass 特征码：附件个数、subpass 个数、每个附件的格式/采样/load/store/stencil load/store/初末布局 的 FNV-1a。
+// 用原始（改写前）描述算，所以和不挂改写时 frame-audit 报出来的 sig 一致，可以直接拿来写规则。
+template <typename Att>
+static uint64_t rp_sig(uint32_t n_att, const Att* a, uint32_t n_sub) {
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&](uint32_t v) { for (int k = 0; k < 4; k++) { h ^= (v >> (8 * k)) & 0xFF; h *= 1099511628211ULL; } };
+    mix(n_att); mix(n_sub);
+    for (uint32_t i = 0; i < n_att; i++) {
+        mix(a[i].format); mix(a[i].samples); mix(a[i].loadOp); mix(a[i].storeOp);
+        mix(a[i].stencilLoadOp); mix(a[i].stencilStoreOp); mix(a[i].initialLayout); mix(a[i].finalLayout);
+    }
+    return h;
+}
+static std::string sig_hex(uint64_t s) { char b[17]; snprintf(b, sizeof b, "%016llx", (unsigned long long)s); return b; }
+
+static void parse_storeop_prop(const char* v) {
+    g_storeop_mode = 0; g_storeop_pick.clear();
+    if (!v || !v[0] || !strcmp(v, "0")) return;
+    if (!strcmp(v, "ds")) { g_storeop_mode = 1; return; }
+    std::string all(v);
+    size_t pos = 0;
+    while (pos <= all.size()) {
+        size_t comma = all.find(',', pos);
+        std::string tok = all.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        size_t colon = tok.find(':');
+        if (colon != std::string::npos && colon >= 8)
+            g_storeop_pick.push_back({tok.substr(0, colon), (uint32_t)strtoul(tok.c_str() + colon + 1, nullptr, 10)});
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    if (!g_storeop_pick.empty()) g_storeop_mode = 2;
+}
+
+// 一个 pass 里哪些附件被当深度/模板用（两种 CreateInfo 的 subpass 结构字段名相同）
+template <typename CI>
+static std::vector<bool> ds_roles(const CI* ci) {
+    std::vector<bool> ds(ci->attachmentCount, false);
+    for (uint32_t s = 0; s < ci->subpassCount; s++) {
+        auto* r = ci->pSubpasses[s].pDepthStencilAttachment;
+        if (r && r->attachment != VK_ATTACHMENT_UNUSED && r->attachment < ds.size()) ds[r->attachment] = true;
+    }
+    return ds;
+}
+
+// 对拷出来的附件数组施加 storeOp 改写，命中的记进 hits
+template <typename CI, typename Att>
+static void apply_storeop(const CI* ci, Att* atts, uint64_t idx, uint64_t sig, std::vector<Effective>& hits) {
+    if (!g_storeop_mode) return;
+    std::vector<bool> ds = ds_roles(ci);
+    std::string sh = sig_hex(sig);
+    for (uint32_t i = 0; i < ci->attachmentCount; i++) {
+        if (atts[i].finalLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) continue;
+        bool pick = false;
+        if (g_storeop_mode == 1) pick = ds[i];
+        else for (auto& p : g_storeop_pick) if (p.second == i && sh.compare(0, p.first.size(), p.first) == 0) pick = true;
+        if (!pick) continue;
+        if (atts[i].storeOp == VK_ATTACHMENT_STORE_OP_STORE) {
+            atts[i].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            hits.push_back({idx, i, "storeOp", "STORE", "DONT_CARE", 0});
+        }
+        if (atts[i].stencilStoreOp == VK_ATTACHMENT_STORE_OP_STORE) {
+            atts[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            hits.push_back({idx, i, "stencilStoreOp", "STORE", "DONT_CARE", 0});
+        }
+    }
+}
 // 被改写过的 VkRenderPass 句柄 -> 它对应的**全部** g_effective 下标。
 // 一个 pass 可能有多个 attachment 被改, 只记最后一个会让其余条目永远 begins=0,
 // harness 会把它们误读成"没生效"。
@@ -247,7 +364,8 @@ static VkDescriptorSet copyprobe_clone(VkCommandBuffer, const DevDisp&, VkDescri
 //   VkImage(尺寸/格式/usage) <- VkImageView <- {framebuffer 附件, 描述符里绑的采样图}
 // 在送显分辨率 pass 的**第一笔 draw** 上, 把当时绑着的描述符里的采样图全列出来,
 // 看有没有哪张正好是上一个(渲染分辨率)pass 的颜色附件。
-struct ImgInfo { uint32_t w = 0, h = 0, fmt = 0, usage = 0; };
+struct ImgInfo { uint32_t w = 0, h = 0, fmt = 0, usage = 0;
+                 uint32_t id = 0, d = 1, samples = 1, mips = 1, layers = 1; bool swap = false; };
 static std::map<VkImage, ImgInfo> g_img;
 static std::map<VkImageView, VkImage> g_view;
 static std::map<VkFramebuffer, std::vector<VkImageView>> g_fb_att;
@@ -264,6 +382,198 @@ static std::map<VkCommandBuffer, int> g_cb_draw_idx;          // 本 pass 内第
 static std::map<VkCommandBuffer, std::vector<VkImageView>> g_cb_prev_att;  // 上一个非送显 pass 的附件
 static std::string g_composite_report;                        // 只填一次
 static std::map<VkCommandBuffer, bool> g_cb_cur_is_swap;
+
+// ══ frameaudit: 一帧步骤清单 (只读) ═════════════════════════════════════════════
+//
+// 回答「这一帧 GPU 到底做了哪些步骤」: 按**提交顺序**列出每个 render pass (附件是哪张图的
+// 哪个 mip/layer、尺寸、格式、采样数、loadOp/storeOp、draw 数、描述符里引用了哪些图) 以及
+// pass 之外的 dispatch / 拷贝 / 清屏 / blit / resolve / UNDEFINED 丢弃。层只记录事实,
+// 「哪一步多余」由主机侧 `phonefarm frame-audit` 离线分析。
+//
+// 触发: 游戏跑起来后主机 `setprop debug.knobs.frameaudit_go <新编号>`; 层每 30 帧看一眼,
+// 编号变了就武装: 之后 FA_CAP_DELAY 帧开始连抓 FA_CAP_N 帧, 第 FA_READ_DELAY 帧回读时间戳并
+// 落盘 knobs_frameaudit.json。用属性触发而不是固定帧号, 是因为原神从冷启到大世界要过登录页,
+// 固定帧号会抓到登录页。
+//
+// 时间戳 (frameaudit_ts=1): 武装后 FA_TS_FRAMES 帧内**开始录制**的命令缓冲, 在每个 pass
+// 开始前/结束后各写一个 BOTTOM_OF_PIPE 时间戳 (写前先在同一条 cb 里 reset 该查询, 所以
+// cb 被重复提交也合法)。相邻时间戳之差 = 这一段 GPU 完成所用的时间, 各段加起来就是一帧。
+// 预录很久之前的 cb 不会有时间戳, 如实报缺。
+
+struct ViewSub { uint32_t mip = 0, nmip = 1, layer = 0, nlayer = 1; };
+struct SubRes { uint32_t img = 0, mip = 0, nmip = 1, layer = 0, nlayer = 1; };
+static std::atomic<uint32_t> g_img_seq{0};
+static std::map<uint32_t, ImgInfo> g_img_by_id;                     // id -> 形状 (销毁即摘)
+static std::map<VkImageView, ViewSub> g_view_sub;
+static std::map<VkDescriptorSet, std::set<uint32_t>> g_set_storage; // 哪些 binding 是 storage image
+static std::map<VkSwapchainKHR, std::vector<VkImage>> g_swap_imgs;
+
+struct FaAtt {
+    SubRes r;
+    uint32_t fmt = 0, samples = 1, load = 0, store = 0, sload = 0, sstore = 0, init = 0, fin = 0;
+    uint32_t role = 4;   // 0 color / 1 depth-stencil / 2 resolve / 3 只当 input / 4 没被任何 subpass 引用
+    bool input = false;  // 有 subpass 把它当 input attachment 读 (同 pass 内 tile 上读, 不走显存)
+};
+struct FaRp { std::vector<FaAtt> att; uint32_t nsub = 1; };
+static std::map<VkRenderPass, FaRp> g_rp_fa;
+
+enum FaKind : uint8_t {
+    FA_PASS = 1, FA_DISPATCH, FA_COPY_IMG, FA_BUF2IMG, FA_IMG2BUF, FA_COPY_BUF, FA_BLIT,
+    FA_RESOLVE, FA_CLEAR_COLOR, FA_CLEAR_DS, FA_DISCARD, FA_FILL_BUF,
+};
+struct FaEv {
+    uint8_t kind = 0;
+    bool dyn = false, sec = false, indirect = false;
+    uint64_t rp = 0; uint32_t w = 0, h = 0;
+    uint64_t sig = 0;                         // pass 特征码（改写前描述），storeop 指定规则用
+    std::vector<FaAtt> att;
+    uint32_t draws = 0, draws_idx = 0, draws_ind = 0, clear_att = 0, clear_att_full = 0, subpasses = 1, binds = 0;
+    uint64_t prims = 0;                       // 直接 draw 的 (顶点或索引数 × 实例数) 之和
+    std::set<uint64_t> reads, writes;         // 描述符引用的图 (writes = storage image, 可读可写)
+    SubRes src, dst; uint32_t ex[3] = {0, 0, 0}, sex[2] = {0, 0}; uint32_t filter = 0, regions = 0;
+    uint64_t texels = 0, bytes = 0;
+    uint32_t gx = 0, gy = 0, gz = 0;
+    uint32_t barriers = 0;                    // 与上一事件之间的 barrier 调用数
+    int32_t ts0 = -1, ts1 = -1;
+};
+struct FaCb {
+    std::vector<FaEv> ev;
+    int open = -1;
+    VkDescriptorSet gfx[8] = {}, comp[8] = {};
+    uint32_t barriers = 0;
+    bool ts = false, overflow = false;
+};
+static std::map<VkCommandBuffer, FaCb> g_facb;
+static const size_t FA_MAX_EV = 4096;
+static const uint64_t FA_CAP_DELAY = 6, FA_CAP_N = 3, FA_TS_FRAMES = 8, FA_READ_DELAY = 90;
+static const uint32_t FA_TS_CAP = 16384;
+
+struct FaState {
+    long go = 0;                       // 最近一次武装的触发编号
+    uint64_t arm_frame = 0;            // 0 = 没武装
+    bool ts_armed = false, capturing = false;
+    uint32_t cap_done = 0;
+    std::vector<std::string> frames;   // 已抓完的帧 (JSON)
+    std::string cur;                   // 正在抓的帧的 submits
+    uint32_t cur_present = 0;
+    std::map<uint32_t, ImgInfo> imgs;  // 抓到的帧里引用过的图 (抓时快照)
+    VkQueryPool pool = VK_NULL_HANDLE; VkDevice pool_dev = VK_NULL_HANDLE;
+    uint32_t ts_next = 0, ts_lo = 0;   // 本次武装用的时间戳槽 [ts_lo, ts_next)
+    float period = 0.f;
+    std::map<void*, uint32_t> qid;     // 队列 -> 小编号
+    uint64_t cb_unseen = 0, ev_overflow = 0, v2_copies = 0, submit2 = 0, dyn_passes = 0, sec_merged = 0;
+    uint64_t ts_skipped = 0;
+};
+static FaState g_fa;
+
+static uint64_t fa_pack(const SubRes& r) {
+    auto c = [](uint32_t v) { return (uint64_t)(v > 255 ? 255 : v); };
+    return ((uint64_t)r.img << 32) | (c(r.mip) << 24) | (c(r.nmip) << 16) | (c(r.layer) << 8) | c(r.nlayer);
+}
+static SubRes fa_view_res(VkImageView v) {
+    SubRes r;
+    auto vi = g_view.find(v);
+    if (vi == g_view.end()) return r;
+    auto ii = g_img.find(vi->second);
+    if (ii != g_img.end()) r.img = ii->second.id;
+    auto si = g_view_sub.find(v);
+    if (si != g_view_sub.end()) { r.mip = si->second.mip; r.nmip = si->second.nmip; r.layer = si->second.layer; r.nlayer = si->second.nlayer; }
+    return r;
+}
+static SubRes fa_img_res(VkImage img, uint32_t mip, uint32_t nmip, uint32_t layer, uint32_t nlayer) {
+    SubRes r; auto ii = g_img.find(img);
+    if (ii != g_img.end()) r.img = ii->second.id;
+    r.mip = mip; r.nmip = nmip; r.layer = layer; r.nlayer = nlayer;
+    return r;
+}
+static void fa_add_set(FaEv& e, VkDescriptorSet s) {
+    auto sv = g_set_views.find(s);
+    if (sv == g_set_views.end()) return;
+    auto st = g_set_storage.find(s);
+    for (auto& bv : sv->second) {
+        SubRes r = fa_view_res(bv.second);
+        if (!r.img) continue;
+        bool storage = st != g_set_storage.end() && st->second.count(bv.first);
+        (storage ? e.writes : e.reads).insert(fa_pack(r));
+    }
+}
+// 调用方持 g_mtx。返回新事件 (满了返回 nullptr)
+static FaEv* fa_push(VkCommandBuffer cb, FaEv&& e) {
+    FaCb& c = g_facb[cb];
+    if (c.ev.size() >= FA_MAX_EV) { if (!c.overflow) g_fa.ev_overflow++; c.overflow = true; return nullptr; }
+    e.barriers = c.barriers; c.barriers = 0;
+    c.ev.push_back(std::move(e));
+    return &c.ev.back();
+}
+static FaEv* fa_open(VkCommandBuffer cb) {
+    auto it = g_facb.find(cb);
+    if (it == g_facb.end() || it->second.open < 0 || it->second.open >= (int)it->second.ev.size()) return nullptr;
+    return &it->second.ev[it->second.open];
+}
+// pass 外写一个时间戳 (先 reset 该槽)。调用方持 g_mtx。
+static int32_t fa_ts(VkCommandBuffer cb, const DevDisp& d) {
+    auto it = g_facb.find(cb);
+    if (it == g_facb.end() || !it->second.ts) return -1;
+    if (g_fa.pool == VK_NULL_HANDLE || g_fa.ts_next >= FA_TS_CAP || !d.CmdResetQueryPool || !d.CmdWriteTimestamp) {
+        g_fa.ts_skipped++; return -1;
+    }
+    uint32_t q = g_fa.ts_next++;
+    d.CmdResetQueryPool(cb, g_fa.pool, q, 1);
+    d.CmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_fa.pool, q);
+    return (int32_t)q;
+}
+static void fa_record_rp(VkRenderPass rp, const VkRenderPassCreateInfo* ci) {
+    if (!g_frameaudit || !ci) return;
+    FaRp f; f.nsub = ci->subpassCount ? ci->subpassCount : 1;
+    for (uint32_t i = 0; i < ci->attachmentCount; i++) {
+        const auto& a = ci->pAttachments[i];
+        FaAtt x; x.fmt = a.format; x.samples = a.samples; x.load = a.loadOp; x.store = a.storeOp;
+        x.sload = a.stencilLoadOp; x.sstore = a.stencilStoreOp; x.init = a.initialLayout; x.fin = a.finalLayout;
+        f.att.push_back(x);
+    }
+    auto mark = [&](uint32_t idx, uint32_t role) {
+        if (idx == VK_ATTACHMENT_UNUSED || idx >= f.att.size()) return;
+        if (role == 3) { f.att[idx].input = true; if (f.att[idx].role == 4) f.att[idx].role = 3; return; }
+        if (f.att[idx].role == 4 || f.att[idx].role == 3) f.att[idx].role = role;
+    };
+    for (uint32_t s = 0; s < ci->subpassCount; s++) {
+        const auto& sp = ci->pSubpasses[s];
+        for (uint32_t j = 0; j < sp.colorAttachmentCount; j++) {
+            mark(sp.pColorAttachments[j].attachment, 0);
+            if (sp.pResolveAttachments) mark(sp.pResolveAttachments[j].attachment, 2);
+        }
+        if (sp.pDepthStencilAttachment) mark(sp.pDepthStencilAttachment->attachment, 1);
+        for (uint32_t j = 0; j < sp.inputAttachmentCount; j++) mark(sp.pInputAttachments[j].attachment, 3);
+    }
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_rp_fa[rp] = std::move(f);
+}
+static void fa_record_rp2(VkRenderPass rp, const VkRenderPassCreateInfo2* ci) {
+    if (!g_frameaudit || !ci) return;
+    FaRp f; f.nsub = ci->subpassCount ? ci->subpassCount : 1;
+    for (uint32_t i = 0; i < ci->attachmentCount; i++) {
+        const auto& a = ci->pAttachments[i];
+        FaAtt x; x.fmt = a.format; x.samples = a.samples; x.load = a.loadOp; x.store = a.storeOp;
+        x.sload = a.stencilLoadOp; x.sstore = a.stencilStoreOp; x.init = a.initialLayout; x.fin = a.finalLayout;
+        f.att.push_back(x);
+    }
+    auto mark = [&](uint32_t idx, uint32_t role) {
+        if (idx == VK_ATTACHMENT_UNUSED || idx >= f.att.size()) return;
+        if (role == 3) { f.att[idx].input = true; if (f.att[idx].role == 4) f.att[idx].role = 3; return; }
+        if (f.att[idx].role == 4 || f.att[idx].role == 3) f.att[idx].role = role;
+    };
+    for (uint32_t s = 0; s < ci->subpassCount; s++) {
+        const auto& sp = ci->pSubpasses[s];
+        for (uint32_t j = 0; j < sp.colorAttachmentCount; j++) {
+            mark(sp.pColorAttachments[j].attachment, 0);
+            if (sp.pResolveAttachments) mark(sp.pResolveAttachments[j].attachment, 2);
+        }
+        if (sp.pDepthStencilAttachment) mark(sp.pDepthStencilAttachment->attachment, 1);
+        for (uint32_t j = 0; j < sp.inputAttachmentCount; j++) mark(sp.pInputAttachments[j].attachment, 3);
+    }
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_rp_fa[rp] = std::move(f);
+}
 
 static uint64_t pass_key(VkRenderPass rp, uint32_t w, uint32_t h) {
     uint64_t seq = 0;
@@ -303,12 +613,12 @@ static void write_marker() {
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         for (const auto& e : g_effective) {
-            char one[160];
+            char one[200];
             snprintf(one, sizeof one,
-                     "%s{\"pass\":%llu,\"attachment\":%u,\"field\":\"loadOp\","
-                     "\"from\":\"LOAD\",\"to\":\"DONT_CARE\",\"begins\":%llu}",
+                     "%s{\"pass\":%llu,\"attachment\":%u,\"field\":\"%s\","
+                     "\"from\":\"%s\",\"to\":\"%s\",\"begins\":%llu}",
                      eff.empty() ? "" : ",", (unsigned long long)e.pass, e.attachment,
-                     (unsigned long long)e.begins);
+                     e.field, e.from, e.to, (unsigned long long)e.begins);
             eff += one;
             if (e.begins) used = true;
         }
@@ -316,11 +626,16 @@ static void write_marker() {
     // harness 据此判断该轮算不算数。两种"没生效"要分开报:
     //   没找到 LOAD 可改 vs 改了但应用根本没用那个 pass 对象
     const char* unavail = "null";
-    if (g_rewrite_loadop && eff.empty())      unavail = "\"no LOAD attachment seen\"";
-    else if (g_rewrite_loadop && !used)       unavail = "\"rewritten pass never bound\"";
+    const bool rewriting = g_rewrite_loadop || g_storeop_mode;
+    if (rewriting && eff.empty())
+        unavail = g_storeop_mode ? "\"no matching STORE attachment seen\"" : "\"no LOAD attachment seen\"";
+    else if (rewriting && !used)              unavail = "\"rewritten pass never bound\"";
+    std::string knob = g_rewrite_loadop ? "gray_loadop_dontcare" : "";
+    if (g_storeop_mode) knob += std::string(knob.empty() ? "" : "+") + (g_storeop_mode == 1 ? "gray_storeop_ds" : "gray_storeop_pick");
+    if (knob.empty()) knob = "gray_readonly_probe";
 
     std::string json =
-        std::string("{\"knob\":\"") + (g_rewrite_loadop ? "gray_loadop_dontcare" : "gray_readonly_probe")
+        std::string("{\"knob\":\"") + knob
         + "\",\"layer_loaded\":true,\"pkg\":\"" + pkg
         + "\",\"effective\":[" + eff + "],\"failed\":[],\"unavailable_reason\":" + unavail
         + ",\"readonly_stats\":{\"frames\":" + std::to_string(g_frames.load())
@@ -443,12 +758,21 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_EnumerateDeviceExtensionProperties(
 static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     const VkInstanceCreateInfo* ci, const VkAllocationCallbacks* a, VkInstance* pInst) {
     g_rewrite_loadop = read_bool_prop("debug.knobs.loadop");
+    {
+        char v[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.knobs.storeop", v);
+        parse_storeop_prop(v);
+        if (g_storeop_mode) RK_LOG("storeop 改写开: mode=%d 指定 %zu 条", g_storeop_mode, g_storeop_pick.size());
+    }
     g_dump_passes = read_bool_prop("debug.knobs.passdump");
     g_copyprobe = read_bool_prop("debug.knobs.copyprobe");
     g_upop = read_bool_prop("debug.knobs.upop");
-    if (g_copyprobe || g_upop) g_dump_passes = true;   // 探针/算子的 src/dst/替换全部建立在溯源表上
-    RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d upop=%d",
-           self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe, (int)g_upop);
+    g_frameaudit = read_bool_prop("debug.knobs.frameaudit");
+    g_frameaudit_ts = g_frameaudit && read_bool_prop("debug.knobs.frameaudit_ts");
+    if (g_copyprobe || g_upop || g_frameaudit) g_dump_passes = true;   // 探针/算子/步骤清单全部建立在溯源表上
+    RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d upop=%d frameaudit=%d ts=%d",
+           self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe, (int)g_upop,
+           (int)g_frameaudit, (int)g_frameaudit_ts);
     auto* link = reinterpret_cast<RkInstCreateInfo*>(const_cast<void*>(ci->pNext));
     while (link && !(link->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
                      link->function == RK_LAYER_LINK_INFO))
@@ -557,6 +881,45 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     d.CmdBindPipeline = (PFN_vkCmdBindPipeline)gdpa(*pDev, "vkCmdBindPipeline");
     d.CmdDispatch = (PFN_vkCmdDispatch)gdpa(*pDev, "vkCmdDispatch");
     if (inst) d.GetPhysMemProps = (PFN_vkGetPhysicalDeviceMemoryProperties)gipa(inst, "vkGetPhysicalDeviceMemoryProperties");
+#define RK_GDPA(field, T, name) d.field = (T)gdpa(*pDev, name)
+    RK_GDPA(CmdEndRenderPass, PFN_vkCmdEndRenderPass, "vkCmdEndRenderPass");
+    RK_GDPA(CmdEndRenderPass2, PFN_vkCmdEndRenderPass2, "vkCmdEndRenderPass2");
+    if (!d.CmdEndRenderPass2) RK_GDPA(CmdEndRenderPass2, PFN_vkCmdEndRenderPass2, "vkCmdEndRenderPass2KHR");
+    RK_GDPA(CmdNextSubpass, PFN_vkCmdNextSubpass, "vkCmdNextSubpass");
+    RK_GDPA(CmdNextSubpass2, PFN_vkCmdNextSubpass2, "vkCmdNextSubpass2");
+    if (!d.CmdNextSubpass2) RK_GDPA(CmdNextSubpass2, PFN_vkCmdNextSubpass2, "vkCmdNextSubpass2KHR");
+    RK_GDPA(CmdBeginRendering, PFN_vkCmdBeginRendering, "vkCmdBeginRendering");
+    if (!d.CmdBeginRendering) RK_GDPA(CmdBeginRendering, PFN_vkCmdBeginRendering, "vkCmdBeginRenderingKHR");
+    RK_GDPA(CmdEndRendering, PFN_vkCmdEndRendering, "vkCmdEndRendering");
+    if (!d.CmdEndRendering) RK_GDPA(CmdEndRendering, PFN_vkCmdEndRendering, "vkCmdEndRenderingKHR");
+    RK_GDPA(CmdDrawIndirect, PFN_vkCmdDrawIndirect, "vkCmdDrawIndirect");
+    RK_GDPA(CmdDrawIndexedIndirect, PFN_vkCmdDrawIndexedIndirect, "vkCmdDrawIndexedIndirect");
+    RK_GDPA(CmdDispatchIndirect, PFN_vkCmdDispatchIndirect, "vkCmdDispatchIndirect");
+    RK_GDPA(CmdCopyImage, PFN_vkCmdCopyImage, "vkCmdCopyImage");
+    RK_GDPA(CmdCopyBuffer, PFN_vkCmdCopyBuffer, "vkCmdCopyBuffer");
+    RK_GDPA(CmdCopyBufferToImage, PFN_vkCmdCopyBufferToImage, "vkCmdCopyBufferToImage");
+    RK_GDPA(CmdCopyImageToBuffer, PFN_vkCmdCopyImageToBuffer, "vkCmdCopyImageToBuffer");
+    RK_GDPA(CmdResolveImage, PFN_vkCmdResolveImage, "vkCmdResolveImage");
+    RK_GDPA(CmdClearColorImage, PFN_vkCmdClearColorImage, "vkCmdClearColorImage");
+    RK_GDPA(CmdClearDepthStencilImage, PFN_vkCmdClearDepthStencilImage, "vkCmdClearDepthStencilImage");
+    RK_GDPA(CmdClearAttachments, PFN_vkCmdClearAttachments, "vkCmdClearAttachments");
+    RK_GDPA(CmdFillBuffer, PFN_vkCmdFillBuffer, "vkCmdFillBuffer");
+    RK_GDPA(CmdUpdateBuffer, PFN_vkCmdUpdateBuffer, "vkCmdUpdateBuffer");
+    RK_GDPA(CmdPipelineBarrier2, PFN_vkCmdPipelineBarrier2, "vkCmdPipelineBarrier2");
+    if (!d.CmdPipelineBarrier2) RK_GDPA(CmdPipelineBarrier2, PFN_vkCmdPipelineBarrier2, "vkCmdPipelineBarrier2KHR");
+    RK_GDPA(QueueSubmit2, PFN_vkQueueSubmit2, "vkQueueSubmit2");
+    if (!d.QueueSubmit2) RK_GDPA(QueueSubmit2, PFN_vkQueueSubmit2, "vkQueueSubmit2KHR");
+    RK_GDPA(GetSwapchainImagesKHR, PFN_vkGetSwapchainImagesKHR, "vkGetSwapchainImagesKHR");
+    RK_GDPA(CreateQueryPool, PFN_vkCreateQueryPool, "vkCreateQueryPool");
+    RK_GDPA(DestroyQueryPool, PFN_vkDestroyQueryPool, "vkDestroyQueryPool");
+    RK_GDPA(CmdResetQueryPool, PFN_vkCmdResetQueryPool, "vkCmdResetQueryPool");
+    RK_GDPA(CmdWriteTimestamp, PFN_vkCmdWriteTimestamp, "vkCmdWriteTimestamp");
+    RK_GDPA(GetQueryPoolResults, PFN_vkGetQueryPoolResults, "vkGetQueryPoolResults");
+#undef RK_GDPA
+    if (inst) {
+        auto gpp = (PFN_vkGetPhysicalDeviceProperties)gipa(inst, "vkGetPhysicalDeviceProperties");
+        if (gpp) { VkPhysicalDeviceProperties pp{}; gpp(phys, &pp); d.ts_period_ns = pp.limits.timestampPeriod; }
+    }
     { std::lock_guard<std::mutex> lk(g_mtx); g_dev[key(*pDev)] = d; }
     return r;
 }
@@ -565,6 +928,12 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocat
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return; d = it->second; g_dev.erase(it); }
     write_marker();  // 收尾再落一次最终计数
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (g_fa.pool != VK_NULL_HANDLE && g_fa.pool_dev == dev && d.DestroyQueryPool) {
+            d.DestroyQueryPool(dev, g_fa.pool, nullptr); g_fa.pool = VK_NULL_HANDLE;
+        }
+    }
     if (g_cp.dev == dev) {   // copyprobe 自建对象随 device 一起收
         if (g_cp.dst) { d.DestroyImageView(dev, g_cp.dst_view, nullptr); d.DestroyImage(dev, g_cp.dst, nullptr); d.FreeMemory(dev, g_cp.mem, nullptr); }
         if (g_cp.pipe) { d.DestroyPipeline(dev, g_cp.pipe, nullptr); d.DestroyPipelineLayout(dev, g_cp.pl, nullptr);
@@ -609,8 +978,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     uint64_t idx = g_rp_created++;
-    if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0) {
+    const uint64_t sig = ci ? rp_sig(ci->attachmentCount, ci->pAttachments, ci->subpassCount) : 0;
+    struct SigRec { VkRenderPass* o; uint64_t s; ~SigRec() { if (o && *o) { std::lock_guard<std::mutex> lk(g_mtx); g_rp_sig[*o] = s; } } } sig_rec{out, sig};
+    if ((!g_rewrite_loadop && !g_storeop_mode) || !ci || ci->attachmentCount == 0) {
         VkResult r0 = d.CreateRenderPass(dev, ci, a, out);
+        if (r0 == VK_SUCCESS) fa_record_rp(*out, ci);
         if (r0 == VK_SUCCESS && g_dump_passes && ci) record_rp(*out, idx, ci->attachmentCount,
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
@@ -621,13 +993,15 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
     // pAttachments 是 const, 必须整份拷出来再改
     std::vector<VkAttachmentDescription> atts(ci->pAttachments, ci->pAttachments + ci->attachmentCount);
     std::vector<Effective> hits;
-    for (uint32_t i = 0; i < atts.size(); i++) {
+    for (uint32_t i = 0; g_rewrite_loadop && i < atts.size(); i++) {
         if (atts[i].loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) continue;
         atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        hits.push_back({idx, i, 0});
+        hits.push_back({idx, i, "loadOp", "LOAD", "DONT_CARE", 0});
     }
+    apply_storeop(ci, atts.data(), idx, sig, hits);
     if (hits.empty()) {
         VkResult r0 = d.CreateRenderPass(dev, ci, a, out);
+        if (r0 == VK_SUCCESS) fa_record_rp(*out, ci);
         if (r0 == VK_SUCCESS && g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
@@ -642,6 +1016,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
         RK_LOG("CreateRenderPass(改写后) 失败: %d, pass=%llu", (int)r, (unsigned long long)idx);
         return r;
     }
+    fa_record_rp(*out, &mod);
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         auto& idxs = g_rewritten[*out];
@@ -655,7 +1030,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass(
         [&](uint32_t i){ return (uint32_t)atts[i].format; },
         [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
         [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
-    RK_LOG("改写 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
+    RK_LOG("改写 pass=%llu: %zu 处 load/store -> DONT_CARE",
            (unsigned long long)idx, hits.size());
     return r;
 }
@@ -668,8 +1043,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     uint64_t idx = g_rp_created++;
-    if (!g_rewrite_loadop || !ci || ci->attachmentCount == 0) {
+    const uint64_t sig = ci ? rp_sig(ci->attachmentCount, ci->pAttachments, ci->subpassCount) : 0;
+    struct SigRec { VkRenderPass* o; uint64_t s; ~SigRec() { if (o && *o) { std::lock_guard<std::mutex> lk(g_mtx); g_rp_sig[*o] = s; } } } sig_rec{out, sig};
+    if ((!g_rewrite_loadop && !g_storeop_mode) || !ci || ci->attachmentCount == 0) {
         VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
+        if (r0 == VK_SUCCESS) fa_record_rp2(*out, ci);
         if (r0 == VK_SUCCESS && g_dump_passes && ci) record_rp(*out, idx, ci->attachmentCount,
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
@@ -679,13 +1057,15 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
 
     std::vector<VkAttachmentDescription2> atts(ci->pAttachments, ci->pAttachments + ci->attachmentCount);
     std::vector<Effective> hits;
-    for (uint32_t i = 0; i < atts.size(); i++) {
+    for (uint32_t i = 0; g_rewrite_loadop && i < atts.size(); i++) {
         if (atts[i].loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) continue;
         atts[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        hits.push_back({idx, i, 0});
+        hits.push_back({idx, i, "loadOp", "LOAD", "DONT_CARE", 0});
     }
+    apply_storeop(ci, atts.data(), idx, sig, hits);
     if (hits.empty()) {
         VkResult r0 = d.CreateRenderPass2(dev, ci, a, out);
+        if (r0 == VK_SUCCESS) fa_record_rp2(*out, ci);
         if (r0 == VK_SUCCESS && g_dump_passes) record_rp(*out, idx, ci->attachmentCount,
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].format; },
             [&](uint32_t i){ return (uint32_t)ci->pAttachments[i].loadOp; },
@@ -700,6 +1080,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
         RK_LOG("CreateRenderPass2(改写后) 失败: %d, pass=%llu", (int)r, (unsigned long long)idx);
         return r;
     }
+    fa_record_rp2(*out, &mod);
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         auto& idxs = g_rewritten[*out];
@@ -713,7 +1094,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateRenderPass2(
         [&](uint32_t i){ return (uint32_t)atts[i].format; },
         [&](uint32_t i){ return (uint32_t)atts[i].loadOp; },
         [&](uint32_t i){ return (uint32_t)atts[i].finalLayout; });
-    RK_LOG("改写2 pass=%llu: %zu 个 attachment 的 loadOp LOAD -> DONT_CARE",
+    RK_LOG("改写2 pass=%llu: %zu 处 load/store -> DONT_CARE",
            (unsigned long long)idx, hits.size());
     return r;
 }
@@ -747,6 +1128,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyRenderPass(
         // 句柄会复用: 这三张表不一起擦, 新建的 pass 拿到旧句柄值就继承死者的 seq/形状 (评审 #8)
         g_rp_seq.erase(rp);
         g_rp_info.erase(rp);
+        g_rp_fa.erase(rp);
     }
     d.DestroyRenderPass(dev, rp, a);
 }
@@ -759,7 +1141,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateImage(
     VkResult r = d.CreateImage(dev, ci, a, out);
     if (r == VK_SUCCESS && ci && g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
-        g_img[*out] = ImgInfo{ci->extent.width, ci->extent.height, (uint32_t)ci->format, (uint32_t)ci->usage};
+        ImgInfo ii{ci->extent.width, ci->extent.height, (uint32_t)ci->format, (uint32_t)ci->usage};
+        ii.id = ++g_img_seq; ii.d = ci->extent.depth; ii.samples = (uint32_t)ci->samples;
+        ii.mips = ci->mipLevels; ii.layers = ci->arrayLayers;
+        g_img[*out] = ii;
+        if (g_frameaudit) g_img_by_id[ii.id] = ii;
     }
     return r;
 }
@@ -771,6 +1157,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateImageView(
     if (r == VK_SUCCESS && ci && g_dump_passes) {
         std::lock_guard<std::mutex> lk(g_mtx);
         g_view[*out] = ci->image;
+        if (g_frameaudit) g_view_sub[*out] = ViewSub{ci->subresourceRange.baseMipLevel, ci->subresourceRange.levelCount,
+                                                   ci->subresourceRange.baseArrayLayer, ci->subresourceRange.layerCount};
     }
     return r;
 }
@@ -796,6 +1184,10 @@ static VKAPI_ATTR void VKAPI_CALL rk_UpdateDescriptorSets(
                     uint32_t kk = ws.dstArrayElement + j + (ws.dstBinding << 8);
                     m[kk] = ws.pImageInfo[j].imageView;
                     ms[kk] = ws.pImageInfo[j].sampler;
+                    if (g_frameaudit) {
+                        auto& st = g_set_storage[ws.dstSet];
+                        if (ws.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) st.insert(kk); else st.erase(kk);
+                    }
                 }
         }
     }
@@ -847,7 +1239,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDescriptorPool(
         auto it = g_pool_sets.find(pool);
         if (it != g_pool_sets.end()) {
             for (auto set : it->second) {
-                g_set_views.erase(set); g_set_samplers.erase(set); g_set_layout.erase(set);
+                g_set_views.erase(set); g_set_samplers.erase(set); g_set_layout.erase(set); g_set_storage.erase(set);
             }
             g_pool_sets.erase(it);
         }
@@ -864,6 +1256,16 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBindDescriptorSets(
         auto& v = g_cb_sets[cb];
         for (uint32_t i = 0; i < n; i++) v.push_back(sets[i]);
         if (v.size() > 32) v.erase(v.begin(), v.end() - 32);
+    }
+    if (g_frameaudit && sets) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        FaCb& c = g_facb[cb];
+        VkDescriptorSet* slots = bp == VK_PIPELINE_BIND_POINT_COMPUTE ? c.comp
+                               : bp == VK_PIPELINE_BIND_POINT_GRAPHICS ? c.gfx : nullptr;
+        if (slots) for (uint32_t i = 0; i < n && first + i < 8; i++) slots[first + i] = sets[i];
+        if (bp == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+            if (FaEv* e = fa_open(cb)) { e->binds++; for (uint32_t i = 0; i < n; i++) fa_add_set(*e, sets[i]); }
+        }
     }
     // copyprobe: 只在送显 pass 内替换 (UI draw 在别的 set 上, 不受影响)
     if ((g_copyprobe || g_upop) && !g_cp.disabled && sets && n > 0 && bp == VK_PIPELINE_BIND_POINT_GRAPHICS) {
@@ -921,9 +1323,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateSwapchainKHR(
     return r;
 }
 
-static void note_draw(VkCommandBuffer cb, uint64_t n) {
+// kind: 0 = vkCmdDraw, 1 = vkCmdDrawIndexed, 2 = 间接 draw; prims = 顶点或索引数 × 实例数 (间接为 0)
+static void note_draw(VkCommandBuffer cb, uint64_t n, int kind = 0, uint64_t prims = 0) {
     if (!g_dump_passes) return;
     std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_frameaudit) {
+        if (FaEv* e = fa_open(cb)) {
+            if (kind == 0) e->draws++; else if (kind == 1) e->draws_idx++; else e->draws_ind++;
+            e->prims += prims;
+        }
+    }
     auto it = g_cb_cur.find(cb);
     if (it != g_cb_cur.end()) g_pass_stat[it->second].draws += n;
 
@@ -992,12 +1401,12 @@ static void note_draw(VkCommandBuffer cb, uint64_t n) {
 static VKAPI_ATTR void VKAPI_CALL rk_CmdDraw(VkCommandBuffer cb, uint32_t vc, uint32_t ic,
                                              uint32_t fv, uint32_t fi) {
     DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdDraw) { RK_LOG_ONCE("CmdDraw: 无下层"); return; }
-    note_draw(cb, 1); d.CmdDraw(cb, vc, ic, fv, fi);
+    note_draw(cb, 1, 0, (uint64_t)vc * ic); d.CmdDraw(cb, vc, ic, fv, fi);
 }
 static VKAPI_ATTR void VKAPI_CALL rk_CmdDrawIndexed(VkCommandBuffer cb, uint32_t ic, uint32_t inst,
                                                     uint32_t fi, int32_t vo, uint32_t fin) {
     DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdDrawIndexed) { RK_LOG_ONCE("CmdDrawIndexed: 无下层"); return; }
-    note_draw(cb, 1); d.CmdDrawIndexed(cb, ic, inst, fi, vo, fin);
+    note_draw(cb, 1, 1, (uint64_t)ic * inst); d.CmdDrawIndexed(cb, ic, inst, fi, vo, fin);
 }
 // 放大也可能不是全屏三角形而是 vkCmdBlitImage, 所以单独记一笔
 static VKAPI_ATTR void VKAPI_CALL rk_CmdBlitImage(
@@ -1012,6 +1421,16 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBlitImage(
                  (int)f);
         std::lock_guard<std::mutex> lk(g_mtx);
         if (g_sampling && g_frame_seq.size() < 400) g_frame_seq.push_back(buf);
+        if (g_frameaudit) {
+            FaEv e; e.kind = FA_BLIT; e.regions = n; e.filter = (uint32_t)f;
+            e.src = fa_img_res(si, r[0].srcSubresource.mipLevel, 1, r[0].srcSubresource.baseArrayLayer, r[0].srcSubresource.layerCount);
+            e.dst = fa_img_res(di, r[0].dstSubresource.mipLevel, 1, r[0].dstSubresource.baseArrayLayer, r[0].dstSubresource.layerCount);
+            e.sex[0] = (uint32_t)std::abs(r[0].srcOffsets[1].x - r[0].srcOffsets[0].x);
+            e.sex[1] = (uint32_t)std::abs(r[0].srcOffsets[1].y - r[0].srcOffsets[0].y);
+            e.ex[0] = (uint32_t)std::abs(r[0].dstOffsets[1].x - r[0].dstOffsets[0].x);
+            e.ex[1] = (uint32_t)std::abs(r[0].dstOffsets[1].y - r[0].dstOffsets[0].y); e.ex[2] = 1;
+            fa_push(cb, std::move(e));
+        }
     }
     d.CmdBlitImage(cb, si, sl, di, dl, n, r, f);
 }
@@ -1325,6 +1744,30 @@ static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi, const
                  (unsigned long long)seq, w, h, st.n_att, st.fmt.empty() ? 0u : st.fmt[0]);
         g_frame_seq.push_back(buf);
     }
+    if (g_frameaudit) {
+        FaEv e; e.kind = FA_PASS; e.w = w; e.h = h;
+        auto si = g_rp_seq.find(bi->renderPass); if (si != g_rp_seq.end()) e.rp = si->second;
+        { auto gi = g_rp_sig.find(bi->renderPass); if (gi != g_rp_sig.end()) e.sig = gi->second; }
+        std::vector<VkImageView> views;
+        if (ai != g_fb_att.end()) views = ai->second;
+        for (auto* p = reinterpret_cast<const VkBaseInStructure*>(bi->pNext); p; p = p->pNext)
+            if (p->sType == VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO) {   // imageless framebuffer
+                auto* ab = reinterpret_cast<const VkRenderPassAttachmentBeginInfo*>(p);
+                views.assign(ab->pAttachments, ab->pAttachments + ab->attachmentCount);
+            }
+        auto ri = g_rp_fa.find(bi->renderPass);
+        size_t na = ri != g_rp_fa.end() ? ri->second.att.size() : views.size();
+        for (size_t i = 0; i < na; i++) {
+            FaAtt a = ri != g_rp_fa.end() ? ri->second.att[i] : FaAtt{};
+            if (i < views.size()) a.r = fa_view_res(views[i]);
+            e.att.push_back(a);
+        }
+        if (ri != g_rp_fa.end()) e.subpasses = 1;   // NextSubpass 再加
+        FaCb& c = g_facb[cb];
+        for (auto s : c.gfx) if (s) fa_add_set(e, s);   // pass 前已绑的 set 在 pass 内照样生效
+        e.ts0 = fa_ts(cb, d);
+        if (fa_push(cb, std::move(e))) c.open = (int)c.ev.size() - 1;
+    }
 }
 
 static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRenderPass(
@@ -1366,6 +1809,17 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_BeginCommandBuffer(VkCommandBuffer cb, 
         std::lock_guard<std::mutex> lk(g_mtx);
         g_cb_cur.erase(cb); g_cb_sets.erase(cb); g_cb_draw_idx.erase(cb);
         g_cb_prev_att.erase(cb); g_cb_cur_is_swap.erase(cb); g_cb_passes.erase(cb);
+        if (g_frameaudit) {
+            FaCb& c = g_facb[cb];
+            c = FaCb{};
+            c.ts = g_frameaudit_ts && g_fa.ts_armed;
+            if (bi && (bi->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) && bi->pInheritanceInfo) {
+                // 二级缓冲: 一个「继承来的」伪 pass 收 draw / 描述符引用, 执行时并进主缓冲当前 pass
+                FaEv e; e.kind = FA_PASS; e.sec = true; c.ts = false;
+                auto si = g_rp_seq.find(bi->pInheritanceInfo->renderPass); if (si != g_rp_seq.end()) e.rp = si->second;
+                c.ev.push_back(std::move(e)); c.open = 0;
+            }
+        }
         if (bi && (bi->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) && bi->pInheritanceInfo) {
             const VkCommandBufferInheritanceInfo* inh = bi->pInheritanceInfo;
             uint32_t w = 0, h = 0;   // inheritance 的 framebuffer 允许是 VK_NULL_HANDLE, 那就只有 0x0
@@ -1400,8 +1854,498 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdExecuteCommands(VkCommandBuffer cb, uint
             if (it == g_cb_passes.end()) continue;
             for (uint64_t k : it->second) { if (v.size() >= 256) break; v.push_back(k); }
         }
+        if (g_frameaudit) {
+            for (uint32_t i = 0; i < n; i++) {
+                auto sit = g_facb.find(cbs[i]);
+                if (sit == g_facb.end()) continue;
+                std::vector<FaEv> sev = sit->second.ev;   // 拷一份: 下面 g_facb[cb] 可能让迭代器所在的树重排
+                FaEv* open = fa_open(cb);
+                for (auto& e : sev) {
+                    if (e.sec && open) {
+                        open->draws += e.draws; open->draws_idx += e.draws_idx; open->draws_ind += e.draws_ind;
+                        open->prims += e.prims; open->binds += e.binds; open->clear_att += e.clear_att;
+                        open->clear_att_full += e.clear_att_full;
+                        open->reads.insert(e.reads.begin(), e.reads.end());
+                        open->writes.insert(e.writes.begin(), e.writes.end());
+                        g_fa.sec_merged++;
+                    } else if (!e.sec) {
+                        fa_push(cb, FaEv(e));
+                        open = fa_open(cb);
+                    }
+                }
+            }
+        }
     }
     d.CmdExecuteCommands(cb, n, cbs);
+}
+
+// ══ frameaudit 钩子与落盘 (全部只读转发; 唯一插入的命令是 frameaudit_ts 时的查询 reset/写时间戳) ══
+
+static void fa_note_img(uint32_t id) {
+    if (!id || g_fa.imgs.count(id)) return;
+    auto it = g_img_by_id.find(id);
+    if (it != g_img_by_id.end()) g_fa.imgs[id] = it->second;
+}
+static std::string fa_sub_json(const SubRes& r) {
+    fa_note_img(r.img);
+    char b[64]; snprintf(b, sizeof b, "[%u,%u,%u]", r.img, r.mip, r.layer);
+    return b;
+}
+static std::string fa_refs_json(const std::set<uint64_t>& s) {
+    std::string o = "[";
+    for (uint64_t p : s) {
+        uint32_t id = (uint32_t)(p >> 32);
+        fa_note_img(id);
+        char b[80];
+        snprintf(b, sizeof b, "%s[%u,%u,%u,%u,%u]", o.size() > 1 ? "," : "", id,
+                 (uint32_t)((p >> 24) & 255), (uint32_t)((p >> 16) & 255), (uint32_t)((p >> 8) & 255), (uint32_t)(p & 255));
+        o += b;
+    }
+    return o + "]";
+}
+static const char* fa_kind_name(uint8_t k) {
+    switch (k) {
+    case FA_PASS: return "pass"; case FA_DISPATCH: return "dispatch"; case FA_COPY_IMG: return "copy_img";
+    case FA_BUF2IMG: return "buf2img"; case FA_IMG2BUF: return "img2buf"; case FA_COPY_BUF: return "copy_buf";
+    case FA_BLIT: return "blit"; case FA_RESOLVE: return "resolve"; case FA_CLEAR_COLOR: return "clear_color";
+    case FA_CLEAR_DS: return "clear_ds"; case FA_DISCARD: return "discard"; case FA_FILL_BUF: return "fill_buf";
+    default: return "?";
+    }
+}
+static std::string fa_ev_json(const FaEv& e) {
+    char b[512];
+    std::string o = std::string("{\"k\":\"") + fa_kind_name(e.kind) + "\"";
+    snprintf(b, sizeof b, ",\"br\":%u", e.barriers); o += b;
+    if (e.kind == FA_PASS) {
+        snprintf(b, sizeof b, ",\"rp\":%llu,\"w\":%u,\"h\":%u,\"dyn\":%s,\"sp\":%u,\"dr\":%u,\"dri\":%u,\"drn\":%u,"
+                 "\"prims\":%llu,\"ca\":%u,\"caf\":%u,\"bd\":%u,\"t0\":%d,\"t1\":%d",
+                 (unsigned long long)e.rp, e.w, e.h, e.dyn ? "true" : "false", e.subpasses, e.draws, e.draws_idx,
+                 e.draws_ind, (unsigned long long)e.prims, e.clear_att, e.clear_att_full, e.binds, e.ts0, e.ts1);
+        o += b;
+        if (e.sig) o += ",\"sig\":\"" + sig_hex(e.sig) + "\"";
+        o += ",\"att\":[";
+        for (size_t i = 0; i < e.att.size(); i++) {
+            const FaAtt& a = e.att[i];
+            fa_note_img(a.r.img);
+            snprintf(b, sizeof b, "%s{\"i\":%u,\"m\":%u,\"l\":%u,\"f\":%u,\"s\":%u,\"lo\":%u,\"st\":%u,\"slo\":%u,\"sst\":%u,"
+                     "\"il\":%u,\"fl\":%u,\"ro\":%u,\"in\":%s}",
+                     i ? "," : "", a.r.img, a.r.mip, a.r.layer, a.fmt, a.samples, a.load, a.store, a.sload, a.sstore,
+                     a.init, a.fin, a.role, a.input ? "true" : "false");
+            o += b;
+        }
+        o += "]";
+    } else if (e.kind == FA_DISPATCH) {
+        snprintf(b, sizeof b, ",\"g\":[%u,%u,%u],\"ind\":%s", e.gx, e.gy, e.gz, e.indirect ? "true" : "false");
+        o += b;
+    } else {
+        if (e.src.img || e.kind == FA_COPY_IMG || e.kind == FA_IMG2BUF || e.kind == FA_BLIT || e.kind == FA_RESOLVE)
+            o += ",\"src\":" + fa_sub_json(e.src);
+        if (e.dst.img || e.kind == FA_COPY_IMG || e.kind == FA_BUF2IMG || e.kind == FA_BLIT || e.kind == FA_RESOLVE ||
+            e.kind == FA_CLEAR_COLOR || e.kind == FA_CLEAR_DS || e.kind == FA_DISCARD) {
+            o += ",\"dst\":" + fa_sub_json(e.dst);
+            snprintf(b, sizeof b, ",\"dnm\":%u,\"dnl\":%u", e.dst.nmip, e.dst.nlayer); o += b;
+        }
+        snprintf(b, sizeof b, ",\"ex\":[%u,%u,%u],\"sex\":[%u,%u],\"n\":%u,\"tx\":%llu,\"bytes\":%llu,\"filter\":%u",
+                 e.ex[0], e.ex[1], e.ex[2], e.sex[0], e.sex[1], e.regions, (unsigned long long)e.texels,
+                 (unsigned long long)e.bytes, e.filter);
+        o += b;
+    }
+    if (!e.reads.empty()) o += ",\"rd\":" + fa_refs_json(e.reads);
+    if (!e.writes.empty()) o += ",\"wr\":" + fa_refs_json(e.writes);
+    return o + "}";
+}
+
+// 调用方持 g_mtx
+static std::map<VkCommandBuffer, uint32_t> g_fa_cbid;
+static void fa_capture_submit(void* q, uint32_t n, const VkCommandBuffer* cbs) {
+    auto qi = g_fa.qid.find(q);
+    uint32_t qn = qi != g_fa.qid.end() ? qi->second : (g_fa.qid[q] = (uint32_t)g_fa.qid.size());
+    std::string sub = std::string(g_fa.cur.empty() ? "" : ",") + "{\"q\":" + std::to_string(qn) + ",\"cbs\":[";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i) sub += ",";
+        auto it = g_facb.find(cbs[i]);
+        if (it == g_facb.end()) { g_fa.cb_unseen++; sub += "{\"unseen\":true}"; continue; }
+        auto ci = g_fa_cbid.find(cbs[i]);
+        uint32_t cid = ci != g_fa_cbid.end() ? ci->second : (g_fa_cbid[cbs[i]] = (uint32_t)g_fa_cbid.size());
+        sub += "{\"cb\":" + std::to_string(cid) + ",\"ts\":" + (it->second.ts ? "true" : "false")
+             + ",\"ov\":" + (it->second.overflow ? "true" : "false") + ",\"ev\":[";
+        bool first = true;
+        for (const auto& e : it->second.ev) {
+            if (e.sec) continue;   // 二级缓冲的伪 pass 已并进主缓冲
+            if (!first) sub += ",";
+            first = false;
+            sub += fa_ev_json(e);
+        }
+        sub += "]}";
+    }
+    g_fa.cur += sub + "]}";
+}
+
+static void fa_write_file(const DevDisp& d) {   // 调用方持 g_mtx
+    std::string ts = "[";
+    uint32_t avail = 0;
+    if (g_fa.pool != VK_NULL_HANDLE && d.GetQueryPoolResults && g_fa.ts_next > g_fa.ts_lo) {
+        uint32_t cnt = g_fa.ts_next - g_fa.ts_lo;
+        std::vector<uint64_t> buf((size_t)cnt * 2, 0);
+        d.GetQueryPoolResults(g_fa.pool_dev, g_fa.pool, g_fa.ts_lo, cnt, buf.size() * 8, buf.data(), 16,
+                              VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);   // 不等待; 没好的槽 availability=0
+        for (uint32_t i = 0; i < cnt; i++) {
+            if (!buf[2 * i + 1]) continue;
+            char b[64]; snprintf(b, sizeof b, "%s[%u,%llu]", avail ? "," : "", g_fa.ts_lo + i, (unsigned long long)buf[2 * i]);
+            ts += b; avail++;
+        }
+    }
+    ts += "]";
+    std::string imgs = "[";
+    for (auto& kv : g_fa.imgs) {
+        const ImgInfo& im = kv.second;
+        char b[256];
+        snprintf(b, sizeof b, "%s{\"id\":%u,\"w\":%u,\"h\":%u,\"d\":%u,\"fmt\":%u,\"usage\":%u,\"samples\":%u,\"mips\":%u,\"layers\":%u,\"swap\":%s}",
+                 imgs.size() > 1 ? "," : "", im.id, im.w, im.h, im.d, im.fmt, im.usage, im.samples, im.mips, im.layers,
+                 im.swap ? "true" : "false");
+        imgs += b;
+    }
+    imgs += "]";
+    std::string frames = "[";
+    for (size_t i = 0; i < g_fa.frames.size(); i++) { if (i) frames += ","; frames += g_fa.frames[i]; }
+    frames += "]";
+    char hdr[768];
+    snprintf(hdr, sizeof hdr,
+             "{\"knob\":\"gray_frameaudit\",\"version\":1,\"pkg\":\"%s\",\"go\":%ld,\"arm_frame\":%llu,"
+             "\"swapchain\":{\"w\":%u,\"h\":%u,\"fmt\":%u},\"ts_enabled\":%s,\"ts_period_ns\":%.6f,\"ts_slots\":[%u,%u],"
+             "\"ts_available\":%u,\"diag\":{\"cb_unseen\":%llu,\"ev_overflow\":%llu,\"submit2\":%llu,\"dyn_passes\":%llu,"
+             "\"sec_merged\":%llu,\"ts_skipped\":%llu},",
+             self_pkg().c_str(), g_fa.go, (unsigned long long)g_fa.arm_frame, g_swap_w, g_swap_h, g_swap_fmt,
+             g_frameaudit_ts ? "true" : "false", (double)g_fa.period, g_fa.ts_lo, g_fa.ts_next, avail,
+             (unsigned long long)g_fa.cb_unseen, (unsigned long long)g_fa.ev_overflow, (unsigned long long)g_fa.submit2,
+             (unsigned long long)g_fa.dyn_passes, (unsigned long long)g_fa.sec_merged, (unsigned long long)g_fa.ts_skipped);
+    std::string json = std::string(hdr) + "\"images\":" + imgs + ",\"ts\":" + ts + ",\"frames\":" + frames + "}";
+    std::string pkg = self_pkg();
+    const std::string cands[] = {
+        "/storage/emulated/0/Android/data/" + pkg + "/files/knobs_frameaudit.json",
+        "/data/data/" + pkg + "/knobs_frameaudit.json",
+        "/data/local/tmp/knobs_frameaudit." + pkg + ".json",
+    };
+    for (const auto& path : cands) {
+        FILE* o = fopen(path.c_str(), "w");
+        if (!o) continue;
+        fwrite(json.data(), 1, json.size(), o);
+        fputc('\n', o);
+        fflush(o); fsync(fileno(o)); fclose(o);
+        RK_LOG("frameaudit go=%ld 落盘 %s (%zu 字节, %zu 帧, 时间戳 %u 个)", g_fa.go, path.c_str(), json.size(),
+               g_fa.frames.size(), avail);
+        return;
+    }
+    RK_LOG("frameaudit: 落盘失败 (三个候选路径都写不进)");
+}
+
+static void fa_on_present(const DevDisp& d, uint64_t f, const VkPresentInfoKHR* pi) {
+    if (!g_fa.arm_frame && f % 30 == 0) {
+        char v[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.knobs.frameaudit_go", v);
+        long go = atol(v);
+        if (go > 0 && go != g_fa.go) {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_fa.go = go; g_fa.arm_frame = f; g_fa.frames.clear(); g_fa.imgs.clear(); g_fa.cur.clear();
+            g_fa.cap_done = 0; g_fa.capturing = false;
+            g_fa.ts_armed = false;
+            if (g_frameaudit_ts) {
+                if (g_fa.pool == VK_NULL_HANDLE && d.CreateQueryPool) {
+                    VkQueryPoolCreateInfo qci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                    qci.queryType = VK_QUERY_TYPE_TIMESTAMP; qci.queryCount = FA_TS_CAP;
+                    if (d.CreateQueryPool(d.dev, &qci, nullptr, &g_fa.pool) != VK_SUCCESS) g_fa.pool = VK_NULL_HANDLE;
+                    g_fa.pool_dev = d.dev; g_fa.period = d.ts_period_ns;
+                }
+                g_fa.ts_lo = g_fa.ts_next;
+                g_fa.ts_armed = g_fa.pool != VK_NULL_HANDLE && g_fa.ts_next + 4096 <= FA_TS_CAP;
+            }
+            RK_LOG("frameaudit 武装 go=%ld frame=%llu ts=%d", go, (unsigned long long)f, (int)g_fa.ts_armed);
+        }
+    }
+    if (!g_fa.arm_frame) return;
+    uint64_t k = f - g_fa.arm_frame;
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (k >= FA_TS_FRAMES) g_fa.ts_armed = false;
+    if (g_fa.capturing) {
+        // 帧边界: 本帧的提交到此为止
+        uint32_t pid = 0;
+        if (pi && pi->swapchainCount && pi->pImageIndices) {
+            auto si = g_swap_imgs.find(pi->pSwapchains[0]);
+            if (si != g_swap_imgs.end() && pi->pImageIndices[0] < si->second.size()) {
+                auto ii = g_img.find(si->second[pi->pImageIndices[0]]);
+                if (ii != g_img.end()) { pid = ii->second.id; fa_note_img(pid); }
+            }
+        }
+        g_fa.frames.push_back("{\"frame\":" + std::to_string(f) + ",\"present\":" + std::to_string(pid)
+                              + ",\"submits\":[" + g_fa.cur + "]}");
+        g_fa.cur.clear();
+        if (++g_fa.cap_done >= FA_CAP_N) g_fa.capturing = false;
+    } else if (k == FA_CAP_DELAY && g_fa.cap_done == 0) {
+        g_fa.capturing = true; g_fa.cur.clear();
+    }
+    if (k >= FA_READ_DELAY) { fa_write_file(d); g_fa.arm_frame = 0; }
+}
+
+static VKAPI_ATTR void VKAPI_CALL rk_CmdEndRenderPass(VkCommandBuffer cb) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdEndRenderPass) { RK_LOG_ONCE("CmdEndRenderPass: 无下层"); return; }
+    d.CmdEndRenderPass(cb);
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (FaEv* e = fa_open(cb)) e->ts1 = fa_ts(cb, d);
+    auto it = g_facb.find(cb); if (it != g_facb.end()) it->second.open = -1;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdEndRenderPass2(VkCommandBuffer cb, const VkSubpassEndInfo* ei) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdEndRenderPass2) { RK_LOG_ONCE("CmdEndRenderPass2: 无下层"); return; }
+    d.CmdEndRenderPass2(cb, ei);
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (FaEv* e = fa_open(cb)) e->ts1 = fa_ts(cb, d);
+    auto it = g_facb.find(cb); if (it != g_facb.end()) it->second.open = -1;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdNextSubpass(VkCommandBuffer cb, VkSubpassContents c) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdNextSubpass) { RK_LOG_ONCE("CmdNextSubpass: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); if (FaEv* e = fa_open(cb)) e->subpasses++; }
+    d.CmdNextSubpass(cb, c);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdNextSubpass2(VkCommandBuffer cb, const VkSubpassBeginInfo* bi, const VkSubpassEndInfo* ei) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdNextSubpass2) { RK_LOG_ONCE("CmdNextSubpass2: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); if (FaEv* e = fa_open(cb)) e->subpasses++; }
+    d.CmdNextSubpass2(cb, bi, ei);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo* ri) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdBeginRendering) { RK_LOG_ONCE("CmdBeginRendering: 无下层"); return; }
+    if (ri) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_fa.dyn_passes++;
+        FaEv e; e.kind = FA_PASS; e.dyn = true; e.w = ri->renderArea.extent.width; e.h = ri->renderArea.extent.height;
+        auto add = [&](const VkRenderingAttachmentInfo* a, uint32_t role) {
+            if (!a || a->imageView == VK_NULL_HANDLE) return;
+            FaAtt x; x.r = fa_view_res(a->imageView); x.load = a->loadOp; x.store = a->storeOp; x.role = role;
+            x.init = a->imageLayout; x.fin = a->imageLayout;
+            auto ii = g_img_by_id.find(x.r.img); if (ii != g_img_by_id.end()) { x.fmt = ii->second.fmt; x.samples = ii->second.samples; }
+            e.att.push_back(x);
+            if (a->resolveImageView != VK_NULL_HANDLE) {
+                FaAtt y; y.r = fa_view_res(a->resolveImageView); y.load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                y.store = VK_ATTACHMENT_STORE_OP_STORE; y.role = 2;
+                auto ij = g_img_by_id.find(y.r.img); if (ij != g_img_by_id.end()) { y.fmt = ij->second.fmt; y.samples = ij->second.samples; }
+                e.att.push_back(y);
+            }
+        };
+        for (uint32_t i = 0; i < ri->colorAttachmentCount; i++) add(&ri->pColorAttachments[i], 0);
+        add(ri->pDepthAttachment, 1);
+        if (ri->pStencilAttachment && (!ri->pDepthAttachment || ri->pStencilAttachment->imageView != ri->pDepthAttachment->imageView))
+            add(ri->pStencilAttachment, 1);
+        else if (ri->pStencilAttachment && !e.att.empty()) {
+            e.att.back().sload = ri->pStencilAttachment->loadOp; e.att.back().sstore = ri->pStencilAttachment->storeOp;
+        }
+        FaCb& c = g_facb[cb];
+        for (auto s : c.gfx) if (s) fa_add_set(e, s);
+        e.ts0 = fa_ts(cb, d);
+        if (fa_push(cb, std::move(e))) c.open = (int)c.ev.size() - 1;
+    }
+    d.CmdBeginRendering(cb, ri);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdEndRendering(VkCommandBuffer cb) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdEndRendering) { RK_LOG_ONCE("CmdEndRendering: 无下层"); return; }
+    d.CmdEndRendering(cb);
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (FaEv* e = fa_open(cb)) e->ts1 = fa_ts(cb, d);
+    auto it = g_facb.find(cb); if (it != g_facb.end()) it->second.open = -1;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdDrawIndirect(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t st) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdDrawIndirect) { RK_LOG_ONCE("CmdDrawIndirect: 无下层"); return; }
+    note_draw(cb, 1, 2, 0); d.CmdDrawIndirect(cb, b, o, n, st);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdDrawIndexedIndirect(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t st) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdDrawIndexedIndirect) { RK_LOG_ONCE("CmdDrawIndexedIndirect: 无下层"); return; }
+    note_draw(cb, 1, 2, 0); d.CmdDrawIndexedIndirect(cb, b, o, n, st);
+}
+static void fa_dispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z, bool ind) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    FaEv e; e.kind = FA_DISPATCH; e.gx = x; e.gy = y; e.gz = z; e.indirect = ind;
+    FaCb& c = g_facb[cb];
+    for (auto s : c.comp) if (s) fa_add_set(e, s);
+    fa_push(cb, std::move(e));
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdDispatch) { RK_LOG_ONCE("CmdDispatch: 无下层"); return; }
+    fa_dispatch(cb, x, y, z, false); d.CmdDispatch(cb, x, y, z);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdDispatchIndirect(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdDispatchIndirect) { RK_LOG_ONCE("CmdDispatchIndirect: 无下层"); return; }
+    fa_dispatch(cb, 0, 0, 0, true); d.CmdDispatchIndirect(cb, b, o);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdCopyImage(VkCommandBuffer cb, VkImage si, VkImageLayout sl, VkImage di,
+                                                  VkImageLayout dl, uint32_t n, const VkImageCopy* r) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdCopyImage) { RK_LOG_ONCE("CmdCopyImage: 无下层"); return; }
+    if (n && r) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        FaEv e; e.kind = FA_COPY_IMG; e.regions = n;
+        e.src = fa_img_res(si, r[0].srcSubresource.mipLevel, 1, r[0].srcSubresource.baseArrayLayer, r[0].srcSubresource.layerCount);
+        e.dst = fa_img_res(di, r[0].dstSubresource.mipLevel, 1, r[0].dstSubresource.baseArrayLayer, r[0].dstSubresource.layerCount);
+        e.ex[0] = r[0].extent.width; e.ex[1] = r[0].extent.height; e.ex[2] = r[0].extent.depth;
+        for (uint32_t i = 0; i < n; i++) e.texels += (uint64_t)r[i].extent.width * r[i].extent.height * r[i].extent.depth * r[i].srcSubresource.layerCount;
+        fa_push(cb, std::move(e));
+    }
+    d.CmdCopyImage(cb, si, sl, di, dl, n, r);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdCopyBuffer(VkCommandBuffer cb, VkBuffer s, VkBuffer t, uint32_t n, const VkBufferCopy* r) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdCopyBuffer) { RK_LOG_ONCE("CmdCopyBuffer: 无下层"); return; }
+    if (n && r) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        FaEv e; e.kind = FA_COPY_BUF; e.regions = n;
+        for (uint32_t i = 0; i < n; i++) e.bytes += r[i].size;
+        fa_push(cb, std::move(e));
+    }
+    d.CmdCopyBuffer(cb, s, t, n, r);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer s, VkImage di, VkImageLayout dl,
+                                                          uint32_t n, const VkBufferImageCopy* r) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdCopyBufferToImage) { RK_LOG_ONCE("CmdCopyBufferToImage: 无下层"); return; }
+    if (n && r) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        FaEv e; e.kind = FA_BUF2IMG; e.regions = n;
+        e.dst = fa_img_res(di, r[0].imageSubresource.mipLevel, 1, r[0].imageSubresource.baseArrayLayer, r[0].imageSubresource.layerCount);
+        e.ex[0] = r[0].imageExtent.width; e.ex[1] = r[0].imageExtent.height; e.ex[2] = r[0].imageExtent.depth;
+        for (uint32_t i = 0; i < n; i++) e.texels += (uint64_t)r[i].imageExtent.width * r[i].imageExtent.height * r[i].imageExtent.depth * r[i].imageSubresource.layerCount;
+        fa_push(cb, std::move(e));
+    }
+    d.CmdCopyBufferToImage(cb, s, di, dl, n, r);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdCopyImageToBuffer(VkCommandBuffer cb, VkImage si, VkImageLayout sl, VkBuffer t,
+                                                          uint32_t n, const VkBufferImageCopy* r) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdCopyImageToBuffer) { RK_LOG_ONCE("CmdCopyImageToBuffer: 无下层"); return; }
+    if (n && r) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        FaEv e; e.kind = FA_IMG2BUF; e.regions = n;
+        e.src = fa_img_res(si, r[0].imageSubresource.mipLevel, 1, r[0].imageSubresource.baseArrayLayer, r[0].imageSubresource.layerCount);
+        e.ex[0] = r[0].imageExtent.width; e.ex[1] = r[0].imageExtent.height; e.ex[2] = r[0].imageExtent.depth;
+        for (uint32_t i = 0; i < n; i++) e.texels += (uint64_t)r[i].imageExtent.width * r[i].imageExtent.height * r[i].imageExtent.depth * r[i].imageSubresource.layerCount;
+        fa_push(cb, std::move(e));
+    }
+    d.CmdCopyImageToBuffer(cb, si, sl, t, n, r);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdResolveImage(VkCommandBuffer cb, VkImage si, VkImageLayout sl, VkImage di,
+                                                     VkImageLayout dl, uint32_t n, const VkImageResolve* r) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdResolveImage) { RK_LOG_ONCE("CmdResolveImage: 无下层"); return; }
+    if (n && r) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        FaEv e; e.kind = FA_RESOLVE; e.regions = n;
+        e.src = fa_img_res(si, r[0].srcSubresource.mipLevel, 1, r[0].srcSubresource.baseArrayLayer, r[0].srcSubresource.layerCount);
+        e.dst = fa_img_res(di, r[0].dstSubresource.mipLevel, 1, r[0].dstSubresource.baseArrayLayer, r[0].dstSubresource.layerCount);
+        e.ex[0] = r[0].extent.width; e.ex[1] = r[0].extent.height; e.ex[2] = r[0].extent.depth;
+        for (uint32_t i = 0; i < n; i++) e.texels += (uint64_t)r[i].extent.width * r[i].extent.height * r[i].extent.depth;
+        fa_push(cb, std::move(e));
+    }
+    d.CmdResolveImage(cb, si, sl, di, dl, n, r);
+}
+static void fa_clear_img(VkCommandBuffer cb, uint8_t kind, VkImage img, uint32_t n, const VkImageSubresourceRange* rg) {
+    if (!n || !rg) return;
+    std::lock_guard<std::mutex> lk(g_mtx);
+    FaEv e; e.kind = kind; e.regions = n;
+    e.dst = fa_img_res(img, rg[0].baseMipLevel, rg[0].levelCount, rg[0].baseArrayLayer, rg[0].layerCount);
+    auto ii = g_img.find(img);
+    if (ii != g_img.end()) { e.ex[0] = ii->second.w; e.ex[1] = ii->second.h; e.ex[2] = ii->second.d; }
+    fa_push(cb, std::move(e));
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdClearColorImage(VkCommandBuffer cb, VkImage img, VkImageLayout l,
+                                                        const VkClearColorValue* c, uint32_t n, const VkImageSubresourceRange* rg) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdClearColorImage) { RK_LOG_ONCE("CmdClearColorImage: 无下层"); return; }
+    fa_clear_img(cb, FA_CLEAR_COLOR, img, n, rg);
+    d.CmdClearColorImage(cb, img, l, c, n, rg);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdClearDepthStencilImage(VkCommandBuffer cb, VkImage img, VkImageLayout l,
+                                                               const VkClearDepthStencilValue* c, uint32_t n, const VkImageSubresourceRange* rg) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdClearDepthStencilImage) { RK_LOG_ONCE("CmdClearDepthStencilImage: 无下层"); return; }
+    fa_clear_img(cb, FA_CLEAR_DS, img, n, rg);
+    d.CmdClearDepthStencilImage(cb, img, l, c, n, rg);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdClearAttachments(VkCommandBuffer cb, uint32_t na, const VkClearAttachment* a,
+                                                         uint32_t nr, const VkClearRect* r) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdClearAttachments) { RK_LOG_ONCE("CmdClearAttachments: 无下层"); return; }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (FaEv* e = fa_open(cb)) {
+            e->clear_att += na;
+            bool full = false;
+            for (uint32_t i = 0; i < nr && r; i++)
+                if (r[i].rect.offset.x == 0 && r[i].rect.offset.y == 0 &&
+                    (e->w == 0 || (r[i].rect.extent.width >= e->w && r[i].rect.extent.height >= e->h))) full = true;
+            if (full) e->clear_att_full += na;
+        }
+    }
+    d.CmdClearAttachments(cb, na, a, nr, r);
+}
+static void fa_discard(VkCommandBuffer cb, VkImage img, const VkImageSubresourceRange& rg) {   // 持锁
+    FaEv e; e.kind = FA_DISCARD;
+    e.dst = fa_img_res(img, rg.baseMipLevel, rg.levelCount, rg.baseArrayLayer, rg.layerCount);
+    if (e.dst.img) fa_push(cb, std::move(e));
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags ss, VkPipelineStageFlags ds,
+    VkDependencyFlags df, uint32_t nm, const VkMemoryBarrier* m, uint32_t nb, const VkBufferMemoryBarrier* b,
+    uint32_t ni, const VkImageMemoryBarrier* im) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdPipelineBarrier) { RK_LOG_ONCE("CmdPipelineBarrier: 无下层"); return; }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        FaCb& c = g_facb[cb];
+        c.barriers++;
+        // oldLayout=UNDEFINED = 应用声明「旧内容不要了」: 之前对它的 STORE 就白存了
+        if (c.open < 0 && im)
+            for (uint32_t i = 0; i < ni; i++)
+                if (im[i].oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) fa_discard(cb, im[i].image, im[i].subresourceRange);
+    }
+    d.CmdPipelineBarrier(cb, ss, ds, df, nm, m, nb, b, ni, im);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo* di) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdPipelineBarrier2) { RK_LOG_ONCE("CmdPipelineBarrier2: 无下层"); return; }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        FaCb& c = g_facb[cb];
+        c.barriers++;
+        if (c.open < 0 && di && di->pImageMemoryBarriers)
+            for (uint32_t i = 0; i < di->imageMemoryBarrierCount; i++)
+                if (di->pImageMemoryBarriers[i].oldLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+                    fa_discard(cb, di->pImageMemoryBarriers[i].image, di->pImageMemoryBarriers[i].subresourceRange);
+    }
+    d.CmdPipelineBarrier2(cb, di);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdFillBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkDeviceSize sz, uint32_t v) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdFillBuffer) { RK_LOG_ONCE("CmdFillBuffer: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); FaEv e; e.kind = FA_FILL_BUF; e.bytes = sz; fa_push(cb, std::move(e)); }
+    d.CmdFillBuffer(cb, b, o, sz, v);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdUpdateBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkDeviceSize sz, const void* p) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdUpdateBuffer) { RK_LOG_ONCE("CmdUpdateBuffer: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); FaEv e; e.kind = FA_FILL_BUF; e.bytes = sz; fa_push(cb, std::move(e)); }
+    d.CmdUpdateBuffer(cb, b, o, sz, p);
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_QueueSubmit2(VkQueue q, uint32_t n, const VkSubmitInfo2* si, VkFence fence) {
+    DevDisp d; if (!dev_of(key(q), &d) || !d.QueueSubmit2) { RK_LOG_ONCE("QueueSubmit2: 无下层"); return VK_ERROR_INITIALIZATION_FAILED; }
+    if (si) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_fa.submit2++;
+        if (g_fa.capturing)
+            for (uint32_t i = 0; i < n; i++) {
+                std::vector<VkCommandBuffer> cbs;
+                for (uint32_t j = 0; j < si[i].commandBufferInfoCount; j++) cbs.push_back(si[i].pCommandBufferInfos[j].commandBuffer);
+                fa_capture_submit(key(q), (uint32_t)cbs.size(), cbs.data());
+            }
+    }
+    return d.QueueSubmit2(q, n, si, fence);
+}
+static VKAPI_ATTR VkResult VKAPI_CALL rk_GetSwapchainImagesKHR(VkDevice dev, VkSwapchainKHR sc, uint32_t* pn, VkImage* imgs) {
+    DevDisp d; if (!dev_of(key(dev), &d) || !d.GetSwapchainImagesKHR) { RK_LOG_ONCE("GetSwapchainImagesKHR: 无下层"); return VK_ERROR_INITIALIZATION_FAILED; }
+    VkResult r = d.GetSwapchainImagesKHR(dev, sc, pn, imgs);
+    if ((r == VK_SUCCESS || r == VK_INCOMPLETE) && imgs && pn) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto& v = g_swap_imgs[sc];
+        v.assign(imgs, imgs + *pn);
+        for (uint32_t i = 0; i < *pn; i++) {
+            if (g_img.count(imgs[i])) continue;
+            ImgInfo ii{g_swap_w, g_swap_h, g_swap_fmt, (uint32_t)VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT};
+            ii.id = ++g_img_seq; ii.swap = true;
+            g_img[imgs[i]] = ii; g_img_by_id[ii.id] = ii;
+        }
+    }
+    return r;
 }
 
 // begins 数的是录制, 不是执行; 真正的"这个 pass 每帧都在跑"要看提交 (评审 #4)。
@@ -1417,6 +2361,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueueSubmit(VkQueue q, uint32_t n, cons
                 if (it != g_cb_passes.end())
                     for (uint64_t k : it->second) g_frame_seen.insert(k);
             }
+        if (g_frameaudit && g_fa.capturing)
+            for (uint32_t i = 0; i < n; i++) fa_capture_submit(key(q), si[i].commandBufferCount, si[i].pCommandBuffers);
     }
     return d.QueueSubmit(q, n, si, fence);
 }
@@ -1430,6 +2376,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_FreeCommandBuffers(VkDevice dev, VkCommandP
         for (uint32_t i = 0; i < n; i++) {
             g_cb_cur.erase(cbs[i]); g_cb_sets.erase(cbs[i]); g_cb_draw_idx.erase(cbs[i]);
             g_cb_prev_att.erase(cbs[i]); g_cb_cur_is_swap.erase(cbs[i]); g_cb_passes.erase(cbs[i]);
+            g_facb.erase(cbs[i]);
         }
     }
     d.FreeCommandBuffers(dev, pool, n, cbs);
@@ -1447,13 +2394,14 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyFramebuffer(VkDevice dev, VkFramebuf
 static VKAPI_ATTR void VKAPI_CALL rk_DestroyImage(VkDevice dev, VkImage img, const VkAllocationCallbacks* a) {
     DevDisp d;
     if (!dev_of(key(dev), &d) || !d.DestroyImage) { RK_LOG_ONCE("DestroyImage: 无下层"); return; }
-    { std::lock_guard<std::mutex> lk(g_mtx); g_img.erase(img); }
+    { std::lock_guard<std::mutex> lk(g_mtx);
+      auto it = g_img.find(img); if (it != g_img.end()) { g_img_by_id.erase(it->second.id); g_img.erase(it); } }
     d.DestroyImage(dev, img, a);
 }
 static VKAPI_ATTR void VKAPI_CALL rk_DestroyImageView(VkDevice dev, VkImageView v, const VkAllocationCallbacks* a) {
     DevDisp d;
     if (!dev_of(key(dev), &d) || !d.DestroyImageView) { RK_LOG_ONCE("DestroyImageView: 无下层"); return; }
-    { std::lock_guard<std::mutex> lk(g_mtx); g_view.erase(v); }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_view.erase(v); g_view_sub.erase(v); }
     d.DestroyImageView(dev, v, a);
 }
 
@@ -1464,6 +2412,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     uint64_t f = ++g_frames;
+    if (g_frameaudit) fa_on_present(d, f, pi);
     if (g_dump_passes) {
         {
             // 本帧提交执行了哪些 pass -> frames_seen。录制数 (begins) 代替不了它:
@@ -1526,6 +2475,26 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
         RK_HOOK("vkAllocateDescriptorSets", rk_AllocateDescriptorSets);
         RK_HOOK("vkDestroyDescriptorPool", rk_DestroyDescriptorPool);
     }
+    if (g_frameaudit) {
+        RK_HOOK("vkCmdEndRenderPass", rk_CmdEndRenderPass);
+        RK_HOOK("vkCmdNextSubpass", rk_CmdNextSubpass);
+        RK_HOOK("vkCmdDrawIndirect", rk_CmdDrawIndirect);
+        RK_HOOK("vkCmdDrawIndexedIndirect", rk_CmdDrawIndexedIndirect);
+        RK_HOOK("vkCmdDispatch", rk_CmdDispatch);
+        RK_HOOK("vkCmdDispatchIndirect", rk_CmdDispatchIndirect);
+        RK_HOOK("vkCmdCopyImage", rk_CmdCopyImage);
+        RK_HOOK("vkCmdCopyBuffer", rk_CmdCopyBuffer);
+        RK_HOOK("vkCmdCopyBufferToImage", rk_CmdCopyBufferToImage);
+        RK_HOOK("vkCmdCopyImageToBuffer", rk_CmdCopyImageToBuffer);
+        RK_HOOK("vkCmdResolveImage", rk_CmdResolveImage);
+        RK_HOOK("vkCmdClearColorImage", rk_CmdClearColorImage);
+        RK_HOOK("vkCmdClearDepthStencilImage", rk_CmdClearDepthStencilImage);
+        RK_HOOK("vkCmdClearAttachments", rk_CmdClearAttachments);
+        RK_HOOK("vkCmdPipelineBarrier", rk_CmdPipelineBarrier);
+        RK_HOOK("vkCmdFillBuffer", rk_CmdFillBuffer);
+        RK_HOOK("vkCmdUpdateBuffer", rk_CmdUpdateBuffer);
+        RK_HOOK("vkGetSwapchainImagesKHR", rk_GetSwapchainImagesKHR);
+    }
     RK_HOOK("vkCreateRenderPass2", rk_CreateRenderPass2);
     RK_HOOK("vkCreateRenderPass2KHR", rk_CreateRenderPass2);
     RK_HOOK("vkQueuePresentKHR", rk_QueuePresentKHR);
@@ -1565,6 +2534,26 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_HOOK("vkAllocateDescriptorSets", rk_AllocateDescriptorSets);
         RK_HOOK("vkDestroyDescriptorPool", rk_DestroyDescriptorPool);
     }
+    if (g_frameaudit) {
+        RK_HOOK("vkCmdEndRenderPass", rk_CmdEndRenderPass);
+        RK_HOOK("vkCmdNextSubpass", rk_CmdNextSubpass);
+        RK_HOOK("vkCmdDrawIndirect", rk_CmdDrawIndirect);
+        RK_HOOK("vkCmdDrawIndexedIndirect", rk_CmdDrawIndexedIndirect);
+        RK_HOOK("vkCmdDispatch", rk_CmdDispatch);
+        RK_HOOK("vkCmdDispatchIndirect", rk_CmdDispatchIndirect);
+        RK_HOOK("vkCmdCopyImage", rk_CmdCopyImage);
+        RK_HOOK("vkCmdCopyBuffer", rk_CmdCopyBuffer);
+        RK_HOOK("vkCmdCopyBufferToImage", rk_CmdCopyBufferToImage);
+        RK_HOOK("vkCmdCopyImageToBuffer", rk_CmdCopyImageToBuffer);
+        RK_HOOK("vkCmdResolveImage", rk_CmdResolveImage);
+        RK_HOOK("vkCmdClearColorImage", rk_CmdClearColorImage);
+        RK_HOOK("vkCmdClearDepthStencilImage", rk_CmdClearDepthStencilImage);
+        RK_HOOK("vkCmdClearAttachments", rk_CmdClearAttachments);
+        RK_HOOK("vkCmdPipelineBarrier", rk_CmdPipelineBarrier);
+        RK_HOOK("vkCmdFillBuffer", rk_CmdFillBuffer);
+        RK_HOOK("vkCmdUpdateBuffer", rk_CmdUpdateBuffer);
+        RK_HOOK("vkGetSwapchainImagesKHR", rk_GetSwapchainImagesKHR);
+    }
     if (dev == VK_NULL_HANDLE) return nullptr;
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return nullptr; d = it->second; }
@@ -1575,6 +2564,23 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     if (!strcmp(name, "vkCreateRenderPass2") || !strcmp(name, "vkCreateRenderPass2KHR"))
         return d.CreateRenderPass2 ? reinterpret_cast<PFN_vkVoidFunction>(rk_CreateRenderPass2)
                                    : (d.gdpa ? d.gdpa(dev, name) : nullptr);
+    if (g_frameaudit) {
+        // 可选 (1.2/1.3/扩展) 命令: 底层有才挂, 没有就原样转发 (多半是空指针, 应用自己会判)
+#define RK_OPT(n, field, fn) if (!strcmp(name, n)) return d.field ? reinterpret_cast<PFN_vkVoidFunction>(fn) : (d.gdpa ? d.gdpa(dev, name) : nullptr)
+        RK_OPT("vkCmdEndRenderPass2", CmdEndRenderPass2, rk_CmdEndRenderPass2);
+        RK_OPT("vkCmdEndRenderPass2KHR", CmdEndRenderPass2, rk_CmdEndRenderPass2);
+        RK_OPT("vkCmdNextSubpass2", CmdNextSubpass2, rk_CmdNextSubpass2);
+        RK_OPT("vkCmdNextSubpass2KHR", CmdNextSubpass2, rk_CmdNextSubpass2);
+        RK_OPT("vkCmdBeginRendering", CmdBeginRendering, rk_CmdBeginRendering);
+        RK_OPT("vkCmdBeginRenderingKHR", CmdBeginRendering, rk_CmdBeginRendering);
+        RK_OPT("vkCmdEndRendering", CmdEndRendering, rk_CmdEndRendering);
+        RK_OPT("vkCmdEndRenderingKHR", CmdEndRendering, rk_CmdEndRendering);
+        RK_OPT("vkCmdPipelineBarrier2", CmdPipelineBarrier2, rk_CmdPipelineBarrier2);
+        RK_OPT("vkCmdPipelineBarrier2KHR", CmdPipelineBarrier2, rk_CmdPipelineBarrier2);
+        RK_OPT("vkQueueSubmit2", QueueSubmit2, rk_QueueSubmit2);
+        RK_OPT("vkQueueSubmit2KHR", QueueSubmit2, rk_QueueSubmit2);
+#undef RK_OPT
+    }
     return d.gdpa ? d.gdpa(dev, name) : nullptr;
 }
 

@@ -134,6 +134,15 @@ layer 注入点未知；不成立则灰档只在 Android 成立，鸿蒙退回�
   **立项时记的"本机 logcat 哑掉"不准确** —— logcat 只是对 shell uid 不可读，root 读一切正常
 - `build/build_layer.sh` — NDK 直编 + `DT_NEEDED` 自检
 - `enable_layer.sh {probe|target <pkg>|status|off}` — `off` 带 state 回滚 + 全盘残留清扫
+- **frameaudit 只读档**（`debug.knobs.frameaudit=1`，可加 `debug.knobs.frameaudit_ts=1`）——
+  「一帧到底做了哪些步骤」：按提交顺序记每个 render pass（附件是哪张图的哪个 mip/layer、尺寸、格式、
+  采样数、loadOp/storeOp、draw 数、描述符引用了哪些图），以及 pass 之外的 dispatch / 拷贝 / 清屏 /
+  blit / resolve / `oldLayout=UNDEFINED` 丢弃。不改任何渲染；`_ts` 档只多在 pass 前后写 GPU 时间戳查询
+  （写前在同一条命令缓冲里 reset 该查询，命令缓冲被反复提交也合法）。用属性 `debug.knobs.frameaudit_go`
+  触发抓帧（不是固定帧号，免得抓到登录页），落盘 `knobs_frameaudit.json`。
+  主机侧：`phonefarm frame-audit capture --out <目录> [--ts]` 挂层进大世界抓几次、收尾摘层关游戏；
+  `phonefarm frame-audit analyze <json>` 离线排时间线并找「白存 / 白读 / 白清 / 清了又 LOAD / 整个 pass 白画」。
+  「读」按描述符引用近似（绑了不等于采了），所以只会把多余的判成有用，不会反过来。
 
 ## 灰档改写 #1：LoadOp LOAD → DONT_CARE —— 已成立
 
@@ -223,6 +232,28 @@ RP2 创建的 pass 现在也进形状表；pass_table 过滤改用「按提交�
 销毁即摘表，长跑不再只增不减；swapchain 尺寸读写同锁；passdump 模式 logcat 只打
 摘要（全文超单条 4KB 上限必被截），全文只走文件通道。**消费方兼容**：harness 只读
 `readonly_stats` 与文件全文，本次全部是新增字段，无破坏。
+
+## 两臂切换不重启游戏（设计，未实现）
+
+现状：两臂只差属性 `debug.knobs.loadop`，但层在 `vkCreateInstance` 时读一次属性，
+loadOp 又是 `vkCreateRenderPass` 时烘进 VkRenderPass 的，所以每臂都要 force-stop、
+重新进游戏（过登录页、等进大世界）。归档 `runs_graylayer/ab` 和 `upop_141624` 里每臂间隔
+约 1 分 45 秒到 2 分 20 秒，其中测量本身约 1 分钟，其余都是重启和进门。
+
+方案（Vulkan 规范层面成立，未上机）：
+
+1. `rk_CreateRenderPass(2)` 在改写开关**可能**打开时一律建两份：原样的 A 与改写后的 B，
+   给应用返回 A，记 `A → B` 映射；`rk_DestroyRenderPass` 一并销毁 B。
+2. `rk_CmdBeginRenderPass(2)` 里按当前开关把 `pRenderPassBeginInfo->renderPass` 换成 B。
+   依据：loadOp/storeOp 不参与 render pass 兼容性判定（Vulkan 规范 Render Pass
+   Compatibility 一节），所以用 A 建的 framebuffer 和 pipeline 都能配 B 用。
+3. 开关在 `rk_QueuePresentKHR` 里每 N 帧读一次属性（或一个文件），切换只在帧边界生效。
+4. 每臂开头丢掉切换后的前几帧，再开始采集；层的命中计数按臂清零。
+
+收益：每臂省掉约 1 分钟重启和进门，10 臂约省 10 分钟；还消掉「每臂冷启动」带进来的
+着色器缓存、资源加载差异。风险：多一倍 VkRenderPass 对象（原神每帧约 30 个 pass，量不大）；
+这一层在本机只能在节点上用 NDK 构建、上机验证；同事的草稿 phonefarm#23 也在改这个文件，
+要等它定下来再动，避免冲突。灰档层暂不接截断（lead 10-11 决定）。
 
 ## 下一步（按性价比排）
 

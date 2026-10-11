@@ -35,8 +35,9 @@ const POLL: Duration = Duration::from_secs(45);
 const HEARTBEAT: Duration = Duration::from_secs(60);
 
 /// 会碰设备、要拿锁的子命令。
-const LOCKED: [&str; 19] = [
+const LOCKED: [&str; 21] = [
     "run",
+    "onboard",
     "benchmark",
     "parallel",
     "script",
@@ -55,6 +56,7 @@ const LOCKED: [&str; 19] = [
     "exec",
     "experiment",
     "selftest",
+    "frame-audit",
 ];
 
 /// 从参数里剥下来的锁选项。
@@ -79,6 +81,10 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
     }
     // selftest report 只读本地证据目录、不带子命令只打用法, 都不碰设备
     if sub == "selftest" && matches!(rest.first().map(|s| s.as_str()), None | Some("report")) {
+        return false;
+    }
+    // frame-audit 只有 capture 碰设备, analyze 纯离线
+    if sub == "frame-audit" && rest.first().map(|s| s.as_str()) != Some("capture") {
         return false;
     }
     if matches!(sub, "eval" | "gpu-op") {
