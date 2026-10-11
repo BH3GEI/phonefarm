@@ -1172,7 +1172,7 @@ mod tests {
         assert!(witness(&r,"com.example.game","UnityGfxDeviceW").unwrap().filters_clear);
         let bad=r.replace("# Available triggers:\n", "# Available triggers:\ntraceoff:unlimited\n");
         assert!(!witness(&bad,"com.example.game","UnityGfxDeviceW").unwrap().filters_clear);
-        let empty=r.replace("# Available triggers:\n", "");
+        let empty=r.replace("# Available triggers:\n", "").replace("# traceon traceoff\n", "");
         assert!(!witness(&empty,"com.example.game","UnityGfxDeviceW").unwrap().filters_clear);
     }
     #[test]
