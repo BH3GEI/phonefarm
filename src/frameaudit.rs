@@ -124,6 +124,9 @@ pub(crate) struct Sub {
     img: u32,
     mip: u32,
     layer: u32,
+    /// 0 = 颜色或深度, 1 = 模板。深度和模板的 load/store 各管各的 (实测原神 rp98:
+    /// 深度 DONT_CARE 但模板 LOAD), 混成一块会把读模板的 pass 误当覆盖, 进而误报白存。
+    asp: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -258,6 +261,14 @@ impl Timeline {
         Some(((im.w >> mip).max(1), (im.h >> mip).max(1)))
     }
 
+    /// 这张图有哪些 aspect: 深度+模板格式两个, 其余一个
+    fn aspects(&self, img: u32) -> &'static [u8] {
+        match self.imgs.get(&img).and_then(|i| fmt_bytes(i.fmt)) {
+            Some((c, st)) if c > 0.0 && st > 0.0 => &[0, 1],
+            _ => &[0],
+        }
+    }
+
     /// 把 [img, m0, nm, l0, nl] 引用展开成子资源 (255 = 剩余全部)
     fn expand(&self, r: &Value) -> Vec<Sub> {
         let a: Vec<u64> = r.as_array().map(|x| x.iter().filter_map(|y| y.as_u64()).collect()).unwrap_or_default();
@@ -273,7 +284,9 @@ impl Timeline {
         let mut v = Vec::new();
         for m in m0..m0 + nm.min(16) {
             for l in l0..l0 + nl.min(64) {
-                v.push(Sub { img, mip: m, layer: l });
+                for &asp in self.aspects(img) {
+                    v.push(Sub { img, mip: m, layer: l, asp });
+                }
             }
         }
         v
@@ -285,7 +298,14 @@ impl Timeline {
         if img == 0 {
             return None;
         }
-        Some(Sub { img, mip: a.get(1)?.as_u64()? as u32, layer: a.get(2)?.as_u64()? as u32 })
+        Some(Sub { img, mip: a.get(1)?.as_u64()? as u32, layer: a.get(2)?.as_u64()? as u32, asp: 0 })
+    }
+
+    /// 同 sub3, 但带上全部 aspect (拷贝/blit 一次搬深度和模板两块)
+    fn subs3(&self, v: &Value) -> Vec<Sub> {
+        Self::sub3(v)
+            .map(|s| self.aspects(s.img).iter().map(|&asp| Sub { asp, ..s }).collect())
+            .unwrap_or_default()
     }
 
     /// 一个事件按先后顺序对各子资源做了什么
@@ -310,28 +330,34 @@ impl Timeline {
                     if img == 0 {
                         continue;
                     }
-                    let s = Sub { img, mip: u(a, "m") as u32, layer: u(a, "l") as u32 };
-                    let full = self.mip_dims(img, s.mip).map(|(w, h)| e.w >= w && e.h >= h).unwrap_or(true);
-                    if u(a, "il") == 0 {
-                        out.push((s, Acc::Discard));
-                    }
+                    let base = Sub { img, mip: u(a, "m") as u32, layer: u(a, "l") as u32, asp: 0 };
+                    let full = self.mip_dims(img, base.mip).map(|(w, h)| e.w >= w && e.h >= h).unwrap_or(true);
                     let role = u(a, "ro");
-                    let lo = if role == 2 { 2 } else { u(a, "lo") };
-                    out.push((
-                        s,
-                        match lo {
-                            0 => Acc::Read,
-                            1 | 2 if full => Acc::Kill,
-                            1 | 2 => Acc::Read, // 只清/丢 render area 的一部分, 其余保留 = 当读
-                            _ => Acc::Read,     // NONE: 不碰, 内容保留
-                        },
-                    ));
-                    let st = u(a, "st");
-                    let produced = st == 0 || (fmt_bytes(u(a, "f") as u32).map(|b| b.1 > 0.0).unwrap_or(false) && u(a, "sst") == 0);
-                    if produced {
-                        out.push((s, Acc::Produce(Producer { ev: idx, att: ai })));
-                    } else if st == 1 {
-                        out.push((s, Acc::Discard));
+                    let has_st = fmt_bytes(u(a, "f") as u32).map(|b| b.0 > 0.0 && b.1 > 0.0).unwrap_or(false);
+                    // (aspect, loadOp, storeOp): 深度模板格式拆成两路
+                    let mut ops = vec![(0u8, if role == 2 { 2 } else { u(a, "lo") }, u(a, "st"))];
+                    if has_st {
+                        ops.push((1u8, u(a, "slo"), u(a, "sst")));
+                    }
+                    for (asp, lo, st) in ops {
+                        let s = Sub { asp, ..base };
+                        if u(a, "il") == 0 {
+                            out.push((s, Acc::Discard));
+                        }
+                        out.push((
+                            s,
+                            match lo {
+                                0 => Acc::Read,
+                                1 | 2 if full => Acc::Kill,
+                                1 | 2 => Acc::Read, // 只清/丢 render area 的一部分, 其余保留 = 当读
+                                _ => Acc::Read,     // NONE: 不碰, 内容保留
+                            },
+                        ));
+                        if st == 0 {
+                            out.push((s, Acc::Produce(Producer { ev: idx, att: ai })));
+                        } else if st == 1 {
+                            out.push((s, Acc::Discard));
+                        }
                     }
                 }
                 for x in r["wr"].as_array().cloned().unwrap_or_default() {
@@ -350,7 +376,7 @@ impl Timeline {
                 }
             }
             "copy_img" | "blit" | "resolve" | "buf2img" | "img2buf" | "clear_color" | "clear_ds" | "discard" => {
-                if let Some(s) = Self::sub3(&r["src"]) {
+                for s in self.subs3(&r["src"]) {
                     out.push((s, Acc::Read));
                 }
                 let dsts: Vec<Sub> = match e.kind.as_str() {
@@ -364,7 +390,7 @@ impl Timeline {
                         }
                     }
                     "img2buf" => vec![],
-                    _ => Self::sub3(&r["dst"]).into_iter().collect(),
+                    _ => self.subs3(&r["dst"]),
                 };
                 let ex = r["ex"].as_array().cloned().unwrap_or_default();
                 let (ew, eh) = (ex.first().and_then(|x| x.as_u64()).unwrap_or(0) as u32, ex.get(1).and_then(|x| x.as_u64()).unwrap_or(0) as u32);
@@ -437,7 +463,7 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
             let p = t.presents[fi];
             if p != 0 {
                 // 用越界的虚拟下标 (evs.len()+帧号) 代表 present, 免得和帧内最后一个事件撞号
-                seq.entry(Sub { img: p, mip: 0, layer: 0 }).or_default().push((t.evs.len() + fi, Acc::Read));
+                seq.entry(Sub { img: p, mip: 0, layer: 0, asp: 0 }).or_default().push((t.evs.len() + fi, Acc::Read));
             }
         }
     }
@@ -480,7 +506,7 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
                             frame: ev.frame,
                             ev: *i,
                             att: Some(p.att),
-                            bytes: cs + ss,
+                            bytes: if s.asp == 1 { ss } else { cs },
                             ms: None,
                             certain,
                             why: format!(
@@ -524,7 +550,11 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
                     }
                     let atts = ev.raw["att"].as_array().cloned().unwrap_or_default();
                     let Some((ai, att)) = atts.iter().enumerate().find(|(_, a)| {
-                        u(a, "i") as u32 == s.img && u(a, "m") as u32 == s.mip && u(a, "l") as u32 == s.layer && u(a, "lo") == 0 && u(a, "ro") != 2
+                        u(a, "i") as u32 == s.img
+                            && u(a, "m") as u32 == s.mip
+                            && u(a, "l") as u32 == s.layer
+                            && u(a, if s.asp == 1 { "slo" } else { "lo" }) == 0
+                            && u(a, "ro") != 2
                     }) else {
                         continue;
                     };
@@ -534,7 +564,8 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
                     }
                     let prev = list[..k].iter().rev().find(|(j, _)| j != i).copied();
                     let own_discard = list[..k].iter().any(|(j, x)| j == i && *x == Acc::Discard);
-                    let (ld, sl, _, _) = t.att_bytes(ev, att);
+                    let (ld0, sl0, _, _) = t.att_bytes(ev, att);
+                    let (ld, sl) = if s.asp == 1 { (0.0, sl0) } else { (ld0, 0.0) };
                     if own_discard || matches!(prev, Some((_, Acc::Discard))) {
                         out.push(Finding {
                             rule: "useless_load",
@@ -678,7 +709,7 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
             certain: true,
             why: format!(
                 "{} ({}) 只在 pass 内用、从不被别的步骤读: 可建成 LAZILY_ALLOCATED/transient; 当前每帧仍写回 {:.0} KB",
-                img_tag(t, &Sub { img, mip: 0, layer: 0 }),
+                img_tag(t, &Sub { img, mip: 0, layer: 0, asp: 0 }),
                 fmt_name(im.fmt),
                 stored / 1e3
             ),
@@ -691,9 +722,10 @@ pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
 fn img_tag(t: &Timeline, s: &Sub) -> String {
     match t.imgs.get(&s.img) {
         Some(im) => format!(
-            "图#{}{} {}x{}{}{}{}",
+            "图#{}{}{} {}x{}{}{}{}",
             s.img,
             if im.swap { "(屏幕)" } else { "" },
+            if s.asp == 1 { "(模板)" } else { "" },
             im.w,
             im.h,
             if im.samples > 1 { format!(" x{}MSAA", im.samples) } else { String::new() },
@@ -788,10 +820,11 @@ fn ev_line(t: &Timeline, i: usize) -> String {
                 stb += a3 + a4;
             }
             format!(
-                "| {} | pass rp{}{} | {}x{} | {} | {} | {} | {:.0} / {:.0} | {} |",
+                "| {} | pass rp{}{}{} | {}x{} | {} | {} | {} | {:.0} / {:.0} | {} |",
                 i,
                 u(r, "rp"),
                 if r["dyn"].as_bool() == Some(true) { " (dyn)" } else { "" },
+                r["sig"].as_str().map(|x| format!("<br>`{x}`")).unwrap_or_default(),
                 ev.w,
                 ev.h,
                 atts.join("<br>"),
@@ -1099,11 +1132,11 @@ mod tests {
         assert_eq!(t.evs[0].ms, Some(2.0)); // (3000-1000) 个 tick × 1000ns = 2ms
         let fs = find(&t);
         let dead: Vec<_> = fs.iter().filter(|x| x.rule == "dead_store" && x.frame == 0).collect();
-        // 深度 #2 白存 (D24 3B + S8 1B) x 100x100 = 40000 字节; 颜色 #1 被读, 不算
-        assert_eq!(dead.len(), 1, "{fs:#?}");
-        assert_eq!(dead[0].att, Some(1));
-        assert!(dead[0].certain);
-        assert!((dead[0].bytes - 40000.0).abs() < 1e-6);
+        // 深度 #2 白存: 深度 3B + 模板 1B, aspect 分开记两条, 合计 40000 字节; 颜色 #1 被读, 不算
+        assert_eq!(dead.len(), 2, "{fs:#?}");
+        assert!(dead.iter().all(|x| x.att == Some(1) && x.certain));
+        let tot: f64 = dead.iter().map(|x| x.bytes).sum();
+        assert!((tot - 40000.0).abs() < 1e-6);
         let ul: Vec<_> = fs.iter().filter(|x| x.rule == "useless_load").collect();
         assert_eq!(ul.len(), 2, "两帧各一次: {fs:#?}");
         assert!((ul[0].bytes - 50.0 * 50.0 * 8.0).abs() < 1e-6);
@@ -1121,6 +1154,25 @@ mod tests {
         assert_eq!(tr.len(), 1, "{fs:#?}");
         assert!(tr[0].why.contains("图#2"));
         assert!((tr[0].bytes - 40000.0).abs() < 1e-6);
+    }
+
+    /// 原神 rp103 -> rp98 实测形态: 前者 STORE 模板, 后者深度 DONT_CARE 但模板 LOAD。
+    /// 模板那份写回是有人读的, 不能报白存 (aspect 不拆开时会误报)。
+    #[test]
+    fn stencil_load_keeps_stencil_store_alive() {
+        let mut j = fixture();
+        for f in j["frames"].as_array_mut().unwrap() {
+            let evs = f["submits"][0]["cbs"][0]["ev"].as_array_mut().unwrap();
+            let reader = json!({"k":"pass","rp":9,"w":100,"h":100,"dr":1,
+                "att":[{"i":2,"m":0,"l":0,"f":129,"s":1,"lo":2,"st":1000301000,"slo":0,"sst":1000301000,"il":1000117000,"fl":1000117000,"ro":1}]});
+            evs.insert(1, reader);
+        }
+        let t = Timeline::from_json(&j).unwrap();
+        let fs = find(&t);
+        let dead: Vec<_> = fs.iter().filter(|x| x.rule == "dead_store" && x.frame == 0).collect();
+        assert_eq!(dead.len(), 1, "只剩深度那份白存: {fs:#?}");
+        assert!((dead[0].bytes - 30000.0).abs() < 1e-6);
+        assert!(!fs.iter().any(|x| x.rule == "transient_ok" && x.why.contains("图#2")), "{fs:#?}");
     }
 
     #[test]
