@@ -45,11 +45,14 @@ pub struct Args {
     pub serial: String,
     /// 确定性截断 (src/curtail.rs), 缺省开; `--no-curtail` 每组跑满 pairs 对。
     pub curtail: bool,
+    /// 每 N 组候选等冷一次 (缺省 1 = 每组都等, 与旧版一致)。N>1 时同一次降温后连跑 N 组,
+    /// 批内后面的组不再等冷 —— 组内 ABBA 照样对消热漂移, 但这几组开跑时比基线热, 见 README。
+    pub cool_every: u32,
 }
 
 const USAGE: &str = "用法: phonefarm autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]\n\
                      [--no-llm] [--probe-only] [--baseline-runs N] [--power-in-verdict auto|on|off]\n\
-                     [--serial S] [--no-curtail]  (SERIAL 环境变量亦可)";
+                     [--serial S] [--no-curtail] [--cool-every N]  (SERIAL 环境变量亦可)";
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut it = args.iter();
@@ -57,6 +60,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         (None, 2u32, 3u32, 5u32);
     let (mut no_llm, mut probe_only) = (false, false);
     let mut curtail = true;
+    let mut cool_every = 1u32;
     let mut baseline_runs = 2u32;
     let mut power_in_verdict = "auto".to_string();
     let mut serial = std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into());
@@ -69,6 +73,13 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--no-llm" => no_llm = true,
             "--probe-only" => probe_only = true,
             "--no-curtail" => curtail = false,
+            "--cool-every" => {
+                cool_every = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .filter(|n: &u32| *n >= 1)
+                    .ok_or(format!("--cool-every 要一个 >= 1 的整数\n{USAGE}"))?
+            }
             "--baseline-runs" => baseline_runs = it.next().and_then(|v| v.parse().ok()).unwrap_or(2),
             "--power-in-verdict" => {
                 power_in_verdict = it.next().cloned().unwrap_or_else(|| "auto".into())
@@ -91,6 +102,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         power_in_verdict,
         serial,
         curtail,
+        cool_every,
     })
 }
 
@@ -405,9 +417,12 @@ struct CandidateRun<'a> {
     cool_c: f64,
     workload: &'a Path,
     curtail: bool,
+    /// false = 批内连跑, 本组不等冷 (`--cool-every`)
+    cool_wait: bool,
 }
 
 fn run_candidate(r: &CandidateRun) -> PyVal {
+    let t_start = std::time::Instant::now();
     let (serial, cand, wl, outdir, pairs, temp_cap_c, power_available, metrics, cool_c, workload) =
         (r.serial, r.cand, r.wl, r.outdir, r.pairs, r.temp_cap_c, r.power_available, r.metrics, r.cool_c, r.workload);
     // 判定规则在看数据前已冻结 (rule.metrics + alpha/K), 截断只用同一张表
@@ -436,7 +451,18 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
     std::fs::write(outdir.join("snap_before.txt"), &snap_before).ok();
 
     // 等冷超时不作废本组: 组内 ABBA 已让两臂承受同样的残余热漂移, 只如实记录
-    let cool = wait_cool(serial, cool_c, COOL_TIMEOUT_S);
+    let cool = if r.cool_wait {
+        wait_cool(serial, cool_c, COOL_TIMEOUT_S)
+    } else {
+        let cur = read_soc_temp(serial);
+        log("批内连跑 (--cool-every): 本组不等冷, 开跑温度如实记录");
+        pyobj! {
+            "ok" => true, "skipped" => "批内连跑 (--cool-every), 本组不等冷",
+            "zone" => cur.as_ref().map(|c| PyVal::Str(c.0.clone())).unwrap_or(PyVal::Null),
+            "c" => cur.map(|c| PyVal::Float(c.1)).unwrap_or(PyVal::Null),
+            "waited_s" => 0.0,
+        }
+    };
     if matches!(cool.get("ok"), Some(PyVal::Bool(false))) {
         log(&format!(
             "等冷未达标 ({}), 仍按 ABBA 交替继续, 已记进证据",
@@ -691,6 +717,8 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
             PyVal::List(status_log.trim().lines().map(|l| PyVal::Str(l.into())).collect()),
         ),
         ("cooldown".into(), cool),
+        // 本组从下发 plan 到还原核对完的墙钟秒数 (提速前后对比用)
+        ("wall_s".into(), PyVal::Float(py_round(t_start.elapsed().as_secs_f64(), 1))),
         (
             "charge_suspend_log".into(),
             PyVal::List(charge_log.trim().lines().map(|l| PyVal::Str(l.into())).collect()),
@@ -1037,15 +1065,28 @@ pub fn run_autoloop(args: &[String]) -> i32 {
     let mut history: Vec<PyVal> = Vec::new();
     let mut all_results: Vec<PyVal> = Vec::new();
     let mut session_keys: Vec<String> = Vec::new();
+    let mut cand_seq = 0u32; // 跨代的候选序号, 决定哪一组等冷 (--cool-every)
+    let mut timing: Vec<PyVal> = Vec::new();
+    let t_loop = std::time::Instant::now();
 
     for gen in 1..=a.generations {
         log(&format!("=== 第 {gen} 代 ==="));
         let gdir = out.join(format!("gen{gen}"));
         let _ = std::fs::create_dir_all(&gdir);
+        let t_gen = std::time::Instant::now();
+
+        // 主机侧与设备重叠: 大模型出方案的这段时间设备本来就闲着, 让它同时等冷。
+        // 只读热区温度, 不写设备; 本代第一组 run_candidate 的等冷随之几乎为零。
+        // 等冷目标、超时与 run_candidate 里完全相同, 判定口径不变。
+        let precool = (!keys.is_empty() && cand_seq.is_multiple_of(a.cool_every)).then(|| {
+            let s = serial.clone();
+            std::thread::spawn(move || wait_cool(&s, cool_target, COOL_TIMEOUT_S))
+        });
 
         // 6) 大模型挑参数 (失败降级到本地变异器)
         let mut cands: Vec<Candidate> = Vec::new();
         let mut source = "local_mutate".to_string();
+        let t_llm = std::time::Instant::now();
         if !keys.is_empty() {
             let prompt = llm::build_prompt(&wl_desc, &history, a.children as usize, "");
             std::fs::write(gdir.join("prompt.txt"), &prompt).ok();
@@ -1082,6 +1123,14 @@ pub fn run_autoloop(args: &[String]) -> i32 {
                 }
             }
         }
+        let llm_s = py_round(t_llm.elapsed().as_secs_f64(), 1);
+        let precool_res = precool.map(|h| {
+            h.join()
+                .unwrap_or_else(|_| pyobj! { "ok" => false, "reason" => "等冷线程异常退出" })
+        });
+        if let Some(pc) = &precool_res {
+            log(&format!("出方案 {llm_s}s, 同时等冷: {}", dumps_indent(pc, 0).replace('\n', " ")));
+        }
         let cands_json = pyobj! {
             "source" => source.clone(),
             "candidates" => PyVal::List(valid.iter().map(|c| c.to_pyval()).collect()),
@@ -1109,7 +1158,9 @@ pub fn run_autoloop(args: &[String]) -> i32 {
                 cool_c: cool_target,
                 workload: &workload,
                 curtail: a.curtail,
+                cool_wait: cand_seq.is_multiple_of(a.cool_every),
             });
+            cand_seq += 1;
             for k in touched_keys(&cand.params, &wl) {
                 if !session_keys.contains(&k) {
                     session_keys.push(k);
@@ -1145,7 +1196,14 @@ pub fn run_autoloop(args: &[String]) -> i32 {
             entry.push(("cand".into(), PyVal::Int(ci as i64 + 1)));
             all_results.push(PyVal::Obj(entry));
         }
+        timing.push(pyobj! {
+            "gen" => gen as i64,
+            "propose_s" => llm_s,
+            "precool_during_propose" => precool_res.unwrap_or(PyVal::Null),
+            "wall_s" => py_round(t_gen.elapsed().as_secs_f64(), 1),
+        });
     }
+    let loop_wall_s = py_round(t_loop.elapsed().as_secs_f64(), 1);
 
     // 8) 收尾: 强制还原 (旋钮 + 充电) + 全局快照比对
     let _ = charge_restore(&serial);
@@ -1237,6 +1295,12 @@ pub fn run_autoloop(args: &[String]) -> i32 {
         "final_snapshot_identical" => ours_identical,
         "final_snapshot_strict_identical" => strict_identical,
         "final_snapshot_diff" => final_sd,
+        "timing" => pyobj! {
+            "generations" => PyVal::List(timing),
+            "loop_wall_s" => loop_wall_s,
+            "cool_every" => a.cool_every as i64,
+            "curtail" => a.curtail,
+        },
     };
     std::fs::write(out.join("report.json"), dumps_indent(&report, 1)).ok();
     log(&format!(
@@ -1257,6 +1321,23 @@ pub fn run_autoloop(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use crate::sysparam::{build_whitelist, parse_probe};
+
+    fn args(xs: &[&str]) -> Result<Args, String> {
+        parse_args(&xs.iter().map(|x| x.to_string()).collect::<Vec<_>>())
+    }
+
+    /// 提速开关的缺省值必须是旧行为 (每组等冷); 截断缺省开。
+    #[test]
+    fn speed_flags_default_and_parse() {
+        let a = args(&["--out", "x"]).unwrap();
+        assert_eq!(a.cool_every, 1);
+        assert!(a.curtail);
+        let a = args(&["--out", "x", "--cool-every", "3", "--no-curtail"]).unwrap();
+        assert_eq!(a.cool_every, 3);
+        assert!(!a.curtail);
+        assert!(args(&["--out", "x", "--cool-every", "0"]).is_err());
+        assert!(args(&["--out", "x", "--cool-every"]).is_err());
+    }
 
     // 与 loop_v1/auto/test_auto.py 同一份 PROBE (白名单/判定口径那部分已搬去
     // sysparam.rs, 这里只需要它造一份测试用的表)
