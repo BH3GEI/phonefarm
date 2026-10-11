@@ -317,3 +317,11 @@ then read the complete initial snapshot and construct the sibling restore graph.
 All steps hold the same lease and precede installation or control writes. No
 post-write snapshot can replace the frozen restore target. Later full snapshot
 equality, conditions freeze, raw chronology and restoration gates stay strict.
+
+Every loaded prepare probe revalidates a fresh typed snapshot against the frozen
+profile and warmup reference immediately before invoking its worker. The worker
+also runs the exact frozen `thermal_sample.sh` before each probe apply, including
+ordinary prepare probes, and at the readback hold boundaries. Failed or unknown
+checks precede control writes or trigger owned cleanup; earlier warmup and later
+baseline rejection do not substitute for this per-write admission. Raw probe
+thermal receipts remain capability evidence, not performance samples.

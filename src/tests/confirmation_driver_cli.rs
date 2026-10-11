@@ -1118,3 +1118,82 @@ fn loaded_restore_target_is_post_warmup_state_before_remote_writes_for_probe_and
         assert!(warmup < snapshot && snapshot < installation);
     }
 }
+
+#[test]
+fn loaded_prepare_checks_fresh_profile_after_install_before_first_control_write() {
+    let f = F::new(false);
+    let mut req = f.read("request.json");
+    req["temperature_profile_id"] = json!("loaded_steady_v1");
+    req["goal"] = json!("render_cadence");
+    f.write("request.json", &req);
+    let (code, v) = f.prepare("thermal_hot_before_probe");
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["status"], "BLOCKED");
+    assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    let argv = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
+    assert!(argv.contains("mkdir "));
+    assert!(!argv.contains("'probe' 'probe_0'"));
+    assert!(!f.dir.join("session/admission-0-bundle.json").exists());
+}
+
+#[test]
+fn actual_remote_prepare_probe_rechecks_thermal_before_apply_without_transport() {
+    // Execute the exact production case body with host-owned stubs. No Android device.
+    let source = include_str!("../../loop_v1/tools/confirmation_worker.sh");
+    let body = source
+        .split("  probe|control_probe)\n")
+        .nth(1)
+        .unwrap()
+        .split("    ;;\n  sample)")
+        .next()
+        .unwrap();
+    for (mode, thermal_exit, should_apply) in [
+        ("probe", 82, false),
+        ("probe", 0, true),
+        ("control_probe", 82, false),
+    ] {
+        let f = F::new(false);
+        let worker_dir = f.dir.join("worker");
+        std::fs::create_dir_all(worker_dir.join("probe_0")).unwrap();
+        std::fs::write(
+            worker_dir.join("thermal_sample.sh"),
+            format!("#!/bin/sh\nexit {thermal_exit}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            worker_dir.join("probe_0.plan.tsv"),
+            "gpu.min_pwrlevel\tsysfs\t/mock/min_pwrlevel\t3\n",
+        )
+        .unwrap();
+        let script = format!(
+            r#"set -eu
+D=$1; R="$D/probe_0"; RUN=probe_0; MODE=$2
+intent() {{ :; }}
+mkdir() {{ :; }}
+snapshot() {{ :; }}
+cleanup_failure() {{ :; }}
+apply_plan() {{ printf 'applied\n' > "$D/applied"; }}
+read_value() {{ printf '3\n'; }}
+sleep() {{ :; }}
+restore_controls() {{ :; }}
+restore_trace() {{ :; }}
+release_master() {{ :; }}
+{body}"#
+        );
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(script)
+            .arg("owned-probe-check")
+            .arg(&worker_dir)
+            .arg(mode);
+        let out = cmd.output().unwrap();
+        f.receipt("actual-worker-thermal-gate", &cmd, &out);
+        assert_eq!(
+            worker_dir.join("applied").exists(),
+            should_apply,
+            "mode={mode}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.status.success(), should_apply);
+    }
+}

@@ -54,6 +54,7 @@ def thermal_raw(step=5,up=None):
     out=f'#phonefarm_thermal_sample v1\nUPTIME\t{up}\n'
     for path,v in [('/sys/class/thermal/thermal_zone0/temp',80000),('/sys/class/thermal/thermal_zone1/temp',60000),('/sys/class/thermal/thermal_zone2/temp',50000),('/sys/class/power_supply/battery/temp',390)]:
         if fail=='thermal_missing' and 'battery' in path:continue
+        if fail=='thermal_hot_before_probe' and state['files'] and 'thermal_zone0' in path:v=92000
         out+=f'TEMP\t{path}\t{v}\n'
     return out+'#hal_begin\n'+thermal_hal()+'#hal_end\n#end\n'
 args=sys.argv[1:];assert args[:2]==['-s','fake-target'] and args[2]=='shell'
