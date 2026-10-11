@@ -32,6 +32,7 @@ mod devlock;
 mod eval;
 mod fold;
 mod gamepad;
+mod frameaudit;
 mod grayab;
 mod graylayer;
 mod shotdiff;
@@ -214,8 +215,10 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
-灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop [pkg] | target <pkg> | status | off} [--keep-prop]
+灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop|frameaudit|frameaudit-ts [pkg] | target <pkg> | status | off} [--keep-prop] [--so 层.so]
        (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
+       frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 层.so]   (只读层抓原神一帧步骤清单)
+       frame-audit analyze <knobs_frameaudit.json>... [--md F] [--json F]           (离线: 步骤总览 + 白存/白读/白清/白画)
        gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
        (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
@@ -713,6 +716,10 @@ fn main() {
         Some("gray-ab") => {
             // 灰档 A/B 采集编排 (两臂都挂层只切属性; 每臂重启原神)
             std::process::exit(grayab::run_gray_ab(&args[1..]));
+        }
+        Some("frame-audit") => {
+            // 一帧步骤清单: capture 真机抓 (只读层) / analyze 离线找多余步骤
+            std::process::exit(frameaudit::run_frame_audit(&args[1..]));
         }
         Some("gray-layer") => {
             // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)
