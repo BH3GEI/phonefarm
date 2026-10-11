@@ -1,0 +1,64 @@
+[
+  {
+    "args": [
+      "gray-artifact",
+      "inspect",
+      "--spirv",
+      "missing",
+      "--process-supervision",
+      "inherited-group"
+    ],
+    "exit": 2,
+    "stderr": "{\"error\":\"argument does not apply to subcommand\",\"state\":\"failed\"}\n",
+    "stdout": ""
+  },
+  {
+    "args": [
+      "gray-artifact",
+      "adapt-storage",
+      "--source",
+      "missing",
+      "--spirv",
+      "missing",
+      "--out",
+      "missing",
+      "--process-supervision",
+      "inherited-group"
+    ],
+    "exit": 2,
+    "stderr": "{\"error\":\"unknown argument --process-supervision\",\"state\":\"failed\"}\n",
+    "stdout": ""
+  },
+  {
+    "args": [
+      "gray-artifact",
+      "build",
+      "--source",
+      "missing",
+      "--out",
+      "missing",
+      "--process-supervision",
+      "inherited-group"
+    ],
+    "exit": 2,
+    "stderr": "{\"error\":\"inherited-group requires an explicit --ndk path\",\"state\":\"failed\"}\n",
+    "stdout": ""
+  },
+  {
+    "args": [
+      "gray-artifact",
+      "build",
+      "--source",
+      "missing",
+      "--out",
+      "missing",
+      "--ndk",
+      "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/system_handoff_20261011/build_supervision_review/blocked-stderr-ndk",
+      "--process-supervision",
+      "inherited-group"
+    ],
+    "exit": 2,
+    "stderr": "{\"error\":\"inherited-group requires phonefarm to lead a fresh isolated process group owned by an outer supervisor\",\"state\":\"failed\"}\n",
+    "stdout": ""
+  }
+]

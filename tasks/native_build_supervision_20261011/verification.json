@@ -1,0 +1,72 @@
+{
+  "schema": "phonefarm/native_build_supervision_acceptance@1",
+  "scope": "actual phonefarm child processes with controlled fake NDK tools; offline mechanism only",
+  "base": "6cde2b1cd86835519a15a1d26d941081c8dcf4ca",
+  "source_files_sha256": {
+    "src/grayartifact.rs": "3dff28eac87a4a82716290a2d1f3530d8d34f48760a1488b800d1521d722e19d",
+    "src/main.rs": "93ed9e23a97efe8bddd20fec29392a0d0c33dbe2219f55237b60878dab15ec68",
+    "src/tests/gray_artifact_process.rs": "ad3900c0920f70083b2c1e447fb9284e10d525b552ac5f13f572e66458458ef5",
+    "docs/SPEC_NATIVE_BUILD_SUPERVISION.md": "eec86d0cf97a336f46e142116a8bc0795ab5d53b3ec0f1f828f75b3eab38b4f1"
+  },
+  "cargo_test": {
+    "exit": 0,
+    "groups": [
+      513,
+      15,
+      1,
+      6
+    ],
+    "total": 535,
+    "log": "fixed-cargo-test.log"
+  },
+  "clippy": {
+    "exit": 0,
+    "warnings_as_errors": false,
+    "log": "fixed-clippy.log",
+    "new_supervision_file_warnings": []
+  },
+  "contracts": {
+    "tools_inherit_launcher_group": true,
+    "requires_launcher_group_leader": true,
+    "requires_explicit_ndk": true,
+    "version_and_compile_timeouts": "whole inherited group terminated; outer non-success",
+    "output_overflow": "whole inherited group terminated; outer non-success",
+    "closed_pipe_background_descendant": "launcher success but outer rejected",
+    "artifact_state": "built_offline_outer_quiescence_required",
+    "outer_quiescence_verified": false,
+    "default_identity_compatibility": "standalone descriptor omits new default field",
+    "failure_termination_precedes_diagnostic_io": true
+  },
+  "independent_review": {
+    "status": "passed_after_counterexample_fix",
+    "log": "independent_review/REVIEW.md",
+    "original_failure": "independent_review/blocked-stderr-result.json",
+    "fixed_receipt": "independent_review/fixed-stderr-result.json",
+    "full_unread_stderr_bytes": 65536,
+    "tool_timeout_seconds": 1,
+    "elapsed_seconds": 1.0270942081697285,
+    "outer_kill_needed": false,
+    "group_absent": true
+  },
+  "not_run": [
+    "real Android NDK build",
+    "real GOL supervised native construction",
+    "GPU execution",
+    "device operations"
+  ],
+  "device_operations": 0,
+  "real_training_runs": 0,
+  "model_api_calls": 0,
+  "deployable": false,
+  "gpu_validated": false,
+  "real_game_optimization_proven": false,
+  "promotion_allowed": false,
+  "limits": [
+    "trusted helpers must not deliberately detach",
+    "outer supervisor crash remains UNKNOWN",
+    "NDK helper dependencies/sysroot authenticity not attested",
+    "PF artifact verifier cannot grant outer quiescence"
+  ],
+  "source_commit": "86f3ab940843bfc93a4646ff9ab5645e64b21ae4",
+  "binary_sha256": "db1721a7779741367f974b27d57e398b1392cd08fb4c16972e95015a5fe65005"
+}
