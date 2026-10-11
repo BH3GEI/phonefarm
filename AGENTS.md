@@ -53,7 +53,9 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ./phonefarm keepalive [--status|--watch]   # 农场级保活：唤醒 + 解锁 + 不息屏
 ./phonefarm fleet [--json]                 # 农场只读快照：每台手机的在线/型号/电量/温度/风扇/
                                            # 前台应用/保活策略 + 设备锁。别人持锁时自动降成
-                                           # 只读 sysfs 的轻量档，不跑 dumpsys
+                                           # 只读 sysfs 的轻量档，不跑 dumpsys（锁在 $DEVLOCK_LABEL
+                                           # 或 --lock-label 名下时算自己的，走完整档）
+tools/devlock status                       # 设备锁：谁持有、谁在排队（碰设备的子命令自己拿锁）
 ./phonefarm probe --serial S "只读命令"     # 只读调试通道
 ./phonefarm exec --serial S "命令" --yes    # 写操作通道，高危，必须显式 --yes
 ```
@@ -180,6 +182,11 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
    - 同一个候选的 A/B 两臂必须落在**同一台**手机上。跨机比较会把机间差异算进改动的效果里。
    - 设备是共享资源，跑之前用设备锁 `devlock` 抢占（拿锁 → 后台心跳续期 → 跑完释放）。
      被别人占着时排队，不要绕过去硬跑——两个任务同时压一台手机，两边的数都作废。
+     锁脚本在 `tools/devlock`（安装：`ln -sf "$PWD/tools/devlock" ~/.local/bin/devlock`）。
+     碰设备的子命令自己拿锁（`src/devlock.rs`，通用参数 `--lock-label` / `--lock-wait` / `--no-devlock`，
+     label 缺省取 `$DEVLOCK_LABEL` 再缺省 `phonefarm`），不必在外面包 `devlock run`；
+     锁已在同一 label 手里时原地执行，所以外面包了 `devlock run <label>` 也不会自己等自己。
+     lead 预排了队列时 label 用队列里的名字。
    - 影响稳态的环境条件（风扇开关、冷机阈值、供电状态）逐轮记进证据。这些不是无关细节，
      条件不同的两批数据不能混在一起比。
    - 规划中的设备构成：安卓旗舰机（一台跑测试、一台留给调试，要并行跑多条线得是同型号多台）、

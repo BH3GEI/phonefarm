@@ -1,0 +1,57 @@
+#!/bin/zsh
+# 手机设备锁（原子 mkdir + 心跳 + 排队）。所有碰手机的命令都必须经过它。
+#   devlock status                 谁持有、谁在排队
+#   devlock acquire <label>        拿到返回0; 被占或没轮到返回1, 并自动排进队尾
+#   devlock renew   <label>        续期(持锁期间至少每5分钟一次)
+#   devlock release <label>
+#   devlock run <label> -- <cmd…>  拿锁→后台每60秒续期→跑命令→释放; 没拿到返回1
+#   devlock queue <l1> <l2> …      lead 预排队列(覆盖); 不带参数则清空
+# 队列非空时只有队首能拿锁。心跳超过 STALE 秒(默认600)视为废弃可接管; 队首超过 STALE 秒没来重试会被跳过。
+# 文件格式与 phonefarm/src/fleet.rs 只读的三个文件一致: devlock.d/owner, devlock.queue, devlock.log。
+# run 会把 DEVLOCK_LABEL=<label> 传给命令: 里面再调 phonefarm / game_opt_loop 时它们认得这把锁是自己这一侧的,
+# 不会再去排一次队 (否则自己等自己)。phonefarm 与 game_opt_loop 碰设备的入口会自己拿锁, 一般不必再包 run。
+B=${DEVLOCK_DIR:-/private/tmp/claude-501}; mkdir -p $B
+D=$B/devlock.d; LOG=$B/devlock.log; Q=$B/devlock.queue; SEEN=$B/devlock.seen; M=$B/devlock.qmutex
+STALE=${DEVLOCK_STALE:-600}
+now(){ date +%s; }
+ts(){ date '+%F %T'; }
+age(){ echo $(( $(now) - $(stat -f %m "$D/owner") )); }
+owner(){ cat "$D/owner" 2>/dev/null; }
+mine(){ [[ "$(owner)" == "$1 "* ]]; }
+qlock(){ local i=0; until mkdir $M 2>/dev/null; do (( ++i > 100 )) && { rm -rf $M; }; sleep 0.1; done; }
+qunlock(){ rm -rf $M; }
+qhead(){ [[ -s $Q ]] && grep -v '^[[:space:]]*$' $Q | head -1; }
+qhas(){ [[ -f $Q ]] && grep -qx -- "$1" $Q; }
+qappend(){ qhas $1 || echo $1 >> $Q; }
+qdrop(){ [[ -f $Q ]] && { grep -vx -- "$1" $Q > $Q.tmp; mv $Q.tmp $Q; }; }
+seen(){ grep -v "^$1 " $SEEN 2>/dev/null > $SEEN.tmp; echo "$1 $(now)" >> $SEEN.tmp; mv $SEEN.tmp $SEEN; }
+seen_age(){ local t=$(grep "^$1 " $SEEN 2>/dev/null | tail -1 | cut -d' ' -f2); [[ -n $t ]] && echo $(( $(now) - t )) || echo 0; }
+take(){ echo "$1 since $(ts)" > "$D/owner"; echo "$(ts) acquire $1" >> $LOG; qdrop $1; }
+acquire(){
+  local L=$1 h a
+  qlock; seen $L
+  h=$(qhead)
+  while [[ -n $h && $h != $L ]] && (( $(seen_age $h) > STALE )); do
+    echo "$(ts) skip $h (queue head idle $(seen_age $h)s)" >> $LOG; qdrop $h; h=$(qhead)
+  done
+  if [[ -n $h && $h != $L ]]; then qappend $L; qunlock; echo "not your turn (已自动排进队尾): head=$h"; return 1; fi
+  if mkdir "$D" 2>/dev/null; then take $L; qunlock; return 0; fi
+  [[ -f "$D/owner" ]] || { sleep 1; [[ -f "$D/owner" ]] || { take $L; qunlock; return 0; }; }
+  a=$(age)
+  if (( a > STALE )); then echo "$(ts) steal by $L from [$(owner)] idle ${a}s" >> $LOG; take $L; qunlock; return 0; fi
+  qappend $L; qunlock
+  echo "busy: $(owner) (heartbeat ${a}s ago); queued as $L"; return 1
+}
+case $1 in
+  status)
+    [[ -d $D ]] && echo "held: $(owner) (heartbeat $(age)s ago)" || echo free
+    [[ -s $Q ]] && echo "queue: $(grep -v '^[[:space:]]*$' $Q | tr '\n' ' ')"; true ;;
+  acquire) acquire $2 ;;
+  renew) mine $2 && touch "$D/owner" || { echo "not owner: $(owner)"; exit 1; } ;;
+  release) mine $2 && { rm -rf $D; echo "$(ts) release $2" >> $LOG; } || { echo "not owner: $(owner)"; exit 1; } ;;
+  queue) shift; qlock; : > $Q; for l in "$@"; do echo $l >> $Q; seen $l; done; qunlock; echo "$(ts) queue set: $*" >> $LOG ;;
+  run) L=$2; shift 3; acquire $L || exit 1
+       ( while mine $L; do touch "$D/owner"; sleep 60; done ) & HB=$!
+       DEVLOCK_LABEL=$L "$@"; rc=$?; kill $HB 2>/dev/null; mine $L && { rm -rf $D; echo "$(ts) release $L" >> $LOG; }; exit $rc ;;
+  *) sed -n 2,10p $0 ;;
+esac
