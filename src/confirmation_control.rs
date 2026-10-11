@@ -357,6 +357,176 @@ pub(crate) fn verify_artifact(artifact: &Value, probe: &str) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn actual_worker_ledger_rejects_partial_and_failed_reads_before_restore() {
+        use std::os::unix::process::CommandExt;
+        struct OwnedGroup(std::process::Child);
+        impl Drop for OwnedGroup {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::kill(-(self.0.id() as i32), libc::SIGKILL);
+                }
+                let _ = self.0.wait();
+            }
+        }
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let owned = OwnedGroup(command.spawn().unwrap());
+        let pid = owned.0.id();
+        assert_eq!(unsafe { libc::kill(-(pid as i32), 0) }, 0);
+        let dir = std::env::temp_dir().join(format!("phonefarm-ledger-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let source = include_str!("../loop_v1/tools/confirmation_worker.sh");
+        let checks = &source[source.find("ledger_complete() {").unwrap()
+            ..source.find("group_absent_remote() {").unwrap()];
+        let consumers =
+            &source[source.find("quiescent() {").unwrap()..source.find("apply_plan() {").unwrap()];
+        // This substitutes only host process-group inspection. It exercises the actual
+        // production shell parser/consumers, not Android /proc or worker acceptance.
+        let group_check = "group_absent_remote() { python3 -c 'import os,sys\ntry: os.killpg(int(sys.argv[1]),0)\nexcept ProcessLookupError: sys.exit(0)\nexcept Exception: sys.exit(1)\nelse: sys.exit(1)' \"$1\"; }\n";
+        let live = format!("workload\t{pid}\t123\t{}/workload.sh\n", dir.display());
+        let dead = format!("workload\t2147483647\t123\t{}/workload.sh\n", dir.display());
+        let pending = format!("workload\t{}/workload.sh\n", dir.display());
+        let malformed = [
+            live.trim_end_matches('\n').to_owned(),
+            String::new(),
+            live.replace("\t123\t", "\t\t"),
+            live.replace(&format!("\t{pid}\t"), "\t-1\t"),
+            live.replace("\n", "\textra\n"),
+            format!("{live}{live}"),
+        ];
+        let mut cases: Vec<(String, Option<String>, Option<String>, bool, &str, bool)> = vec![
+            ("no_children".into(), None, None, false, "quiescent", true),
+            (
+                "dead".into(),
+                Some(dead.clone()),
+                None,
+                false,
+                "quiescent",
+                true,
+            ),
+            (
+                "live".into(),
+                Some(live.clone()),
+                None,
+                false,
+                "quiescent",
+                false,
+            ),
+            (
+                "pending_partial".into(),
+                Some(live.clone()),
+                Some(pending.trim_end_matches('\n').into()),
+                false,
+                "quiescent",
+                false,
+            ),
+            (
+                "pending_valid_live".into(),
+                Some(live.clone()),
+                Some(pending.clone()),
+                false,
+                "quiescent",
+                false,
+            ),
+            (
+                "child_read_failure".into(),
+                Some(live.clone()),
+                None,
+                true,
+                "quiescent",
+                false,
+            ),
+            (
+                "dead_read_failure".into(),
+                Some(dead.clone()),
+                None,
+                true,
+                "quiescent",
+                false,
+            ),
+            (
+                "pending_read_failure".into(),
+                Some(dead.clone()),
+                Some(pending.clone()),
+                true,
+                "pending_known",
+                false,
+            ),
+            (
+                "stop_read_failure".into(),
+                Some(dead),
+                None,
+                true,
+                "stop_owned",
+                false,
+            ),
+        ];
+        for (i, value) in malformed.into_iter().enumerate() {
+            cases.push((
+                format!("malformed_{i}"),
+                Some(value),
+                None,
+                false,
+                "quiescent",
+                false,
+            ));
+        }
+        for (name, ledger, pending, read_failure, call, allowed) in cases {
+            let run = dir.join(name);
+            std::fs::create_dir(&run).unwrap();
+            if let Some(value) = ledger {
+                std::fs::write(run.join("children.tsv"), value).unwrap();
+            }
+            if let Some(value) = pending {
+                std::fs::write(run.join("launch-workload.pending"), value).unwrap();
+            }
+            let fault = if read_failure {
+                "read() { return 1; }\n"
+            } else {
+                ""
+            };
+            let script = format!("set -eu\nD={}; R={}\n{checks}\n{group_check}\n{consumers}\n{fault}\nif {call}; then printf RESTORE_ALLOWED; else printf UNKNOWN; fi\n",
+                crate::confirmation_transport::quote(dir.to_str().unwrap()),
+                crate::confirmation_transport::quote(run.to_str().unwrap()));
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", &script])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}: {}",
+                run.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                if allowed {
+                    "RESTORE_ALLOWED"
+                } else {
+                    "UNKNOWN"
+                },
+                "{}",
+                run.display()
+            );
+            assert_eq!(
+                unsafe { libc::kill(-(pid as i32), 0) },
+                0,
+                "parser must not kill owned live control"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn actual_remote_entry_intent_and_bootstrap_reject_terminal_session() {
         let dir = std::env::temp_dir().join(format!("phonefarm-revoked-{}", std::process::id()));
