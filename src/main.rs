@@ -29,6 +29,10 @@ mod device;
 mod eval;
 mod qualification;
 mod confirmation_observation;
+mod confirmation_control;
+mod confirmation_driver;
+mod confirmation_transport;
+mod devlease;
 mod fold;
 mod gamepad;
 mod grayab;
@@ -710,6 +714,8 @@ fn main() {
         Some("qualify") => {
             std::process::exit(qualification::run_qualify(&args[1..]));
         }
+        Some("confirmation-driver") => { std::process::exit(confirmation_driver::run_confirmation_driver(&args[1..])); }
+        Some("lease") => { std::process::exit(devlease::run_lease(&args[1..])); }
         Some("confirmation-observation") => {
             std::process::exit(confirmation_observation::run_confirmation_observation(&args[1..]));
         }
