@@ -308,14 +308,14 @@ case "$MODE" in
     intent mkdir "$R" ''; mkdir "$R"
     trap 'cleanup_failure' EXIT INT TERM
     snapshot snapshot_before
-    if [ "$MODE" = control_probe ] && [ -f "$D/thermal_sample.sh" ]; then sh "$D/thermal_sample.sh" >> "$R/thermal_hold.raw.tsv"; fi
+    if [ -f "$D/thermal_sample.sh" ]; then sh "$D/thermal_sample.sh" >> "$R/thermal_hold.raw.tsv"; fi
     apply_plan "$D/$RUN.plan.tsv"
     [ "$MODE" != control_probe ] || snapshot snapshot_at_run
     sleep 1
     while IFS="$(printf '\t')" read -r key kind path value; do
       [ "$(read_value "$kind" "$path")" = "$value" ] || exit 74
     done < "$D/$RUN.plan.tsv"
-    if [ "$MODE" = control_probe ] && [ -f "$D/thermal_sample.sh" ]; then
+    if [ -f "$D/thermal_sample.sh" ]; then
       sh "$D/thermal_sample.sh" >> "$R/thermal_hold.raw.tsv"
       sleep 5
       sh "$D/thermal_sample.sh" >> "$R/thermal_hold.raw.tsv"

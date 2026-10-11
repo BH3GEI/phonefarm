@@ -1152,6 +1152,10 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
     let mut actualprobe = probe.trim_end().to_owned() + "\n";
     for (i, _) in graph.probes.iter().enumerate() {
         let id = format!("probe_{i}");
+        if loaded {
+            let frozen = temperature::load_frozen(&out)?;
+            temperature::loaded_snapshot(&mut t, &lease, &out, &frozen, &format!("pre-{id}"))?;
+        }
         let done = worker(&mut t, &lease, &state, "probe", &id, "", 45)?;
         require(
             String::from_utf8_lossy(&done).trim() == "PROBE_COMPLETE",
