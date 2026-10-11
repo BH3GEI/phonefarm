@@ -22,6 +22,8 @@ const LOADOP_PROP: &str = "debug.knobs.loadop"; // 1 = 层把 loadOp LOAD 改写
 const DUMP_PROP: &str = "debug.knobs.passdump"; // 1 = 层导出 render pass 形状表
 const CP_PROP: &str = "debug.knobs.copyprobe"; // 1 = 1:1 拷贝探针 (隐含 passdump 追踪)
 const UPOP_PROP: &str = "debug.knobs.upop"; // 1 = 真超分算子 (gen1_loc3)
+/// Android 非只读属性值上限 91 字节 (PROP_VALUE_MAX 92 含结尾 0)。超了 setprop 会失败。
+pub(crate) const PROP_VALUE_MAX: usize = 91;
 pub(crate) const FA_PROP: &str = "debug.knobs.frameaudit"; // 1 = 一帧步骤清单 (只读, 隐含 passdump)
 pub(crate) const FA_TS_PROP: &str = "debug.knobs.frameaudit_ts"; // 1 = 步骤清单另插 GPU 时间戳
 pub(crate) const FA_GO_PROP: &str = "debug.knobs.frameaudit_go"; // 改成新编号 = 抓一次
@@ -32,6 +34,37 @@ const SO: &str = "libVkLayer_refknobs.so";
 const STATE: &str = "/data/local/tmp/knobs_layer_state"; // "把 .so 推进了哪个包"
 
 const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off} [--serial S] [--keep-prop] [--so 本机.so]";
+
+/// 「去掉多余写回」的属性串: 每项 (pass 特征码前缀, 附件下标) → "<sig>:<i>,…"。
+///
+/// 特征码前缀要 ≥8 位十六进制 (层只认这么长的前缀, 短了容易撞上别的 pass), 全串不能超过
+/// Android 属性值上限 —— 超了 setprop 静默失败, 层读到空串就当成关, 那一臂就成了对照臂。
+pub fn storeop_spec(items: &[(String, u32)]) -> Result<String, String> {
+    if items.is_empty() {
+        return Ok("0".into());
+    }
+    let mut parts = Vec::new();
+    for (sig, att) in items {
+        let sig = sig.trim().to_ascii_lowercase();
+        if sig.len() < 8 || sig.len() > 16 || !sig.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!("pass 特征码前缀要 8–16 位十六进制, 收到 {sig:?}"));
+        }
+        if *att > 31 {
+            return Err(format!("附件下标 {att} 不合理"));
+        }
+        parts.push(format!("{sig}:{att}"));
+    }
+    parts.sort();
+    parts.dedup();
+    let s = parts.join(",");
+    if s.len() > PROP_VALUE_MAX {
+        return Err(format!(
+            "写回改写指定串 {} 字节, 超过属性值上限 {PROP_VALUE_MAX}: 少放几项, 或把特征码前缀截短到 8 位",
+            s.len()
+        ));
+    }
+    Ok(s)
+}
 
 pub struct GrayLayer {
     serial: String,
@@ -236,6 +269,16 @@ impl GrayLayer {
             &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}; setprop {FA_PROP} {fa}; setprop {FA_TS_PROP} {fa_ts}; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} \"{rule}\"; setprop {STOREOP_LIVE_PROP} {live}; setprop {STOREOP_ON_PROP} 0'"),
             15,
         );
+    }
+
+
+    /// 挂层之后核对 storeop 规则真的写进了属性。写不进 (例如超长) 时层读到的是关,
+    /// 那一臂就成了对照臂 —— 拿 A 去和 A 比。
+    pub fn require_storeop(&self) -> Result<(), String> {
+        match &self.storeop {
+            Some((rule, _)) => self.require_prop(STOREOP_PROP, rule, "写回改写"),
+            None => Ok(()),
+        }
     }
 
     /// 某个属性档的回读核验: 写不进就拒绝按那一档继续 (静默退化会让自报失真)。
@@ -472,5 +515,30 @@ mod launch_tests {
         let raw = "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false\ncom.miHoYo.Yuanshen/com.miHoYo.GetMobileInfo.MainActivity\n#adb_exit=0";
         let act = GrayLayer::adb_stdout(raw).lines().rev().find(|l| !l.trim().is_empty()).unwrap();
         assert_eq!(act.trim(), "com.miHoYo.Yuanshen/com.miHoYo.GetMobileInfo.MainActivity");
+    }
+}
+
+#[cfg(test)]
+mod storeop_tests {
+    use super::storeop_spec;
+
+    #[test]
+    fn spec_joins_sorted_unique_items() {
+        let s = storeop_spec(&[
+            ("15A51A879DF99C32".into(), 2),
+            ("9d0b4db80bf552b8".into(), 0),
+            ("15a51a879df99c32".into(), 2),
+        ])
+        .unwrap();
+        assert_eq!(s, "15a51a879df99c32:2,9d0b4db80bf552b8:0");
+        assert_eq!(storeop_spec(&[]).unwrap(), "0");
+    }
+
+    #[test]
+    fn short_or_non_hex_sigs_and_overlong_specs_are_refused() {
+        assert!(storeop_spec(&[("1234567".into(), 0)]).is_err());
+        assert!(storeop_spec(&[("zzzzzzzz".into(), 0)]).is_err());
+        let many: Vec<(String, u32)> = (0..6).map(|i| ("0123456789abcdef".to_string(), i)).collect();
+        assert!(storeop_spec(&many).unwrap_err().contains("上限"));
     }
 }
