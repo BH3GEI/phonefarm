@@ -276,3 +276,20 @@ forbidden even if the helper itself is absent. Normal collection and full
 reconciliation verify frozen helper closure and current absence as part of the
 main execution closure. Prepared names include the native provenance files,
 preinstall/intent/closure receipts and all three baseline final raw witnesses.
+
+### Rejected baseline admission and observation diagnostics
+
+Queued-origin heldout measurements depend on the baseline-derived grouping.
+They must reconstruct and validate the admission before interpreting the heldout
+trace; invalid or synthetic admission never supplies a usable grouping.
+
+Historical comm-proxy observations have no such grouping dependency. After the
+conditions, frozen plan and complete arm raw bytes pass structural checks, the
+receiver retains their known legacy/loaded observation schema, purpose, raw
+thermal binding and mechanical diagnostics even when baseline admission later
+rejects. Rejection remains `BLOCKED`, `valid_observation=false`,
+`baseline_admission_verified=false` and `eligible=false`; it cannot promote a
+synthetic session or bypass any baseline, chronology, purpose or thermal rule.
+Malformed/mixed conditions and capability-only profiles still reject before
+these diagnostics. Do not relabel a known loaded arm as legacy merely because
+its separate baseline admission is ineligible.

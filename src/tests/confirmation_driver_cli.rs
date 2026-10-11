@@ -1037,6 +1037,17 @@ fn loaded_cadence_driver_freeze_ten_arms_and_actual_judge_cannot_promote_synthet
             assert_eq!(report["status"], "BLOCKED");
             assert_eq!(report["qualification"]["version"], 2);
             assert_eq!(report["qualification"]["eligible"], false);
+            assert_eq!(report["qualification"]["evidence_origin"], "synthetic");
+            assert_eq!(report["qualification"]["policy"]["version"], 2);
+            assert_eq!(report["sample_qualification"]["valid_observation"], false);
+            assert_eq!(
+                report["sample_qualification"]["gates"]["baseline_admission_verified"],
+                false
+            );
+            assert!(report["issues"].as_array().unwrap().iter().any(|v| v
+                .as_str()
+                .unwrap_or("")
+                .contains("baseline admission arm not independently valid")));
             assert_eq!(
                 report["confirmation_binding"]["thermal_contract"]["profile_id"],
                 "loaded_steady_v1"

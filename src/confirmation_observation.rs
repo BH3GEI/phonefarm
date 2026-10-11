@@ -1433,18 +1433,25 @@ fn reconstruct(path: &Path, reader: &mut Reader, out: &mut Value) -> Result<(), 
     let run_base=run_path.parent().ok_or("run parent missing")?.to_path_buf();
     let (_,conditions): (_,Conditions)=reader.json(&run_base,&raw_run.conditions)?;
     conditions_valid(&conditions)?;frozen_valid(&f,&conditions)?;
-    let admitted=admission(reader,base,&b.baseline_admission,&f,&conditions)?;
-    let run = load_run(reader, base, &b.run, admitted.render.as_ref())?;
+    // Only attributed measurements need baseline grouping before the arm can
+    // be interpreted. Preserve structurally checked legacy/loaded diagnostics
+    // when their separate admission is later rejected; never relax admission.
+    let admitted = if conditions.render_attribution.is_some() {
+        Some(admission(reader, base, &b.baseline_admission, &f, &conditions)?)
+    } else {
+        None
+    };
+    let run = load_run(reader, base, &b.run, admitted.as_ref().and_then(|a| a.render.as_ref()))?;
     let m = &run.manifest;
     let c = &run.conditions;
     if c.policy.version == 2 {
         out["schema"] = json!("phonefarm/confirmation_observation@2");
         out["sample_qualification"]["schema"] =
             json!("phonefarm/confirmation_sample_qualification@2");
-        out["qualification"]["version"] = json!(2);
-        out["qualification"]["policy"] =
-            serde_json::to_value(&c.policy).map_err(|e| e.to_string())?;
     }
+    out["qualification"]["version"] = json!(c.policy.version);
+    out["qualification"]["policy"] =
+        serde_json::to_value(&c.policy).map_err(|e| e.to_string())?;
     out["qualification"]["evidence_origin"] = json!(if matches!(
         m.evidence_origin.as_str(),
         "recorded_device" | "live_device"
@@ -1538,7 +1545,12 @@ fn reconstruct(path: &Path, reader: &mut Reader, out: &mut Value) -> Result<(), 
         raw_hashes.iter().collect::<BTreeSet<_>>().len() == raw_hashes.len(),
         "independent trace/env/thermal reading raw bytes reused",
     )?;
-    // Admission was reconstructed before any heldout grouping/measurement.
+    let admitted = match admitted {
+        Some(admitted) => admitted,
+        None => admission(reader, base, &b.baseline_admission, &f, c)?,
+    };
+    // Attributed grouping depends on prior admission. Every route requires
+    // valid admission before it can grant a valid heldout observation.
     require(
         run.uptime.0 > admitted.capture_end && run.env_window.first_uptime.is_some_and(|t|t>admitted.env_end),
         "same-boot confirmation capture uptime and entire ENV window must follow all admission windows",

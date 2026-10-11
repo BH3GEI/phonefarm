@@ -1134,6 +1134,60 @@ fn loaded_raw_cli_missing_window_bad_exit_and_over_cap_are_blocked() {
 }
 
 #[test]
+fn rejected_admission_retains_known_legacy_or_loaded_diagnostics_without_qualification() {
+    for loaded in [false, true] {
+        let mut f = if loaded { Fixture::loaded() } else { Fixture::new() };
+        if loaded {
+            let mut evidence = f.s.read("thermal-evidence.json");
+            evidence["clock_scope"] = json!("synthetic_virtual_timing");
+            let mut conditions = f.s.read("conditions.json");
+            conditions["thermal_contract"] = f.s.json("thermal-evidence.json", &evidence);
+            f.replace_conditions(conditions);
+        }
+        let mut admission = f.s.read("admission.json");
+        for (index, name) in ["explore1.json", "explore2.json", "explore3.json", "run.json"].iter().enumerate() {
+            let mut run = f.s.read(name);
+            run["evidence_origin"] = json!("synthetic");
+            let reference = f.s.json(name, &run);
+            if index < 3 {
+                admission["runs"][index] = reference;
+            } else {
+                f.update_run(&run);
+            }
+        }
+        f.admission = f.s.json("admission.json", &admission);
+        f.freeze();
+        let (code, r) = f.output(if loaded { "loaded-admission-blocked" } else { "legacy-admission-blocked" });
+        blocked(code, &r);
+        assert_eq!(r["schema"], if loaded { "phonefarm/confirmation_observation@2" } else { "phonefarm/confirmation_observation@1" });
+        assert_eq!(r["qualification"]["version"], if loaded { 2 } else { 1 });
+        assert_eq!(r["qualification"]["policy"]["version"], if loaded { 2 } else { 1 });
+        assert_eq!(r["sample_qualification"]["gates"]["baseline_admission_verified"], false);
+        assert!(r["confirmation_binding"].is_object());
+        assert_eq!(r["confirmation_binding"].get("thermal_contract").is_some(), loaded);
+        assert!(r["issues"].to_string().contains("baseline admission arm not independently valid"), "loaded={loaded}: {r:#}");
+        assert_eq!(r["real_game_optimization_proven"], false);
+        assert_eq!(r["promotion_allowed"], false);
+    }
+}
+
+#[test]
+fn rejected_admission_never_invents_performance_purpose_from_capability_profile() {
+    for loaded in [false, true] {
+        let mut f = if loaded { Fixture::loaded() } else { Fixture::new() };
+        let mut c = f.s.read("conditions.json");
+        c["policy"]["temperature_profile_id"] = json!("capability_absolute_v1");
+        f.replace_conditions(c);
+        let (code, r) = f.output(if loaded { "loaded-capability-purpose" } else { "legacy-capability-purpose" });
+        blocked(code, &r);
+        assert!(r["confirmation_binding"].is_null());
+        assert!(r["qualification"].get("policy").is_none());
+        assert_eq!(r["real_game_optimization_proven"], false);
+        assert_eq!(r["promotion_allowed"], false);
+    }
+}
+
+#[test]
 fn loaded_reference_widening_is_rejected_after_all_outer_bindings_are_rehashed() {
     let mut f = Fixture::loaded();
     let warmup_before = std::fs::read(f.s.0.join("thermal-warmup.tsv")).unwrap();
