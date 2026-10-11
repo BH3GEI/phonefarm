@@ -7,6 +7,7 @@ mod autoloop;
 mod bench;
 mod ftrace;
 mod gpuop;
+mod shaderplan;
 mod gpustat;
 mod hwcond;
 mod brain;
@@ -26,6 +27,7 @@ mod sysparam;
 mod vksreport;
 mod parallel;
 mod device;
+mod devlease;
 mod eval;
 mod qualification;
 mod fold;
@@ -344,6 +346,9 @@ fn spawn_detached_with(args: &[String], console: &str, envs: &[(&str, &str)]) ->
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
+        Some("lease") => {
+            std::process::exit(devlease::run_lease(&args[1..]));
+        }
         Some("serve") => {
             // MCP stdio 工具服务(SPEC_MCP_SERVE): octos 等客户端的外部工具契约
             std::process::exit(serve::run_serve(&args[1..]));

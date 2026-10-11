@@ -73,6 +73,8 @@ pub struct EvalRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_reference: Option<String>,
     pub protocol: EvalProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v2_context: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -197,6 +199,11 @@ impl QualityReference {
 pub fn validate_request(r: &EvalRequest) -> Result<(), String> {
     if r.version != 1 {
         return Err(format!("不认识的 eval_request 版本 {}", r.version));
+    }
+    if let Some(c) = &r.v2_context {
+        if !["conditions_requested","workload_requested","resolved_config"].iter().all(|k|c[*k].is_object()) {
+            return Err("v2_context requires object requested/real resolved config fields".into());
+        }
     }
     if r.candidate_id.trim().is_empty() {
         return Err("candidate_id 为空".into());
@@ -744,6 +751,7 @@ pub struct GpuOpArgs {
     pub power_rail: PowerRail,
     /// 测量期间 root 停充, 测完自动恢复。默认关 (有副作用的写操作)。
     pub suspend_charging: bool,
+    pub require_discharging: bool,
     /// 评测载体。
     pub carrier: Carrier,
     /// refbench 场景的 fragment 负载强度。
@@ -789,6 +797,7 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
         runner_bin: None,
         power_rail: PowerRail::Usb,
         suspend_charging: false,
+        require_discharging: false,
         carrier: Carrier::Headless,
         intensity: 6,
         frames: 3000,
@@ -832,6 +841,7 @@ pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
             }
             "--unlock" => a.unlock_only = true,
             "--suspend-charging" => a.suspend_charging = true,
+            "--require-discharging" => a.require_discharging = true,
             "--no-quality-pass" => a.quality_pass = false,
             "--cool-timeout-s" => {
                 a.cool_timeout_s = it
@@ -900,8 +910,16 @@ fn locate_runner(a: &GpuOpArgs) -> Result<String, String> {
 
 // ══════════════ 主流程 ══════════════
 
+fn battery_evidence(b: &hwcond::BatteryState) -> Value {
+    let known = matches!(b.status.trim().to_ascii_lowercase().as_str(),
+        "charging" | "discharging" | "not charging" | "full");
+    let discharge = if known && b.current_ua.is_some_and(|c| c != 0) { Some(b.on_battery()) } else { None };
+    serde_json::json!({"status":b.status,"current_now_ua":b.current_ua,
+        "capacity_pct":b.capacity_pct,"on_battery":discharge,"source":"battery_sysfs"})
+}
+
 pub fn run_gpu_op(args: &[String]) -> i32 {
-    let a = match parse_args(args) {
+    let mut a = match parse_args(args) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
@@ -917,11 +935,13 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         eprintln!("建不了输出目录 {out_dir}: {e}");
         return 2;
     }
-    let phone = crate::device::Device::new(a.serial.clone(), out_dir.clone());
-
-    let state_path = hwcond::lock_state_path("gpuop", &a.serial);
-
     if a.unlock_only {
+        let _lease = match crate::devlease::Lease::target(a.serial.as_deref(), "gpu-op-unlock") {
+            Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
+        };
+        a.serial = Some(_lease.serial.clone());
+        let phone = crate::device::Device::new(a.serial.clone(), out_dir.clone());
+        let state_path = hwcond::lock_state_path("gpuop", &a.serial);
         return match hwcond::recover_stale_lock("gpu-op", &phone, &state_path) {
             Some(true) => {
                 progress("遗留锁频态已回滚");
@@ -999,6 +1019,15 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         info.version_major, info.version_minor, info.bytes, info.entry_points, info.local_size
     ));
 
+    // Resolve/pin request serial before every device command; retain lease through restoration.
+    let requested = a.serial.clone().or_else(|| req.serial.clone());
+    let _lease = match crate::devlease::Lease::target(requested.as_deref(), "gpu-op") {
+        Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
+    };
+    a.serial = Some(_lease.serial.clone());
+    let phone = crate::device::Device::new(a.serial.clone(), out_dir.clone());
+    let state_path = hwcond::lock_state_path("gpuop", &a.serial);
+
     // ---- root 与 runner ----
     if !hwcond::root_ok(&phone) {
         eprintln!("设备无 root: 等冷/锁频/功耗遥测都需要 root");
@@ -1031,7 +1060,9 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     // 先回滚上次遗留的停充状态。无条件做, 与 --suspend-charging 无关 ——
     // 遗留状态的危害是"手机一直没在充电", 不该等到下次有人恰好又要停充才被清掉。
     let charge_state = hwcond::lock_state_path("charge", &a.serial);
-    hwcond::recover_stale_charge_ctl(&phone, &charge_state);
+    if hwcond::recover_stale_charge_ctl(&phone, &charge_state) == Some(false) {
+        eprintln!("stale charging state restoration failed"); return 2;
+    }
     let mut suspend = None;
     if a.suspend_charging {
         match hwcond::ChargeSuspend::apply(&phone, &charge_state) {
@@ -1048,7 +1079,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     // 从这里往下任何一条 return 都必须先恢复充电 —— 宏包住, 免得漏掉哪一条
     macro_rules! bail {
         ($code:expr) => {{
-            if let Some(mut g) = suspend {
+            if let Some(mut g) = suspend.take() {
                 let _ = g.restore(&phone);
             }
             return $code;
@@ -1090,7 +1121,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
                  再 adb install -r build/out/refbench.apk",
                 refbench::PACKAGE
             );
-            return 2;
+            bail!(2);
         }
         phone.shell(
             &format!("mkdir -p $(dirname {})", refbench::REMOTE_SPV),
@@ -1098,7 +1129,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         );
         if !phone.push_file(&req.spirv_path, refbench::REMOTE_SPV) {
             eprintln!("推送候选 SPIR-V 到 {} 失败", refbench::REMOTE_SPV);
-            return 2;
+            bail!(2);
         }
         phone.shell(&format!("chmod 644 {}", refbench::REMOTE_SPV), 10_000);
         progress(&format!(
@@ -1114,7 +1145,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     if a.carrier == Carrier::Headless {
     if let Err(e) = deploy(&phone, &runner, &req) {
         eprintln!("部署失败: {e}");
-        return 2;
+        bail!(2);
     }
     }
 
@@ -1134,7 +1165,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             Err(e) => {
                 eprintln!("参考帧不可用: {e}");
                 cleanup(&phone);
-                return 2;
+                bail!(2);
             }
         };
         // 只准备**会被读到**的那几张。每张要解码、裁剪、写 8.3 MB 裸 RGBA
@@ -1165,14 +1196,14 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
                 Err(e) => {
                     eprintln!("参考帧不可用: {e}");
                     cleanup(&phone);
-                    return 2;
+                    bail!(2);
                 }
             };
             let remote = format!("{REMOTE_DIR}/reference_{i:02}.rgba");
             if !phone.push_file(&raw.to_string_lossy(), &remote) {
                 eprintln!("推送参考帧 {} 失败", frame.display());
                 cleanup(&phone);
-                return 2;
+                bail!(2);
             }
             progress(&format!(
                 "画质真值 {}/{}: {} ({w}x{h} 中心裁剪到 1920x1080)",
@@ -1211,7 +1242,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     if recovered == Some(false) {
         eprintln!("上次遗留的锁频态回滚失败, 拒绝在未知频率状态下跑测");
         cleanup(&phone);
-        return 2;
+        bail!(2);
     }
 
     // ---- A/B/A/B 交替跑测 ----
@@ -1230,6 +1261,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     let mut stretch_a: Vec<f64> = Vec::new();
     let mut stretch_b: Vec<f64> = Vec::new();
     let mut psnr_b: Vec<f64> = Vec::new();
+    let mut observations: Vec<Value> = Vec::new();
     let mut crashed = false;
     let mut fatal: Option<String> = None;
 
@@ -1243,14 +1275,15 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         ));
 
         // 每轮都重新等冷: 上一轮把机器跑热了, 不等就把热漂移算进算子差异。
-        if let Err(e) = hwcond::wait_cool(
-            "gpu-op",
-            &phone,
-            req.protocol.cool_c as f64,
-            a.cool_timeout_s,
+        let (zone, start_c, waited_s) = match hwcond::wait_cool(
+            "gpu-op", &phone, req.protocol.cool_c as f64, a.cool_timeout_s,
         ) {
-            fatal = Some(format!("等冷失败: {e}"));
-            break;
+            Ok(v) => v,
+            Err(e) => { fatal = Some(format!("等冷失败: {e}")); break; }
+        };
+        let battery_before = hwcond::read_battery_state(&phone);
+        if a.require_discharging && !battery_before.on_battery() {
+            fatal = Some("required discharge not verified before arm".into()); break;
         }
 
         // 锁频只包住跑测那几秒 (bench 的实测教训: 先锁再等冷永远等不下来)
@@ -1267,13 +1300,41 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             }
         };
 
+        let locked = hwcond::read_snapshot(&phone);
+        if req.v2_context.is_some() && (locked.gpu_max_level != Some(level) || locked.gpu_min_level != Some(level)) {
+            let restored = lock.restore(&phone);
+            fatal = Some(format!("frequency control actual readback unavailable/mismatch; restored={restored}")); break;
+        }
+        observations.push(serde_json::json!({"arm":arm.as_str(),"index":i,
+            "start_temp_c":start_c,"thermal_zone":zone,"waited_s":waited_s,
+            "battery_before":battery_evidence(&battery_before),"battery_after":null,
+            "frequency_control_readback":{"gpu_max_level":locked.gpu_max_level,
+                "gpu_min_level":locked.gpu_min_level,"gpuclk_hz":locked.gpuclk_hz},
+            "restored":null,"frames_submitted":null,"postfx_active":null}));
+
         // ── refbench 载体 ──
         if a.carrier == Carrier::Refbench {
             let (res, power) = run_refbench_arm(&phone, *arm, &a, a.power_rail);
             let restored = lock.restore(&phone);
+            let battery_after = hwcond::read_battery_state(&phone);
+            let last = observations.last_mut().unwrap();
+            last["restored"] = serde_json::json!(restored);
+            last["battery_after"] = battery_evidence(&battery_after);
+            last["frames_submitted"] = serde_json::json!(res.frames_submitted);
+            last["postfx_active"] = serde_json::json!(res.postfx_active);
+            last["refbench_config_readback"] = serde_json::json!({"frames":res.frames_config,
+                "intensity":res.intensity,"scene":res.scene,"run_id":res.run_id});
+            if a.require_discharging && !battery_after.on_battery() {
+                fatal = Some("required discharge not verified after arm".into()); break;
+            }
             if !restored {
                 fatal = Some("锁频态回读与锁前不一致, 设备状态未能 100% 还原".into());
                 break;
+            }
+            if req.v2_context.is_some() {
+                if let Err(e) = verify_refbench_conditions(&res, *arm, a.frames, a.intensity) {
+                    fatal = Some(e); break;
+                }
             }
             if let Some(e) = res.error {
                 if *arm == Arm::Baseline {
@@ -1317,7 +1378,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
                 arm.as_str(),
                 p95,
                 busy,
-                res.frames_submitted,
+                res.frames_submitted.unwrap_or(0),
                 w.map(|w| format!(" | {w:.2} W")).unwrap_or_default()
             ));
             continue;
@@ -1325,6 +1386,13 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
 
         let (out, power) = run_one(&phone, *arm, &req, a.power_rail, inline_reference.as_deref());
         let restored = lock.restore(&phone);
+        let battery_after = hwcond::read_battery_state(&phone);
+        let last = observations.last_mut().unwrap();
+        last["restored"] = serde_json::json!(restored);
+        last["battery_after"] = battery_evidence(&battery_after);
+        if a.require_discharging && !battery_after.on_battery() {
+            fatal = Some("required discharge not verified after arm".into()); break;
+        }
         if !restored {
             fatal = Some("锁频态回读与锁前不一致, 设备状态未能 100% 还原".into());
             break;
@@ -1413,7 +1481,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
 
     if let Some(e) = fatal {
         eprintln!("{e}");
-        return 2;
+        bail!(2);
     }
 
     // ---- 统计裁决 ----
@@ -1533,14 +1601,43 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     };
 
     // 打印之前先恢复充电: 打印失败也不能把手机丢在不充电的状态里
-    if let Some(mut g) = suspend {
+    if let Some(mut g) = suspend.take() {
         if !g.restore(&phone) {
-            eprintln!("警告: 恢复充电后回读不符 ({}); 状态文件留着, 下次启动会再试一次", g.node());
+            eprintln!("恢复充电后回读不符 ({}); 本轮 ABORT", g.node());
+            return 2;
         }
     }
 
+    if let Err(e)=_lease.check() {eprintln!("{e}"); return 2;}
     if a.as_json {
-        println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+        let mut output = serde_json::to_value(&report).unwrap_or(Value::Null);
+        if let Some(context) = &req.v2_context {
+            output["version"] = serde_json::json!(2);
+            output["kind"] = serde_json::json!("shader");
+            output["conditions_requested"] = context["conditions_requested"].clone();
+            output["workload_requested"] = context["workload_requested"].clone();
+            let mut resolved = context["resolved_config"].clone();
+            resolved["serial"] = serde_json::json!(a.serial);
+            resolved["carrier"] = serde_json::json!(a.carrier.as_str());
+            resolved["frames"] = if a.carrier == Carrier::Refbench { serde_json::json!(a.frames) } else { Value::Null };
+            resolved["intensity"] = if a.carrier == Carrier::Refbench { serde_json::json!(a.intensity) } else { Value::Null };
+            resolved["seconds"] = if a.carrier == Carrier::Headless { serde_json::json!(req.protocol.replay_seconds) } else { Value::Null };
+            resolved["require_discharging"] = serde_json::json!(a.require_discharging);
+            resolved["charging_suspend"]["enabled"] = serde_json::json!(a.suspend_charging);
+            resolved["power_rail"] = serde_json::json!(a.power_rail.as_str());
+            resolved["gpu_level"] = serde_json::json!(a.gpu_level);
+            resolved["quality_reference"] = serde_json::json!(ref_source);
+            output["resolved_config"] = resolved;
+            output["measurement_scope"] = serde_json::json!(if a.carrier==Carrier::Headless {"operator_benchmark_only"} else {"refbench_measurement_only"});
+            output["qualification"] = crate::shaderplan::qualification_scope(Some(a.carrier.as_str()));
+            output["conditions_observed"] = serde_json::json!({"root_verified":true,
+                "arms":observations,"restored":true,"charging_suspended_via":report.power_source.as_ref().and_then(|p| p.charging_suspended_via.as_deref()),
+                "power_probe":report.power_source,"power_window_verified":false});
+            output["metric_provenance"] = serde_json::json!({"fps_p95_ms":{
+                "source":if a.carrier==Carrier::Refbench {"raw_ftrace_kgsl_submit_proxy"} else {"unavailable"},
+                "is_display_timing":false}});
+        }
+        println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
     } else {
         println!("{}", render_text(&report, base.as_ref(), welch.as_ref()));
     }
@@ -1878,14 +1975,34 @@ fn cleanup(phone: &crate::device::Device) {
 /// refbench 一臂的产出。
 #[derive(Debug, Clone, Default)]
 pub struct RefbenchArm {
-    pub frames_submitted: u32,
+    pub frames_submitted: Option<u32>,
+    pub frames_config: Option<u32>,
+    pub intensity: Option<u32>,
+    pub scene: Option<String>,
+    pub run_id: Option<String>,
     pub clean_exit: bool,
-    pub postfx_active: bool,
+    pub postfx_active: Option<bool>,
     /// 帧间隔 (ms)
     pub intervals_ms: Vec<f64>,
     /// 每帧 GPU 忙时 (ms)
     pub gpu_busy_ms: Vec<f64>,
     pub error: Option<String>,
+}
+
+fn verify_refbench_conditions(r: &RefbenchArm, arm: Arm, expected_frames: u32, expected_intensity: u32) -> Result<(), String> {
+    if r.frames_config != Some(expected_frames) || r.intensity != Some(expected_intensity)
+        || r.scene.as_deref() != Some(refbench::SCENE)
+        || r.run_id.as_deref() != Some(format!("gpuop_{}",arm.as_str()).as_str()) {
+        return Err("refbench actual params/scene/run_id missing or differ from requested execution".into());
+    }
+    if r.frames_submitted != Some(expected_frames) {
+        return Err(format!("refbench actual frames {:?} != requested {expected_frames}",r.frames_submitted));
+    }
+    let expected = arm == Arm::Candidate;
+    if r.postfx_active != Some(expected) {
+        return Err(format!("refbench postfx actual {:?} != required {expected}",r.postfx_active));
+    }
+    Ok(())
 }
 
 /// 驱动 refbench 跑一臂: 开 ftrace → 拉起场景 → 采功耗 → 等自退 → 收 trace 与回包。
@@ -1998,21 +2115,24 @@ fn run_refbench_arm(
             out.frames_submitted = v
                 .get("frames_submitted")
                 .and_then(Value::as_u64)
-                .unwrap_or(0) as u32;
+                .and_then(|n| u32::try_from(n).ok());
+            out.frames_config = v.pointer("/params/frames").and_then(Value::as_u64).and_then(|n|u32::try_from(n).ok());
+            out.intensity = v.pointer("/params/intensity").and_then(Value::as_u64).and_then(|n|u32::try_from(n).ok());
+            out.scene = v["scene"].as_str().map(str::to_string);
+            out.run_id = v["run_id"].as_str().map(str::to_string);
             out.clean_exit = v.get("clean_exit").and_then(Value::as_bool).unwrap_or(false);
             out.postfx_active = v
                 .pointer("/postfx/active")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+                .and_then(Value::as_bool);
         }
         Err(e) => out.error = Some(format!("refbench 回包不可解析: {e}")),
     }
 
     // 算子该挂上却没挂上 = 这一臂在测别的东西, 绝不能当成有效样本。
-    if arm == Arm::Candidate && !out.postfx_active && out.error.is_none() {
+    if arm == Arm::Candidate && out.postfx_active != Some(true) && out.error.is_none() {
         out.error = Some("候选臂的 postfx 没有生效, 这一臂测的不是候选算子".into());
     }
-    if arm == Arm::Baseline && out.postfx_active && out.error.is_none() {
+    if arm == Arm::Baseline && out.postfx_active != Some(false) && out.error.is_none() {
         out.error = Some("基线臂却挂上了算子, A/B 被污染".into());
     }
 
@@ -2381,6 +2501,7 @@ mod tests {
             quality_baseline_db: 37.286,
             incumbent_latency_ms: None,
             quality_reference: None,
+            v2_context: None,
             protocol: EvalProtocol {
                 cool_c: 32.0,
                 replay_seconds: 60,
@@ -2410,6 +2531,29 @@ mod tests {
             quality_reference: None,
             power_source: None,
         }
+    }
+
+    #[test]
+    fn unknown_battery_observation_is_null_not_request_echo() {
+        let b=hwcond::BatteryState {status:"Unknown".into(),current_ua:Some(-100),capacity_pct:Some(80)};
+        assert_eq!(battery_evidence(&b)["on_battery"],Value::Null);
+    }
+
+    #[test]
+    fn v2_refbench_actual_unknown_or_mismatch_cannot_pass_conditions() {
+        let mut r=RefbenchArm::default();
+        assert!(verify_refbench_conditions(&r,Arm::Baseline,300,3).is_err());
+        r.frames_submitted=Some(300);
+        assert!(verify_refbench_conditions(&r,Arm::Baseline,300,3).is_err());
+        r.postfx_active=Some(false);
+        assert!(verify_refbench_conditions(&r,Arm::Baseline,300,3).is_err());
+        r.frames_config=Some(300); r.intensity=Some(3); r.scene=Some(refbench::SCENE.into()); r.run_id=Some("gpuop_A".into());
+        assert!(verify_refbench_conditions(&r,Arm::Baseline,300,3).is_ok());
+        assert!(verify_refbench_conditions(&r,Arm::Candidate,300,3).is_err());
+        r.postfx_active=Some(true); r.run_id=Some("gpuop_B".into());
+        assert!(verify_refbench_conditions(&r,Arm::Candidate,300,3).is_ok());
+        assert!(verify_refbench_conditions(&r,Arm::Candidate,300,4).is_err());
+        assert!(verify_refbench_conditions(&r,Arm::Candidate,301,3).is_err());
     }
 
     /// 上游 game_opt_loop 写出来的那份 JSON 必须能被原样读进来。
@@ -2466,6 +2610,8 @@ mod tests {
 
         let mut r = a_request();
         r.protocol.p_threshold = 1.5;
+        assert!(validate_request(&r).is_err());
+        let mut r=a_request(); r.v2_context=Some(serde_json::json!("malformed"));
         assert!(validate_request(&r).is_err());
     }
 
