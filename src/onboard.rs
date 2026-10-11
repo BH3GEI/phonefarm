@@ -187,6 +187,8 @@ const LOADING: &[&str] = &[
     "健康游戏忠告", "抵制不良游戏", "适龄提示",
     "loading", "please wait", "connecting", "logging in", "initializing", "checking", "verifying",
     "preparing",
+    // 机型自带的游戏空间浮层 (红魔「CUBE能量魔方」): 启动游戏时弹几秒, 等它收起
+    "能量魔方",
 ];
 /// 付费上下文 (画面上有它, 弱关闭类按钮一律不点)。
 const PAY_CTX: &[&str] = &[
@@ -416,10 +418,17 @@ pub fn classify(items: &[OcrItem], fg_ok: bool, fg_pkg: &str, policy: Policy, ba
 }
 
 /// 进游戏探针的判定: 视角跟着手指转 (swing 大), 静置时画面基本不动 (idle 小),
-/// 拖回去之后比拖过去时更接近原样 (ret < swing)。三条同时成立才算「在游戏里」。
+/// 拖回去之后明显比拖过去时更接近原样 (ret ≤ 0.75·swing)。三条同时成立才算「在游戏里」。
+///
+/// 第三条的 0.75 来自 10-11 原神冷启动的误判: 启动过场 (加上机型的游戏空间浮层) 在拖动
+/// 期间整屏换画面, 量到 idle 0.00 / swing 0.99 / ret 0.97 —— 「拖回来」几乎没回来,
+/// 画面变是它自己在变, 不是跟着手指。真在大世界里同一台机量到 swing 0.73 / ret 0.42。
 pub fn ingame_verdict(idle: f64, swing: f64, ret: f64) -> bool {
-    swing >= SPIN_MOVED_MIN && swing >= idle * 1.5 + 0.05 && ret < swing
+    swing >= SPIN_MOVED_MIN && swing >= idle * 1.5 + 0.05 && ret <= swing * RETURN_RATIO_MAX
 }
+
+/// 拖回来之后剩下的变化占拖过去时的比例上限 (见 `ingame_verdict`)。
+pub const RETURN_RATIO_MAX: f64 = 0.75;
 
 // ══════════════ 可重复判定 (纯函数) ══════════════
 
@@ -691,8 +700,7 @@ pub fn parse_focus(s: &str) -> String {
 pub fn parse_component(s: &str, pkg: &str) -> Option<String> {
     s.lines()
         .map(str::trim)
-        .filter(|l| l.starts_with(&format!("{pkg}/")))
-        .last()
+        .rfind(|l| l.starts_with(&format!("{pkg}/")))
         .map(str::to_string)
 }
 
@@ -1341,6 +1349,40 @@ fn mean(xs: &[f64]) -> Option<f64> {
     (!xs.is_empty()).then(|| round6(xs.iter().sum::<f64>() / xs.len() as f64))
 }
 
+// ══════════════ 给评测用的进门 ══════════════
+
+/// 评测请求带 `workload.enter == "onboard"` 时用: 每臂重启游戏之后, 用同一套白名单状态机
+/// 把游戏带回游戏场景 (不冷启动、不问大模型)。进不去就返回原因, 调用方据此作废这一轮。
+pub fn enter_scene(serial: &str, pkg: &str, out: &Path) -> Result<Value, String> {
+    let dev = Dev { serial: serial.to_string() };
+    let comp_txt = dev.sh(
+        &format!("cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {pkg}"),
+        10,
+    );
+    let component = parse_component(&comp_txt, pkg).ok_or(format!("{pkg} 没有可启动的 Activity"))?;
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let r = enter(
+        &dev,
+        &EnterCfg {
+            pkg: pkg.to_string(),
+            component,
+            cold: false,
+            policy: Policy::default(),
+            max_steps: 40,
+            timeout_s: 300,
+            out: out.to_path_buf(),
+            vlm_calls: 0,
+        },
+    );
+    let v = serde_json::to_value(&r).unwrap_or(Value::Null);
+    std::fs::write(out.join("enter.json"), serde_json::to_string_pretty(&v).unwrap_or_default()).ok();
+    if r.status == "INGAME" {
+        Ok(json!({"status": r.status, "taps": r.taps, "seconds": r.seconds}))
+    } else {
+        Err(format!("{}: {}", r.status, r.reason.unwrap_or_default()))
+    }
+}
+
 // ══════════════ CLI ══════════════
 
 const USAGE: &str = "用法: phonefarm onboard --package <包名> [--serial S] [--out 目录]
@@ -1634,6 +1676,7 @@ pub fn run_onboard(args: &[String]) -> i32 {
             "min_valid_rounds": MIN_VALID_ROUNDS,
             "min_frames_per_round": MIN_FRAMES_PER_ROUND,
             "spin_moved_min": SPIN_MOVED_MIN,
+            "ingame_return_ratio_max": RETURN_RATIO_MAX,
             "temp_cap_c": TEMP_CAP_C,
         },
         "repeatability": {
@@ -1820,6 +1863,9 @@ mod tests {
         assert!(!ingame_verdict(0.03, 0.10, 0.05), "拖了没动 = 菜单");
         assert!(!ingame_verdict(0.60, 0.70, 0.65), "静置也在大变 = 过场动画");
         assert!(!ingame_verdict(0.02, 0.50, 0.55), "拖回来反而更远 = 不是视角");
+        assert!(!ingame_verdict(0.00, 0.9921, 0.9669), "10-11 原神冷启动过场: 拖回来没回来");
+        assert!(!ingame_verdict(0.1871, 0.9996, 0.9955), "同上, 复测");
+        assert!(ingame_verdict(0.026, 0.7312, 0.4202), "10-11 原神大世界实测");
     }
 
     fn rs(p95: f64) -> RoundStat {

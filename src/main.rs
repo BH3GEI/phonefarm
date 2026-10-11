@@ -243,7 +243,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        export [--task T] --split train|heldout --out <文件> [--redact-config toml]  (训练数据导出)
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)
-设备锁: 碰设备的子命令 (run/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
+设备锁: 碰设备的子命令 (run/onboard/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
        capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
        通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h] [--no-devlock]
        锁已在同一 label 手里 (外层 devlock run / optimize) 时原地执行; 没拿到锁不碰设备, 退出 2";

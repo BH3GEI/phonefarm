@@ -35,8 +35,9 @@ const POLL: Duration = Duration::from_secs(45);
 const HEARTBEAT: Duration = Duration::from_secs(60);
 
 /// 会碰设备、要拿锁的子命令。
-const LOCKED: [&str; 19] = [
+const LOCKED: [&str; 20] = [
     "run",
+    "onboard",
     "benchmark",
     "parallel",
     "script",

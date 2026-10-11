@@ -1324,6 +1324,14 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                 abort_reason = Some(format!("{arm} 臂挂层失败: {e}"));
                 break;
             }
+            // 挂层 = 重启了游戏。有游戏档案的目标 (enter == "onboard") 自己走回游戏场景;
+            // 进不去这一臂就没法量, 整次评测作废, 不拿登录页 / 加载画面的帧凑数
+            if req["workload"]["enter"].as_str() == Some("onboard") {
+                if let Err(e) = crate::onboard::enter_scene(serial, &pkg, &evidence.join(format!("{arm}{i}_enter"))) {
+                    abort_reason = Some(format!("{arm}{i} 重启后没回到游戏场景: {e}"));
+                    break;
+                }
+            }
             let res = run_one_with(
                 serial,
                 &format!("gray_{arm}{i}"),
