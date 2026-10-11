@@ -27,6 +27,7 @@ mod curtail;
 mod vksreport;
 mod parallel;
 mod device;
+mod platform;
 mod devlock;
 mod eval;
 mod fold;
