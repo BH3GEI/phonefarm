@@ -1,0 +1,45 @@
+{
+  "source_head": "e4e059e25e722a4d5963af1ade32994c8a53061c",
+  "full_gate": {
+    "tests": 669,
+    "cargo_test_exit": 0,
+    "default_clippy_exit": 0,
+    "strict_clippy_not_claimed": true
+  },
+  "offline_fixture_scope": "fake transport and actual host CLI/source shell stubs; all synthetic observations BLOCKED; no Android proof",
+  "actual_phase": {
+    "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/gpu-control-probe-v3",
+    "control_write_executed": false,
+    "hold_executed": false,
+    "restore_executed": false,
+    "gate": "HAL SEVERE before remote installation/control"
+  },
+  "media_retained_locally": {
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/gpu-control-probe-v3/before-image.png": "684729ec4f0aca11d7101519a2d8b7716fcc7ab39c1822a04cf9a726b10fe2ca",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/gpu-control-probe-v3/blocked-image.png": "51e8f181ebec004d2f11daeddbc0a7bbc4f9015a37bac0b4aac5af00780c6210"
+  },
+  "files": {
+    "final-source-identities.json": "50513c2dc62a7bf4e8baf9f392aba1801b6233702c7dc21e408174f167a8591d",
+    "final-result.json": "804d2cbb3cc63a8badb541e27b6d6e14bf86c9880089747c9cdfb04f439e2057",
+    "final-commands.json": "9382e40756900e939f1e87bcb52573fc31a6894399b5ba0d7627ffd751bfe325",
+    "final-cargo-test.log": "88f3e156a83d1719007161a83dff9429f1770bcdaf8f7fcb0430f137bff68964",
+    "final-cargo-clippy.log": "d363b923f045dc39589d6eeecf6e4896d53c9ec1ada5b5b00fbe61f1edac2362",
+    "actual-blocked/request.original.json": "c8eb9cb1482e9ae09860f777cc3f0615e9f3a129f52cdfea5366c92c63935316",
+    "actual-blocked/thermal-rules.json": "fcc3881be61286984a59037bfbf7880b8e4d859491014d07df19b6013ebcc225",
+    "actual-blocked/thermal_profile.json": "254fad25ddb642da5f9f179fe1cfb12d6d86366503108ffa5984ec173adba87f",
+    "actual-blocked/warmup-partial.raw.tsv": "e96128be8815e7e00b40980b00d2e50e5c6b8a4725aecaa06347080918bed6a2",
+    "actual-blocked/driver.stdout": "263fcdc5230ae9ed5bc1a717ee3b64f7f603c2637241887d3b98791e30da55fc",
+    "actual-blocked/driver.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "actual-blocked/blocked-state.stdout": "750198eb834572dd83fc7eda76cf5022c24706e91e6202d579552f8d20fa5d54",
+    "actual-blocked/thermal_metadata.raw.tsv": "d8118403eacf1556d6bd2c8b58ab783ae015dcd48330b59e3ae57443e95608f8",
+    "actual-blocked/before-commands.json": "0ba646f3579cb6bdda9bea5f2a397744bdc51febbf3aa845c9229394a689c9ef",
+    "actual-blocked/thermal_hal.raw.txt": "0e6d597ddccfc9a55341a4cb2873e0dd6b92e3b84ab7bd603723e74a5f13eade",
+    "actual-blocked/warmup.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "actual-blocked/thermal_inventory.json": "32b4de91ad518467e10802096b9b0be2ee544591866bde9bf3c94ac542fe8029",
+    "actual-blocked/blocked-commands.json": "f382f1ed3e9c5707a3a644baee02e79a4e3ace5f2772bdd62002d3166ad81570",
+    "actual-blocked/before-state.stdout": "8a0f81b0749ac2a07b3068237607d87b3be8089819f1e1af473c6be867cddf67",
+    "actual-blocked/review.json": "24dfd3c7cdc2c9cd72fdb2d97d53b47bfc03087ddf00e8b4e26bb1c613b46153",
+    "actual-blocked/candidate.original.json": "49f622b4a9eb2ec5237bb97c58c8f2cc7777f6fdcd9e849a8b96904de45e862d",
+    "actual-blocked/driver.command.json": "47f2526652effeb6604cef596ec90d2f70d3f1e06119318823ac0f78776b8558"
+  }
+}

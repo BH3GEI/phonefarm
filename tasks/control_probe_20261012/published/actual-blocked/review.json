@@ -1,0 +1,40 @@
+{
+  "schema": "phonefarm/live_control_attempt_review@1",
+  "status": "ENV_BLOCKED_BEFORE_CONTROL",
+  "source": "e4e059e25e722a4d5963af1ade32994c8a53061c",
+  "actual_device_executed": true,
+  "actual_control_write_executed": false,
+  "readback_hold_executed": false,
+  "restoration_experiment_executed": false,
+  "gate": "HAL thermal_status=3 (SEVERE), baseline-only warmup exit83",
+  "cached_shell_skin": {
+    "celsius": 48,
+    "status": 3,
+    "scope": "reported framework cache, no freshness claim"
+  },
+  "actual_sysfs_at_warmup": {
+    "CPU_range_C": [
+      61.4,
+      64.3
+    ],
+    "GPU_range_C": [
+      60,
+      62.3
+    ],
+    "skin_C": 54.24,
+    "battery_C": 43.8
+  },
+  "no_control_preparation_files": [
+    "initial.snapshot",
+    "restore.tsv",
+    "state.json",
+    "inputs.manifest.json"
+  ],
+  "normal_lease_checkpoint_after_attempt_succeeded": true,
+  "GPU_min_before": "11",
+  "GPU_min_blocked_after": "11",
+  "eligible": false,
+  "promotion_allowed": false,
+  "real_game_optimization_proven": false,
+  "scope": "receiver_live_prewrite_environment_gate_only"
+}

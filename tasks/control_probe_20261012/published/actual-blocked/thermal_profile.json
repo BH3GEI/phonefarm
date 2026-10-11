@@ -1,0 +1,985 @@
+{
+  "excluded": [],
+  "id": "loaded_steady_v1",
+  "metadata": [
+    {
+      "domain": "battery",
+      "path": "/sys/class/power_supply/battery/temp",
+      "sensor_type": "battery",
+      "trip_points": [
+        {
+          "kind": "hal_severe",
+          "raw": 800.0
+        }
+      ],
+      "unit": "deci_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone14/temp",
+      "sensor_type": "cpu-2-0-0",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone15/temp",
+      "sensor_type": "cpu-2-0-1",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 125000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone16/temp",
+      "sensor_type": "cpu-2-1-0",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone17/temp",
+      "sensor_type": "cpu-2-1-1",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 125000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone18/temp",
+      "sensor_type": "cpu-2-2-0",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone19/temp",
+      "sensor_type": "cpu-2-2-1",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 125000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone20/temp",
+      "sensor_type": "cpu-1-0-0",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone21/temp",
+      "sensor_type": "cpu-1-0-1",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 125000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone22/temp",
+      "sensor_type": "cpu-1-1-0",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone23/temp",
+      "sensor_type": "cpu-1-1-1",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 125000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone25/temp",
+      "sensor_type": "cpu-1-2-0",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone26/temp",
+      "sensor_type": "cpu-1-2-1",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 125000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 90000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone27/temp",
+      "sensor_type": "cpu-1-2-2",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 125000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 108000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone28/temp",
+      "sensor_type": "cpu-0-0-0",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 112000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "cpu",
+      "path": "/sys/class/thermal/thermal_zone29/temp",
+      "sensor_type": "cpu-0-1-0",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 110000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 112000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "gpu",
+      "path": "/sys/class/thermal/thermal_zone41/temp",
+      "sensor_type": "gpuss-0",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "gpu",
+      "path": "/sys/class/thermal/thermal_zone42/temp",
+      "sensor_type": "gpuss-1",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "gpu",
+      "path": "/sys/class/thermal/thermal_zone43/temp",
+      "sensor_type": "gpuss-2",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "gpu",
+      "path": "/sys/class/thermal/thermal_zone44/temp",
+      "sensor_type": "gpuss-3",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "gpu",
+      "path": "/sys/class/thermal/thermal_zone45/temp",
+      "sensor_type": "gpuss-4",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "gpu",
+      "path": "/sys/class/thermal/thermal_zone46/temp",
+      "sensor_type": "gpuss-5",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "gpu",
+      "path": "/sys/class/thermal/thermal_zone47/temp",
+      "sensor_type": "gpuss-6",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "gpu",
+      "path": "/sys/class/thermal/thermal_zone48/temp",
+      "sensor_type": "gpuss-7",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 95000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 115000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 95000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    },
+    {
+      "domain": "skin",
+      "path": "/sys/class/thermal/thermal_zone54/temp",
+      "sensor_type": "skin-msm-therm",
+      "trip_points": [
+        {
+          "kind": "passive",
+          "raw": 125000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 60000.0
+        },
+        {
+          "kind": "passive",
+          "raw": 60000.0
+        },
+        {
+          "kind": "hal_severe",
+          "raw": 60000.0
+        }
+      ],
+      "unit": "milli_celsius"
+    }
+  ],
+  "schema": "phonefarm/thermal_profile@1",
+  "sensors": [
+    {
+      "admission_cap_c": 45.0,
+      "cap_basis": "receiver battery cap; not a SoC limit",
+      "domain": "battery",
+      "operating_cap_c": 45.0,
+      "path": "/sys/class/power_supply/battery/temp",
+      "sensor_type": "battery",
+      "unit": "deci_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone14/temp",
+      "sensor_type": "cpu-2-0-0",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone15/temp",
+      "sensor_type": "cpu-2-0-1",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone16/temp",
+      "sensor_type": "cpu-2-1-0",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone17/temp",
+      "sensor_type": "cpu-2-1-1",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone18/temp",
+      "sensor_type": "cpu-2-2-0",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone19/temp",
+      "sensor_type": "cpu-2-2-1",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone20/temp",
+      "sensor_type": "cpu-1-0-0",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone21/temp",
+      "sensor_type": "cpu-1-0-1",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone22/temp",
+      "sensor_type": "cpu-1-1-0",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone23/temp",
+      "sensor_type": "cpu-1-1-1",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone25/temp",
+      "sensor_type": "cpu-1-2-0",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 85.0,
+      "cap_basis": "minimum passive/HAL severe threshold 90C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 85.0,
+      "path": "/sys/class/thermal/thermal_zone26/temp",
+      "sensor_type": "cpu-1-2-1",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone27/temp",
+      "sensor_type": "cpu-1-2-2",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone28/temp",
+      "sensor_type": "cpu-0-0-0",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "cpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone29/temp",
+      "sensor_type": "cpu-0-1-0",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "gpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone41/temp",
+      "sensor_type": "gpuss-0",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "gpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone42/temp",
+      "sensor_type": "gpuss-1",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "gpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone43/temp",
+      "sensor_type": "gpuss-2",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "gpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone44/temp",
+      "sensor_type": "gpuss-3",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "gpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone45/temp",
+      "sensor_type": "gpuss-4",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "gpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone46/temp",
+      "sensor_type": "gpuss-5",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "gpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone47/temp",
+      "sensor_type": "gpuss-6",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 90.0,
+      "cap_basis": "minimum passive/HAL severe threshold 95C minus receiver margin 5C",
+      "domain": "gpu",
+      "operating_cap_c": 90.0,
+      "path": "/sys/class/thermal/thermal_zone48/temp",
+      "sensor_type": "gpuss-7",
+      "unit": "milli_celsius"
+    },
+    {
+      "admission_cap_c": 57.0,
+      "cap_basis": "minimum passive/HAL severe threshold 60C minus receiver margin 3C",
+      "domain": "skin",
+      "operating_cap_c": 57.0,
+      "path": "/sys/class/thermal/thermal_zone54/temp",
+      "sensor_type": "skin-msm-therm",
+      "unit": "milli_celsius"
+    }
+  ],
+  "window": {
+    "reference_tolerance_c": 2.0,
+    "sample_max_gap_seconds": 6.0,
+    "warmup_max_range_c": 3.0,
+    "warmup_min_samples": 6,
+    "warmup_min_seconds": 30.0
+  }
+}

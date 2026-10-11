@@ -1,0 +1,25 @@
+{
+  "kind": "sysparam",
+  "payload": {
+    "why": "Single reversible GPU min-pwrlevel capability check; no optimization claim",
+    "params": {
+      "gpu.min_pwrlevel": "10"
+    },
+    "plan": [
+      {
+        "kind": "sysfs",
+        "path": "/sys/class/kgsl/kgsl-3d0/min_pwrlevel",
+        "value": "10"
+      }
+    ],
+    "deny_keywords": [
+      "thermal",
+      "trip_point",
+      "cooling",
+      "fan",
+      "tsens",
+      "bcl",
+      "throttl"
+    ]
+  }
+}
