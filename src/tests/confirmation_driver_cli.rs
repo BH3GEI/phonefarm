@@ -7,6 +7,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
+static CLI_RECEIPT: AtomicU64 = AtomicU64::new(0);
 fn sha(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
@@ -161,7 +162,9 @@ impl F {
         c
     }
     fn call(&self, args: &[&str], fail: &str) -> (i32, Value) {
-        let o = self.command(args, fail).output().unwrap();
+        let mut command = self.command(args, fail);
+        let o = command.output().unwrap();
+        self.receipt(args[0], &command, &o);
         let v = serde_json::from_slice(&o.stdout).unwrap_or_else(|_| {
             panic!(
                 "{} {}",
@@ -170,6 +173,29 @@ impl F {
             )
         });
         (o.status.code().unwrap_or(-1), v)
+    }
+    fn receipt(&self, label: &str, command: &Command, output: &std::process::Output) {
+        let prefix = format!(
+            "host-cli-{}-{label}",
+            CLI_RECEIPT.fetch_add(1, Ordering::Relaxed)
+        );
+        std::fs::write(self.dir.join(format!("{prefix}.stdout")), &output.stdout).unwrap();
+        std::fs::write(self.dir.join(format!("{prefix}.stderr")), &output.stderr).unwrap();
+        let argv = std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let environment = command
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        self.write(&format!("{prefix}.exit.json"), &json!({"argv":argv,
+            "cwd":command.get_current_dir(),"environment_overrides":environment,"exit":output.status.code()}));
     }
     fn prepare(&self, fail: &str) -> (i32, Value) {
         self.call(
@@ -180,13 +206,14 @@ impl F {
     fn freeze(&self) {
         // Exact typed order is supplied by actual GOL when env points to it; portable fallback mirrors its contract.
         if let Some(bin) = std::env::var_os("PHONEFARM_DRIVER_GOL_BIN") {
-            let o = Command::new(bin)
+            let mut command = Command::new(bin);
+            command
                 .args(["confirm", "freeze", "--plan"])
                 .arg(self.dir.join("session/plan.json"))
                 .arg("--out")
-                .arg(self.dir.join("frozen.json"))
-                .output()
-                .unwrap();
+                .arg(self.dir.join("frozen.json"));
+            let o = command.output().unwrap();
+            self.receipt("gol-freeze", &command, &o);
             assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
             return;
         }
