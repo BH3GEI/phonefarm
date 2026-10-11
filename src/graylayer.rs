@@ -22,20 +22,31 @@ const LOADOP_PROP: &str = "debug.knobs.loadop"; // 1 = 层把 loadOp LOAD 改写
 const DUMP_PROP: &str = "debug.knobs.passdump"; // 1 = 层导出 render pass 形状表
 const CP_PROP: &str = "debug.knobs.copyprobe"; // 1 = 1:1 拷贝探针 (隐含 passdump 追踪)
 const UPOP_PROP: &str = "debug.knobs.upop"; // 1 = 真超分算子 (gen1_loc3)
+pub(crate) const FA_PROP: &str = "debug.knobs.frameaudit"; // 1 = 一帧步骤清单 (只读, 隐含 passdump)
+pub(crate) const FA_TS_PROP: &str = "debug.knobs.frameaudit_ts"; // 1 = 步骤清单另插 GPU 时间戳
+pub(crate) const FA_GO_PROP: &str = "debug.knobs.frameaudit_go"; // 改成新编号 = 抓一次
 const SO: &str = "libVkLayer_refknobs.so";
 const STATE: &str = "/data/local/tmp/knobs_layer_state"; // "把 .so 推进了哪个包"
 
-const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|target <pkg>|status|off} [--serial S] [--keep-prop]";
+const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off} [--serial S] [--keep-prop] [--so 本机.so]";
 
 pub struct GrayLayer {
     serial: String,
+    /// 显式指定的层 .so (测未合并的层; 缺省用 knobs/gray/build/out/ 下的产物)
+    so: Option<String>,
 }
 
 impl GrayLayer {
     pub fn new(serial: &str) -> Self {
         Self {
             serial: serial.to_string(),
+            so: None,
         }
+    }
+
+    pub fn with_so(mut self, so: Option<String>) -> Self {
+        self.so = so;
+        self
     }
 
     fn ashell(&self, cmd: &str, timeout: u64) -> String {
@@ -90,7 +101,7 @@ impl GrayLayer {
     /// 挂层: 推 .so → 对齐属主/SELinux 上下文 (每步回读核验) → 写 state →
     /// 重启目标 (已在跑的进程不会凭空挂上层) → 清旧 marker → 置属性 (回读核验)。
     fn mount_layer(&self, pkg: &str, keep_prop: bool) -> Result<(), String> {
-        let so_path = layer_so_path();
+        let so_path = self.so.clone().unwrap_or_else(layer_so_path);
         let Some(so) = resolve_path(&so_path) else {
             return Err(format!(
                 "先跑 knobs/gray/build/build_layer.sh 出 {SO} (按 cwd 与仓库根都找不到: {so_path})"
@@ -129,7 +140,7 @@ impl GrayLayer {
         self.ashell(&format!("am force-stop {pkg}"), 30);
         self.ashell(
             &format!(
-                "su -c 'rm -f /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json /data/data/{pkg}/knobs_layer_out.json /data/local/tmp/knobs_layer_out.{pkg}.json'"
+                "su -c 'rm -f /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json /data/data/{pkg}/knobs_layer_out.json /data/local/tmp/knobs_layer_out.{pkg}.json /storage/emulated/0/Android/data/{pkg}/files/knobs_frameaudit.json /data/data/{pkg}/knobs_frameaudit.json /data/local/tmp/knobs_frameaudit.{pkg}.json'"
             ),
             15,
         );
@@ -197,9 +208,14 @@ impl GrayLayer {
         );
     }
 
+    /// 每一档都把**全部**开关显式写一遍: 上一轮留下的 frameaudit=1 会给别的臂凭空加观测开销。
     fn setprops(&self, loadop: &str, dump: &str, cp: &str, upop: &str) {
+        self.setprops_fa(loadop, dump, cp, upop, "0", "0");
+    }
+
+    fn setprops_fa(&self, loadop: &str, dump: &str, cp: &str, upop: &str, fa: &str, fa_ts: &str) {
         self.ashell(
-            &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}'"),
+            &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}; setprop {FA_PROP} {fa}; setprop {FA_TS_PROP} {fa_ts}; setprop {FA_GO_PROP} 0'"),
             15,
         );
     }
@@ -248,6 +264,15 @@ impl GrayLayer {
                 self.require_prop(UPOP_PROP, "1", "算子")?;
                 self.mount_layer(pkg, keep_prop)
             }
+            // 一帧步骤清单 (只读): 层按提交顺序记 pass/拷贝/清屏/dispatch, 由
+            // `debug.knobs.frameaudit_go` 触发抓帧; -ts 档另在 pass 前后写 GPU 时间戳
+            "frameaudit" | "frameaudit-ts" => {
+                let ts = if mode == "frameaudit-ts" { "1" } else { "0" };
+                self.setprops_fa("0", "1", "0", "0", "1", ts);
+                self.require_prop(FA_PROP, "1", "步骤清单")?;
+                self.require_prop(FA_TS_PROP, ts, "步骤清单时间戳")?;
+                self.mount_layer(pkg, keep_prop)
+            }
             other => Err(format!("不认识的挂层模式 {other:?}")),
         }
     }
@@ -258,7 +283,7 @@ impl GrayLayer {
             "debug.vulkan.layers = [{}]",
             self.getprop("debug.vulkan.layers")
         ));
-        for p in [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP] {
+        for p in [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, FA_PROP, FA_TS_PROP, FA_GO_PROP] {
             l.push(format!("{p}  = [{}]", self.getprop(p)));
         }
         let st = Self::adb_stdout(
@@ -282,7 +307,7 @@ impl GrayLayer {
     pub fn off(&self) -> String {
         self.ashell(
             &format!(
-                "su -c 'setprop debug.vulkan.layers \"\"; setprop {LOADOP_PROP} 0; setprop {DUMP_PROP} 0; setprop {CP_PROP} 0; setprop {UPOP_PROP} 0'"
+                "su -c 'setprop debug.vulkan.layers \"\"; setprop {LOADOP_PROP} 0; setprop {DUMP_PROP} 0; setprop {CP_PROP} 0; setprop {UPOP_PROP} 0; setprop {FA_PROP} 0; setprop {FA_TS_PROP} 0; setprop {FA_GO_PROP} 0'"
             ),
             15,
         );
@@ -295,7 +320,7 @@ impl GrayLayer {
             let (pkg, dir) = st.split_once('|').unwrap_or(("", ""));
             self.ashell(
                 &format!(
-                    "su -c 'rm -f /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json /data/data/{pkg}/knobs_layer_out.json /data/local/tmp/knobs_layer_out.{pkg}.json'"
+                    "su -c 'rm -f /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json /data/data/{pkg}/knobs_layer_out.json /data/local/tmp/knobs_layer_out.{pkg}.json /storage/emulated/0/Android/data/{pkg}/files/knobs_frameaudit.json /data/data/{pkg}/knobs_frameaudit.json /data/local/tmp/knobs_frameaudit.{pkg}.json'"
                 ),
                 15,
             );
@@ -362,10 +387,12 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
     let mut serial = std::env::var("REFBENCH_SERIAL")
         .unwrap_or_else(|_| std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into()));
     let mut keep_prop = false;
+    let mut so: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--serial" => serial = it.next().cloned().unwrap_or(serial),
+            "--so" => so = it.next().cloned(),
             "--keep-prop" => keep_prop = true,
             other => positional.push(other.to_string()),
         }
@@ -378,7 +405,7 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
         eprintln!("找不到 adb");
         return 2;
     }
-    let gl = GrayLayer::new(&serial);
+    let gl = GrayLayer::new(&serial).with_so(so);
     match mode.as_str() {
         "status" => {
             println!("{}", gl.status());
@@ -388,7 +415,7 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
             println!("{}", gl.off());
             0
         }
-        "probe" | "loadop" | "passdump" | "copyprobe" | "upop" | "target" => {
+        "probe" | "loadop" | "passdump" | "copyprobe" | "upop" | "frameaudit" | "frameaudit-ts" | "target" => {
             let default_pkg = if mode == "probe" || mode == "loadop" {
                 "io.github.hgamey.refbench"
             } else {

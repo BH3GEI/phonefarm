@@ -60,7 +60,7 @@ fn in_world(serial: &str) -> bool {
 }
 
 /// 等登录页的门出现再点; 点早了会落空。然后等进大世界 (passes/帧 >= 25)。
-fn launch_to_world_layered(serial: &str) -> Result<(), String> {
+pub(crate) fn launch_to_world_layered(serial: &str) -> Result<(), String> {
     let mut i = 0u32;
     while i < 40 {
         if mark_field(serial, "frames").is_some() {

@@ -56,6 +56,7 @@ const LOCKED: [&str; 20] = [
     "exec",
     "experiment",
     "selftest",
+    "frame-audit",
 ];
 
 /// 从参数里剥下来的锁选项。
@@ -80,6 +81,10 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
     }
     // selftest report 只读本地证据目录、不带子命令只打用法, 都不碰设备
     if sub == "selftest" && matches!(rest.first().map(|s| s.as_str()), None | Some("report")) {
+        return false;
+    }
+    // frame-audit 只有 capture 碰设备, analyze 纯离线
+    if sub == "frame-audit" && rest.first().map(|s| s.as_str()) != Some("capture") {
         return false;
     }
     if matches!(sub, "eval" | "gpu-op") {

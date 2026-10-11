@@ -134,6 +134,15 @@ layer 注入点未知；不成立则灰档只在 Android 成立，鸿蒙退回�
   **立项时记的"本机 logcat 哑掉"不准确** —— logcat 只是对 shell uid 不可读，root 读一切正常
 - `build/build_layer.sh` — NDK 直编 + `DT_NEEDED` 自检
 - `enable_layer.sh {probe|target <pkg>|status|off}` — `off` 带 state 回滚 + 全盘残留清扫
+- **frameaudit 只读档**（`debug.knobs.frameaudit=1`，可加 `debug.knobs.frameaudit_ts=1`）——
+  「一帧到底做了哪些步骤」：按提交顺序记每个 render pass（附件是哪张图的哪个 mip/layer、尺寸、格式、
+  采样数、loadOp/storeOp、draw 数、描述符引用了哪些图），以及 pass 之外的 dispatch / 拷贝 / 清屏 /
+  blit / resolve / `oldLayout=UNDEFINED` 丢弃。不改任何渲染；`_ts` 档只多在 pass 前后写 GPU 时间戳查询
+  （写前在同一条命令缓冲里 reset 该查询，命令缓冲被反复提交也合法）。用属性 `debug.knobs.frameaudit_go`
+  触发抓帧（不是固定帧号，免得抓到登录页），落盘 `knobs_frameaudit.json`。
+  主机侧：`phonefarm frame-audit capture --out <目录> [--ts]` 挂层进大世界抓几次、收尾摘层关游戏；
+  `phonefarm frame-audit analyze <json>` 离线排时间线并找「白存 / 白读 / 白清 / 清了又 LOAD / 整个 pass 白画」。
+  「读」按描述符引用近似（绑了不等于采了），所以只会把多余的判成有用，不会反过来。
 
 ## 灰档改写 #1：LoadOp LOAD → DONT_CARE —— 已成立
 
