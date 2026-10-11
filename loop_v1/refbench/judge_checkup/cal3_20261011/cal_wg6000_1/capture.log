@@ -1,0 +1,2 @@
+CAPTURE_OK lines=4322 out=/data/local/tmp/phonefarm_selftest/trace_raw.txt
+#adb_exit=0
