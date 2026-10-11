@@ -1,0 +1,8 @@
+Starting: Intent { cmp=io.github.hgamey.refbench/android.app.NativeActivity (has extras) }
+Status: ok
+LaunchState: COLD
+Activity: io.github.hgamey.refbench/android.app.NativeActivity
+TotalTime: 136
+WaitTime: 140
+Complete
+#adb_exit=0

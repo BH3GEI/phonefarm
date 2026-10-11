@@ -1,0 +1,125 @@
+{
+  "calib": {
+    "k_ms_per_wg": 0.000507625,
+    "t0_ms": 2.257499999999999
+  },
+  "conditions": {
+    "base_wg": 4000,
+    "capdur_s": 10,
+    "charge_suspend": true,
+    "cool_c": 46.0,
+    "cool_timeout_s": 90,
+    "fan": "on(enable=1,level=5)",
+    "frames": 3000,
+    "intensity": 1,
+    "iters": 64,
+    "lock_freq": false,
+    "scene": "sr_pipeline",
+    "serial": "91253241019A",
+    "temp_cap_c": 70.0,
+    "warmup_s": 2
+  },
+  "metric": "frame_p50",
+  "residual_pct": [
+    0.047,
+    -0.005,
+    0.005,
+    -0.047
+  ],
+  "restore": {
+    "device_after": {
+      "capacity": "100",
+      "charge_state_file": "absent",
+      "charging_enabled": "1",
+      "fan_enable": "0",
+      "fan_speed_level": "5",
+      "max_pwrlevel": "3",
+      "min_pwrlevel": "17",
+      "thermal_pwrlevel": "7"
+    },
+    "fan_restored_to": "enable=0 level=5"
+  },
+  "runs": [
+    {
+      "apply_ok": false,
+      "fps_mean": 120.036,
+      "frame_p50": 8.31,
+      "frame_p95": 9.067,
+      "heavy_wg": 0,
+      "label": "cal_wg0_1",
+      "power_w_mean": null,
+      "seconds_total": 31.4
+    },
+    {
+      "apply_ok": false,
+      "fps_mean": 300.289,
+      "frame_p50": 3.2845,
+      "frame_p95": 3.8949,
+      "heavy_wg": 2000,
+      "label": "cal_wg2000_1",
+      "power_w_mean": null,
+      "seconds_total": 31.4
+    },
+    {
+      "apply_ok": true,
+      "fps_mean": 231.187,
+      "frame_p50": 4.29,
+      "frame_p95": 4.8807,
+      "heavy_wg": 4000,
+      "label": "cal_wg4000_1",
+      "power_w_mean": null,
+      "seconds_total": 31.7
+    },
+    {
+      "apply_ok": true,
+      "fps_mean": 187.423,
+      "frame_p50": 5.303,
+      "frame_p95": 5.9335,
+      "heavy_wg": 6000,
+      "label": "cal_wg6000_1",
+      "power_w_mean": null,
+      "seconds_total": 31.4
+    },
+    {
+      "apply_ok": true,
+      "fps_mean": 187.236,
+      "frame_p50": 5.3035,
+      "frame_p95": 5.9833,
+      "heavy_wg": 6000,
+      "label": "cal_wg6000_2",
+      "power_w_mean": null,
+      "seconds_total": 31.6
+    },
+    {
+      "apply_ok": true,
+      "fps_mean": 231.252,
+      "frame_p50": 4.286,
+      "frame_p95": 4.9169,
+      "heavy_wg": 4000,
+      "label": "cal_wg4000_2",
+      "power_w_mean": null,
+      "seconds_total": 31.6
+    },
+    {
+      "apply_ok": false,
+      "fps_mean": 300.754,
+      "frame_p50": 3.285,
+      "frame_p95": 3.9012,
+      "heavy_wg": 2000,
+      "label": "cal_wg2000_2",
+      "power_w_mean": null,
+      "seconds_total": 31.1
+    },
+    {
+      "apply_ok": false,
+      "fps_mean": 120.228,
+      "frame_p50": 8.312,
+      "frame_p95": 9.0385,
+      "heavy_wg": 0,
+      "label": "cal_wg0_2",
+      "power_w_mean": null,
+      "seconds_total": 31.7
+    }
+  ],
+  "template_sha256": "c094c3d35efc6823035d8622b2a62e183bfb4805287f3bc62d794afd835cb839"
+}
