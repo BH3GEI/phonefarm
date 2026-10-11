@@ -748,6 +748,9 @@ pub fn env_stats(text: &str) -> PyVal {
     let mut charge_suspended = false;
     let mut fan_state: Option<String> = None;
     let mut n = 0usize;
+    // GPU <uptime> <max_pwrlevel> <gpuclk Hz>: 厂商性能服务会改 GPU 上限, 逐样本核对
+    let mut gpu_levels: Vec<i64> = vec![];
+    let mut gpu_mhz: Vec<f64> = vec![];
 
     for line in text.lines() {
         let line = line.trim();
@@ -769,6 +772,20 @@ pub fn env_stats(text: &str) -> PyVal {
             // 两臂是不是同一风扇状态 —— 风扇开关前后的数据不能混着比。
             let v = v.trim();
             fan_state = (!v.is_empty()).then(|| v.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("GPU ") {
+            let p: Vec<&str> = rest.split_whitespace().collect();
+            if let (Some(Ok(l)), Some(Ok(hz))) =
+                (p.get(1).map(|x| x.parse::<i64>()), p.get(2).map(|x| x.parse::<i64>()))
+            {
+                if !gpu_levels.contains(&l) {
+                    gpu_levels.push(l);
+                }
+                if hz > 0 {
+                    gpu_mhz.push(hz as f64 / 1e6);
+                }
+            }
             continue;
         }
         if !line.starts_with("ENV ") {
@@ -859,7 +876,7 @@ pub fn env_stats(text: &str) -> PyVal {
         )
     };
 
-    pyobj! {
+    let mut out = pyobj! {
         "n_samples" => n,
         "battery_status" => status.clone(),
         "battery_capacity_pct" => capacity,
@@ -881,7 +898,21 @@ pub fn env_stats(text: &str) -> PyVal {
         "soc_temp_max_c" => temps.iter().copied().reduce(f64::max),
         "soc_temp_mean_c" => (!temps.is_empty())
             .then(|| py_round(py_sum(temps.iter().copied()) / temps.len() as f64, 3)),
+    };
+    // 只有采到 GPU 行时才加这几个键 —— 旧证据 (没有 GPU 行) 解析出来与以前逐字节相同
+    if let (PyVal::Obj(kvs), false) = (&mut out, gpu_levels.is_empty()) {
+        gpu_levels.sort_unstable();
+        kvs.push((
+            "gpu_max_pwrlevel_seen".into(),
+            PyVal::List(gpu_levels.iter().map(|l| PyVal::Int(*l)).collect()),
+        ));
+        kvs.push(("gpu_clk_mhz_mean".into(), PyVal::from(avg(&gpu_mhz).map(|v| py_round(v, 1)))));
+        kvs.push((
+            "gpu_clk_mhz_max".into(),
+            PyVal::from(gpu_mhz.iter().copied().reduce(f64::max).map(|v| py_round(v, 1))),
+        ));
     }
+    out
 }
 
 // ══════════════ 判定 ══════════════
@@ -1597,5 +1628,29 @@ ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
         }
         // 留痕这条线走的是未舍入的 alpha_win
         assert_eq!(got.get("alpha_win").unwrap().as_f64(), Some(0.05 / 3.0));
+    }
+
+    /// 厂商性能服务会把 GPU max_pwrlevel 改回 17: 逐样本的 GPU 行汇总成「见到过哪些档」
+    /// 与频率均值/最大值; 没有 GPU 行的旧证据不多出任何键。
+    #[test]
+    fn env_stats_records_gpu_cap_changes_only_when_sampled() {
+        let s = env_stats(
+            "#battery_status=Discharging\n\
+ENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n\
+GPU 1.0 0 900000000\n\
+ENV 3.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n\
+GPU 3.0 17 300000000\n\
+GPU 5.0 17 bad\n",
+        );
+        assert_eq!(
+            s.get("gpu_max_pwrlevel_seen"),
+            Some(&PyVal::List(vec![PyVal::Int(0), PyVal::Int(17)]))
+        );
+        assert_eq!(s.get("gpu_clk_mhz_mean").and_then(|v| v.as_f64()), Some(600.0));
+        assert_eq!(s.get("gpu_clk_mhz_max").and_then(|v| v.as_f64()), Some(900.0));
+        assert_eq!(s.get("n_samples").and_then(|v| v.as_i64()), Some(2));
+        let old = env_stats("#battery_status=Discharging\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n");
+        assert!(old.get("gpu_max_pwrlevel_seen").is_none());
+        assert!(old.get("gpu_clk_mhz_mean").is_none());
     }
 }

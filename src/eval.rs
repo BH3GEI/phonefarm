@@ -748,7 +748,7 @@ pub(crate) fn run_one_with(
 }
 
 /// [`run_one`] 回包里并进判定视图的 env 字段 (sample_env.sh → [`sysparam::env_stats`])。
-pub(crate) const RUN_ENV_KEYS: [&str; 16] = [
+pub(crate) const RUN_ENV_KEYS: [&str; 19] = [
     "power_w_mean",
     "power_w_median",
     "power_now_w_mean",
@@ -765,6 +765,10 @@ pub(crate) const RUN_ENV_KEYS: [&str; 16] = [
     "soc_temp_mean_c",
     "n_samples",
     "fan_state",
+    // 只有设备端采到 GPU 行时 env 里才有这三项 (厂商性能服务会改 GPU 上限, 逐臂留证)
+    "gpu_max_pwrlevel_seen",
+    "gpu_clk_mhz_mean",
+    "gpu_clk_mhz_max",
 ];
 
 /// 判定/统计用的单轮视图: summary 字段展平, 再并上 env 的功耗/温度字段
