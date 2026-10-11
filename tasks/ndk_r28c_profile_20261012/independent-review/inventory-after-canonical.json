@@ -1,0 +1,12 @@
+{
+  "source_sha256": "7bb7ee2d613690f83e5b8588135d62bc435b4c9e9f9d09a1c11f866c775a212f",
+  "case": "owned4097zero-files same counterexample with canonical private temp root",
+  "source_kind": "synthetic_host_fixture",
+  "configured_entry_cap": 4096,
+  "outcome": "REJECTED",
+  "error": "exported entry limit during enumeration",
+  "elapsed_seconds": 0.001572249922901392,
+  "sdk_calls": 0,
+  "device_calls": 0,
+  "model_calls": 0
+}

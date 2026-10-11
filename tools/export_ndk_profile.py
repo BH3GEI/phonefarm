@@ -51,15 +51,32 @@ def atomic(path, value):
         os.close(fd)
 
 
+def directory_fd(path):
+    absolute = Path(path).absolute()
+    if '..' in absolute.parts:
+        raise ValueError('parent traversal refused')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in absolute.parts[1:]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 class Source:
     def __init__(self, root, seconds):
         if root.is_symlink():
             raise ValueError('source root symlink refused')
-        self.root = root.resolve(strict=True)
-        self.fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.root = root.absolute()
+        self.fd = directory_fd(self.root)
         self.deadline = time.monotonic() + seconds
         self.observed = {}
         self.directories = {}
+        self.entries_seen = set()
 
     def close(self):
         os.close(self.fd)
@@ -118,7 +135,16 @@ class Source:
         finally:
             os.close(parent)
         try:
-            names = sorted(os.listdir(fd))
+            names = []
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    self.budget()
+                    child = str(Path(rel) / entry.name)
+                    self.entries_seen.add(child)
+                    if len(self.entries_seen) > LIMIT_ENTRIES:
+                        raise ValueError('selected entry count exceeds limit during enumeration')
+                    names.append(entry.name)
+            names.sort()
             self.directories[rel] = names
             self.observed[rel] = signature(os.fstat(fd))
             files = []
@@ -183,7 +209,14 @@ class Source:
                 if rel in self.directories:
                     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                     try:
-                        if sorted(os.listdir(fd)) != self.directories[rel]:
+                        names = []
+                        with os.scandir(fd) as entries:
+                            for entry in entries:
+                                self.budget()
+                                if len(names) >= LIMIT_ENTRIES:
+                                    raise ValueError('source directory entry limit')
+                                names.append(entry.name)
+                        if sorted(names) != self.directories[rel]:
                             raise ValueError('source directory changed: ' + rel)
                     finally:
                         os.close(fd)
@@ -191,48 +224,70 @@ class Source:
                 os.close(parent)
 
 
-def inventory(root):
-    if root.is_symlink() or not root.is_dir():
-        raise ValueError('SDK root must be a regular directory')
+def inventory(root, budget=None, include_count=False):
     rows = []
     total = 0
-    for parent, dirs, files in os.walk(root, followlinks=False):
-        for name in sorted(dirs + files):
-            path = Path(parent) / name
-            s = path.lstat()
-            rel = str(path.relative_to(root))
-            if len(Path(rel).parts) > 16 or stat.S_ISLNK(s.st_mode):
-                raise ValueError('unsafe exported path')
+    entries_seen = 0
+    root_fd = directory_fd(root)
+    def tick():
+        if budget:
+            budget()
+    def visit(fd, rel=''):
+        nonlocal total, entries_seen
+        names = []
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                tick()
+                entries_seen += 1
+                if entries_seen > LIMIT_ENTRIES:
+                    raise ValueError('exported entry limit during enumeration')
+                names.append(entry.name)
+        for name in sorted(names):
+            tick()
+            path = str(Path(rel) / name)
+            if len(Path(path).parts) > 16:
+                raise ValueError('exported path depth')
+            s = os.stat(name, dir_fd=fd, follow_symlinks=False)
             if stat.S_ISDIR(s.st_mode):
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    visit(child, path)
+                finally:
+                    os.close(child)
                 continue
             if not stat.S_ISREG(s.st_mode):
                 raise ValueError('nonregular exported file')
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
             try:
-                before = os.fstat(fd)
+                before = os.fstat(child)
                 if not stat.S_ISREG(before.st_mode) or signature(before) != signature(s) or total + before.st_size > LIMIT_BYTES:
                     raise ValueError('exported file type/size changed or exceeds budget')
                 h = hashlib.sha256()
                 count = 0
                 while True:
-                    b = os.read(fd, 1024 * 1024)
+                    tick()
+                    b = os.read(child, 1024 * 1024)
                     if not b:
                         break
                     count += len(b)
                     if count > before.st_size:
                         raise ValueError('exported file grew')
                     h.update(b)
-                if count != before.st_size or signature(before) != signature(os.fstat(fd)):
+                if count != before.st_size or signature(before) != signature(os.fstat(child)):
                     raise ValueError('exported file changed during read')
             finally:
-                os.close(fd)
+                os.close(child)
+            executable = bool(s.st_mode & 0o111)
+            if stat.S_IMODE(s.st_mode) != (0o500 if executable else 0o400):
+                raise ValueError('exported file is not frozen read-only')
             total += s.st_size
-            rows.append({'path': rel, 'bytes': s.st_size, 'sha256': h.hexdigest(),
-                         'executable': bool(s.st_mode & 0o111)})
-            if total > LIMIT_BYTES:
-                raise ValueError('exported byte limit')
+            rows.append({'path': path, 'bytes': s.st_size, 'sha256': h.hexdigest(), 'executable': executable})
+    try:
+        visit(root_fd)
+    finally:
+        os.close(root_fd)
     rows.sort(key=lambda x: x['path'])
-    return rows
+    return (rows, entries_seen) if include_count else rows
 
 
 def bounded_metadata(path):
@@ -258,7 +313,7 @@ def bounded_metadata(path):
         os.close(fd)
 
 
-def verify(out, require_receipt=True):
+def verify(out, require_receipt=True, budget=None):
     if out.is_symlink() or (out / 'manifest.json').is_symlink():
         raise ValueError('profile/manifest symlink')
     expected_outer = {'sdk', 'manifest.json', 'receipt.json'} if require_receipt else {'sdk', 'manifest.json'}
@@ -287,11 +342,10 @@ def verify(out, require_receipt=True):
     expected = m['files']
     if not isinstance(expected, list) or len(expected) > LIMIT_ENTRIES:
         raise ValueError('bad file ledger')
-    actual = inventory(out / 'sdk')
+    actual, entries = inventory(out / 'sdk', budget, include_count=True)
     reduced = [{k: r[k] for k in ('path', 'bytes', 'sha256', 'executable')} for r in expected]
     if actual != reduced:
         raise ValueError('profile current bytes/file set mismatch')
-    entries = sum(1 for unused in (out / 'sdk').rglob('*'))
     if entries > LIMIT_ENTRIES or m.get('entries') != entries or m.get('regular_bytes') != sum(r['bytes'] for r in actual):
         raise ValueError('entry/byte ledger mismatch')
     required = sorted(FILES + list(ALIASES))
@@ -369,11 +423,8 @@ def export(root, out, seconds, synthetic=False):
             dest.chmod(0o500 if r['executable'] else 0o400)
             rows.append(dict(r, path=rel, source_path=origin, source_bytes=r['bytes'],
                              source_sha256=r['sha256'], alias_chain=chain))
-        entries = sum(1 for unused in sdk.rglob('*'))
-        if entries > LIMIT_ENTRIES:
-            raise ValueError('output entries exceed limit')
         source.unchanged()
-        actual = inventory(sdk)
+        actual, entries = inventory(sdk, source.budget, include_count=True)
         source.budget()
         m = {'schema': 'phonefarm/ndk_profile@1', 'profile': PROFILE, 'complete': True,
              'source_root': str(source.root), 'package_revision': parsed['Pkg.Revision'],
@@ -382,7 +433,7 @@ def export(root, out, seconds, synthetic=False):
              'inventory_sha256': hashlib.sha256(encode(actual)).hexdigest(),
              'proof_flags': proof_flags(), 'host_dependencies': 'system_libSystem_libz_shared_cache_shell_OS_unfrozen'}
         atomic(out / 'manifest.json', m)
-        verify(out, require_receipt=False)
+        verify(out, require_receipt=False, budget=source.budget)
         source.budget()
         atomic(out / 'receipt.json', {'complete': True, 'profile': PROFILE, 'sdk_path': str(sdk.resolve()),
                                     'manifest_sha256': hashlib.sha256((out / 'manifest.json').read_bytes()).hexdigest(),

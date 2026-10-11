@@ -15,7 +15,7 @@ spec.loader.exec_module(m)
 class Profile(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='ndk-profile-unit-')
-        self.root = Path(self.tmp.name) / 'original'
+        self.root = Path(self.tmp.name).resolve() / 'original'
         self.root.mkdir()
         for rel in m.FILES:
             p = self.root / rel
@@ -34,7 +34,7 @@ class Profile(unittest.TestCase):
             p = self.root / tree
             p.mkdir(parents=True)
             (p / 'fixture.h').write_bytes(b'synthetic data\n')
-        self.out = Path(self.tmp.name) / 'export'
+        self.out = Path(self.tmp.name).resolve() / 'export'
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -74,7 +74,7 @@ class Profile(unittest.TestCase):
                 else:
                     os.mkfifo(p)
                 with self.assertRaises(ValueError):
-                    m.export(self.root, Path(self.tmp.name) / ('export-' + special), 30, True)
+                    m.export(self.root, Path(self.tmp.name).resolve() / ('export-' + special), 30, True)
                 p.unlink()
 
     def test_existing_destination_never_covered(self):
@@ -92,7 +92,7 @@ class Profile(unittest.TestCase):
 
     def test_byte_and_entry_budgets_persist_negative(self):
         for name, cap in [('LIMIT_BYTES', 32), ('LIMIT_ENTRIES', 4)]:
-            out = Path(self.tmp.name) / name
+            out = Path(self.tmp.name).resolve() / name
             with patch.object(m, name, cap), self.assertRaises(ValueError):
                 m.export(self.root, out, 30, True)
             self.assertFalse((out / 'receipt.json').exists())
@@ -187,6 +187,34 @@ class Profile(unittest.TestCase):
         self.run_export()
         (self.out / 'failure.json').write_text('{"complete":false}')
         with self.assertRaises(ValueError):
+            m.verify(self.out)
+
+
+    def test_inventory_stream_refuses_4097_entries(self):
+        root = Path(self.tmp.name).resolve() / 'many'
+        root.mkdir()
+        for n in range(m.LIMIT_ENTRIES + 1):
+            (root / str(n)).touch(mode=0o400)
+        with self.assertRaisesRegex(ValueError, 'entry limit during enumeration'):
+            m.inventory(root)
+
+    def test_inventory_block_budget_checked(self):
+        self.run_export()
+        def stop():
+            raise ValueError('deadline test')
+        with self.assertRaisesRegex(ValueError, 'deadline test'):
+            m.inventory(self.out / 'sdk', stop)
+
+    def test_source_ancestor_symlink_refused(self):
+        link = Path(self.tmp.name).resolve() / 'alias-parent'
+        link.symlink_to(self.root.parent, target_is_directory=True)
+        with self.assertRaises(OSError):
+            m.export(link / 'original', self.out, 30, True)
+
+    def test_current_permissions_binding(self):
+        self.run_export()
+        (self.out / 'sdk/NOTICE').chmod(0o600)
+        with self.assertRaisesRegex(ValueError, 'read-only'):
             m.verify(self.out)
 
 

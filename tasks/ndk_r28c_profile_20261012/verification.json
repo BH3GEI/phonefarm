@@ -3,7 +3,7 @@
   "profile": "ndk-r28c-darwin-arm64-api30-v1",
   "source_base": "aadc9c9abd37fe5b4340516bb0a0ca0c42a06488",
   "rust_tests": 535,
-  "python_tests": 17,
+  "python_tests": 21,
   "cargo_clippy_exit": 0,
   "clippy_existing_warnings": 54,
   "original_ndk": {
@@ -183,5 +183,19 @@
   "promotion": false,
   "real_sdk_compilation_observed": true,
   "raw_sessions_retained_at": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools",
-  "archive_omissions": "Executables, SDK snapshots, ELF/APK and original full inventory stay in local owned paths; archive is receipts only, not a portable inspectable session."
+  "archive_omissions": "Executables, SDK snapshots, ELF/APK and original full inventory stay in local owned paths; archive is receipts only, not a portable inspectable session.",
+  "final_source_export": {
+    "complete": true,
+    "manifest_byte_exact_equal_to_accepted_real_exports": true,
+    "inventory_sha256": "89d1457293ec0bf6f7db63f329398df23210511196209353af3aed746d52da9c",
+    "entries": 3490,
+    "regular_bytes": 483954086,
+    "mechanism": "bounded ancestor FD/entry streaming checks changed; exported SDK bytes and complete manifest identical to six-stage accepted profile"
+  },
+  "independent_review": {
+    "bounded_enumeration_after": "REJECTED at entry 4097",
+    "ancestor_symlink_after": "REJECTED",
+    "scope": "owned host fixtures; no SDK/full/device/GPU repetition",
+    "remaining_publication_blockers": 0
+  }
 }

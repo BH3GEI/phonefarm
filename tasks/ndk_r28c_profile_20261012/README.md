@@ -1,6 +1,6 @@
 # Actual Android host compilation, not GPU acceptance
 
-Source baseline PF24 aadc9c9; new exporter is tools/export_ndk_profile.py. 535 unchanged Rust tests, 17 new Python exporter/receiver counterexamples and default Clippy exit0 (54 existing advisory warnings). No device/model/API calls.
+Source baseline PF24 aadc9c9; new exporter is tools/export_ndk_profile.py. 535 unchanged Rust tests, 21 new Python exporter/receiver counterexamples and default Clippy exit0 (54 existing advisory warnings). No device/model/API calls.
 
 Google command-line tools and sdkmanager installed only ndk28.2.13676358, build-tools35 and platformandroid35. Official URLs/checksums, pinned package identity, actual versions and observed hashes are retained. Exported profile records caller_supplied_unverified; this ledger does not grant an external caller Google authenticity. glslc/spirv-val version text says ndk-r29-beta2 even though the official installed package is r28c; both literal identities are retained rather than rewritten.
 
@@ -15,3 +15,5 @@ Receipts/descriptors and selected dependency manifest are committed. Large execu
 Usage is in docs/SPEC_NDK_R28C_PROFILE.md. No production Rust, GOL gates, targets, layer inputs or device source were changed.
 
 Large raw stdout and selected raw logs are gzip-compressed byte exactly (mtime0); reference JSON records decompressed SHA/size. They are not normalized summaries.
+
+Final-source bounded ancestor/enumeration/stream-budget checks exported byte-exact the same manifest/SDK inventory as the profile used by both real six-stage builds. Independent review receipts include entry4097 immediate refusal; no accepted raw build receipts were edited.
