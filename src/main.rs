@@ -26,6 +26,7 @@ mod sysparam;
 mod vksreport;
 mod parallel;
 mod device;
+mod devlock;
 mod eval;
 mod fold;
 mod gamepad;
@@ -230,7 +231,11 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        experiment <spec.toml> [--arm A|B|C] [--ablate no-active-testing|no-cap-screening] [--resume|--report-only] [--json]  (A/B/C 对比实验,SPEC_EVOLUTION §7)
        export [--task T] --split train|heldout --out <文件> [--redact-config toml]  (训练数据导出)
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
-服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)";
+服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)
+设备锁: 碰设备的子命令 (run/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
+       capture/test-batch/cts-fetch/quest/probe/exec/experiment) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
+       通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h] [--no-devlock]
+       锁已在同一 label 手里 (外层 devlock run / optimize) 时原地执行; 没拿到锁不碰设备, 退出 2";
 
 /// 任务数据根(tasks 目录)解析: PF_TASKS_ROOT 环境变量优先(实验臂隔离/单测注入,
 /// 语义与 cli.rs data_root() 一致——指向 tasks 根本身);否则 <data_dir>/tasks。
@@ -337,7 +342,15 @@ fn spawn_detached_with(args: &[String], console: &str, envs: &[(&str, &str)]) ->
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // 碰设备的子命令先过设备锁 (src/devlock.rs): 没拿到锁不碰设备
+    if let Some(sub) = args.first().cloned() {
+        if devlock::needs_lock(&sub, &args[1..]) {
+            if let devlock::Gate::Exit(code) = devlock::gate(&mut args) {
+                std::process::exit(code);
+            }
+        }
+    }
     match args.first().map(|s| s.as_str()) {
         Some("serve") => {
             // MCP stdio 工具服务(SPEC_MCP_SERVE): octos 等客户端的外部工具契约
