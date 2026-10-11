@@ -1,0 +1,81 @@
+{
+  "source_kind": "actual_GOL_Naga_and_official_installed_NDK_with_exported_profile",
+  "gol_source": "70141d57dfe6238afa219d01604e191162353967",
+  "pf_source": "f88188ca73cd8fb9255c27c03a25b8c3a798f6cf",
+  "gol_sha256": "0b6a45e5453d6d73f9184bf67d29aefb5de14c8041d8cad8c5720f51370943e6",
+  "pf_sha256": "5abd65372e3da6dae3a932d97617489b8f4f86cbe1d55a059d5785ff3cc5b397",
+  "layer_contract": "ownership5",
+  "layer": {
+    "bytes": 3085992,
+    "sha256": "b74ce25c577ae3ae0b363e54739f166ac13244cacaa2d4fdb8254626bdd9f21b"
+  },
+  "artifact": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-ndk-prepare-ownership5/session/native/upop-1230f75c75cb06a3e56c047d097975d6cd3d02c6ceb3158e1bcf4c995dccb06e",
+  "stages": [
+    {
+      "name": "compile",
+      "state": "COMPLETED",
+      "group_absent": true,
+      "exit_code": 0
+    },
+    {
+      "name": "verify_compile",
+      "state": "COMPLETED",
+      "group_absent": true,
+      "exit_code": 0
+    },
+    {
+      "name": "adapt",
+      "state": "COMPLETED",
+      "group_absent": true,
+      "exit_code": 0
+    },
+    {
+      "name": "verify_adaptation",
+      "state": "COMPLETED",
+      "group_absent": true,
+      "exit_code": 0
+    },
+    {
+      "name": "native_build",
+      "state": "COMPLETED",
+      "group_absent": true,
+      "exit_code": 0
+    },
+    {
+      "name": "verify_native",
+      "state": "COMPLETED",
+      "group_absent": true,
+      "exit_code": 0
+    }
+  ],
+  "spirv_static_validation": [
+    {
+      "name": "candidate.spv",
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "name": "copyprobe_copy.spv",
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "name": "original_candidate.spv",
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "actual_android_native_compiler_execution_observed": true,
+  "accepted_journal_fields_preserved": true,
+  "android_codegen_field_in_old_journal": false,
+  "real_ndk_validation_field_in_old_journal": "not_run",
+  "gpu_validation": "not_run",
+  "deployable": false,
+  "proof_game": false,
+  "promotion": false,
+  "api_calls": 0,
+  "device_calls": 0
+}

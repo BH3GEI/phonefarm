@@ -1,0 +1,187 @@
+{
+  "schema": "ndk_profile_acceptance@1",
+  "profile": "ndk-r28c-darwin-arm64-api30-v1",
+  "source_base": "aadc9c9abd37fe5b4340516bb0a0ca0c42a06488",
+  "rust_tests": 535,
+  "python_tests": 17,
+  "cargo_clippy_exit": 0,
+  "clippy_existing_warnings": 54,
+  "original_ndk": {
+    "sdk": "/Users/kamico/Library/Android/sdk/ndk/28.2.13676358",
+    "inventory_sha256": "42b1ea37b808894dff1cfa9632fe957b48f70b200878653de7eedd54df04ab03",
+    "entries": 8897,
+    "regular_bytes": 2962187103,
+    "symlinks": 23,
+    "special": 0,
+    "max_depth": 14,
+    "elapsed_s": 3.061414957046509
+  },
+  "exported": {
+    "complete": true,
+    "profile": "ndk-r28c-darwin-arm64-api30-v1",
+    "source_origin": "caller_supplied_unverified",
+    "entries": 3490,
+    "bytes": 483954086,
+    "proof_flags": {
+      "deployable": false,
+      "device": false,
+      "gpu": false,
+      "promotion": false,
+      "quality": false,
+      "real_game": false,
+      "semantic": false
+    }
+  },
+  "real_cli_cases": [
+    {
+      "name": "actual-ndk-prepare-v2",
+      "stages": [
+        {
+          "name": "compile",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "verify_compile",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "adapt",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "verify_adaptation",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "native_build",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "verify_native",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        }
+      ]
+    },
+    {
+      "name": "actual-ndk-prepare-ownership5",
+      "stages": [
+        {
+          "name": "compile",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "verify_compile",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "adapt",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "verify_adaptation",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "native_build",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "verify_native",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        }
+      ]
+    },
+    {
+      "name": "actual-full-ndk-blocked",
+      "stages": [
+        {
+          "name": "compile",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "verify_compile",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "adapt",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "verify_adaptation",
+          "state": "COMPLETED",
+          "group_absent": true,
+          "exit_code": 0,
+          "error": null
+        },
+        {
+          "name": "native_build",
+          "state": "NOT_RUN",
+          "group_absent": null,
+          "exit_code": null,
+          "error": "BLOCKED_NATIVE_INPUTS: SDK symlink layout unsupported: toolchains/llvm/prebuilt/darwin-x86_64/bin/clang"
+        },
+        {
+          "name": "verify_native",
+          "state": "NOT_RUN",
+          "group_absent": null,
+          "exit_code": null,
+          "error": "native build unavailable"
+        }
+      ]
+    }
+  ],
+  "api_calls": 0,
+  "device_calls": 0,
+  "gpu_validation": "not_run",
+  "game_proof": false,
+  "deployable": false,
+  "promotion": false,
+  "real_sdk_compilation_observed": true,
+  "raw_sessions_retained_at": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools",
+  "archive_omissions": "Executables, SDK snapshots, ELF/APK and original full inventory stay in local owned paths; archive is receipts only, not a portable inspectable session."
+}
