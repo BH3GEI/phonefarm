@@ -385,7 +385,10 @@ pub fn build_whitelist(probe: &ProbeMap) -> Whitelist {
         ("setting.system.min_refresh_rate", "min_refresh_rate"),
     ] {
         let cur = probe.s(&format!("setting.system.{skey}.cur")).to_string();
-        if cur.is_empty() || cur == "null" || modes.is_empty() {
+        // Known unset is reversible only with the controlled driver's actual read/hold/restore receipts.
+        let known_unset = cur == "null" && probe.s(&format!("{pid}.read_exit")) == "0"
+            && usable(probe,pid) && probe.s(&format!("{pid}.effect_restored")) == "yes";
+        if cur.is_empty() || (cur == "null" && !known_unset) || modes.is_empty() {
             continue;
         }
         b.add(
@@ -491,6 +494,7 @@ fn cross_val_f(cand: &[(String, String)], wl: &Whitelist, pid: &str, dflt: f64) 
         return v.parse().map_err(|_| format!("{pid}={v} 不是数字"));
     }
     match wl_get(wl, pid).map(|s| s.current.as_str()) {
+        Some("null") if pid.starts_with("setting.system.") => Ok(dflt),
         Some(c) if !c.is_empty() => c
             .parse()
             .map_err(|_| format!("{pid} 的探测原值 {c:?} 不是数字, 无法做跨项约束检查")),

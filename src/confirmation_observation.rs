@@ -85,6 +85,8 @@ struct Conditions {
     capture_seconds: u64,
     frozen_at: String,
     policy: qualification::Policy,
+    #[serde(default)]
+    sampling_contract_sha256: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -276,6 +278,12 @@ impl Reader {
 
 fn conditions_valid(c: &Conditions) -> Result<(), String> {
     require(
+        c.sampling_contract_sha256
+            .as_ref()
+            .is_none_or(|s| digest_ok(s)),
+        "invalid sampling contract fingerprint",
+    )?;
+    require(
         c.schema == "phonefarm/confirmation_conditions@1",
         "unknown conditions schema",
     )?;
@@ -341,7 +349,7 @@ const SNAPSHOT_FIXED_KEYS: &[&str] = &[
     "settings.min_refresh_rate",
     "settings.refresh_rate_mode",
 ];
-fn snapshot(s: &str, policies: &[String]) -> Result<BTreeMap<String, String>, String> {
+pub(crate) fn snapshot(s: &str, policies: &[String]) -> Result<BTreeMap<String, String>, String> {
     require(
         eval::adb_ok(s)
             && s.starts_with("# device_snapshot v1\n")
@@ -1017,6 +1025,86 @@ pub fn produce(path: &Path) -> Value {
     }
     out["artifact_hashes"] = json!(reader.hashes);
     out
+}
+
+pub(crate) fn report_for_driver(path: &Path) -> Value {
+    produce(path)
+}
+pub(crate) fn validate_driver_artifact(bytes: &[u8]) -> Result<(), String> {
+    let a: Artifact = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    require(
+        a.kind == "sysparam" && a.payload.params.len() <= 32,
+        "driver requires bounded sysparam artifact",
+    )
+}
+/// Internal driver uses the same raw algorithms before registration; never a conclusion.
+pub(crate) fn validate_raw_run(path: &Path) -> Result<Value, String> {
+    let bytes = regular_bytes(path, JSON_LIMIT)?;
+    let r = FileRef {
+        path: path
+            .file_name()
+            .ok_or("missing raw bundle filename")?
+            .to_string_lossy()
+            .into(),
+        sha256: hash(&bytes),
+    };
+    let loaded = load_run(
+        &mut Reader::default(),
+        path.parent().unwrap_or(Path::new(".")),
+        &r,
+    )?;
+    Ok(
+        json!({"valid":loaded.valid(),"gates":loaded.gates,"issues":loaded.issues,"checks":loaded.checks,"parsed":loaded.parsed,
+        "evidence_origin":loaded.manifest.evidence_origin,"real_game_optimization_proven":false,"promotion_allowed":false}),
+    )
+}
+pub(crate) fn validate_admission_for_driver(
+    path: &Path,
+    plan: &Value,
+    registered_at: &str,
+) -> Result<Value, String> {
+    let bytes = regular_bytes(path, JSON_LIMIT)?;
+    let a: Admission = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    let mut reader = Reader::default();
+    let (_, c): (_, Conditions) = reader.json(base, &a.conditions)?;
+    conditions_valid(&c)?;
+    let mut f = Frozen {
+        schema: "game_opt_loop/confirmation_plan@1".into(),
+        registered_at: registered_at.into(),
+        plan: serde_json::from_value(plan.clone()).map_err(|e| e.to_string())?,
+        sha256: String::new(),
+    };
+    f.sha256 = hash(
+        &serde_json::to_vec(&(&f.schema, &f.registered_at, &f.plan)).map_err(|e| e.to_string())?,
+    );
+    frozen_valid(&f, &c)?;
+    let r = FileRef {
+        path: path
+            .file_name()
+            .ok_or("missing admission filename")?
+            .to_string_lossy()
+            .into(),
+        sha256: hash(&bytes),
+    };
+    Ok(admission(&mut reader, base, &r, &f, &c)?.qualification)
+}
+pub(crate) fn validate_registration_for_driver(
+    path: &Path,
+    conditions_path: &Path,
+    expected: &Value,
+) -> Result<Value, String> {
+    let f: Frozen =
+        serde_json::from_slice(&regular_bytes(path, JSON_LIMIT)?).map_err(|e| e.to_string())?;
+    let c: Conditions = serde_json::from_slice(&regular_bytes(conditions_path, JSON_LIMIT)?)
+        .map_err(|e| e.to_string())?;
+    conditions_valid(&c)?;
+    frozen_valid(&f, &c)?;
+    require(
+        serde_json::to_value(&f.plan).map_err(|e| e.to_string())? == *expected,
+        "registry changed receiver-owned plan",
+    )?;
+    serde_json::to_value(&f).map_err(|e| e.to_string())
 }
 pub fn run_confirmation_observation(args: &[String]) -> i32 {
     let mut input = None;

@@ -183,6 +183,7 @@ pub fn snapshot_key_of(kind: &str, path: &str) -> Option<String> {
     {
         return Some(format!("kgsl.{}_pwrlevel", &m[1]));
     }
+    if let Some(m) = re(r"^/sys/class/kgsl/kgsl-3d0/devfreq/(governor|min_freq|max_freq)$").and_then(|r| r.captures(path)) { return Some(format!("kgsl.devfreq_{}", &m[1])); }
     if let Some(m) = re(r"^/sys/devices/system/cpu/bus_dcvs/(\w+)/boost_freq$")
         .and_then(|r| r.captures(path))
     {
@@ -209,6 +210,8 @@ pub fn touched_keys(cand: &[(String, String)], wl: &sysparam::Whitelist) -> Vec<
                     format!("{d}/scaling_min_freq"),
                 ];
             }
+        } else if spec.path.starts_with("/sys/class/kgsl/kgsl-3d0/devfreq/") {
+            paths = vec!["/sys/class/kgsl/kgsl-3d0/devfreq/governor".into(),"/sys/class/kgsl/kgsl-3d0/devfreq/max_freq".into(),"/sys/class/kgsl/kgsl-3d0/devfreq/min_freq".into()];
         } else if spec.path.ends_with("min_pwrlevel") || spec.path.ends_with("max_pwrlevel") {
             paths = vec![
                 "/sys/class/kgsl/kgsl-3d0/min_pwrlevel".into(),
