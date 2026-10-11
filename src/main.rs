@@ -30,6 +30,7 @@ mod device;
 mod platform;
 mod devlock;
 mod eval;
+mod onboard;
 mod fold;
 mod gamepad;
 mod grayab;
@@ -209,6 +210,10 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
        (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
         shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
+接入:  onboard --package <包名> [--serial S] [--out 目录] [--rounds 5] [--seconds 30] [--enter-only]
+              [--no-cold] [--no-guest] [--no-consent] [--no-charge-suspend] [--vlm-calls N]
+       (新游戏零人工接入: 冷启动 -> OCR 认画面只做白名单点击 -> 进游戏探针 -> 生成转视角负载
+        -> 渲染线程 -> N 轮实测可重复 -> profile.json; --enter-only 只把游戏带进游戏场景)
 闭环:  autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]
               [--no-llm] [--probe-only] [--baseline-runs N] [--power-in-verdict auto|on|off]
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
@@ -238,7 +243,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        export [--task T] --split train|heldout --out <文件> [--redact-config toml]  (训练数据导出)
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)
-设备锁: 碰设备的子命令 (run/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
+设备锁: 碰设备的子命令 (run/onboard/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
        capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
        通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h] [--no-devlock]
        锁已在同一 label 手里 (外层 devlock run / optimize) 时原地执行; 没拿到锁不碰设备, 退出 2";
@@ -726,6 +731,10 @@ fn main() {
         Some("autoloop") => {
             // 系统参数全自动闭环 (probe -> 基线 -> 冻结规则 -> 提名 -> ABBA -> 判定 -> 报告)
             std::process::exit(autoloop::run_autoloop(&args[1..]));
+        }
+        Some("onboard") => {
+            // 新游戏零人工接入: 进门 → 进游戏探针 → 生成负载 → 实测可重复 → 游戏档案
+            std::process::exit(onboard::run_onboard(&args[1..]));
         }
         Some("eval") => {
             // game_opt_loop 评测请求的唯一入口 (v2 信封 shader/sysparam/gray; v1 扁平兼容)

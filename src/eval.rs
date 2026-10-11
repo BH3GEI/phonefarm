@@ -641,7 +641,7 @@ fn probe_whitelist(serial: &str, evidence: &Path) -> Result<sysparam::Whitelist,
 }
 
 /// 跑一轮负载 + ftrace 采集 + 功耗温度采样 (与 autoloop.run_one 同一编排:
-/// sample_env 与 run_once 并行, 覆盖整段负载)。
+/// sample_env 与 run_once 并行, 覆盖整段负载)。渲染线程按 Unity 缺省 (UnityGfxDeviceW) 解析。
 pub(crate) fn run_one(
     serial: &str,
     label: &str,
@@ -649,6 +649,21 @@ pub(crate) fn run_one(
     seconds: u64,
     workload: &Path,
     pkg: &str,
+) -> Result<Value, String> {
+    run_one_with(serial, label, outdir, seconds, workload, pkg, None)
+}
+
+/// 同 [`run_one`], 但可指定渲染线程名 (ftrace comm)。非 Unity 游戏 (虚幻的 RHIThread 等)
+/// 不指定就解析出零帧 —— 这个名字由 `phonefarm onboard` 从 ftrace 里数出来, 记在游戏档案
+/// 的 workload.render_comm, 经评测请求的同名字段传到这里。
+pub(crate) fn run_one_with(
+    serial: &str,
+    label: &str,
+    outdir: &Path,
+    seconds: u64,
+    workload: &Path,
+    pkg: &str,
+    comm: Option<&str>,
 ) -> Result<Value, String> {
     std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
     let root = repo_root();
@@ -709,6 +724,15 @@ pub(crate) fn run_one(
     };
     let mut m = json!({ "label": label, "run_once_rc": rc });
     let sp = outdir.join("summary.json");
+    // 指定了渲染线程: 在本进程里按它重解析 trace.txt, 覆盖 run_once.sh 按 Unity 缺省解析出的
+    // summary.json。放在这里而不是给 run_once.sh 加参数, 是为了换个仓库根 (手机节点上的
+    // main 版脚本) 也照样生效。
+    if let Some(c) = comm.filter(|c| !c.is_empty()) {
+        if let Ok(b) = std::fs::read(outdir.join("trace.txt")) {
+            let d = crate::looptrace::parse(&String::from_utf8_lossy(&b), c);
+            std::fs::write(&sp, crate::pyjson::dumps(&d.summarize())).map_err(|e| e.to_string())?;
+        }
+    }
     match std::fs::read_to_string(&sp).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
         Some(s) => {
             m["summary"] = s;
@@ -976,7 +1000,15 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                 }
             }
             let label = format!("sp_{arm}{i}");
-            let res = run_one(serial, &label, &evidence.join(format!("{arm}{i}")), seconds, &workload_path, pkg);
+            let res = run_one_with(
+                serial,
+                &label,
+                &evidence.join(format!("{arm}{i}")),
+                seconds,
+                &workload_path,
+                pkg,
+                req["workload"]["render_comm"].as_str(),
+            );
             if arm == "knob" {
                 let r = restore(serial);
                 if r.contains("KNOB_RESTORE_FAIL") && restore_fail.is_none() {
@@ -1300,13 +1332,22 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                 abort_reason = Some(format!("{arm} 臂挂层失败: {e}"));
                 break;
             }
-            let res = run_one(
+            // 挂层 = 重启了游戏。有游戏档案的目标 (enter == "onboard") 自己走回游戏场景;
+            // 进不去这一臂就没法量, 整次评测作废, 不拿登录页 / 加载画面的帧凑数
+            if req["workload"]["enter"].as_str() == Some("onboard") {
+                if let Err(e) = crate::onboard::enter_scene(serial, &pkg, &evidence.join(format!("{arm}{i}_enter"))) {
+                    abort_reason = Some(format!("{arm}{i} 重启后没回到游戏场景: {e}"));
+                    break;
+                }
+            }
+            let res = run_one_with(
                 serial,
                 &format!("gray_{arm}{i}"),
                 &evidence.join(format!("{arm}{i}")),
                 seconds,
                 &workload_path,
                 &pkg,
+                req["workload"]["render_comm"].as_str(),
             );
             match res {
                 Ok(mut m) => match arm {
