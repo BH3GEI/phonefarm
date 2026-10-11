@@ -30,8 +30,10 @@ mod device;
 mod platform;
 mod devlock;
 mod eval;
+mod onboard;
 mod fold;
 mod gamepad;
+mod frameaudit;
 mod grayab;
 mod graylayer;
 mod shotdiff;
@@ -209,13 +211,19 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
        (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
         shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
+接入:  onboard --package <包名> [--serial S] [--out 目录] [--rounds 5] [--seconds 30] [--enter-only]
+              [--no-cold] [--no-guest] [--no-consent] [--no-charge-suspend] [--vlm-calls N]
+       (新游戏零人工接入: 冷启动 -> OCR 认画面只做白名单点击 -> 进游戏探针 -> 生成转视角负载
+        -> 渲染线程 -> N 轮实测可重复 -> profile.json; --enter-only 只把游戏带进游戏场景)
 闭环:  autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]
               [--no-llm] [--probe-only] [--baseline-runs N] [--power-in-verdict auto|on|off]
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
-灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop [pkg] | target <pkg> | status | off} [--keep-prop]
+灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop|frameaudit|frameaudit-ts [pkg] | target <pkg> | status | off} [--keep-prop] [--so 层.so]
        (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
+       frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 层.so]   (只读层抓原神一帧步骤清单)
+       frame-audit analyze <knobs_frameaudit.json>... [--md F] [--json F]           (离线: 步骤总览 + 白存/白读/白清/白画)
        gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
        (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
@@ -238,7 +246,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        export [--task T] --split train|heldout --out <文件> [--redact-config toml]  (训练数据导出)
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)
-设备锁: 碰设备的子命令 (run/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
+设备锁: 碰设备的子命令 (run/onboard/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
        capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
        通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h] [--no-devlock]
        锁已在同一 label 手里 (外层 devlock run / optimize) 时原地执行; 没拿到锁不碰设备, 退出 2";
@@ -714,6 +722,10 @@ fn main() {
             // 灰档 A/B 采集编排 (两臂都挂层只切属性; 每臂重启原神)
             std::process::exit(grayab::run_gray_ab(&args[1..]));
         }
+        Some("frame-audit") => {
+            // 一帧步骤清单: capture 真机抓 (只读层) / analyze 离线找多余步骤
+            std::process::exit(frameaudit::run_frame_audit(&args[1..]));
+        }
         Some("gray-layer") => {
             // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)
             std::process::exit(graylayer::run_gray_layer(&args[1..]));
@@ -726,6 +738,10 @@ fn main() {
         Some("autoloop") => {
             // 系统参数全自动闭环 (probe -> 基线 -> 冻结规则 -> 提名 -> ABBA -> 判定 -> 报告)
             std::process::exit(autoloop::run_autoloop(&args[1..]));
+        }
+        Some("onboard") => {
+            // 新游戏零人工接入: 进门 → 进游戏探针 → 生成负载 → 实测可重复 → 游戏档案
+            std::process::exit(onboard::run_onboard(&args[1..]));
         }
         Some("eval") => {
             // game_opt_loop 评测请求的唯一入口 (v2 信封 shader/sysparam/gray; v1 扁平兼容)

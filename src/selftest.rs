@@ -917,6 +917,7 @@ fn fan_state_path(serial: &str) -> PathBuf {
     hwcond::lock_state_path("selftest-fan", &Some(serial.to_string()))
 }
 
+const KGSL: &str = "/sys/class/kgsl/kgsl-3d0";
 const FAN_EN: &str = "/sys/kernel/fan/fan_enable";
 const FAN_LV: &str = "/sys/kernel/fan/fan_speed_level";
 const CHARGE_STATE: &str = "/data/local/tmp/loop_v1_charge.state";
@@ -959,6 +960,14 @@ impl Session {
         }
         push_tools(&c.serial)?;
         sh(&c.serial, "input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard", 15);
+        // 前台若留着别的应用 (实测: 原神留在前台 60 fps 持续提交), 等冷期间它一直在发热、
+        // refbench 退出后它又回到前台。回桌面让它进后台暂停渲染; 不杀进程、不动它的任何设置
+        let top = sh(&c.serial, "dumpsys activity activities | grep -m1 topResumedActivity", 15);
+        let top = strip_exit(&top).trim().to_string();
+        if !top.is_empty() && !top.contains(rb::PACKAGE) && !top.to_lowercase().contains("launcher") {
+            sh(&c.serial, "input keyevent KEYCODE_HOME", 15);
+            log(&format!("前台原是 {top} —— 回桌面 (不杀进程)"));
+        }
         let mut s = Session {
             serial: c.serial.clone(),
             dev,
@@ -986,6 +995,17 @@ impl Session {
             log(&format!("发现上次遗留的停充态, 先恢复充电: {}", strip_exit(&out).trim().lines().last().unwrap_or("")));
         }
         log(&format!("开场设备状态: {}", device_state(&c.serial)));
+        // 不锁频时的测量条件是「GPU 频率上限为缺省 0 档」。别的通路被打断会把 max_pwrlevel
+        // 留在中间档 (10-11 实测见过 17 / 12 / 3), 不归位的话整组都在降频下量。
+        if !c.lock_freq {
+            let mp = su(&c.serial, &format!("cat {KGSL}/max_pwrlevel"), 15);
+            let mp = strip_exit(&mp).trim().to_string();
+            if adb_ok(&su(&c.serial, "true", 10)) && !mp.is_empty() && mp != "0" {
+                su(&c.serial, &format!("echo 0 > {KGSL}/max_pwrlevel"), 15);
+                let now = su(&c.serial, &format!("cat {KGSL}/max_pwrlevel"), 15);
+                log(&format!("GPU max_pwrlevel 遗留为 {mp}, 归位到 0 (回读 {})", strip_exit(&now).trim()));
+            }
+        }
 
         if c.fan_on {
             let en = su(&c.serial, &format!("cat {FAN_EN}"), 15);
@@ -1247,7 +1267,7 @@ fn run_arm_retry(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, re
 
 const USAGE: &str = "用法:
   phonefarm selftest calibrate --out <目录> [--levels 0,4000,8000] [--rounds 2] [条件...]
-  phonefarm selftest run --out <目录> --cases <清单> [--pairs 5] [--calib calib.json] [--budget-min 40] [条件...]
+  phonefarm selftest run --out <目录> --cases <清单> [--only 编号,..] [--pairs 5] [--calib calib.json] [--budget-min 40] [条件...]
   phonefarm selftest quality --out <目录> [--pct 5] [--downs 2] [--calib calib.json] [条件...]
   phonefarm selftest report --root <目录> [--ns 5,8,10] [--json]
 
@@ -1263,6 +1283,7 @@ struct Args {
     sub: String,
     out: Option<PathBuf>,
     cases: Option<String>,
+    only: Option<Vec<String>>,
     pairs: usize,
     calib: Option<PathBuf>,
     budget_min: f64,
@@ -1291,6 +1312,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         sub,
         out: None,
         cases: None,
+        only: None,
         pairs: 5,
         calib: None,
         budget_min: 40.0,
@@ -1325,6 +1347,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         match k.as_str() {
             "--out" | "--root" => a.out = it.next().map(PathBuf::from),
             "--cases" => a.cases = it.next().cloned(),
+            "--only" => a.only = it.next().map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()),
             "--pairs" => a.pairs = num(it.next(), k)? as usize,
             "--calib" => a.calib = it.next().map(PathBuf::from),
             "--budget-min" => a.budget_min = num(it.next(), k)?,
@@ -1506,7 +1529,18 @@ fn cmd_run(mut a: Args) -> Result<(), String> {
         std::fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap_or_default()).map_err(|e| e.to_string())?;
     }
 
-    let todo: Vec<&Case> = cases.iter().filter(|cs| !out.join(&cs.id).join("case_done.json").is_file()).collect();
+    // --only: 分段跑 (每段一个新目录, 本地再合并成一个根给 report)。考题编号由完整清单决定,
+    // 所以各段要给同一份 --cases, 只挑本段要跑的编号; plan.json 各段一字不差, 合并时可核对
+    if let Some(only) = &a.only {
+        if let Some(bad) = only.iter().find(|id| !cases.iter().any(|c| &c.id == *id)) {
+            return Err(format!("--only 里的 {bad} 不在 --cases 展开的考题里"));
+        }
+    }
+    let todo: Vec<&Case> = cases
+        .iter()
+        .filter(|cs| a.only.as_ref().is_none_or(|o| o.contains(&cs.id)))
+        .filter(|cs| !out.join(&cs.id).join("case_done.json").is_file())
+        .collect();
     log(&format!("考题 {} 道, 待跑 {} 道, 每道 {}v{}, frames={}", cases.len(), todo.len(), a.pairs, a.pairs, c.frames));
     if todo.is_empty() {
         return cmd_report(&a);

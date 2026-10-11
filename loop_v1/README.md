@@ -78,7 +78,7 @@
 ```
 tools/
   device_snapshot.sh    设备可变状态快照 (38 行), 进入前/退出后 diff = 判据 4
-  ftrace_capture.sh     ftrace 采集, 自带四项状态存档与 trap 还原
+  ftrace_capture.sh     ftrace 采集, 优先用私有实例 (不碰全局 tracing, 不被别人常开的事件冲掉); 无实例时退回全局并四项存档/trap 还原
   knob_ddr_boost.sh     旋钮: DDR/LLCC 总线下限钉到硬件上限, apply/restore/status
   pf_bin.sh             解析 phonefarm 二进制路径 (供各脚本 source)
   pybridge.py           迁移期通道: 尚未搬走的 Python 从这里转调二进制拿统计与判定口径
