@@ -27,6 +27,7 @@ use crate::device;
 use crate::hwcond;
 use crate::loopstat::{self, Run};
 use crate::pyjson::{dumps as py_dumps, PyVal};
+use crate::curtail;
 use crate::sysparam;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -46,7 +47,7 @@ const DEFAULT_DENY_KEYWORDS: [&str; 7] = [
 /// 或请求收端没实现的开关, 整份拒绝。
 const GRAY_SUPPORTED_KNOBS: [&str; 1] = ["loadop_dont_care"];
 
-const USAGE: &str = "用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--json]";
+const USAGE: &str = "用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--json]";
 
 /// PyVal → serde_json 值 (同一个桥的反向)。经 dumps 走文本, 非有限值
 /// (Infinity/NaN) 会被 serde_json 拒掉, 这里如实落 null。
@@ -85,17 +86,21 @@ struct EvalArgs {
     serial: Option<String>,
     power_rail: Option<String>,
     out: Option<String>,
+    /// 确定性截断 (src/curtail.rs): 缺省开。`--no-curtail` 跑满全部轮次。
+    curtail: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
     let mut it = args.iter();
     let (mut request, mut serial, mut power_rail, mut out) = (None, None, None, None);
+    let mut curtail = true;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--request" => request = it.next().cloned(),
             "--serial" => serial = it.next().cloned(),
             "--power-rail" => power_rail = it.next().cloned(),
             "--out" => out = it.next().cloned(),
+            "--no-curtail" => curtail = false,
             "--json" => {} // eval 的回包恒为 JSON, 收下这个旗子仅为兼容接口形状
             other => return Err(format!("不认识的参数 {other}\n{USAGE}")),
         }
@@ -105,6 +110,7 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
         serial,
         power_rail,
         out,
+        curtail,
     })
 }
 
@@ -161,7 +167,7 @@ pub fn run_eval(args: &[String]) -> i32 {
         .or_else(|| req["serial"].as_str().map(String::from));
     let report = match kind {
         "shader" => return eval_shader_v2(&req, &a),
-        "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence)),
+        "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail),
         "gray" => gray_eval(&req, serial.as_deref(), Path::new(&evidence)),
         other => {
             eprintln!("不认识的 kind {other}");
@@ -766,7 +772,53 @@ pub(crate) fn run_soc_temp_max(m: &Value) -> Option<f64> {
         .or_else(|| m["summary"]["soc_temp_max_c"].as_f64())
 }
 
-fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
+/// 判定视图下的一臂 (标签 + [`run_view`])。
+fn eval_runs(runs: &[Value]) -> Vec<Run> {
+    runs.iter()
+        .filter_map(|r| Some((r["label"].as_str()?.to_string(), run_view(r))))
+        .collect()
+}
+
+/// 两臂已跑的每一轮都在放电态 (功耗才进判定)。空集算真 —— 后面的轮次还可能全是放电态。
+fn all_on_battery(knob_runs: &[Value], ctrl_runs: &[Value]) -> bool {
+    knob_runs
+        .iter()
+        .chain(ctrl_runs.iter())
+        .all(|r| r["env"]["on_battery"].as_bool().unwrap_or(false))
+}
+
+/// 跑满时**可能**进入判定的「显著改善」检验, 各取最宽的 alpha_win:
+/// 帧时/帧率至少在 2 指标表里 (alpha/2); 功耗只有在已跑的轮全在放电态时才可能进表,
+/// 进表时是 3 指标 (alpha/3)。覆盖所有可能的指标表, 截断只会更保守。
+fn sysparam_win_tests(alpha: f64, power_possible: bool) -> Vec<curtail::WinTest> {
+    let mut t = vec![
+        curtail::WinTest::new("frame_p95", true, alpha / 2.0),
+        curtail::WinTest::new("fps_mean", false, alpha / 2.0),
+    ];
+    if power_possible {
+        t.push(curtail::WinTest::new("power_w_mean", true, alpha / 3.0));
+    }
+    t
+}
+
+/// 截断记录, 原样进回包 `verdict.curtailed`。
+fn curtail_note(knob: usize, ctrl: usize, rounds: u32, tests: &[curtail::WinTest]) -> Value {
+    json!({
+        "arms_run": knob + ctrl,
+        "arms_planned": 2 * rounds,
+        "knob_runs": knob,
+        "ctrl_runs": ctrl,
+        "pairs_planned": rounds,
+        "checked": tests.iter().map(|t| json!({
+            "metric": t.metric, "better": if t.lower_is_better { "lower" } else { "higher" },
+            "alpha_win": t.alpha_win,
+        })).collect::<Vec<_>>(),
+        "rule": "剩余轮次取任意值时, 每个可能进判定的指标在改善方向上的置换 p 下界都已 >= alpha_win; \
+                 KEEP 不可达, 跑满的判定必然相同 (src/curtail.rs)。--no-curtail 可跑满",
+    })
+}
+
+fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bool) -> Result<String, String> {
     let Some(serial) = serial else {
         return Err("kind=sysparam 需要真机: 请加 --serial (或设备唯一在线时省略)".into());
     };
@@ -901,8 +953,10 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     let mut apply_ok = true;
     let mut restore_fail: Option<String> = None;
     let mut apply_logs: Vec<String> = Vec::new();
+    let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
+    let mut curtailed: Option<Value> = None;
 
-    for i in 1..=rounds {
+    'pairs: for i in 1..=rounds {
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             if arm == "knob" {
                 let out = su(
@@ -955,6 +1009,19 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
             }
             if abort_reason.is_some() {
                 break;
+            }
+            // 确定性截断: 剩下的臂无论量出什么, 都不可能有指标显著改善 → 跑满也必然不是
+            // KEEP, 现在停 (论证见 src/curtail.rs)。KEEP 一侧永远不提前锁定。
+            if curtail {
+                let tests = sysparam_win_tests(alpha, all_on_battery(&knob_runs, &ctrl_runs));
+                let (left_a, left_b) = (
+                    (rounds as usize).saturating_sub(ctrl_runs.len()),
+                    (rounds as usize).saturating_sub(knob_runs.len()),
+                );
+                if !curtail::keep_possible(&eval_runs(&ctrl_runs), &eval_runs(&knob_runs), left_a, left_b, &tests) {
+                    curtailed = Some(curtail_note(knob_runs.len(), ctrl_runs.len(), rounds, &tests));
+                    break 'pairs;
+                }
             }
         }
         if abort_reason.is_some() {
@@ -1010,19 +1077,9 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     }
 
     let primary = "frame_p95";
-    let mk_runs = |runs: &[Value]| -> Vec<Run> {
-        runs.iter()
-            .filter_map(|r| {
-                let label = r["label"].as_str()?.to_string();
-                Some((label, run_view(r)))
-            })
-            .collect()
-    };
-    let (a_runs, b_runs) = (mk_runs(&ctrl_runs), mk_runs(&knob_runs));
+    let (a_runs, b_runs) = (eval_runs(&ctrl_runs), eval_runs(&knob_runs));
     // 与 autoloop 一致的判定指标表: 功耗只在两臂都处于放电态时才进判定
-    let on_battery_all = knob_runs.iter().chain(ctrl_runs.iter()).all(|r| {
-        r["env"]["on_battery"].as_bool().unwrap_or(false)
-    });
+    let on_battery_all = all_on_battery(&knob_runs, &ctrl_runs);
     let mut metrics_list: Vec<(String, &str)> =
         vec![("frame_p95".into(), "lower"), ("fps_mean".into(), "higher")];
     if on_battery_all {
@@ -1032,7 +1089,6 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
     let mut wins: Vec<String> = Vec::new();
     let mut regressions: Vec<String> = Vec::new();
     let mut per_metric: Vec<(String, Value)> = Vec::new();
-    let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
     let alpha_win = alpha / metrics_list.len() as f64;
     for (metric, better) in &metrics_list {
         let cmp = loopstat::compare(&a_runs, &b_runs, metric);
@@ -1093,6 +1149,19 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<S
             json!("没有任何指标显著改善")
         },
     });
+    if let Some(note) = curtailed {
+        // 构造上不可能: 截断只在「任何指标都已不可能显著改善」时发生, 部分数据的 p
+        // 不会低于跑满的下界 (src/curtail.rs)。真出现了就是实现错了, 别把它当 KEEP 发出去。
+        if keep {
+            return Err("内部错误: 截断后的部分数据判出了 KEEP, 与截断的前提矛盾".into());
+        }
+        let partial = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
+        report["verdict"]["reason"] = json!(format!(
+            "确定性截断: 跑了 {}/{} 臂后, 剩余轮次无论量出什么都不可能有指标显著改善, 跑满也必然不保留 (已量部分: {partial})",
+            note["arms_run"], note["arms_planned"]
+        ));
+        report["verdict"]["curtailed"] = note;
+    }
 
     // ── metrics: 逐臂聚合 (B 臂 = 候选臂) ──
     // 臂内均值: ABBA 的全部轮一起算 —— 只取最后一轮的话, 那恰好是整场最热的

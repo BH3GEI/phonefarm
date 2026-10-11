@@ -52,7 +52,7 @@ const EFFECT_OK: [&str; 1] = ["live"];
 /// 每轮还有 snap_at_run.txt 复核实际生效, 所以不会放过假生效。
 const EFFECT_SOFT: [&str; 1] = ["skipped_same_value"];
 
-const ALPHA: f64 = 0.05;
+pub(crate) const ALPHA: f64 = 0.05;
 /// 手机整机功耗的合理区间 (瓦)。本机 battery/power_now 读出过 777W —— 单位有误,
 /// 这种数不进任何均值, 只如实记录并标 plausible=False。
 const PLAUSIBLE_W: (f64, f64) = (0.05, 30.0);
@@ -680,6 +680,14 @@ fn min_reachable_p(pairs: i64) -> Option<f64> {
         }
     }
     Some(2.0 / c)
+}
+
+/// 判定指标的方向: `Some(true)` = 越小越好。不在判定表里的指标返回 `None`。
+pub(crate) fn lower_is_better(metric: &str) -> Option<bool> {
+    PRIMARY_METRICS
+        .iter()
+        .find(|(m, _)| *m == metric)
+        .map(|(_, d)| *d == "lower")
 }
 
 fn active_metrics(power_available: bool) -> Vec<(&'static str, &'static str)> {

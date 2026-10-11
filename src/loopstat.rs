@@ -510,7 +510,7 @@ pub fn load_runs(pattern: &str) -> Vec<Run> {
 
 // ══════════════ 描述与对比 ══════════════
 
-fn column(runs: &[Run], metric: &str) -> Vec<Num> {
+pub(crate) fn column(runs: &[Run], metric: &str) -> Vec<Num> {
     runs.iter()
         .filter_map(|r| r.1.get(metric).and_then(Num::from_json))
         .collect()
