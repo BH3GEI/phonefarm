@@ -221,6 +221,19 @@ replace a dead master's lock only after positive group absence and matching
 session/boot identity. Every remote workload/sampler has a durable pending launch
 before setsid and waits for a permit until its PID/start/group ledger is synced.
 Unmatched pending launches are UNKNOWN/manual recovery gaps, never quiescence.
+Every present child ledger/pending record must be a regular nonsymlink file,
+nonempty, bounded, newline-terminated and have the exact frozen field grammar.
+Children require known unique tags, positive PID/start ticks and their exact
+receiver-owned script path; pending requires one matching tag/script row. Empty,
+partial, malformed or duplicated records are UNKNOWN before any group stop or
+restore. EOF without LF must never be treated as an empty process set. Master
+ownership likewise requires a complete single record. A detected broken ledger
+preserves the host barrier; no restore/clear receipt is manufactured.
+Validation freezes the expected row count (at most two children or one pending
+record); every subsequent shell read loop must consume that count exactly.
+A reader error or premature EOF is UNKNOWN, even when a preceding grammar check
+succeeded. These host fault-injection checks do not establish Android shell or
+actual storage-error behavior.
 Normal errors retain the master lock and host barrier. Remote frozen tool/graph
 bytes are reread across registration and before each sample. Snapshot_after_run
 remains while control is applied; snapshot_restored is recorded afterward.

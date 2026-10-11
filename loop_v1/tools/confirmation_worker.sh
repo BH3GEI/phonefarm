@@ -138,14 +138,43 @@ start_child() {
   sync || return 1
   CHILD_PID=$pid
 }
+ledger_complete() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -s "$1" ] || return 1
+  size=$(wc -c < "$1" | tr -d '[:space:]') || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$size" -le 8192 ] || return 1
+  # Preserve the final newline through command substitution with a sentinel.
+  last=$(tail -c 1 "$1" && printf x) || return 1
+  [ "$last" = "$(printf '\nx')" ]
+}
+children_valid() {
+  CHILD_ROWS=0
+  [ -e "$R/children.tsv" ] || [ -L "$R/children.tsv" ] || return 0
+  ledger_complete "$R/children.tsv" || return 1
+  CHILD_ROWS=$(awk -F '\t' -v w="$D/workload.sh" -v s="$D/sample_env.sh" '
+    NF!=4 || ($1!="workload" && $1!="sampler") || $2!~/^[0-9]+$/ ||
+    $2+0<=0 || $2+0>2147483647 || $3!~/^[0-9]+$/ || $3+0<=0 ||
+    ($1=="workload" && $4!=w) || ($1=="sampler" && $4!=s) {bad=1}
+    ++tags[$1]>1 || ++pids[$2]>1 {bad=1}
+    END {if (bad || NR<1 || NR>2) exit 1; print NR}' "$R/children.tsv") || return 1
+}
 pending_known() {
+  children_valid || return 1
   for pending in "$R"/launch-*.pending; do
-    [ -f "$pending" ] || continue
-    [ -s "$pending" ] || return 1
+    [ -e "$pending" ] || [ -L "$pending" ] || continue
+    ledger_complete "$pending" || return 1
     [ -f "$R/children.tsv" ] || return 1
+    expected=${pending##*/}; expected=${expected#launch-}; expected=${expected%.pending}
+    case "$expected" in workload) script_expected="$D/workload.sh" ;; sampler) script_expected="$D/sample_env.sh" ;; *) return 1 ;; esac
+    awk -F '\t' -v t="$expected" -v s="$script_expected" '
+      NF!=2 || $1!=t || $2!=s {bad=1} END {exit (bad || NR!=1)}' "$pending" || return 1
+    consumed_pending=0
     while IFS="$(printf '\t')" read -r tag script; do
-      [ "$(awk -F '\t' -v t="$tag" -v s="$script" '$1==t && $4==s {n++} END {print n+0}' "$R/children.tsv")" = 1 ] || return 1
+      matched=$(awk -F '\t' -v t="$tag" -v s="$script" '$1==t && $4==s {n++} END {print n+0}' "$R/children.tsv") || return 1
+      [ "$matched" = 1 ] || return 1
+      consumed_pending=$((consumed_pending+1))
     done < "$pending"
+    [ "$consumed_pending" = 1 ] || return 1
   done
 }
 group_absent_remote() {
@@ -161,16 +190,22 @@ group_absent_remote() {
 }
 quiescent() {
   pending_known || return 1
-  [ -f "$R/children.tsv" ] || return 0
+  [ "$CHILD_ROWS" != 0 ] || return 0
+  [ -f "$R/children.tsv" ] && [ ! -L "$R/children.tsv" ] || return 1
+  required_child_rows=$CHILD_ROWS; consumed_children=0
   while IFS="$(printf '\t')" read -r tag pid ticks script; do
     if [ -d "/proc/$pid" ]; then return 1; fi
     # A dead leader with a surviving group cannot be safely attributed from PID alone.
     group_absent_remote "$pid" || return 1
+    consumed_children=$((consumed_children+1))
   done < "$R/children.tsv"
+  [ "$consumed_children" = "$required_child_rows" ]
 }
 stop_owned() {
   pending_known || return 1
-  [ -f "$R/children.tsv" ] || return 0
+  [ "$CHILD_ROWS" != 0 ] || return 0
+  [ -f "$R/children.tsv" ] && [ ! -L "$R/children.tsv" ] || return 1
+  required_child_rows=$CHILD_ROWS; consumed_children=0
   while IFS="$(printf '\t')" read -r tag pid ticks script; do
     if [ -d "/proc/$pid" ]; then
       [ "$(start_ticks "$pid")" = "$ticks" ] && [ "$(group_id "$pid")" = "$pid" ] || return 1
@@ -180,7 +215,9 @@ stop_owned() {
       kill -TERM -- "-$pid" || return 1
       wait "$pid" 2>/dev/null || true
     fi
+    consumed_children=$((consumed_children+1))
   done < "$R/children.tsv"
+  [ "$consumed_children" = "$required_child_rows" ] || return 1
   n=0; while [ "$n" -lt 50 ]; do quiescent && return 0; n=$((n+1)); sleep .1; done
   return 1
 }
@@ -216,12 +253,13 @@ acquire_master() {
   L="$D/worker.lock"
   if [ -d "$L" ]; then
     [ "$MODE" = reconcile ] || return 1
-    [ -f "$L/owner" ] || return 1
+    ledger_complete "$L/owner" || return 1
+    awk -v t="$TOKEN" -v b="$BOOT" 'NF!=5 || $1!=t || $2!=b {bad=1} END {exit (bad || NR!=1)}' "$L/owner" || return 1
     IFS=' ' read -r oldtoken oldboot oldpid oldticks oldrun < "$L/owner" || return 1
     [ "$oldtoken" = "$TOKEN" ] && [ "$oldboot" = "$BOOT" ] || return 1
     case "$oldpid:$oldticks:$oldrun" in *[!a-zA-Z0-9_:-]*) return 1 ;; esac
     case "$oldpid:$oldticks" in *[!0-9:]*) return 1 ;; esac
-    [ "$oldpid" -gt 0 ] && [ "$oldticks" -gt 0 ] || return 1
+    [ "$oldpid" -gt 0 ] && [ "$oldticks" -gt 0 ] && [ -n "$oldrun" ] || return 1
     # A live/reused PID or surviving group is unknown; no recovery writes may race it.
     [ ! -d "/proc/$oldpid" ] && group_absent_remote "$oldpid" || return 1
     intent reconcile_dead_master "$oldpid" "$oldticks" || return 1
