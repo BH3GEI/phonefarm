@@ -23,6 +23,7 @@ mod framecheck;
 mod llm;
 mod looptrace;
 mod sysparam;
+mod curtail;
 mod vksreport;
 mod parallel;
 mod device;
@@ -192,6 +193,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 解析:  parse-trace <trace.txt> [--full] [--comm 线程名]   (ftrace 文本 -> 帧时序/GPU 活跃/排队/带宽指标, 纯离线)
        attribute <summary.json>                          (一轮 summary -> 主因判定 + 正交带宽维, 纯离线)
        analyze <A臂glob> [B臂glob] [--metric M]           (离散度 + 漂移 + 精确置换检验 + 置换反演 CI)
+       curtail-replay <A臂glob> <B臂glob> [--alpha A] [--metrics m1,m2]  (确定性截断离线回放: 截在哪、判定是否与跑满一致)
        frames-moving <raw1> <raw2>                        (两张 screencap 裸帧的平均逐像素差 %, 判画面动没动)
        crosscheck-report <轮目录>                         (两条采集通路并排对照表, 纯离线)
        refbench-report --root <runs目录>                  (refbench M0 六判据汇总, 规则哈希自证)
@@ -756,6 +758,10 @@ fn main() {
         Some("frames-moving") => {
             // 两张 adb screencap 裸帧的平均逐像素差 (%)。纯离线, 确认"画面真的在动"。
             std::process::exit(framecheck::run_frames_moving(&args[1..]));
+        }
+        Some("curtail-replay") => {
+            // 确定性截断的离线回放: 归档两臂逐轮数据按 ABBA 到达顺序重演, 核对截断不改判定。纯离线。
+            std::process::exit(curtail::run_replay(&args[1..]));
         }
         Some("analyze") => {
             // 多轮 summary.json → 离散度 (判据 1) 与两臂对比 (判据 3)。纯离线, 无随机。

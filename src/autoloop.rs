@@ -18,6 +18,7 @@ use crate::llm::{self, Candidate};
 use crate::loopreport::snapshot_diff;
 use crate::loopstat::{self, Run};
 use crate::pyjson::{dumps_indent, dumps_indent_sorted, py_round, PyVal};
+use crate::curtail;
 use crate::sysparam::{self, DecideCtx};
 use crate::pyobj;
 use serde_json::Value;
@@ -42,17 +43,20 @@ pub struct Args {
     pub baseline_runs: u32,
     pub power_in_verdict: String,
     pub serial: String,
+    /// 确定性截断 (src/curtail.rs), 缺省开; `--no-curtail` 每组跑满 pairs 对。
+    pub curtail: bool,
 }
 
 const USAGE: &str = "用法: phonefarm autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]\n\
                      [--no-llm] [--probe-only] [--baseline-runs N] [--power-in-verdict auto|on|off]\n\
-                     [--serial S]  (SERIAL 环境变量亦可)";
+                     [--serial S] [--no-curtail]  (SERIAL 环境变量亦可)";
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut it = args.iter();
     let (mut out, mut generations, mut children, mut pairs) =
         (None, 2u32, 3u32, 5u32);
     let (mut no_llm, mut probe_only) = (false, false);
+    let mut curtail = true;
     let mut baseline_runs = 2u32;
     let mut power_in_verdict = "auto".to_string();
     let mut serial = std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into());
@@ -64,6 +68,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--pairs" => pairs = it.next().and_then(|v| v.parse().ok()).unwrap_or(5),
             "--no-llm" => no_llm = true,
             "--probe-only" => probe_only = true,
+            "--no-curtail" => curtail = false,
             "--baseline-runs" => baseline_runs = it.next().and_then(|v| v.parse().ok()).unwrap_or(2),
             "--power-in-verdict" => {
                 power_in_verdict = it.next().cloned().unwrap_or_else(|| "auto".into())
@@ -85,6 +90,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         baseline_runs,
         power_in_verdict,
         serial,
+        curtail,
     })
 }
 
@@ -398,11 +404,21 @@ struct CandidateRun<'a> {
     metrics: &'a [String],
     cool_c: f64,
     workload: &'a Path,
+    curtail: bool,
 }
 
 fn run_candidate(r: &CandidateRun) -> PyVal {
     let (serial, cand, wl, outdir, pairs, temp_cap_c, power_available, metrics, cool_c, workload) =
         (r.serial, r.cand, r.wl, r.outdir, r.pairs, r.temp_cap_c, r.power_available, r.metrics, r.cool_c, r.workload);
+    // 判定规则在看数据前已冻结 (rule.metrics + alpha/K), 截断只用同一张表
+    let win_tests: Vec<curtail::WinTest> = metrics
+        .iter()
+        .filter_map(|m| {
+            let lower = sysparam::lower_is_better(m)?;
+            Some(curtail::WinTest::new(m, lower, sysparam::ALPHA / metrics.len().max(1) as f64))
+        })
+        .collect();
+    let mut curtailed: Option<PyVal> = None;
     let params = &cand.params;
     let plan = sysparam::plan_text(params, wl).unwrap_or_default();
     std::fs::write(outdir.join("plan.txt"), &plan).ok();
@@ -446,7 +462,7 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
     ];
     let restore = |s: &str| -> String { su(s, &format!("sh {DEV_TMP}/knob_sysparam.sh restore"), 120) };
 
-    for i in 1..=pairs {
+    'pairs: for i in 1..=pairs {
         // ABBA: 奇数对旋钮先跑, 偶数对对照先跑, 让残余漂移在两臂之间对消
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             if arm == "knob" {
@@ -511,6 +527,24 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
             if aborted.is_some() {
                 break;
             }
+            // 确定性截断: 剩下的臂无论量出什么都不可能有指标显著改善 → 跑满也必然不是
+            // KEEP, 现在停 (论证见 src/curtail.rs)
+            if r.curtail {
+                let left_a = (pairs as usize).saturating_sub(ctrl_runs.len());
+                let left_b = (pairs as usize).saturating_sub(knob_runs.len());
+                if !curtail::keep_possible(&runs_as_pyval(&ctrl_runs), &runs_as_pyval(&knob_runs), left_a, left_b, &win_tests) {
+                    let arms = knob_runs.len() + ctrl_runs.len();
+                    log(&format!("确定性截断: {arms}/{} 臂后已不可能有指标显著改善, 本组提前结束", 2 * pairs));
+                    curtailed = Some(pyobj! {
+                        "arms_run" => arms,
+                        "arms_planned" => 2 * pairs as i64,
+                        "knob_runs" => knob_runs.len(),
+                        "ctrl_runs" => ctrl_runs.len(),
+                        "rule" => "剩余轮次取任意值时, 每个判定指标在改善方向上的置换 p 下界都已 >= alpha_win; KEEP 不可达, 跑满的判定必然相同 (src/curtail.rs)。--no-curtail 可跑满",
+                    });
+                    break 'pairs;
+                }
+            }
         }
         if aborted.is_some() {
             break;
@@ -563,7 +597,7 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
             "verdict" => "ABORT", "reason" => reason,
             "temp_max_c" => temp_max, "temp_cap_c" => temp_cap_c,
         }
-    } else if knob_runs.len() < pairs as usize || ctrl_runs.len() < pairs as usize {
+    } else if curtailed.is_none() && (knob_runs.len() < pairs as usize || ctrl_runs.len() < pairs as usize) {
         pyobj! {
             "verdict" => "ABORT",
             "reason" => format!("轮数不足 (旋钮 {}/{}, 对照 {}/{})",
@@ -582,6 +616,32 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
                 power_available,
             },
         )
+    };
+
+    // 截断只截「必然不保留」的一侧; 部分数据判出 KEEP 与前提矛盾, 是实现错了, 作废而不是放行
+    let dec = match (&curtailed, dec.get("verdict").map(|v| v.py_str())) {
+        (Some(_), Some(v)) if v == "KEEP" => pyobj! {
+            "verdict" => "ABORT",
+            "reason" => "内部错误: 截断后的部分数据判出了 KEEP, 与截断的前提矛盾",
+            "temp_max_c" => temp_max, "temp_cap_c" => temp_cap_c,
+        },
+        (Some(note), Some(v)) if v == "REJECT" => match dec {
+            PyVal::Obj(mut kvs) => {
+                for (k, val) in kvs.iter_mut() {
+                    if k == "reason" {
+                        *val = PyVal::Str(format!(
+                            "确定性截断: 跑了 {}/{} 臂后, 剩余轮次无论量出什么都不可能有指标显著改善, 跑满也必然不保留 (已量部分: {})",
+                            note.get("arms_run").map(|x| x.py_str()).unwrap_or_default(),
+                            note.get("arms_planned").map(|x| x.py_str()).unwrap_or_default(),
+                            val.py_str()
+                        ));
+                    }
+                }
+                PyVal::Obj(kvs)
+            }
+            other => other,
+        },
+        _ => dec,
     };
 
     let describe_arm = |runs: &[(String, Value)]| -> PyVal {
@@ -677,6 +737,7 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
             }),
         ),
         ("comparisons".into(), comparisons_val),
+        ("curtailed".into(), curtailed.clone().unwrap_or(PyVal::Null)),
     ];
     // **dec 的键按它自己的顺序接在后面
     if let PyVal::Obj(kvs) = dec {
@@ -1047,6 +1108,7 @@ pub fn run_autoloop(args: &[String]) -> i32 {
                 metrics: &rule_metrics,
                 cool_c: cool_target,
                 workload: &workload,
+                curtail: a.curtail,
             });
             for k in touched_keys(&cand.params, &wl) {
                 if !session_keys.contains(&k) {
