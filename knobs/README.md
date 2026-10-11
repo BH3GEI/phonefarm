@@ -46,7 +46,9 @@ bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清�
 | 灰档改写 #2 前置：copyprobe 1:1 拷贝探针（原神） | ✅ 通过 | 5 臂跑满一轮无反作弊拦截；copies=subs≈帧数；p50 与无层差 <0.05ms；画面目检无异常（跨 run 逐像素受游戏内时辰影响不可比） |
 | 同上，在原神大世界的效果 | ⚠ 命中但无效果 | 5 对 A/B：改写真被绑 4.4–5.2 万次，但 p95 / GPU / 带宽 p 值全 > 0.05 |
 | 超分算子可行性（只读观测） | ✅ 可行 | 放大 = 帧内最后一个 pass 的第一笔 draw；**UI 在同一 pass 内紧跟其后**；该 draw 采的确认就是上一个渲染分辨率 pass 的输出（`usage=151` 含 `SAMPLED`，可读） |
-| 灰档超分：真算子 gen1_loc3 投原神（渲染精度低） | ✅ 零成本通过 | 5 对 A/B（loop_v1 冻结口径 252 枚举）：p95 −0.19%、fps +0.15%、功耗 +4.1%（p_lose=0.28，噪声内；A 臂自身极差 0.85W）、37°C 平直；画质 MAD 比游戏自带放大接近原生 3–4 倍（8.3–18.7 vs 26.9–42.8）。`evidence/09_upop/` |
+| 灰档超分：真算子 gen1_loc3 投原神（渲染精度低） | ⚠ 机制已投，收益待独立确认 | 历史 5 对 A/B：p95 −0.19%、fps +0.15%、功耗 +4.1%（p_lose=0.28）；冻结判定 INCONCLUSIVE。未检出显著退化不构成非劣效或零成本证明。静态 MAD 为 8.3–18.7 vs 26.9–42.8，尚无同帧/连续质量证明。`evidence/09_upop/` |
+
+动态 sampled-input 候选的离线构建契约见 [`../docs/SPEC_DYNAMIC_UPOP_ARTIFACT.md`](../docs/SPEC_DYNAMIC_UPOP_ARTIFACT.md)；设备部署与真实游戏资格验收仍待接入。
 
 **层对宿主是透明的**（有无层对照：swapchain、`frames_submitted=3600`、`clean_exit=true` 全相等）。
 

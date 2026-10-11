@@ -31,6 +31,8 @@ mod fold;
 mod gamepad;
 mod grayab;
 mod graylayer;
+mod grayartifact;
+mod upopabi;
 mod shotdiff;
 mod hypo;
 mod mtools;
@@ -209,6 +211,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop [pkg] | target <pkg> | status | off} [--keep-prop]
        (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
+工件:  gray-artifact {build --source sampled.comp --out DIR [--ndk DIR] [--timeout-seconds 1..120] | inspect --spirv FILE | verify --artifact DIR} [--json]
+       (离线编译/ABI/摘要门禁; deployable=false, 不构成真机部署资格)
        gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
        (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
@@ -695,6 +699,7 @@ fn main() {
             // 灰档 A/B 采集编排 (两臂都挂层只切属性; 每臂重启原神)
             std::process::exit(grayab::run_gray_ab(&args[1..]));
         }
+        Some("gray-artifact") => std::process::exit(grayartifact::run(&args[1..])),
         Some("gray-layer") => {
             // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)
             std::process::exit(graylayer::run_gray_layer(&args[1..]));
