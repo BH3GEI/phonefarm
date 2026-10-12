@@ -884,6 +884,8 @@ pub struct Cond {
     pub charge_suspend: bool,
     pub fan_on: bool,
     pub lock_freq: bool,
+    /// 锁频时钉在哪一档 (缺省: 锁频前的 max_pwrlevel)。档位号越大频率越低。
+    pub lock_level: Option<u32>,
 }
 
 impl Cond {
@@ -894,7 +896,7 @@ impl Cond {
             "capdur_s": self.capdur_s, "cool_c": self.cool_c, "cool_timeout_s": self.cool_timeout_s,
             "temp_cap_c": self.temp_cap_c, "charge_suspend": self.charge_suspend,
             "fan": if self.fan_on { "on(enable=1,level=5)" } else { "keep" },
-            "lock_freq": self.lock_freq, "scene": rb::SCENE,
+            "lock_freq": self.lock_freq, "lock_level": self.lock_level, "scene": rb::SCENE,
         })
     }
 }
@@ -1117,7 +1119,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     // 2) 锁频 (可选): 只包住跑测, 与 gpu-op 同一做法 —— 先锁再等冷永远等不下来
     let lock = if c.lock_freq {
         let snap = hwcond::read_snapshot(&s.dev);
-        let level = snap.gpu_max_level.unwrap_or(0);
+        let level = c.lock_level.unwrap_or(snap.gpu_max_level.unwrap_or(0));
         Some(hwcond::Lock::apply(&s.dev, &s.lock_state, snap, level).map_err(|e| format!("锁频失败: {e}"))?)
     } else {
         None
@@ -1319,7 +1321,7 @@ const USAGE: &str = "用法:
 考题清单: aa*4,better:1*2,worse:2 (帧时幅度%, 需标定) 或 better-wg:50 (直接给工作组数差)
 条件: [--serial S] [--template ../refbench/selftest/load.spv] [--intensity 1] [--iters 64]
       [--base-wg 4000] [--frames N] [--warmup 2] [--capdur 10] [--cool-c 45] [--cool-timeout 240]
-      [--temp-cap 70] [--no-charge-suspend] [--fan-on] [--lock-freq]
+      [--temp-cap 70] [--no-charge-suspend] [--fan-on] [--lock-freq] [--lock-level N (隐含 --lock-freq)]
 
 判定一律走现有链 (loopstat::compare + sysparam::decide; 画面走 eval --request kind=shader),
 本命令不另写统计。证据与判定输入全部落盘, report 不碰设备、可离线重算。";
@@ -1382,6 +1384,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             charge_suspend: true,
             fan_on: false,
             lock_freq: false,
+            lock_level: None,
         },
         frames_given: false,
     };
@@ -1419,6 +1422,10 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--no-charge-suspend" => a.cond.charge_suspend = false,
             "--fan-on" => a.cond.fan_on = true,
             "--lock-freq" => a.cond.lock_freq = true,
+            "--lock-level" => {
+                a.cond.lock_level = Some(num(it.next(), k)? as u32);
+                a.cond.lock_freq = true;
+            }
             other => return Err(format!("不认识的参数 {other}\n\n{USAGE}")),
         }
     }
