@@ -72,6 +72,38 @@
         },
         "settle": {
           "type": "integer"
+        },
+        "msaa": {
+          "type": "string",
+          "description": "白盒旋钮原样回写 (没给为空串), 见 launch.json"
+        },
+        "store_opt": {
+          "type": "string",
+          "description": "白盒旋钮原样回写 (没给为空串), 见 launch.json"
+        },
+        "feat_off": {
+          "type": "string",
+          "description": "白盒旋钮原样回写 (没给为空串), 见 launch.json"
+        },
+        "fog_event": {
+          "type": "string",
+          "description": "白盒旋钮原样回写 (没给为空串), 见 launch.json"
+        },
+        "ssao_src": {
+          "type": "string",
+          "description": "白盒旋钮原样回写 (没给为空串), 见 launch.json"
+        },
+        "ssao_after_opaque": {
+          "type": "string",
+          "description": "白盒旋钮原样回写 (没给为空串), 见 launch.json"
+        },
+        "shadowres": {
+          "type": "string",
+          "description": "白盒旋钮原样回写 (没给为空串), 见 launch.json"
+        },
+        "depth_priming": {
+          "type": "string",
+          "description": "白盒旋钮原样回写 (没给为空串), 见 launch.json"
         }
       }
     },
@@ -138,6 +170,39 @@
         },
         "srp_asset": {
           "type": "string"
+        },
+        "msaa": {
+          "type": "string",
+          "description": "URP asset msaaSampleCount 的实际值 (回读)"
+        },
+        "store_opt": {
+          "type": "string",
+          "description": "URP asset storeActionsOptimization 的实际值 (回读)"
+        },
+        "shadowres": {
+          "type": "string",
+          "description": "URP asset mainLightShadowmapResolution 的实际值 (回读)"
+        },
+        "renderer_features": {
+          "type": "array",
+          "description": "所有渲染器特性与实际开关",
+          "items": {
+            "type": "object",
+            "properties": {
+              "renderer": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              },
+              "active": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     },
@@ -193,6 +258,24 @@
         "mode_set": {
           "type": "string",
           "description": "单机模式是否设上: settings / none / failed:<异常>"
+        }
+      }
+    },
+    "knobs": {
+      "type": "object",
+      "description": "白盒旋钮逐条生效记录: 键为旋钮名(可带 :特性名 / @渲染器名), 值 {want, how, actual}。how 不是 prop/field/SetActive 的那一臂不能当对照",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "want": {
+            "type": "string"
+          },
+          "how": {
+            "type": "string"
+          },
+          "actual": {
+            "type": "string"
+          }
         }
       }
     }

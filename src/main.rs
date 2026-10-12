@@ -25,6 +25,7 @@ mod looptrace;
 mod sysparam;
 mod curtail;
 mod vksreport;
+mod whitebox;
 mod parallel;
 mod device;
 mod platform;
