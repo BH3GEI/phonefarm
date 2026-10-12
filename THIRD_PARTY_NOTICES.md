@@ -33,11 +33,16 @@
 - 版权: Copyright (c) 2026 ZHONG XIN
 - 引入 commit: `08ed5b0`
 - 本仓库移植的部分:
+  - **iOS 设备后端**（`src/ios.rs`）——对应上游 `server/wda_client.py` / `wda_controller.py` /
+    `wda_apps.py`：USB → 本机 loopback 转发 → HTTP → WDA 这条通路，以及
+    「WDA 的 JSON source 不带 clickable/scrollable，需按类型推导」这个坑。仅借语义，无代码。
   - **观察预算契约**（`docs/SPEC_OBSERVATION_BUDGET.md`）——对应上游 `server/wda_client.py`
     的紧凑控件树 / 去重 / 有界滚动 / 截图复用
   - **组合动作原语**（`src/collect.rs`）——对应上游 `pua_scroll_find` 与 `pua_collect_list`
   - **MCP `structuredContent`**（`src/serve.rs`）——对应上游 `structuredContent` 返回约定
-  - 上游自身的依赖（Appium / WebDriverAgent / appium-ios-device）与本仓库无关，未引入
+  - 上游自身的依赖（Appium / WebDriverAgent / appium-ios-device）与本仓库无关：
+    本仓库不随附 WebDriverAgent，也不负责安装它。`iproxy` / `idevice_id` 来自
+    libimobiledevice，由使用者自己装。
 
 ---
 

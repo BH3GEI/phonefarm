@@ -9,7 +9,9 @@
 整套东西是一个 harness。用户只提一种任务——「把某个游戏在某台手机上优化一下」，
 内部自动决定用哪几层。本仓库是底座那一层，负责四件事：
 
-- 设备：Android `adb` 与 OpenHarmony `hdc` 两族的连接、保活、确定性脚本回放。
+- 设备：Android `adb` / OpenHarmony `hdc` / iOS `wda`（WebDriverAgent）三族的连接、保活、确定性脚本回放。
+  iOS 那一族只能看与动（UI 树 / 截图 / 输入 / 应用启停），没有三层改动面也没有遥测，
+  不能用于优化闭环的改动面评测；能力边界与未上真机的状态见 [`docs/DEVICES.md`](docs/DEVICES.md)。
 - 应用改动（[`knobs/`](knobs/README.md)）：黑档系统参数（DVFS / 限帧 / 热 / 调度 / 刷新率），
   灰档 Vulkan layer 注入（render pass 观测，以及 LoadOp / 精度 / 分辨率 / shader 改写）。
 - 测量：安卓读 sysfs 电源轨加 raw ftrace kgsl，鸿蒙走 HiSmartPerf，上层拿同一份 JSON。
@@ -184,7 +186,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ## 设备与农场运维
 
 ```bash
-./phonefarm devices                        # adb 与 hdc 两族设备一并列出
+./phonefarm devices                        # adb / hdc / iOS 三族设备一并列出（iOS 只列 USB 上看得见的，不代表 WDA 已就绪）
 ./phonefarm keepalive                      # 对全部在线设备巡检一轮：唤醒 + 解锁 + 不息屏
 ./phonefarm keepalive --status             # 只读报告：连接/亮屏/不息屏是否生效
 ./phonefarm keepalive --watch              # 常驻守护（默认 300s 一轮，新上线设备自动纳入）
