@@ -42,14 +42,32 @@ bstat() { cat "$B/status" 2>/dev/null; }
 bcur()  { cat "$B/current_now" 2>/dev/null; }
 bcap()  { cat "$B/capacity" 2>/dev/null; }
 
+abs() { case "$1" in -*) echo "${1#-}" ;; *) echo "$1" ;; esac; }
+
+# 满电空闲: status=Full 且 |电池电流| < BYPASS_IDLE_UA —— 电池不进不出, 整机由 USB 供电。
+# 这**不是**放电态 (2026-10-12 实测: Full + current_now=-3000 被当成放电, 不停充也不进旁路,
+# 电池轨读数 ≈ 0.01 W 被当成整机功耗交了上去)。
+full_idle() {
+  st=$(bstat); cur=$(bcur)
+  case "$st" in Full|full|FULL) ;; *) return 1 ;; esac
+  case "$cur" in ''|*[!0-9-]*) return 1 ;; esac
+  [ "$(abs "$cur")" -lt "$BYPASS_IDLE_UA" ] 2>/dev/null
+}
+
 on_battery() {
   st=$(bstat); cur=$(bcur)
   case "$st" in Charging|charging|CHARGING) return 1 ;; esac
   case "$cur" in ''|*[!0-9-]*) return 1 ;; esac
+  full_idle && return 1
   [ "$cur" -lt 0 ] 2>/dev/null
 }
 
-abs() { case "$1" in -*) echo "${1#-}" ;; *) echo "$1" ;; esac; }
+# 满电空闲时按旁路处理: 写充电开关=0 (测量中途电量掉一点也不会补电), 状态文件第三行记 bypass,
+# sample_env / env_stats 据此取 USB 轨 |V x I|。按顺序找第一个存在的充电开关节点。
+FULL_BYPASS_NODES="/sys/class/qcom-battery/battery_charging_enabled
+/sys/class/qcom-battery/charging_enabled
+/sys/class/power_supply/battery/battery_charging_enabled
+/sys/class/power_supply/battery/charging_enabled"
 
 # 旁路 (bypass): 停充后整机由 USB 直接供电, 电池不进不出 —— status 仍写 Charging,
 # 电流趋近 0 而不是变负, on_battery() 永远判不过。10-11 手机节点 (USB-C PD 供电) 上
@@ -92,6 +110,20 @@ case "${1:-status}" in
     esac
     if [ "$cap" -lt "$MIN_CAPACITY" ] 2>/dev/null; then
       echo "CHARGE_SKIP: 电量 $cap% 低于停充下限 $MIN_CAPACITY%, 不停充"
+      report_state
+      exit 1
+    fi
+    if full_idle; then
+      for path in $FULL_BYPASS_NODES; do
+        saved=$(cat "$path" 2>/dev/null)
+        [ -n "$saved" ] || continue
+        printf '%s\n%s\n%s\n' "$path" "$saved" "bypass" > "$STATE"
+        echo 0 > "$path" 2>/dev/null
+        echo "CHARGE_SUSPENDED_BYPASS $path: $saved -> $(cat "$path" 2>/dev/null) (电池已满且不进不出, 按旁路: 整机由 USB 供电, 关充电防止测量中途补电)"
+        report_state
+        exit 0
+      done
+      echo "CHARGE_FAIL: 电池已满空闲, 但找不到能关充电的节点, 旁路不成立"
       report_state
       exit 1
     fi
