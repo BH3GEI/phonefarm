@@ -104,6 +104,16 @@ if cmd.startswith('set -eu; id;'):
     print('uid=0(root) gid=0(root)');print('fake-serial');print('changed-boot' if fail=='boot' else 'fake-boot');print('/system/bin/setsid')
 elif cmd=='dumpsys activity activities': print('mResumedActivity: ActivityRecord x '+('com.example.crashed/.Home' if fail=='foreground' else 'com.example.game/.Game')+' t1')
 elif cmd=='timeout 8 dumpsys thermalservice':sys.stdout.write(thermal_hal())
+elif cmd.startswith('timeout 20 sh -s -- ') and b'# Fixed host-supplied read-only diagnostic' in data:
+    if fail=='diagnostic_boot':sys.exit(72)
+    if fail=='diagnostic_partial':print('#phonefarm_helper_diagnostic@1');sys.exit(0)
+    print('#phonefarm_helper_diagnostic@1')
+    words=shlex.split(cmd);d,token,boot=words[-3:];owner=token+' '+boot+'\n'
+    print('BEGIN\towner\t'+str(len(owner)));print(owner,end='');print();print('END\towner')
+    for label in ['closed','lock_owner','master','children','pending','permit','reader_log','reader_stderr','reader_exit','quiescence','journal']:
+        print('MISSING\t'+label)
+    print('SELECTION\tmaster\tUNKNOWN');print('SELECTION\tchild\tUNKNOWN')
+    print('SCAN\t0\t0');print('#phonefarm_helper_diagnostic_end@1')
 elif cmd.startswith('sh -s -- ') and b'#phonefarm_render_witness v2' in data:
     sys.stdout.write(render_raw(1045975.,False))
 elif cmd.startswith('sh -s -- ') and b'# Fixed helper-only closure checker' in data:

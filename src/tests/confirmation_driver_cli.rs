@@ -1895,3 +1895,40 @@ cleanup_failure() {{
         }
     }
 }
+
+#[test]
+fn helper_recovery_diagnostic_records_only_and_never_clears_barrier() {
+    for fail in ["", "diagnostic_partial", "diagnostic_boot"] {
+        let f=origin_fixture(); assert_eq!(f.prepare("helper_interrupt").0,1);
+        let before=f.read("fake-state.json");
+        let (code,r)=f.call(&["diagnose-helper","--session","session","--execute"],fail);
+        assert_eq!(code,0,"{fail}: {r}"); assert_eq!(r["status"],"UNKNOWN");
+        assert_eq!(r["diagnostic_complete"],fail.is_empty());
+        for key in ["eligible","recovery_completed","remote_idle_verified","control_restore_claimed","promotion_allowed","real_game_optimization_proven","remote_worker_executed"] { assert_eq!(r[key],false); }
+        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        assert_eq!(f.read("fake-state.json"),before,"diagnostic must not mutate synthetic remote state");
+        let argv=std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
+        assert!(argv.contains("# Fixed host-supplied read-only diagnostic"));
+        let issued_worker_recovery=argv.lines().any(|line| {
+            let row:Value=serde_json::from_str(line).unwrap();
+            let cmd=row["command"].as_str().unwrap();cmd.starts_with("setsid sh ") && cmd.contains("reconcile_render")
+        });
+        assert!(!issued_worker_recovery); assert!(!f.dir.join("session/render-helper-removed.json").exists());
+        let diagnostic=PathBuf::from(r["diagnostic_dir"].as_str().unwrap());
+        assert!(diagnostic.join("result.json").exists()); assert!(diagnostic.join("raw.stdout").exists());
+    }
+}
+#[test]
+fn helper_recovery_diagnostic_rejects_main_or_changed_sources_before_transport() {
+    for fail in ["main", "dangling_main", "changed", "noexecute"] {
+        let f=origin_fixture();assert_eq!(f.prepare("helper_interrupt").0,1);
+        if fail=="main" {f.write("session/main-install.intent.json",&json!({"schema":"phonefarm/main_install_intent@1"}));}
+        #[cfg(unix)] if fail=="dangling_main" {std::os::unix::fs::symlink(f.dir.join("absent-main-marker"),f.dir.join("session/main-install.intent.json")).unwrap();}
+        if fail=="changed" {std::fs::write(f.dir.join("session/render_args.tsv"),"foreign\tthread\n").unwrap();}
+        let before=std::fs::read(f.dir.join("argv.jsonl")).unwrap();
+        let args=if fail=="noexecute" {vec!["diagnose-helper","--session","session"]}else{vec!["diagnose-helper","--session","session","--execute"]};
+        let (code,r)=f.call(&args,"");assert_eq!(code,1,"{fail}: {r}");assert_eq!(r["status"],"BLOCKED");
+        assert_eq!(std::fs::read(f.dir.join("argv.jsonl")).unwrap(),before);
+        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    }
+}
