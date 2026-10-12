@@ -25,6 +25,8 @@ B=/sys/class/power_supply/battery
 MIN_CAPACITY=30
 SETTLE_TRIES=12      # 12 x 1s = 12s, 与 hwcond.rs 的 SUSPEND_SETTLE_MS 一致
                      # (不用 sleep 0.5: Android 的 sh 不保证支持小数秒)
+BYPASS_MAX_S=90      # 旁路判定最多等这么久 (电量计读数是平滑过的, 10-11 实测约 45 s 才落到 ~0)
+BYPASS_IDLE_UA=50000 # |电池电流| 低于它 = 电池不进不出
 
 # "<路径> <how>" —— how: one=写1 / zero=写0 / cap=把上限压到当前电量以下
 CANDIDATES="/sys/class/power_supply/battery/input_suspend one
@@ -45,6 +47,31 @@ on_battery() {
   case "$st" in Charging|charging|CHARGING) return 1 ;; esac
   case "$cur" in ''|*[!0-9-]*) return 1 ;; esac
   [ "$cur" -lt 0 ] 2>/dev/null
+}
+
+abs() { case "$1" in -*) echo "${1#-}" ;; *) echo "$1" ;; esac; }
+
+# 旁路 (bypass): 停充后整机由 USB 直接供电, 电池不进不出 —— status 仍写 Charging,
+# 电流趋近 0 而不是变负, on_battery() 永远判不过。10-11 手机节点 (USB-C PD 供电) 上
+# 红魔 NX809J 写 qcom-battery/battery_charging_enabled=0 就是这个状态: USB 输入 2.13 A
+# 掉到 0.13-0.22 A, 电池 +1.93 A 约 45 s 衰减到 +0.03 A。
+# 判据: 写节点前电池在充 (> BYPASS_IDLE_UA) 且 12 s 内电流降了三成以上 (节点确实起作用),
+# 或写之前就几乎不进不出; 然后最多等到 BYPASS_MAX_S 让 |I| < BYPASS_IDLE_UA。
+bypass_wait() {   # $1 = 写节点前的电流; 成功返回 0
+  pre=$1; cur=$(bcur)
+  case "$cur" in ''|*[!0-9-]*) return 1 ;; esac
+  apre=$(abs "$pre"); acur=$(abs "$cur")
+  if [ "$apre" -gt "$BYPASS_IDLE_UA" ] 2>/dev/null; then
+    [ "$pre" -gt 0 ] 2>/dev/null || return 1                # 写之前在放电: 不是旁路的样子
+    [ $((cur * 10)) -le $((pre * 7)) ] 2>/dev/null || return 1   # 没降三成: 节点没起作用
+  fi
+  t=$SETTLE_TRIES
+  while [ "$t" -lt "$BYPASS_MAX_S" ]; do
+    acur=$(abs "$(bcur)")
+    [ "$acur" -lt "$BYPASS_IDLE_UA" ] 2>/dev/null && return 0
+    sleep 1; t=$((t + 1))
+  done
+  return 1
 }
 
 report_state() {
@@ -90,8 +117,9 @@ case "${1:-status}" in
         *) continue ;;
       esac
 
-      # 先落状态文件再动设备
-      printf '%s\n%s\n' "$path" "$saved" > "$STATE"
+      # 先落状态文件再动设备 (第三行是停充后的供电方式, sample_env.sh 读它)
+      pre_cur=$(bcur)
+      printf '%s\n%s\n%s\n' "$path" "$saved" "battery" > "$STATE"
       echo "$want" > "$path" 2>/dev/null
 
       i=0
@@ -103,6 +131,12 @@ case "${1:-status}" in
       done
       if [ "$ok" = "1" ]; then
         echo "CHARGE_SUSPENDED $path: $saved -> $want"
+        report_state
+        exit 0
+      fi
+      if bypass_wait "$pre_cur"; then
+        printf '%s\n%s\n%s\n' "$path" "$saved" "bypass" > "$STATE"
+        echo "CHARGE_SUSPENDED_BYPASS $path: $saved -> $want (整机由 USB 直接供电, 电池电流 $pre_cur -> $(bcur) uA)"
         report_state
         exit 0
       fi
@@ -146,7 +180,7 @@ CANDS
 
   status)
     if [ -f "$STATE" ]; then
-      echo "state: 已停充 ($(sed -n 1p "$STATE") 原值 $(sed -n 2p "$STATE"))"
+      echo "state: 已停充 ($(sed -n 1p "$STATE") 原值 $(sed -n 2p "$STATE") 供电 $(sed -n 3p "$STATE"))"
     else
       echo "state: 未停充"
     fi
