@@ -419,9 +419,8 @@ pub fn judge_arms(
     let all: Vec<&ArmRec> = a.iter().chain(b.iter()).collect();
     // 功耗是否进判定: 与 eval / autoloop 的 auto 口径一致 —— 两臂全程放电态且量到了
     let power_available = !all.is_empty()
-        && all.iter().all(|(_, m)| {
-            m["env"]["on_battery"].as_bool() == Some(true) && m["env"]["power_w_mean"].as_f64().is_some()
-        });
+        && all.iter().all(|(_, m)| m["env"]["power_w_mean"].as_f64().is_some())
+        && sysparam::power_group_ok(all.iter().map(|(_, m)| &m["env"]));
     let apply_ok = all.iter().all(|(_, m)| m["arm"]["apply_ok"].as_bool() == Some(true));
     let temp_max = all
         .iter()

@@ -147,6 +147,15 @@ const ACCOUNT_STRONG: &[&str] = &[
 const ACCOUNT_WEAK: &[&str] = &[
     "登录", "登入", "注册", "login", "log in", "sign in", "sign up", "register", "create account",
 ];
+/// 登录页上「更多登录方式」一类的展开按钮: 游客入口常藏在它后面 (10-11 PUBG Mobile:
+/// X / Facebook / Phone/Email / More)。只在登录页、且看不到游客入口时点一次。
+const LOGIN_MORE: &[&str] = &[
+    "更多", "更多登录方式", "其他登录方式", "其他方式", "more", "more options", "other options",
+];
+/// 登录页的上下文 (第三方登录按钮常带这些词, 而整条又不像一个短按钮)。
+const LOGIN_CTX: &[&str] = &["login with", "log in with", "sign in with", "continue with", "登录方式"];
+/// 「正在…」类状态文字: 带「下载 / 更新」字样也不是确认按钮。
+const IN_PROGRESS: &[&str] = &["正在", "downloading", "updating", "后台下载", "in progress"];
 /// 游客入口。
 const GUEST: &[&str] = &["游客登录", "游客模式", "游客", "以游客身份", "play as guest", "guest login", "guest"];
 /// 权限弹窗上下文与「拒绝」按钮 (拒绝 = 维持默认, 不改设置)。
@@ -334,7 +343,9 @@ pub fn classify(items: &[OcrItem], fg_ok: bool, fg_pkg: &str, policy: Policy, ba
 
     let progress = items.iter().any(|it| is_progress(&it.t));
     if any_mention(items, UPDATE_CTX) {
-        let has_btn = items.iter().any(|it| UPDATE_BUTTONS.iter().any(|w| is_button(&it.t, w, 2, 1)));
+        let has_btn = items.iter().any(|it| {
+            !mentions_any(&it.t, IN_PROGRESS) && UPDATE_BUTTONS.iter().any(|w| is_button(&it.t, w, 2, 1))
+        });
         if has_btn {
             return d(
                 Screen::Update,
@@ -392,12 +403,17 @@ pub fn classify(items: &[OcrItem], fg_ok: bool, fg_pkg: &str, policy: Policy, ba
     }
 
     let weak_account = items.iter().any(|it| {
-        !mentions_any(&it.t, LOADING) && ACCOUNT_WEAK.iter().any(|w| is_button(&it.t, w, 4, 2))
+        !mentions_any(&it.t, LOADING)
+            && (ACCOUNT_WEAK.iter().any(|w| is_button(&it.t, w, 4, 2)) || mentions_any(&it.t, LOGIN_CTX))
     });
     if weak_account {
         if policy.allow_guest {
             if let Some((it, w)) = find_button(items, GUEST, 4, 2, banned) {
                 return d(Screen::Account, tap(it, "guest", w));
+            }
+            // 看不到游客入口: 展开「更多」看一眼 (点过没反应会被拉黑, 不会反复点)
+            if let Some((it, w)) = find_button(items, LOGIN_MORE, 2, 1, banned) {
+                return d(Screen::Account, tap(it, "login_more", w));
             }
         }
         return d(Screen::Account, Act::Stop { reason: "只有登录入口, 没有游客 / 点击进入: 需要人登录".into() });
@@ -1059,10 +1075,14 @@ fn enter(dev: &Dev, cfg: &EnterCfg) -> EnterResult {
         let (w, h) = img.dimensions();
         res.screen_wh = (w, h);
 
-        // 上一次点击之后画面几乎没变: 这个位置拉黑, 不点第二次
+        // 上一次点击之后画面几乎没变: 这个位置拉黑, 不点第二次。画面明显变了 (关掉了一个
+        // 盖在上面的框): 之前拉黑的位置作废 —— 10-11 Megacity 的「SINGLE PLAYER」先被提示框挡住、
+        // 点了没反应被拉黑, 框关掉之后就再也不点它了
         if let Some((tx, ty, before)) = last_tap.take() {
-            if mf(&before, &raw).is_some_and(|f| f < 0.02) {
-                banned.push((tx, ty));
+            match mf(&before, &raw) {
+                Some(f) if f < 0.02 => banned.push((tx, ty)),
+                Some(f) if f >= 0.10 => banned.clear(),
+                _ => {}
             }
         }
 
@@ -1991,6 +2011,58 @@ CHARGE_STATE status=Charging current_now=-632000 capacity=100 on_battery=no";
         assert!(!suspend_took("CHARGE_SKIP: 电量 20% 低于停充下限 30%, 不停充"));
         assert!(suspend_took("CHARGE_SUSPENDED /sys/class/qcom-battery/charging_enabled: 1 -> 0\nCHARGE_STATE status=Discharging current_now=-640000 capacity=100 on_battery=yes"));
         assert!(suspend_took("CHARGE_ALREADY_ON_BATTERY (本来就在放电态, 不需要停充)"));
+    }
+
+    #[test]
+    fn download_in_progress_waits_instead_of_stopping() {
+        // 10-11 PUBG Mobile 首次启动: 自动下载资源, 没有要确认的按钮
+        let items = vec![
+            it("支持后台下载，下载过程中请勿关闭游戏。", 1300, 50),
+            it("开启推送权限", 2500, 120),
+            it("正在下载", 200, 950),
+            it("（65.7MB/134.4MB", 300, 1000),
+            it("最小化后仍可在后台下载（下载试听组件资源包后可获取更好的视觉体验）", 800, 1060),
+        ];
+        let d = classify(&items, true, "com.tencent.ig", Policy::default(), &[]);
+        assert!(matches!(d.act, Act::Wait { .. }), "{d:?}");
+        // 真的有确认按钮时仍然停
+        let mut ask = items.clone();
+        ask.push(it("立即下载", 1300, 900));
+        let d = classify(&ask, true, "com.tencent.ig", Policy::default(), &[]);
+        assert!(matches!(d.act, Act::Stop { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn login_page_without_guest_opens_more_once_never_third_party() {
+        // 10-11 PUBG Mobile 登录页 (OCR 原样, 含错字)
+        let items = vec![
+            it("X Lagin with X", 840, 930),
+            it("f Login with Facebook", 1270, 930),
+            it("Phone/Email", 1690, 930),
+            it("Mare", 1970, 930),
+            it("More", 1970, 930),
+            it("帮助", 2600, 120),
+            it("语言", 2600, 260),
+        ];
+        let d = classify(&items, true, "com.tencent.ig", Policy::default(), &[]);
+        match &d.act {
+            Act::Tap { label, .. } => assert_eq!(label.to_lowercase(), "more", "{d:?}"),
+            _ => panic!("应该展开 More: {d:?}"),
+        }
+        // More 点过没反应被拉黑之后: 停, 不碰第三方登录
+        let d = classify(&items, true, "com.tencent.ig", Policy::default(), &[(1970, 930)]);
+        assert!(matches!(d.act, Act::Stop { .. }), "{d:?}");
+        // 展开后出现游客: 点游客
+        let mut g = items.clone();
+        g.push(it("Guest", 1970, 700));
+        let d = classify(&g, true, "com.tencent.ig", Policy::default(), &[(1970, 930)]);
+        match &d.act {
+            Act::Tap { label, .. } => assert_eq!(label.to_lowercase(), "guest", "{d:?}"),
+            _ => panic!("应该点游客: {d:?}"),
+        }
+        // 不允许游客时连 More 都不点
+        let d = classify(&items, true, "com.tencent.ig", Policy { allow_guest: false, ..Policy::default() }, &[]);
+        assert!(matches!(d.act, Act::Stop { .. }), "{d:?}");
     }
 
     #[test]

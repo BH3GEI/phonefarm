@@ -857,7 +857,7 @@ pub(crate) fn run_one_with(
 }
 
 /// [`run_one`] 回包里并进判定视图的 env 字段 (sample_env.sh → [`sysparam::env_stats`])。
-pub(crate) const RUN_ENV_KEYS: [&str; 19] = [
+pub(crate) const RUN_ENV_KEYS: [&str; 23] = [
     "power_w_mean",
     "power_w_median",
     "power_now_w_mean",
@@ -870,6 +870,10 @@ pub(crate) const RUN_ENV_KEYS: [&str; 19] = [
     "battery_status",
     "battery_charging",
     "power_usable_reason",
+    "on_battery",
+    "bypass",
+    "power_valid",
+    "power_source",
     "soc_temp_max_c",
     "soc_temp_mean_c",
     "n_samples",
@@ -916,12 +920,10 @@ fn eval_runs(runs: &[Value]) -> Vec<Run> {
         .collect()
 }
 
-/// 两臂已跑的每一轮都在放电态 (功耗才进判定)。空集算真 —— 后面的轮次还可能全是放电态。
+/// 两臂已跑的每一轮都量到了可信功耗、且是同一种口径 (全电池放电或全 USB 旁路), 功耗才进
+/// 判定; 混了口径这组功耗无效。空集算真 —— 后面的轮次还可能全合格。
 fn all_on_battery(knob_runs: &[Value], ctrl_runs: &[Value]) -> bool {
-    knob_runs
-        .iter()
-        .chain(ctrl_runs.iter())
-        .all(|r| r["env"]["on_battery"].as_bool().unwrap_or(false))
+    sysparam::power_group_ok(knob_runs.iter().chain(ctrl_runs.iter()).map(|r| &r["env"]))
 }
 
 /// 跑满时**可能**进入判定的「显著改善」检验, 各取最宽的 alpha_win:
@@ -1334,6 +1336,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         "battery_current_now_ua": env["current_now_ua_mean"].as_f64().map(|x| x as i64),
         "battery_capacity_pct": env["battery_capacity_pct"].as_str().and_then(|s| s.parse::<i64>().ok()),
         "on_battery": env["on_battery"],
+        "source": env["power_source"],
         "charging_suspended_via": suspended_via.clone(),
     });
 
