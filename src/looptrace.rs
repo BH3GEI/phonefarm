@@ -229,6 +229,17 @@ fn kv(re: &Regex, rest: &str) -> HashMap<String, i64> {
 }
 
 pub fn parse(text: &str, render_comm: &str) -> Parsed {
+    parse_with_spf(text, render_comm, None)
+}
+
+/// 同 [`parse`], 但每帧提交数由调用方给定 (`Some(n)`), 不从数据自检。
+///
+/// 白盒负载 (refbench) 的契约就是每帧恰 1 次提交。自检在这种负载上会被骗:
+/// 实测 refbench 跑到 ~360 fps 时, 120 Hz 屏让每第 3 帧等一次 vsync, 提交间隔出现
+/// 周期 3 的长短节奏 (lag3 自相关 0.65), 自检判成「每帧 3 次提交」, 帧时虚高 3 倍、
+/// 帧数少 3 倍 (10-11 selftest 标定 3000 工作组: 8.28 ms 实为 2.76 ms)。
+/// 自检的打分照样算出来记在 `spf_scores` 里, 只是不用它分组。
+pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -> Parsed {
     let line_re = Regex::new(LINE_RE).expect("LINE_RE");
     let kv_re = Regex::new(KV_RE).expect("KV_RE");
 
@@ -321,7 +332,8 @@ pub fn parse(text: &str, render_comm: &str) -> Parsed {
         .windows(2)
         .map(|w| (w[1].0 - w[0].0) * 1000.0)
         .collect();
-    let (spf, spf_scores) = detect_submits_per_frame(&gaps, 6);
+    let (detected, spf_scores) = detect_submits_per_frame(&gaps, 6);
+    let spf = fixed_spf.filter(|n| *n >= 1).unwrap_or(detected);
 
     // 帧时长 = 每 spf 个间隔一组求和。组边界同时用来聚合该帧的 GPU 活跃时长。
     let mut frame_ms = Vec::new();
@@ -615,17 +627,19 @@ pub fn attribute(s: &PyVal) -> Result<PyVal, String> {
 
 // ══════════════ 子命令 ══════════════
 
-const PARSE_USAGE: &str = "用法: phonefarm parse-trace <trace.txt> [--full] [--comm 线程名]";
+const PARSE_USAGE: &str = "用法: phonefarm parse-trace <trace.txt> [--full] [--comm 线程名] [--spf 每帧提交数 (缺省自检)]";
 const ATTR_USAGE: &str = "用法: phonefarm attribute <summary.json>";
 
 pub fn run_parse_trace(args: &[String]) -> i32 {
     let mut path: Option<&str> = None;
     let mut comm = DEFAULT_RENDER_COMM.to_string();
     let mut full = false;
+    let mut spf: Option<usize> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--full" => full = true,
+            "--spf" => spf = it.next().and_then(|v| v.parse().ok()),
             "--comm" => {
                 if let Some(v) = it.next() {
                     comm = v.clone();
@@ -647,7 +661,7 @@ pub fn run_parse_trace(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let d = parse(&String::from_utf8_lossy(&bytes), &comm);
+    let d = parse_with_spf(&String::from_utf8_lossy(&bytes), &comm, spf);
     println!("{}", dumps(&if full { d.to_pyval() } else { d.summarize() }));
     0
 }
@@ -811,6 +825,24 @@ mod tests {
         m.set("b", "2");
         m.set("a", "3");
         assert_eq!(dumps(&m.to_pyval()), "{\n \"a\": \"3\",\n \"b\": \"2\"\n}");
+    }
+
+    #[test]
+    fn fixed_spf_overrides_a_vsync_rhythm_that_fools_detection() {
+        // 每帧 1 次提交, 但每第 3 帧多等一会 (屏幕节奏): 自检会判成 3
+        let mut t = 100.0;
+        let mut text = String::from("#loop_v1_meta a=1\n");
+        for i in 0..300 {
+            t += if i % 3 == 2 { 0.0045 } else { 0.0020 };
+            text.push_str(&format!(
+                "     RefbenchDrv-1   [001] ..... {t:.6}: adreno_cmdbatch_submitted: ctx=45 ctx_prio=1 ts={i} inflight=1 flags=0x0 prio=1\n"
+            ));
+        }
+        let auto = parse(&text, "RefbenchDrv");
+        let fixed = parse_with_spf(&text, "RefbenchDrv", Some(1));
+        assert_eq!(auto.submits_per_frame, 3, "这段节奏正是会骗过自检的那种");
+        assert_eq!(fixed.submits_per_frame, 1);
+        assert!(fixed.frame_ms.len() > 2 * auto.frame_ms.len());
     }
 
     #[test]
