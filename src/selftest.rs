@@ -882,8 +882,9 @@ pub struct Cond {
     pub cool_timeout_s: u64,
     pub temp_cap_c: f64,
     pub charge_suspend: bool,
-    pub fan_on: bool,
     pub lock_freq: bool,
+    /// 锁频时钉在哪一档 (缺省: 锁频前的 max_pwrlevel)。档位号越大频率越低。
+    pub lock_level: Option<u32>,
 }
 
 impl Cond {
@@ -893,8 +894,8 @@ impl Cond {
             "base_wg": self.base_wg, "frames": self.frames, "warmup_s": self.warmup_s,
             "capdur_s": self.capdur_s, "cool_c": self.cool_c, "cool_timeout_s": self.cool_timeout_s,
             "temp_cap_c": self.temp_cap_c, "charge_suspend": self.charge_suspend,
-            "fan": if self.fan_on { "on(enable=1,level=5)" } else { "keep" },
-            "lock_freq": self.lock_freq, "scene": rb::SCENE,
+            "fan": "off",
+            "lock_freq": self.lock_freq, "lock_level": self.lock_level, "scene": rb::SCENE,
         })
     }
 }
@@ -919,7 +920,6 @@ struct Session {
     serial: String,
     dev: Device,
     charge_suspended: bool,
-    fan_saved: Option<(String, String)>,
     lock_state: PathBuf,
 }
 
@@ -932,8 +932,8 @@ const FAN_EN: &str = "/sys/kernel/fan/fan_enable";
 const FAN_LV: &str = "/sys/kernel/fan/fan_speed_level";
 const CHARGE_STATE: &str = "/data/local/tmp/loop_v1_charge.state";
 
-fn write_fan(serial: &str, en: &str, lv: &str) {
-    su(serial, &format!("echo {lv} > {FAN_LV}; echo {en} > {FAN_EN}"), 15);
+fn write_fan_off(serial: &str) {
+    su(serial, &format!("echo 0 > {FAN_EN}"), 15);
 }
 
 /// 设备上几项「改了要还原」的现值, 开场与收场各记一份进证据。
@@ -982,7 +982,6 @@ impl Session {
             serial: c.serial.clone(),
             dev,
             charge_suspended: false,
-            fan_saved: None,
             lock_state: hwcond::lock_state_path("selftest", &Some(c.serial.clone())),
         };
         // ── 先清上一次异常退出 (含宿主机崩溃) 的遗留, 再动任何东西 ──
@@ -991,14 +990,13 @@ impl Session {
         if hwcond::recover_stale_lock("selftest", &s.dev, &s.lock_state) == Some(false) {
             return Err("上次遗留的锁频态回滚失败, 拒绝在未知频率状态下跑".into());
         }
-        let fan_file = fan_state_path(&c.serial);
-        if let Some((en, lv)) = std::fs::read_to_string(&fan_file).ok().and_then(|t| {
-            let mut it = t.split_whitespace();
-            Some((it.next()?.to_string(), it.next()?.to_string()))
-        }) {
-            write_fan(&c.serial, &en, &lv);
-            log(&format!("发现上次遗留的风扇改动, 已还原 enable={en} level={lv}"));
-            let _ = std::fs::remove_file(&fan_file);
+        // 风扇一律不开 (owner 规定: 噪音)。开场无条件写 0 —— 旧版本 --fan-on 被杀/宕机后
+        // 可能把风扇留在开着 (10-11 19:40 节点宕机那次就是), 不管谁留的都在这里关掉
+        let _ = std::fs::remove_file(fan_state_path(&c.serial));
+        let fan_before = strip_exit(&su(&c.serial, &format!("cat {FAN_EN}"), 15)).trim().to_string();
+        write_fan_off(&c.serial);
+        if fan_before != "0" {
+            log(&format!("风扇原为 enable={fan_before}, 已关 (风扇一律不开)"));
         }
         if su(&c.serial, &format!("[ -f {CHARGE_STATE} ] && echo STALE"), 15).contains("STALE") {
             let out = su(&c.serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
@@ -1017,20 +1015,6 @@ impl Session {
             }
         }
 
-        if c.fan_on {
-            let en = su(&c.serial, &format!("cat {FAN_EN}"), 15);
-            let lv = su(&c.serial, &format!("cat {FAN_LV}"), 15);
-            if adb_ok(&en) && adb_ok(&lv) {
-                let (en, lv) = (strip_exit(&en).trim().to_string(), strip_exit(&lv).trim().to_string());
-                // 先落盘「改之前」再改, 进程或宿主机中途挂掉也能由下次启动还原
-                std::fs::write(&fan_file, format!("{en} {lv}\n")).map_err(|e| format!("写不了风扇状态文件: {e}"))?;
-                s.fan_saved = Some((en.clone(), lv.clone()));
-                write_fan(&c.serial, "1", "5");
-                log(&format!("风扇: 原 enable={en} level={lv} → 1/5 (结束还原)"));
-            } else {
-                log("风扇节点读不到, 风扇保持原样");
-            }
-        }
         if c.charge_suspend {
             let out = su(&c.serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
             if adb_ok(&out) && out.contains("CHARGE_SUSPENDED") {
@@ -1051,11 +1035,7 @@ impl Session {
             v["charge_restore"] = json!(strip_exit(&out).trim());
             self.charge_suspended = false;
         }
-        if let Some((en, lv)) = self.fan_saved.take() {
-            write_fan(&self.serial, &en, &lv);
-            v["fan_restored_to"] = json!(format!("enable={en} level={lv}"));
-            let _ = std::fs::remove_file(fan_state_path(&self.serial));
-        }
+        write_fan_off(&self.serial);
         if hwcond::recover_stale_lock("selftest", &self.dev, &self.lock_state) == Some(false) {
             v["lock_restore"] = json!("FAILED");
         }
@@ -1067,7 +1047,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if self.charge_suspended || self.fan_saved.is_some() {
+        if self.charge_suspended {
             self.close();
         }
     }
@@ -1117,7 +1097,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     // 2) 锁频 (可选): 只包住跑测, 与 gpu-op 同一做法 —— 先锁再等冷永远等不下来
     let lock = if c.lock_freq {
         let snap = hwcond::read_snapshot(&s.dev);
-        let level = snap.gpu_max_level.unwrap_or(0);
+        let level = c.lock_level.unwrap_or(snap.gpu_max_level.unwrap_or(0));
         Some(hwcond::Lock::apply(&s.dev, &s.lock_state, snap, level).map_err(|e| format!("锁频失败: {e}"))?)
     } else {
         None
@@ -1319,7 +1299,7 @@ const USAGE: &str = "用法:
 考题清单: aa*4,better:1*2,worse:2 (帧时幅度%, 需标定) 或 better-wg:50 (直接给工作组数差)
 条件: [--serial S] [--template ../refbench/selftest/load.spv] [--intensity 1] [--iters 64]
       [--base-wg 4000] [--frames N] [--warmup 2] [--capdur 10] [--cool-c 45] [--cool-timeout 240]
-      [--temp-cap 70] [--no-charge-suspend] [--fan-on] [--lock-freq]
+      [--temp-cap 70] [--no-charge-suspend] [--lock-freq] [--lock-level N (隐含 --lock-freq)]
 
 判定一律走现有链 (loopstat::compare + sysparam::decide; 画面走 eval --request kind=shader),
 本命令不另写统计。证据与判定输入全部落盘, report 不碰设备、可离线重算。";
@@ -1380,8 +1360,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             cool_timeout_s: 240,
             temp_cap_c: 70.0,
             charge_suspend: true,
-            fan_on: false,
             lock_freq: false,
+            lock_level: None,
         },
         frames_given: false,
     };
@@ -1417,8 +1397,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--cool-timeout" => a.cond.cool_timeout_s = num(it.next(), k)? as u64,
             "--temp-cap" => a.cond.temp_cap_c = num(it.next(), k)?,
             "--no-charge-suspend" => a.cond.charge_suspend = false,
-            "--fan-on" => a.cond.fan_on = true,
+            "--fan-on" => return Err("--fan-on 已取消: 风扇一律不开 (owner 规定), 需要降温靠等冷".into()),
             "--lock-freq" => a.cond.lock_freq = true,
+            "--lock-level" => {
+                a.cond.lock_level = Some(num(it.next(), k)? as u32);
+                a.cond.lock_freq = true;
+            }
             other => return Err(format!("不认识的参数 {other}\n\n{USAGE}")),
         }
     }

@@ -447,6 +447,13 @@ impl BatteryState {
         if self.status.eq_ignore_ascii_case("Charging") {
             return false;
         }
+        // 满电空闲: 电池不进不出, 整机由 USB 供电 —— 不是放电态 (与 charge_suspend.sh /
+        // sysparam::env_stats 同一判据, 门限 sysparam::BYPASS_IDLE_UA)
+        if self.status.eq_ignore_ascii_case("Full")
+            && matches!(self.current_ua, Some(c) if (c.abs() as f64) < crate::sysparam::BYPASS_IDLE_UA)
+        {
+            return false;
+        }
         matches!(self.current_ua, Some(c) if c < 0)
     }
 
@@ -976,6 +983,10 @@ mod tests {
         // 充放平衡过零的瞬间判不出来, 一律不算放电态
         assert!(!bat("Not charging", 0, 80).on_battery());
         assert!(!BatteryState::default().on_battery());
+        // 满电空闲 (2026-10-12 实测 Full + -3000 µA): 不是放电态
+        assert!(!bat("Full", -3_000, 100).on_battery());
+        // 满电但确实在大电流放电 (拔了线): 算放电态
+        assert!(bat("Full", -800_000, 100).on_battery());
     }
 
     #[test]
