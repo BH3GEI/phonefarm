@@ -210,7 +210,9 @@ arm_audit() {
   say "audit_r$R 完成"
 }
 
-[ $# -eq 0 ] && say "没给臂: 只做收尾还原"
+# 先清掉上一次被打断的会话可能留下的东西 (层、framecap 属性、debug.vulkan.layers)
+restore
+[ $# -eq 0 ] && say "没给臂: 只做还原"
 say "会话开始 out=$OUT arms=$* so=$SO frames=$FRAMES 音量=$(volume_zero)"
 asu "cat /sys/class/power_supply/battery/status /sys/class/power_supply/battery/capacity /sys/class/qcom-battery/charging_enabled" > "$OUT/battery_at_start.txt" 2>&1
 for arm in "$@"; do
