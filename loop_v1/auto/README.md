@@ -134,6 +134,18 @@ phonefarm `src/hwcond.rs` (PR #27 真机验过的那一版), 不另造一套 —
 两个都会单独骗人 —— 停充之后有的内核仍写 `Not charging` 而不是 `Discharging`,
 而 `current_now` 在充放平衡的瞬间会过零。
 
+**旁路供电 (10-11 起)**: 手机挪到手机节点 (USB-C PD 供电) 之后, `charging_enabled=0`
+完全不起作用; 管用的是 `qcom-battery/battery_charging_enabled=0`, 但它不让手机转成放电态,
+而是**旁路**: 整机由 USB 直接供电 (USB 输入从 2.13 A 掉到 0.13-0.22 A @ 5.15 V), 电池电流
+约 45 秒衰减到 ≈0, `status` 一直写 `Charging`。所以 `charge_suspend.sh` 多认一种成功:
+写节点前在充、12 秒内电流降了三成以上, 再最多等到 90 秒让 |I| < 50 mA → 输出
+`CHARGE_SUSPENDED_BYPASS`, 状态文件第三行记 `bypass` (放电态记 `battery`)。
+`sample_env.sh` 把它写成 `#charge_mode=`, `env_stats` 在旁路且电池电流均值 |I| < 50 mA 时
+取 **USB 轨 |V x I|** 作 `power_w_mean`, 标 `power_source=usb_bypass` (含充电器转换损耗,
+但口径稳定); 放电态仍取电池轨, 标 `power_source=battery`。**两种口径不许混在同一组 A/B 里比**:
+一组里口径不一致 (或有轮没量到) 这组功耗就不进判定 (`sysparam::power_group_ok`, eval / autoloop /
+selftest 共用)。
+
 功耗进不进判定因此是 `--power-in-verdict {auto,on,off}`, 缺省 `auto`:
 **基线轮每一轮都真的拿到放电态才计入**。不是"能测到就用" —— 充电态下测到的数
 看起来很正常, 悄悄拿它判保留/淘汰比不测还糟。
