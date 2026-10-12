@@ -16,7 +16,7 @@
 //!    结果里标 `measure_only`, 状态不会是 PASS —— 它们回答的是「这块浪费值多少」, 不是可采纳的优化。
 
 use crate::eval::{
-    adb, aggregate_metrics, arm_cool_timeout, arm_wait_cool, base_report, cool_summary, judge_runs, push_tools,
+    adb, arm_fan_off, fan_mismatch, fan_still_on, aggregate_metrics, arm_cool_timeout, arm_wait_cool, base_report, cool_summary, judge_runs, push_tools,
     run_one_launch, run_soc_temp_max, start_with_extras, su, unavailable, wait_launch_window, launch_spec,
     psnr_rgba, adb_ok, GRAY_MIN_PSNR_DB, DEV_TMP,
 };
@@ -249,9 +249,15 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     'pairs: for i in 1..=rounds {
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             let tag = format!("{arm}{i}");
+            let fan = arm_fan_off(serial);
             let mut c = arm_wait_cool(serial, cool_c, &tag, arm_cool_timeout(&cool_log));
             c["arm"] = json!(tag);
+            c["fan"] = fan.clone();
             cool_log.push(c);
+            if let Some(e) = fan_still_on(&fan) {
+                abort = Some(format!("{tag}: {e}"));
+                break 'pairs;
+            }
             let dir = evidence.join(&tag);
             let _ = std::fs::create_dir_all(&dir);
             let extras = if arm == "knob" { knob_full.clone() } else { base_extras.clone() };
@@ -315,6 +321,10 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     }
 
     // ── 判定 ──
+    if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
+        report["verdict"]["reason"] = json!(e);
+        return done(&report);
+    }
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
     report["verdict"] = verdict;
     let mut m = report["metrics"].take();
