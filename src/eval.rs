@@ -514,11 +514,18 @@ pub(crate) fn snapshot(serial: &str) -> String {
 
 /// 每臂开跑前等冷的上限。等不到不作废 (组内交替让两臂承受同样的残余热漂移), 但如实记下。
 const ARM_COOL_TIMEOUT_S: u64 = 300;
+/// 同一次评测里已经有一臂等冷超时之后, 后面每臂最多再等这么久: 降不到就是降不到,
+/// 一臂一臂地累计干等只会把一次评测拖成一个小时 (10 臂 × 300 秒)。
+const ARM_COOL_TIMEOUT_AFTER_MISS_S: u64 = 30;
+/// 等冷期间多久打一行进度 (stderr; 上层把它原样转进节点日志)。
+const COOL_PROGRESS_EVERY_S: u64 = 30;
 
 /// 一臂开跑前的等冷: 等到 SoC 最热热区 < cool_c 或超时。回 {zone, c, waited_s, timeout}。
-/// cool_c 缺省 (null) = 不等冷, 只记一次起跑温度。
-fn arm_wait_cool(serial: &str, cool_c: Option<f64>) -> Value {
+/// cool_c 缺省 (null) = 不等冷, 只记一次起跑温度。`timeout_s` 由调用方按「这次评测里之前
+/// 有没有臂已经超时」给 (见 [`ARM_COOL_TIMEOUT_AFTER_MISS_S`])。
+fn arm_wait_cool(serial: &str, cool_c: Option<f64>, label: &str, timeout_s: u64) -> Value {
     let t0 = std::time::Instant::now();
+    let mut last_note = 0u64;
     loop {
         let cur = crate::autoloop::read_soc_temp(serial);
         let waited = (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0;
@@ -527,13 +534,28 @@ fn arm_wait_cool(serial: &str, cool_c: Option<f64>) -> Value {
         };
         match cool_c {
             Some(target) if c >= target => {
-                if t0.elapsed().as_secs() >= ARM_COOL_TIMEOUT_S {
+                let el = t0.elapsed().as_secs();
+                if el >= timeout_s {
+                    eprintln!("等冷 {label}: 等了 {el}s 仍 {zone}={c:.1}C >= 目标 {target:.1}C, 超时, 照常开跑 (如实标注)");
                     return json!({"zone": zone, "c": c, "waited_s": waited, "timeout": true});
+                }
+                if el >= last_note + COOL_PROGRESS_EVERY_S || last_note == 0 {
+                    eprintln!("等冷 {label}: {zone}={c:.1}C, 目标 < {target:.1}C, 已等 {el}s (最多 {timeout_s}s)");
+                    last_note = el.max(1);
                 }
                 std::thread::sleep(std::time::Duration::from_secs(8));
             }
             _ => return json!({"zone": zone, "c": c, "waited_s": waited, "timeout": false}),
         }
+    }
+}
+
+/// 这一臂最多等多久: 之前已有一臂超时就只再给 [`ARM_COOL_TIMEOUT_AFTER_MISS_S`]。
+fn arm_cool_timeout(log: &[Value]) -> u64 {
+    if log.iter().any(|a| a["timeout"].as_bool() == Some(true)) {
+        ARM_COOL_TIMEOUT_AFTER_MISS_S
+    } else {
+        ARM_COOL_TIMEOUT_S
     }
 }
 
@@ -1101,7 +1123,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     'pairs: for i in 1..=rounds {
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 每臂开跑前按请求的 cool_c 等冷 (施加之前等: 等的那几分钟里厂商服务有足够时间把刚写的值改回去)
-            let mut c = arm_wait_cool(serial, cool_c);
+            let mut c = arm_wait_cool(serial, cool_c, &format!("{arm}{i}"), arm_cool_timeout(&cool_log));
             c["arm"] = json!(format!("{arm}{i}"));
             cool_log.push(c);
             if arm == "knob" {
@@ -1643,7 +1665,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
             // 层是 CreateInstance 时读的, 切属性必须重启目标 —— force-stop 是两臂切换的一部分
             let _ = gl.off();
             // 游戏关着的时候等冷最快; 等到请求的 cool_c 或超时
-            let mut c = arm_wait_cool(serial, cool_c);
+            let mut c = arm_wait_cool(serial, cool_c, &format!("{arm}{i}"), arm_cool_timeout(&cool_log));
             c["arm"] = json!(format!("{arm}{i}"));
             cool_log.push(c);
             if let Err(e) = mount(arm) {
@@ -2218,6 +2240,16 @@ mod path_tests {
         ];
         assert_eq!(cool_summary(&arms), (Some(47.9), true));
         assert_eq!(cool_summary(&[]), (None, false));
+    }
+
+    #[test]
+    fn after_one_arm_misses_the_cool_target_later_arms_wait_briefly() {
+        assert_eq!(arm_cool_timeout(&[]), ARM_COOL_TIMEOUT_S);
+        assert_eq!(arm_cool_timeout(&[json!({"timeout": false})]), ARM_COOL_TIMEOUT_S);
+        assert_eq!(
+            arm_cool_timeout(&[json!({"timeout": false}), json!({"timeout": true})]),
+            ARM_COOL_TIMEOUT_AFTER_MISS_S
+        );
     }
 }
 
