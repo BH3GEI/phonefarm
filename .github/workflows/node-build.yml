@@ -108,7 +108,10 @@ jobs:
           files = {}
           for f in sorted(os.listdir("out")):
               d = open(f"out/{f}", "rb").read()
-              files[f] = {"sha256": hashlib.sha256(d).hexdigest(), "size": len(d)}
+              # asset：带提交号的资产名，永不覆盖。--clobber 是先删后传，覆盖同名资产的那几秒
+              # （加上 GitHub 下载链接的缓存）会 404；节点按 asset 下载就不会撞上。
+              files[f] = {"sha256": hashlib.sha256(d).hexdigest(), "size": len(d),
+                          "asset": f"{os.environ['GITHUB_SHA'][:12]}-{f}"}
           info = {
               "sha": os.environ["GITHUB_SHA"],
               "built_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -130,6 +133,16 @@ jobs:
           gh release view node-build >/dev/null 2>&1 || \
             gh release create node-build --target "$GITHUB_SHA" --prerelease --title node-build \
               --notes "节点用的预编译产物（phonefarm macOS arm64 + 灰档层 .so），每次 push main 覆盖。以 build.json 的 sha 为准，tag 位置不代表产物版本。"
-          # 先传二进制，build.json 最后传：节点看到新 sha 时二进制已经是新的（还会按 sha256 再核对）
+          # 1) 带提交号的资产（新名字，不覆盖任何东西）；2) 不带提交号的同名资产（给旧版 update_node.sh，覆盖）；
+          # 3) 最后才换 build.json：节点看到新 sha 时它指向的资产都已就位（还会按 sha256 再核对）
+          short=${GITHUB_SHA:0:12}
+          mkdir vout
+          for f in out/*; do cp "$f" "vout/$short-$(basename "$f")"; done
+          gh release upload node-build vout/* --clobber
           gh release upload node-build out/phonefarm out/libVkLayer_refknobs.so out/VkLayer_refknobs.json --clobber
           gh release upload node-build build.json --clobber
+          # 带提交号的资产只留最近 3 次构建（正在下载上一版的节点不受影响）
+          gh api "repos/$GH_REPO/releases/tags/node-build" --jq '.assets[] | [.id, .name, .created_at] | @tsv' \
+            | awk -F'\t' 'substr($2,13,1)=="-" && $2 ~ /^[0-9a-f]+-/' | sort -t$'\t' -k3,3r \
+            | awk -F'\t' '{p=substr($2,1,12)} !(p in seen){seen[p]=1; n++} n>3 {print $1, $2}' \
+            | while read -r id name; do echo "删旧资产 $name"; gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"; done
