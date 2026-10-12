@@ -108,20 +108,21 @@ launch() {   # launch <run_id> <resscale>
   a "am start -n $PKG/$ACT --es scene city_flythrough --es run_id $1 --es frames $FRAMES --es route route_a --es warmup 600 --es settle 7200 --es resscale $2 --es vsync off" >/dev/null 2>&1
 }
 
+# 节点 (Mac mini) 配置低: 每次 adb 调用都是一个进程, 轮询一律 1 秒一次, 不要更密
 wait_file() {   # wait_file <设备路径> <上限秒>; 应用中途退出就失败
-  local n=$(( $2 * 5 ))
-  for _ in $(seq 1 $n); do
+  local i
+  for i in $(seq 1 "$2"); do
     [ -n "$(asu "cat $1 2>/dev/null | head -c 64")" ] && return 0
-    [ -z "$(a "pidof $PKG" | tr -d '\r')" ] && return 1
-    sleep 0.2
+    if [ $((i % 5)) = 0 ] && [ -z "$(a "pidof $PKG" | tr -d '\r')" ]; then return 1; fi
+    sleep 1
   done
   return 1
 }
 
-wait_exit() {   # wait_exit <上限秒>
-  for _ in $(seq 1 "$1"); do
+wait_exit() {   # wait_exit <上限秒>, 每 3 秒问一次
+  for _ in $(seq 1 $(( $1 / 3 ))); do
     [ -z "$(a "pidof $PKG" | tr -d '\r')" ] && return 0
-    sleep 1
+    sleep 3
   done
   return 1
 }
@@ -190,7 +191,7 @@ arm_perf() {   # 只读: 不挂层、不录屏
       asu "cat /sys/class/power_supply/battery/status /sys/class/power_supply/battery/current_now /sys/class/power_supply/battery/voltage_now /sys/class/kgsl/kgsl-3d0/temp" | tr -d '\r'
     } >> "$d/samples.txt"
     i=$((i + 1))
-    sleep 1
+    sleep 2
   done
   pull_common "$d"
   python3 "$HERE/framecap_tools.py" perf "$d" >>"$LOG" 2>&1 || say "性能汇总失败"
@@ -209,6 +210,7 @@ arm_audit() {
   say "audit_r$R 完成"
 }
 
+[ $# -eq 0 ] && say "没给臂: 只做收尾还原"
 say "会话开始 out=$OUT arms=$* so=$SO frames=$FRAMES 音量=$(volume_zero)"
 asu "cat /sys/class/power_supply/battery/status /sys/class/power_supply/battery/capacity /sys/class/qcom-battery/charging_enabled" > "$OUT/battery_at_start.txt" 2>&1
 for arm in "$@"; do
