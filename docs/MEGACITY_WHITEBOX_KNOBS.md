@@ -65,3 +65,8 @@
 - rp32 那次中途解析到底是谁引起的：只是推测（雾或 SSAO），W3 会给出答案。
 - W2、W4、W7 能否在运行时改：取决于 URP 17 的字段可见性，做 harness 时再核实。改不动就降级成「出包时改 asset」，变成每档一个包。
 - Render Graph 是否真的开着：GraphicsSettings 里没有对应条目，按 Unity 6 默认推断是开的，**未核实**。
+
+## 6. 待办（下次出包时一起做）
+
+- **knobs 回读提前写**：harness 现在只在路线走完、`Finish()` 时才写 `megacity_out.json`，所以 whitebox 评测每臂都要等路线跑完（3600 帧约 2 分钟）才能核对旋钮。改成在落 `megacity_started` 的那一刻，另写一份只含 `knobs` 和 `graphics` 的回读文件（例如 `megacity_knobs.json`），whitebox_eval 优先读它，读不到再退回等 `megacity_out.json`。每臂能省几分钟，5 对 ABBA 就能回到 45 分钟锁时以内。（lead 2026-10-12 提出）
+- 可选：加冻结 ECS 系统（车流、广告）的参数，让 `city_static` 真正静止，用来做逐像素证明（见 [Megacity 报告 §4](MEGACITY_FRAME_AUDIT.md)）。
