@@ -43,7 +43,7 @@ namespace Megacity.Refbench
     public sealed class MegacityRefbenchHarness : MonoBehaviour
     {
         const int    ContractVersion = 1;
-        const string HarnessVersion  = "0.1.0-draft";
+        const string HarnessVersion  = "0.2.0-knobs";
         const string Carrier         = "megacity";
 
         // 与 contract/launch.json 对齐
@@ -68,6 +68,12 @@ namespace Megacity.Refbench
         string m_Scene, m_RunId, m_RouteName, m_VSync, m_UnityScene;
         int    m_Frames, m_Warmup, m_Settle;
         float  m_ResScale;
+
+        // ---- 白盒旋钮 (阶段 3, docs/MEGACITY_WHITEBOX_KNOBS.md W1–W7) ----
+        // 全部可选; 不给就不碰。生效结果逐条写进 json 的 "knobs": 想要的值、怎么改的
+        // (prop / field / none / failed:...)、改完回读的实际值。改不动就如实记, 绝不静默降级。
+        string m_KMsaa, m_KStoreOpt, m_KFeatOff, m_KFogEvent, m_KSsaoSrc, m_KSsaoAfterOpaque, m_KShadowRes, m_KDepthPriming;
+        readonly List<string> m_KnobLog = new List<string>();
 
         // 静置阶段的事实, 全部如实回写进 json
         int    m_SettleFrames;
@@ -100,6 +106,14 @@ namespace Megacity.Refbench
             // settle 是"等城市装完"的上界, 不是固定等待 —— 装完就提前走
             m_Settle    = ParseInt(GetIntentExtra("settle"),  7200, 0, 200000);
             m_ResScale  = ParseFloat(GetIntentExtra("resscale"), 1.0f, 0.25f, 2.0f);
+            m_KMsaa            = GetIntentExtra("msaa");               // W1: 1 / 2 / 4
+            m_KStoreOpt        = GetIntentExtra("store_opt");          // W2: auto / discard / store
+            m_KFeatOff         = GetIntentExtra("feat_off");           // W3: 逗号分隔的渲染器特性名 (子串匹配, 不分大小写)
+            m_KFogEvent        = GetIntentExtra("fog_event");          // W4: RenderPassEvent 名或整数
+            m_KSsaoSrc         = GetIntentExtra("ssao_src");           // W5: depth / depthnormals
+            m_KSsaoAfterOpaque = GetIntentExtra("ssao_after_opaque");  // W5: 0 / 1
+            m_KShadowRes       = GetIntentExtra("shadowres");          // W6: 256..4096
+            m_KDepthPriming    = GetIntentExtra("depth_priming");      // W7: off / auto / forced
         }
 
         IEnumerator Start()
@@ -165,6 +179,11 @@ namespace Megacity.Refbench
                 else { stable = 0; lastCount = n; }
             }
             if (m_StreamingReady == null) m_StreamingReady = "timeout";
+
+            // 5.5) 白盒旋钮: 城市装完、预热开始前一次性生效 (预热期间让 shader / 渲染器重建落定)
+            //      参数写错 (比如 msaa=x) 不能让整轮崩掉: 记成 failed, 本轮照跑, 上层看 knobs 判废
+            try { ApplyKnobs(); }
+            catch (Exception e) { LogKnob("apply", "all", "failed:" + e.GetType().Name + ":" + e.Message, null); }
 
             // 6) 接管相机
             m_Cam = TakeOverCamera();
@@ -249,6 +268,178 @@ namespace Megacity.Refbench
             var rp = GraphicsSettings.currentRenderPipeline;
             var p = rp?.GetType().GetProperty("renderScale");
             return p != null ? Convert.ToSingle(p.GetValue(rp)) : -1f;
+        }
+
+        // ---- 白盒旋钮实现 (全部反射, 不对 URP 类型做编译期依赖) -------------
+
+        const BindingFlags AnyInst = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        // 先试属性 (含非公开 setter), 再试字段; 返回改法。值按目标类型转换 (枚举接受名字或整数)。
+        static string SetMember(object o, string prop, string field, object v)
+        {
+            if (o == null) return "none:null_target";
+            try
+            {
+                var t = o.GetType();
+                var p = prop != null ? t.GetProperty(prop, AnyInst) : null;
+                if (p != null && p.GetSetMethod(true) != null) { p.SetValue(o, Coerce(v, p.PropertyType)); return "prop"; }
+                for (var tt = t; tt != null; tt = tt.BaseType)
+                {
+                    var f = field != null ? tt.GetField(field, AnyInst | BindingFlags.DeclaredOnly) : null;
+                    if (f != null) { f.SetValue(o, Coerce(v, f.FieldType)); return "field"; }
+                }
+                return "none";
+            }
+            catch (Exception e) { return "failed:" + (e.InnerException ?? e).GetType().Name; }
+        }
+
+        static object GetMember(object o, string prop, string field)
+        {
+            if (o == null) return null;
+            try
+            {
+                var t = o.GetType();
+                var p = prop != null ? t.GetProperty(prop, AnyInst) : null;
+                if (p != null && p.GetGetMethod(true) != null) return p.GetValue(o);
+                for (var tt = t; tt != null; tt = tt.BaseType)
+                {
+                    var f = field != null ? tt.GetField(field, AnyInst | BindingFlags.DeclaredOnly) : null;
+                    if (f != null) return f.GetValue(o);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        static object Coerce(object v, Type t)
+        {
+            if (t.IsEnum)
+            {
+                var s = Convert.ToString(v, CultureInfo.InvariantCulture);
+                if (int.TryParse(s, out var n)) return Enum.ToObject(t, n);
+                foreach (var name in Enum.GetNames(t))
+                    if (string.Equals(name, s, StringComparison.OrdinalIgnoreCase)) return Enum.Parse(t, name);
+                throw new ArgumentException("enum " + t.Name + " 没有 " + s);
+            }
+            if (t == typeof(bool)) return Convert.ToString(v, CultureInfo.InvariantCulture) is var b && (b == "1" || string.Equals(b, "true", StringComparison.OrdinalIgnoreCase));
+            return Convert.ChangeType(v, t, CultureInfo.InvariantCulture);
+        }
+
+        void LogKnob(string name, string want, string how, object actual)
+        {
+            m_KnobLog.Add("\"" + Esc(name) + "\":{\"want\":\"" + Esc(want) + "\",\"how\":\"" + Esc(how)
+                          + "\",\"actual\":\"" + Esc(Convert.ToString(actual, CultureInfo.InvariantCulture) ?? "null") + "\"}");
+        }
+
+        static IEnumerable<ScriptableObject> RendererDatas(object asset)
+        {
+            var list = GetMember(asset, "rendererDataList", "m_RendererDataList") as System.Collections.IEnumerable;
+            if (list == null) yield break;
+            foreach (var d in list) if (d is ScriptableObject so && so != null) yield return so;
+        }
+
+        static IEnumerable<ScriptableObject> Features(ScriptableObject rd)
+        {
+            var list = GetMember(rd, "rendererFeatures", "m_RendererFeatures") as System.Collections.IEnumerable;
+            if (list == null) yield break;
+            foreach (var f in list) if (f is ScriptableObject so && so != null) yield return so;
+        }
+
+        static bool NameHas(ScriptableObject f, string key)
+            => f.name.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0
+               || f.GetType().Name.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0;
+
+        static void MarkDirty(ScriptableObject rd)
+        {
+            // 渲染器数据改了要让 URP 重建渲染器; SetDirty 在不同 URP 版本可见性不同, 反射调
+            try { rd.GetType().GetMethod("SetDirty", AnyInst)?.Invoke(rd, null); } catch { }
+        }
+
+        void ApplyKnobs()
+        {
+            var asset = GraphicsSettings.currentRenderPipeline;
+            if (asset == null)
+            {
+                if (m_KMsaa != null || m_KStoreOpt != null || m_KFeatOff != null || m_KFogEvent != null || m_KSsaoSrc != null
+                    || m_KSsaoAfterOpaque != null || m_KShadowRes != null || m_KDepthPriming != null)
+                    LogKnob("all", "requested", "none:no_srp_asset", null);
+                return;
+            }
+            // W1 MSAA
+            if (m_KMsaa != null)
+                LogKnob("msaa", m_KMsaa, SetMember(asset, "msaaSampleCount", "m_MSAA", int.Parse(m_KMsaa, CultureInfo.InvariantCulture)),
+                        GetMember(asset, "msaaSampleCount", "m_MSAA"));
+            // W2 store actions: auto / discard / store
+            if (m_KStoreOpt != null)
+                LogKnob("store_opt", m_KStoreOpt, SetMember(asset, "storeActionsOptimization", "m_StoreActionsOptimization", m_KStoreOpt),
+                        GetMember(asset, "storeActionsOptimization", "m_StoreActionsOptimization"));
+            // W6 阴影分辨率
+            if (m_KShadowRes != null)
+                LogKnob("shadowres", m_KShadowRes, SetMember(asset, "mainLightShadowmapResolution", "m_MainLightShadowmapResolution", int.Parse(m_KShadowRes, CultureInfo.InvariantCulture)),
+                        GetMember(asset, "mainLightShadowmapResolution", "m_MainLightShadowmapResolution"));
+
+            foreach (var rd in RendererDatas(asset))
+            {
+                bool dirty = false;
+                // W7 depth priming: off / auto / forced (= Disabled / Auto / Forced)
+                if (m_KDepthPriming != null)
+                {
+                    var v = m_KDepthPriming == "off" ? "Disabled" : m_KDepthPriming;
+                    LogKnob("depth_priming@" + rd.name, m_KDepthPriming, SetMember(rd, "depthPrimingMode", "m_DepthPrimingMode", v),
+                            GetMember(rd, "depthPrimingMode", "m_DepthPrimingMode"));
+                    dirty = true;
+                }
+                foreach (var f in Features(rd))
+                {
+                    // W3 关特性
+                    if (m_KFeatOff != null)
+                        foreach (var key in m_KFeatOff.Split(','))
+                            if (key.Trim().Length > 0 && NameHas(f, key.Trim()))
+                            {
+                                string how;
+                                try { f.GetType().GetMethod("SetActive", AnyInst)?.Invoke(f, new object[] { false }); how = "SetActive"; }
+                                catch (Exception e) { how = "failed:" + e.GetType().Name; }
+                                LogKnob("feat_off:" + f.name, "off", how, GetMember(f, "isActive", "m_Active"));
+                                dirty = true;
+                            }
+                    // W4 雾的注入时机: 特性本身或其一级字段里第一个 RenderPassEvent 类型的成员
+                    if (m_KFogEvent != null && NameHas(f, "fog"))
+                    {
+                        string how = "none:no_RenderPassEvent_member";
+                        object actual = null;
+                        foreach (var fi in f.GetType().GetFields(AnyInst))
+                        {
+                            if (fi.FieldType.Name == "RenderPassEvent") { how = SetMember(f, null, fi.Name, m_KFogEvent); actual = fi.GetValue(f); break; }
+                            var inner = fi.FieldType.IsClass && fi.FieldType != typeof(string) ? fi.GetValue(f) : null;
+                            if (inner == null) continue;
+                            foreach (var fj in inner.GetType().GetFields(AnyInst))
+                                if (fj.FieldType.Name == "RenderPassEvent") { how = SetMember(inner, null, fj.Name, m_KFogEvent) + "@" + fi.Name; actual = fj.GetValue(inner); break; }
+                            if (actual != null) break;
+                        }
+                        LogKnob("fog_event:" + f.name, m_KFogEvent, how, actual);
+                        dirty = true;
+                    }
+                    // W5 SSAO 设置
+                    if ((m_KSsaoSrc != null || m_KSsaoAfterOpaque != null) && NameHas(f, "AmbientOcclusion"))
+                    {
+                        var st = GetMember(f, null, "m_Settings");
+                        if (m_KSsaoSrc != null)
+                            LogKnob("ssao_src:" + f.name, m_KSsaoSrc,
+                                    SetMember(st, null, "Source", m_KSsaoSrc == "depth" ? "Depth" : "DepthNormals"), GetMember(st, null, "Source"));
+                        if (m_KSsaoAfterOpaque != null)
+                            LogKnob("ssao_after_opaque:" + f.name, m_KSsaoAfterOpaque,
+                                    SetMember(st, null, "AfterOpaque", m_KSsaoAfterOpaque), GetMember(st, null, "AfterOpaque"));
+                        dirty = true;
+                    }
+                }
+                if (dirty) MarkDirty(rd);
+            }
+            if (m_KFeatOff != null && !m_KnobLog.Exists(x => x.StartsWith("\"feat_off:")))
+                LogKnob("feat_off", m_KFeatOff, "none:no_feature_matched", null);
+            if (m_KFogEvent != null && !m_KnobLog.Exists(x => x.StartsWith("\"fog_event:")))
+                LogKnob("fog_event", m_KFogEvent, "none:no_fog_feature", null);
+            if ((m_KSsaoSrc != null || m_KSsaoAfterOpaque != null) && !m_KnobLog.Exists(x => x.StartsWith("\"ssao_")))
+                LogKnob("ssao", (m_KSsaoSrc ?? "") + "/" + (m_KSsaoAfterOpaque ?? ""), "none:no_ssao_feature", null);
         }
 
         // ---- 上游状态的三处干预 ------------------------------------------
@@ -459,6 +650,14 @@ namespace Megacity.Refbench
             J(sb, "warmup", m_Warmup); sb.Append(',');
             J(sb, "settle", m_Settle); sb.Append(',');
             sb.Append("\"resscale\":").Append(m_ResScale.ToString("R", ci)).Append(',');
+            JS(sb, "msaa", m_KMsaa ?? ""); sb.Append(',');
+            JS(sb, "store_opt", m_KStoreOpt ?? ""); sb.Append(',');
+            JS(sb, "feat_off", m_KFeatOff ?? ""); sb.Append(',');
+            JS(sb, "fog_event", m_KFogEvent ?? ""); sb.Append(',');
+            JS(sb, "ssao_src", m_KSsaoSrc ?? ""); sb.Append(',');
+            JS(sb, "ssao_after_opaque", m_KSsaoAfterOpaque ?? ""); sb.Append(',');
+            JS(sb, "shadowres", m_KShadowRes ?? ""); sb.Append(',');
+            JS(sb, "depth_priming", m_KDepthPriming ?? ""); sb.Append(',');
             JS(sb, "vsync", m_VSync);
             sb.Append("},");
 
@@ -480,7 +679,27 @@ namespace Megacity.Refbench
             JS(sb, "quality_level", QualitySettings.names[QualitySettings.GetQualityLevel()]); sb.Append(',');
             JS(sb, "srp_asset", GraphicsSettings.currentRenderPipeline != null
                                 ? GraphicsSettings.currentRenderPipeline.name : "none");
+            sb.Append(',');
+            // 回读: 不管有没有给旋钮, 都把关键设置的实际值写出来, 便于核对两臂真的不同
+            var rpa = GraphicsSettings.currentRenderPipeline;
+            JS(sb, "msaa", Convert.ToString(GetMember(rpa, "msaaSampleCount", "m_MSAA"), ci) ?? "null"); sb.Append(',');
+            JS(sb, "store_opt", Convert.ToString(GetMember(rpa, "storeActionsOptimization", "m_StoreActionsOptimization"), ci) ?? "null"); sb.Append(',');
+            JS(sb, "shadowres", Convert.ToString(GetMember(rpa, "mainLightShadowmapResolution", "m_MainLightShadowmapResolution"), ci) ?? "null"); sb.Append(',');
+            sb.Append("\"renderer_features\":[");
+            bool firstF = true;
+            if (rpa != null)
+                foreach (var rd in RendererDatas(rpa))
+                    foreach (var f in Features(rd))
+                    {
+                        if (!firstF) sb.Append(',');
+                        firstF = false;
+                        sb.Append("{\"renderer\":\"").Append(Esc(rd.name)).Append("\",\"name\":\"").Append(Esc(f.name))
+                          .Append("\",\"type\":\"").Append(Esc(f.GetType().Name)).Append("\",\"active\":\"")
+                          .Append(Esc(Convert.ToString(GetMember(f, "isActive", "m_Active"), ci))).Append("\"}");
+                    }
+            sb.Append(']');
             sb.Append("},");
+            sb.Append("\"knobs\":{").Append(string.Join(",", m_KnobLog)).Append("},");
 
             JS(sb, "render_thread_comm", DetectGfxThreadComm()); sb.Append(',');
 

@@ -84,6 +84,69 @@
         200000
       ],
       "note": "静置帧数上界 —— 不是固定等待。Main.unity 里 6 个 SubScene 都是 AutoLoadScene=1, 城市会自动装且不需要玩家驱动, 但装完要时间。harness 以\"实体总数连续 120 帧不再增长\"作装完信号, 装完就提前进入预热; 到 settle 仍没稳定下来则记 streaming.ready=timeout。首轮就是栽在这里: 当时只等了 300 帧, 城市还没装完就开测, 画面上只有天空。"
+    },
+    "msaa": {
+      "required": false,
+      "default": "(不改, 用画质档自带值; High 档为 4)",
+      "enum": [
+        "1",
+        "2",
+        "4"
+      ],
+      "note": "W1。URP asset msaaSampleCount。实际值回写 graphics.msaa 与 knobs.msaa"
+    },
+    "store_opt": {
+      "required": false,
+      "enum": [
+        "auto",
+        "discard",
+        "store"
+      ],
+      "note": "W2。URP asset storeActionsOptimization"
+    },
+    "feat_off": {
+      "required": false,
+      "note": "W3。逗号分隔, 按渲染器特性名/类型名子串匹配(不分大小写), 对命中的特性 SetActive(false)。例: fog,ambientocclusion。graphics.renderer_features 列出全部特性与实际开关"
+    },
+    "fog_event": {
+      "required": false,
+      "note": "W4。雾特性(名字含 fog)第一个 RenderPassEvent 类型成员改成该值, 接受枚举名或整数(如 AfterRenderingTransparents / 500)"
+    },
+    "ssao_src": {
+      "required": false,
+      "enum": [
+        "depth",
+        "depthnormals"
+      ],
+      "note": "W5。SSAO 特性 m_Settings.Source"
+    },
+    "ssao_after_opaque": {
+      "required": false,
+      "enum": [
+        "0",
+        "1"
+      ],
+      "note": "W5。SSAO 特性 m_Settings.AfterOpaque"
+    },
+    "shadowres": {
+      "required": false,
+      "enum": [
+        "256",
+        "512",
+        "1024",
+        "2048",
+        "4096"
+      ],
+      "note": "W6。URP asset mainLightShadowmapResolution"
+    },
+    "depth_priming": {
+      "required": false,
+      "enum": [
+        "off",
+        "auto",
+        "forced"
+      ],
+      "note": "W7。渲染器数据 depthPrimingMode"
     }
   },
   "fail_loud": {
@@ -115,5 +178,7 @@
   },
   "prerequisites": {
     "record_audio": "首次安装后 Vivox 会弹录音权限框, 框一出应用被挂起、协程停摆。harness 现在会切单机模式(上游只在非单机时实例化 Vivox)绕开它; run 脚本仍会 pm grant android.permission.RECORD_AUDIO 作双保险, 这步是幂等的。"
-  }
+  },
+  "knobs_note": "白盒旋钮 (docs/MEGACITY_WHITEBOX_KNOBS.md)。全部可选, 不给就不碰。城市装完、预热前一次性生效; 每条的想要值/改法(prop|field|none|failed:..)/回读实际值写进输出 json 的 knobs。改法不是 prop/field 的那一臂作废, 不能当对照。",
+  "launch_template_knobs": " --es msaa {msaa} --es store_opt {store_opt} --es feat_off {feat_off} --es fog_event {fog_event} --es ssao_src {ssao_src} --es ssao_after_opaque {ssao_after_opaque} --es shadowres {shadowres} --es depth_priming {depth_priming}"
 }
