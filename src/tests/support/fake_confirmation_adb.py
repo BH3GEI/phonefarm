@@ -104,6 +104,23 @@ if cmd.startswith('set -eu; id;'):
     print('uid=0(root) gid=0(root)');print('fake-serial');print('changed-boot' if fail=='boot' else 'fake-boot');print('/system/bin/setsid')
 elif cmd=='dumpsys activity activities': print('mResumedActivity: ActivityRecord x '+('com.example.crashed/.Home' if fail=='foreground' else 'com.example.game/.Game')+' t1')
 elif cmd=='timeout 8 dumpsys thermalservice':sys.stdout.write(thermal_hal())
+elif cmd.startswith('timeout 20 setsid sh -s -- ') and b'# Receiver-owned finite helper-only dead retirement.' in data:
+    d,token,boot,run,mode=shlex.split(cmd)[-5:]
+    if fail=='native_files':sys.exit(73)
+    if fail=='native_partial':print('#phonefarm_render_witness v2');sys.exit(0)
+    def ps(p,g,t):return f'{p} (synthetic name with spaces) S 1 {g} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {t} 0\n'
+    ap,np=(300,400) if mode!='remove' else (500,600)
+    records=[('owner',token+' '+boot+'\n'),('master',f'{token} {boot} 100 9 render_initial\n'),('children',f'render_reader\t200\t8\t{d}/render_ownership.sh\n'),('boot_before',boot+'\n'),('boot_after',boot+'\n'),('actor',ps(ap,ap,7)),('native_child',ps(np,np,6)),('inventory_count','2'),(f'process_stat/{ap}',ps(ap,ap,7)),(f'process_stat/{np}',ps(np,np,6))]
+    if fail=='native_live':records.append(('process_stat/100',ps(100,100,99)));records=[(n,'3' if n=='inventory_count' else b)for n,b in records]
+    if fail=='native_epoch':records=[(n,ps(np,np,99) if n=='native_child' else b)for n,b in records]
+    print('#phonefarm_render_witness v2')
+    for n,b in records:print(f'BEGIN\t{n}\n{b}\nEND\t{n}')
+    print(f'#end\nACTOR {ap} 7 {ap}\nCHILD {np} 6 {np}\nSTAGE {mode} {run}\n#phonefarm_native_helper_end@1')
+    if mode=='close':state['files'][d+'/session.closed']=token+' '+boot+' '+run
+    if mode=='remove':state['files']={k:v for k,v in state['files'].items() if not k.startswith(d+'/')}
+elif cmd=='timeout 20 sh -s' and b'NATIVE_HELPER_POST_VERIFIED' in data:
+    if fail=='native_post':sys.exit(77)
+    print('NATIVE_HELPER_POST_VERIFIED')
 elif cmd.startswith('timeout 20 sh -s -- ') and b'# Fixed host-supplied read-only diagnostic' in data:
     if fail=='diagnostic_boot':sys.exit(72)
     if fail=='diagnostic_partial':print('#phonefarm_helper_diagnostic@1');sys.exit(0)

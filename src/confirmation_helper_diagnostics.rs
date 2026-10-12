@@ -3,7 +3,7 @@ use super::*;
 const TEMPLATE: &str = include_str!("../loop_v1/tools/helper_recovery_diagnostics.sh");
 const OUTPUT_CAP: u64 = 2 * 1024 * 1024;
 
-fn helper_only(dir: &Path) -> Result<(Request, Value), String> {
+pub(super) fn helper_only(dir: &Path) -> Result<(Request, Value), String> {
     let req: Request =
         serde_json::from_slice(&bounded(&dir.join("request.json"), 2 * 1024 * 1024)?)
             .map_err(|e| e.to_string())?;

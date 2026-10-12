@@ -15,6 +15,8 @@ use std::{
 };
 #[path = "confirmation_helper_diagnostics.rs"]
 mod helper_diagnostics;
+#[path = "confirmation_helper_native.rs"]
+mod helper_native;
 #[path = "confirmation_control_probe.rs"]
 mod control_probe;
 #[path = "confirmation_render_reader.rs"]
@@ -2247,7 +2249,7 @@ pub fn run_confirmation_driver(args: &[String]) -> i32 {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "prepare" | "collect" | "reconcile" | "probe-controls" | "diagnose-helper" if mode.is_none() => {
+            "prepare" | "collect" | "reconcile" | "probe-controls" | "diagnose-helper" | "diagnose-helper-native" | "retire-helper-native" if mode.is_none() => {
                 mode = Some(args[i].clone())
             }
             "--execute" => execute = true,
@@ -2268,7 +2270,7 @@ pub fn run_confirmation_driver(args: &[String]) -> i32 {
     let result = if let Some(e) = err {
         Err(e)
     } else {
-        match mode.as_deref(){Some("diagnose-helper") if session.is_some()&&req.is_none()&&out.is_none()&&frozen.is_none()=>helper_diagnostics::diagnose(session.as_deref().unwrap(),execute),Some("probe-controls") if req.is_some()&&out.is_some()&&session.is_none()&&frozen.is_none()=>control_probe::run(req.as_deref().unwrap(),out.as_deref().unwrap(),execute),Some("prepare") if req.is_some()&&out.is_some()&&session.is_none()&&frozen.is_none()=>prepare(req.as_deref().unwrap(),out.as_deref().unwrap(),execute),Some("collect") if session.is_some()&&frozen.is_some()&&req.is_none()&&out.is_none()=>collect(session.as_deref().unwrap(),frozen.as_deref().unwrap(),execute),Some("reconcile") if session.is_some()&&req.is_none()&&out.is_none()&&frozen.is_none()=>reconcile(session.as_deref().unwrap(),execute),_=>Err("use prepare --request R --out NEW | collect --session S --frozen F | reconcile --session S --execute | diagnose-helper --session S --execute".into())}
+        match mode.as_deref(){Some("diagnose-helper-native" | "retire-helper-native") if session.is_some()&&req.is_none()&&out.is_none()&&frozen.is_none()=>helper_native::run(session.as_deref().unwrap(),execute,mode.as_deref()==Some("retire-helper-native")),Some("diagnose-helper") if session.is_some()&&req.is_none()&&out.is_none()&&frozen.is_none()=>helper_diagnostics::diagnose(session.as_deref().unwrap(),execute),Some("probe-controls") if req.is_some()&&out.is_some()&&session.is_none()&&frozen.is_none()=>control_probe::run(req.as_deref().unwrap(),out.as_deref().unwrap(),execute),Some("prepare") if req.is_some()&&out.is_some()&&session.is_none()&&frozen.is_none()=>prepare(req.as_deref().unwrap(),out.as_deref().unwrap(),execute),Some("collect") if session.is_some()&&frozen.is_some()&&req.is_none()&&out.is_none()=>collect(session.as_deref().unwrap(),frozen.as_deref().unwrap(),execute),Some("reconcile") if session.is_some()&&req.is_none()&&out.is_none()&&frozen.is_none()=>reconcile(session.as_deref().unwrap(),execute),_=>Err("use prepare --request R --out NEW | collect --session S --frozen F | reconcile --session S --execute | diagnose-helper --session S --execute".into())}
     };
     match result {
         Ok(v) => {

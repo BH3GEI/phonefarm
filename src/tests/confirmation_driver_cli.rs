@@ -1932,3 +1932,32 @@ fn helper_recovery_diagnostic_rejects_main_or_changed_sources_before_transport()
         assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
     }
 }
+
+#[test]
+fn native_dead_retirement_requires_complete_current_proofs_and_preserves_unknown_barrier() {
+    for fail in ["", "native_partial", "native_live", "native_epoch", "native_files", "native_post"] {
+        let f=origin_fixture();assert_eq!(f.prepare("helper_interrupt").0,1);
+        let (code,r)=f.call(&["retire-helper-native","--session","session","--execute"],fail);
+        assert_eq!(code,0,"{fail}: {r}");
+        let success=fail.is_empty();assert_eq!(r["retirement_completed"],success);assert_eq!(r["barrier_retained"],!success);
+        assert_eq!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists(),!success);
+        for key in ["eligible","real_game_optimization_proven","promotion_allowed","control_restore_claimed","old_samples_revalidated","live_process_stopped","old_tools_changed"] {assert_eq!(r[key],false);}
+        if success {assert_eq!(r["status"],"SIMULATED_HELPER_CLOSED");assert_eq!(r["stages"].as_array().unwrap().len(),2);}
+        else {assert_eq!(r["status"],"UNKNOWN");}
+        let events=std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
+        let commands=events.lines().map(|s|serde_json::from_str::<Value>(s).unwrap()).collect::<Vec<_>>();
+        assert!(commands.iter().all(|v|!v["command"].as_str().unwrap().contains("reconcile_render")));
+        if fail=="native_post" {assert!(f.read("fake-state.json")["files"].as_object().unwrap().keys().any(|k|k.ends_with("/session.closed")),"closed without post proof stays barrier");assert!(!commands.iter().any(|v|v["command"].as_str().unwrap().ends_with("'remove'")));}
+    }
+}
+#[test]
+fn native_helper_noexecute_main_or_changed_frozen_inputs_refuse_before_transport() {
+    for kind in ["noexecute","main","source"] {
+        let f=origin_fixture();assert_eq!(f.prepare("helper_interrupt").0,1);
+        if kind=="main"{f.write("session/main-install.intent.json",&json!({"unexpected":true}));}
+        if kind=="source"{std::fs::write(f.dir.join("session/render_reader.source.c"),"changed").unwrap();}
+        let before=std::fs::read(f.dir.join("argv.jsonl")).unwrap();
+        let args=if kind=="noexecute"{vec!["retire-helper-native","--session","session"]}else{vec!["retire-helper-native","--session","session","--execute"]};
+        let (code,r)=f.call(&args,"");assert_eq!(code,1,"{kind}: {r}");assert_eq!(r["status"],"BLOCKED");assert_eq!(std::fs::read(f.dir.join("argv.jsonl")).unwrap(),before);assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    }
+}
