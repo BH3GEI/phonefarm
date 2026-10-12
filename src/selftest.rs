@@ -1210,7 +1210,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
 
     // 6) 解析 (与 parse-trace 同一函数) + 功耗温度 (与 eval/autoloop 同一函数)
     let text = std::fs::read(&local_trace).map_err(|e| e.to_string())?;
-    let summary = looptrace::parse(&String::from_utf8_lossy(&text), rb::SUBMIT_COMM).summarize();
+    let summary = looptrace::parse_with_spf(&String::from_utf8_lossy(&text), rb::SUBMIT_COMM, Some(1)).summarize();
     std::fs::write(dir.join("summary.json"), dumps(&summary)).map_err(|e| e.to_string())?;
     let env = sysparam::env_stats(&std::fs::read_to_string(&env_path).unwrap_or_default());
     std::fs::write(dir.join("env.json"), dumps(&env)).map_err(|e| e.to_string())?;
