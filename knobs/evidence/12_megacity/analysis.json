@@ -1,0 +1,794 @@
+[
+  {
+    "file": "f464bea1724f/out/fa/fa_1.json",
+    "findings": [
+      {
+        "att": 1,
+        "bytes": 7734320.0,
+        "certain": true,
+        "ev": 8,
+        "frame": 0,
+        "ms": null,
+        "rule": "dead_store",
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5",
+        "why": "附件1 (R11G11B10F 图#366 2068x935) STORE 后下一次是覆盖/丢弃, 没人读"
+      },
+      {
+        "att": 1,
+        "bytes": 7734320.0,
+        "certain": true,
+        "ev": 19,
+        "frame": 1,
+        "ms": null,
+        "rule": "dead_store",
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5",
+        "why": "附件1 (R11G11B10F 图#366 2068x935) STORE 后下一次是覆盖/丢弃, 没人读"
+      }
+    ],
+    "frames": [
+      {
+        "descriptor_refs": 88,
+        "draws": 601,
+        "empty_passes": 0,
+        "events": 11,
+        "frame": 0,
+        "kinds": {
+          "copy_buf": 2,
+          "dispatch": 1,
+          "pass": 8
+        },
+        "load_attachments": 6,
+        "model_load_mb": 108.76,
+        "model_store_mb": 173.74,
+        "pass_ms_sum": 16.217,
+        "passes": 8,
+        "passes_timed": 8,
+        "query_passes": 0
+      },
+      {
+        "descriptor_refs": 88,
+        "draws": 601,
+        "empty_passes": 0,
+        "events": 11,
+        "frame": 1,
+        "kinds": {
+          "copy_buf": 2,
+          "dispatch": 1,
+          "pass": 8
+        },
+        "load_attachments": 6,
+        "model_load_mb": 108.76,
+        "model_store_mb": 173.74,
+        "pass_ms_sum": 12.652,
+        "passes": 8,
+        "passes_timed": 8,
+        "query_passes": 0
+      },
+      {
+        "descriptor_refs": 88,
+        "draws": 601,
+        "empty_passes": 0,
+        "events": 11,
+        "frame": 2,
+        "kinds": {
+          "copy_buf": 2,
+          "dispatch": 1,
+          "pass": 8
+        },
+        "load_attachments": 6,
+        "model_load_mb": 108.76,
+        "model_store_mb": 173.74,
+        "pass_ms_sum": 0.0,
+        "passes": 8,
+        "passes_timed": 0,
+        "query_passes": 0
+      }
+    ],
+    "pass_times": [
+      {
+        "draws": 314,
+        "ev": 3,
+        "frame": 0,
+        "ms": 6.70911441158,
+        "sig": "pass rp13 4096x4096 sig=2b01c0d5a1d5e34e"
+      },
+      {
+        "draws": 138,
+        "ev": 4,
+        "frame": 0,
+        "ms": 2.1082291126959998,
+        "sig": "pass rp17 2068x935 sig=e51e2a0b50cc0287"
+      },
+      {
+        "draws": 139,
+        "ev": 5,
+        "frame": 0,
+        "ms": 5.2030727834679995,
+        "sig": "pass rp19 2068x935 sig=c3a64d53ba8837bb"
+      },
+      {
+        "draws": 1,
+        "ev": 6,
+        "frame": 0,
+        "ms": 0.43802082212,
+        "sig": "pass rp21 1034x467 sig=b86d017ba7deaeeb"
+      },
+      {
+        "draws": 1,
+        "ev": 7,
+        "frame": 0,
+        "ms": 0.050572915371999996,
+        "sig": "pass rp38 1034x467 sig=67c02862fc88532b"
+      },
+      {
+        "draws": 1,
+        "ev": 8,
+        "frame": 0,
+        "ms": 0.820677062324,
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5"
+      },
+      {
+        "draws": 6,
+        "ev": 9,
+        "frame": 0,
+        "ms": 0.713385398404,
+        "sig": "pass rp41 2068x935 sig=d88abfb3b0566231"
+      },
+      {
+        "draws": 1,
+        "ev": 10,
+        "frame": 0,
+        "ms": 0.173854162216,
+        "sig": "pass rp40 2068x935 sig=ae9f514c59165b6a"
+      },
+      {
+        "draws": 314,
+        "ev": 14,
+        "frame": 1,
+        "ms": 4.9443748734240005,
+        "sig": "pass rp13 4096x4096 sig=2b01c0d5a1d5e34e"
+      },
+      {
+        "draws": 138,
+        "ev": 15,
+        "frame": 1,
+        "ms": 1.374270798152,
+        "sig": "pass rp17 2068x935 sig=e51e2a0b50cc0287"
+      },
+      {
+        "draws": 139,
+        "ev": 16,
+        "frame": 1,
+        "ms": 4.496926968212,
+        "sig": "pass rp19 2068x935 sig=c3a64d53ba8837bb"
+      },
+      {
+        "draws": 1,
+        "ev": 17,
+        "frame": 1,
+        "ms": 0.41015623949999996,
+        "sig": "pass rp21 1034x467 sig=b86d017ba7deaeeb"
+      },
+      {
+        "draws": 1,
+        "ev": 18,
+        "frame": 1,
+        "ms": 0.048749998752,
+        "sig": "pass rp38 1034x467 sig=67c02862fc88532b"
+      },
+      {
+        "draws": 1,
+        "ev": 19,
+        "frame": 1,
+        "ms": 0.6011979012759999,
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5"
+      },
+      {
+        "draws": 6,
+        "ev": 20,
+        "frame": 1,
+        "ms": 0.65911456646,
+        "sig": "pass rp41 2068x935 sig=d88abfb3b0566231"
+      },
+      {
+        "draws": 1,
+        "ev": 21,
+        "frame": 1,
+        "ms": 0.116979163672,
+        "sig": "pass rp40 2068x935 sig=ae9f514c59165b6a"
+      },
+      {
+        "draws": 314,
+        "ev": 25,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp13 4096x4096 sig=2b01c0d5a1d5e34e"
+      },
+      {
+        "draws": 138,
+        "ev": 26,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp17 2068x935 sig=e51e2a0b50cc0287"
+      },
+      {
+        "draws": 139,
+        "ev": 27,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp19 2068x935 sig=c3a64d53ba8837bb"
+      },
+      {
+        "draws": 1,
+        "ev": 28,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp21 1034x467 sig=b86d017ba7deaeeb"
+      },
+      {
+        "draws": 1,
+        "ev": 29,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp38 1034x467 sig=67c02862fc88532b"
+      },
+      {
+        "draws": 1,
+        "ev": 30,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5"
+      },
+      {
+        "draws": 6,
+        "ev": 31,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp41 2068x935 sig=d88abfb3b0566231"
+      },
+      {
+        "draws": 1,
+        "ev": 32,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp40 2068x935 sig=ae9f514c59165b6a"
+      }
+    ],
+    "summary_per_frame": [
+      {
+        "count": 1.0,
+        "model_mb": 7.73432,
+        "ms": 0.0,
+        "rule": "dead_store"
+      }
+    ]
+  },
+  {
+    "file": "f464bea1724f/out/fa/fa_2.json",
+    "findings": [
+      {
+        "att": 1,
+        "bytes": 7734320.0,
+        "certain": true,
+        "ev": 8,
+        "frame": 0,
+        "ms": null,
+        "rule": "dead_store",
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5",
+        "why": "附件1 (R11G11B10F 图#366 2068x935) STORE 后下一次是覆盖/丢弃, 没人读"
+      },
+      {
+        "att": 1,
+        "bytes": 7734320.0,
+        "certain": true,
+        "ev": 19,
+        "frame": 1,
+        "ms": null,
+        "rule": "dead_store",
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5",
+        "why": "附件1 (R11G11B10F 图#366 2068x935) STORE 后下一次是覆盖/丢弃, 没人读"
+      }
+    ],
+    "frames": [
+      {
+        "descriptor_refs": 87,
+        "draws": 592,
+        "empty_passes": 0,
+        "events": 11,
+        "frame": 0,
+        "kinds": {
+          "copy_buf": 2,
+          "dispatch": 1,
+          "pass": 8
+        },
+        "load_attachments": 6,
+        "model_load_mb": 108.76,
+        "model_store_mb": 173.74,
+        "pass_ms_sum": 13.6,
+        "passes": 8,
+        "passes_timed": 8,
+        "query_passes": 0
+      },
+      {
+        "descriptor_refs": 87,
+        "draws": 592,
+        "empty_passes": 0,
+        "events": 11,
+        "frame": 1,
+        "kinds": {
+          "copy_buf": 2,
+          "dispatch": 1,
+          "pass": 8
+        },
+        "load_attachments": 6,
+        "model_load_mb": 108.76,
+        "model_store_mb": 173.74,
+        "pass_ms_sum": 13.243,
+        "passes": 8,
+        "passes_timed": 8,
+        "query_passes": 0
+      },
+      {
+        "descriptor_refs": 87,
+        "draws": 592,
+        "empty_passes": 0,
+        "events": 11,
+        "frame": 2,
+        "kinds": {
+          "copy_buf": 2,
+          "dispatch": 1,
+          "pass": 8
+        },
+        "load_attachments": 6,
+        "model_load_mb": 108.76,
+        "model_store_mb": 173.74,
+        "pass_ms_sum": 0.0,
+        "passes": 8,
+        "passes_timed": 0,
+        "query_passes": 0
+      }
+    ],
+    "pass_times": [
+      {
+        "draws": 311,
+        "ev": 3,
+        "frame": 0,
+        "ms": 5.368801945892,
+        "sig": "pass rp13 4096x4096 sig=2b01c0d5a1d5e34e"
+      },
+      {
+        "draws": 135,
+        "ev": 4,
+        "frame": 0,
+        "ms": 1.634010374836,
+        "sig": "pass rp17 2068x935 sig=e51e2a0b50cc0287"
+      },
+      {
+        "draws": 136,
+        "ev": 5,
+        "frame": 0,
+        "ms": 4.767656127948,
+        "sig": "pass rp19 2068x935 sig=c3a64d53ba8837bb"
+      },
+      {
+        "draws": 1,
+        "ev": 6,
+        "frame": 0,
+        "ms": 0.371510407156,
+        "sig": "pass rp21 1034x467 sig=b86d017ba7deaeeb"
+      },
+      {
+        "draws": 1,
+        "ev": 7,
+        "frame": 0,
+        "ms": 0.048020832104,
+        "sig": "pass rp38 1034x467 sig=67c02862fc88532b"
+      },
+      {
+        "draws": 1,
+        "ev": 8,
+        "frame": 0,
+        "ms": 0.604374984528,
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5"
+      },
+      {
+        "draws": 6,
+        "ev": 9,
+        "frame": 0,
+        "ms": 0.6904166489920001,
+        "sig": "pass rp41 2068x935 sig=d88abfb3b0566231"
+      },
+      {
+        "draws": 1,
+        "ev": 10,
+        "frame": 0,
+        "ms": 0.11484374706,
+        "sig": "pass rp40 2068x935 sig=ae9f514c59165b6a"
+      },
+      {
+        "draws": 311,
+        "ev": 14,
+        "frame": 1,
+        "ms": 5.041301954276,
+        "sig": "pass rp13 4096x4096 sig=2b01c0d5a1d5e34e"
+      },
+      {
+        "draws": 135,
+        "ev": 15,
+        "frame": 1,
+        "ms": 1.591093709268,
+        "sig": "pass rp17 2068x935 sig=e51e2a0b50cc0287"
+      },
+      {
+        "draws": 136,
+        "ev": 16,
+        "frame": 1,
+        "ms": 4.8114582101600005,
+        "sig": "pass rp19 2068x935 sig=c3a64d53ba8837bb"
+      },
+      {
+        "draws": 1,
+        "ev": 17,
+        "frame": 1,
+        "ms": 0.36828124057199996,
+        "sig": "pass rp21 1034x467 sig=b86d017ba7deaeeb"
+      },
+      {
+        "draws": 1,
+        "ev": 18,
+        "frame": 1,
+        "ms": 0.048072915435999994,
+        "sig": "pass rp38 1034x467 sig=67c02862fc88532b"
+      },
+      {
+        "draws": 1,
+        "ev": 19,
+        "frame": 1,
+        "ms": 0.583124985072,
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5"
+      },
+      {
+        "draws": 6,
+        "ev": 20,
+        "frame": 1,
+        "ms": 0.690572898988,
+        "sig": "pass rp41 2068x935 sig=d88abfb3b0566231"
+      },
+      {
+        "draws": 1,
+        "ev": 21,
+        "frame": 1,
+        "ms": 0.10869791388399999,
+        "sig": "pass rp40 2068x935 sig=ae9f514c59165b6a"
+      },
+      {
+        "draws": 311,
+        "ev": 25,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp13 4096x4096 sig=2b01c0d5a1d5e34e"
+      },
+      {
+        "draws": 135,
+        "ev": 26,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp17 2068x935 sig=e51e2a0b50cc0287"
+      },
+      {
+        "draws": 136,
+        "ev": 27,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp19 2068x935 sig=c3a64d53ba8837bb"
+      },
+      {
+        "draws": 1,
+        "ev": 28,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp21 1034x467 sig=b86d017ba7deaeeb"
+      },
+      {
+        "draws": 1,
+        "ev": 29,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp38 1034x467 sig=67c02862fc88532b"
+      },
+      {
+        "draws": 1,
+        "ev": 30,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5"
+      },
+      {
+        "draws": 6,
+        "ev": 31,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp41 2068x935 sig=d88abfb3b0566231"
+      },
+      {
+        "draws": 1,
+        "ev": 32,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp40 2068x935 sig=ae9f514c59165b6a"
+      }
+    ],
+    "summary_per_frame": [
+      {
+        "count": 1.0,
+        "model_mb": 7.73432,
+        "ms": 0.0,
+        "rule": "dead_store"
+      }
+    ]
+  },
+  {
+    "file": "f464bea1724f/out/fa/fa_3.json",
+    "findings": [
+      {
+        "att": 1,
+        "bytes": 7734320.0,
+        "certain": true,
+        "ev": 8,
+        "frame": 0,
+        "ms": null,
+        "rule": "dead_store",
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5",
+        "why": "附件1 (R11G11B10F 图#366 2068x935) STORE 后下一次是覆盖/丢弃, 没人读"
+      },
+      {
+        "att": 1,
+        "bytes": 7734320.0,
+        "certain": true,
+        "ev": 19,
+        "frame": 1,
+        "ms": null,
+        "rule": "dead_store",
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5",
+        "why": "附件1 (R11G11B10F 图#366 2068x935) STORE 后下一次是覆盖/丢弃, 没人读"
+      }
+    ],
+    "frames": [
+      {
+        "descriptor_refs": 87,
+        "draws": 592,
+        "empty_passes": 0,
+        "events": 11,
+        "frame": 0,
+        "kinds": {
+          "copy_buf": 2,
+          "dispatch": 1,
+          "pass": 8
+        },
+        "load_attachments": 6,
+        "model_load_mb": 108.76,
+        "model_store_mb": 173.74,
+        "pass_ms_sum": 12.528,
+        "passes": 8,
+        "passes_timed": 8,
+        "query_passes": 0
+      },
+      {
+        "descriptor_refs": 87,
+        "draws": 592,
+        "empty_passes": 0,
+        "events": 11,
+        "frame": 1,
+        "kinds": {
+          "copy_buf": 2,
+          "dispatch": 1,
+          "pass": 8
+        },
+        "load_attachments": 6,
+        "model_load_mb": 108.76,
+        "model_store_mb": 173.74,
+        "pass_ms_sum": 16.022,
+        "passes": 8,
+        "passes_timed": 8,
+        "query_passes": 0
+      },
+      {
+        "descriptor_refs": 87,
+        "draws": 592,
+        "empty_passes": 0,
+        "events": 11,
+        "frame": 2,
+        "kinds": {
+          "copy_buf": 2,
+          "dispatch": 1,
+          "pass": 8
+        },
+        "load_attachments": 6,
+        "model_load_mb": 108.76,
+        "model_store_mb": 173.74,
+        "pass_ms_sum": 0.0,
+        "passes": 8,
+        "passes_timed": 0,
+        "query_passes": 0
+      }
+    ],
+    "pass_times": [
+      {
+        "draws": 311,
+        "ev": 3,
+        "frame": 0,
+        "ms": 4.923854040616,
+        "sig": "pass rp13 4096x4096 sig=2b01c0d5a1d5e34e"
+      },
+      {
+        "draws": 135,
+        "ev": 4,
+        "frame": 0,
+        "ms": 1.3657812150359998,
+        "sig": "pass rp17 2068x935 sig=e51e2a0b50cc0287"
+      },
+      {
+        "draws": 136,
+        "ev": 5,
+        "frame": 0,
+        "ms": 4.446197802844,
+        "sig": "pass rp19 2068x935 sig=c3a64d53ba8837bb"
+      },
+      {
+        "draws": 1,
+        "ev": 6,
+        "frame": 0,
+        "ms": 0.370156240524,
+        "sig": "pass rp21 1034x467 sig=b86d017ba7deaeeb"
+      },
+      {
+        "draws": 1,
+        "ev": 7,
+        "frame": 0,
+        "ms": 0.049010415412000005,
+        "sig": "pass rp38 1034x467 sig=67c02862fc88532b"
+      },
+      {
+        "draws": 1,
+        "ev": 8,
+        "frame": 0,
+        "ms": 0.5730729019959999,
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5"
+      },
+      {
+        "draws": 6,
+        "ev": 9,
+        "frame": 0,
+        "ms": 0.688749982368,
+        "sig": "pass rp41 2068x935 sig=d88abfb3b0566231"
+      },
+      {
+        "draws": 1,
+        "ev": 10,
+        "frame": 0,
+        "ms": 0.11093749716,
+        "sig": "pass rp40 2068x935 sig=ae9f514c59165b6a"
+      },
+      {
+        "draws": 311,
+        "ev": 14,
+        "frame": 1,
+        "ms": 6.64296857994,
+        "sig": "pass rp13 4096x4096 sig=2b01c0d5a1d5e34e"
+      },
+      {
+        "draws": 135,
+        "ev": 15,
+        "frame": 1,
+        "ms": 1.882708285136,
+        "sig": "pass rp17 2068x935 sig=e51e2a0b50cc0287"
+      },
+      {
+        "draws": 136,
+        "ev": 16,
+        "frame": 1,
+        "ms": 5.163749867808,
+        "sig": "pass rp19 2068x935 sig=c3a64d53ba8837bb"
+      },
+      {
+        "draws": 1,
+        "ev": 17,
+        "frame": 1,
+        "ms": 0.400364573084,
+        "sig": "pass rp21 1034x467 sig=b86d017ba7deaeeb"
+      },
+      {
+        "draws": 1,
+        "ev": 18,
+        "frame": 1,
+        "ms": 0.050989582028,
+        "sig": "pass rp38 1034x467 sig=67c02862fc88532b"
+      },
+      {
+        "draws": 1,
+        "ev": 19,
+        "frame": 1,
+        "ms": 0.864895811192,
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5"
+      },
+      {
+        "draws": 6,
+        "ev": 20,
+        "frame": 1,
+        "ms": 0.8264062288440001,
+        "sig": "pass rp41 2068x935 sig=d88abfb3b0566231"
+      },
+      {
+        "draws": 1,
+        "ev": 21,
+        "frame": 1,
+        "ms": 0.189531245148,
+        "sig": "pass rp40 2068x935 sig=ae9f514c59165b6a"
+      },
+      {
+        "draws": 311,
+        "ev": 25,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp13 4096x4096 sig=2b01c0d5a1d5e34e"
+      },
+      {
+        "draws": 135,
+        "ev": 26,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp17 2068x935 sig=e51e2a0b50cc0287"
+      },
+      {
+        "draws": 136,
+        "ev": 27,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp19 2068x935 sig=c3a64d53ba8837bb"
+      },
+      {
+        "draws": 1,
+        "ev": 28,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp21 1034x467 sig=b86d017ba7deaeeb"
+      },
+      {
+        "draws": 1,
+        "ev": 29,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp38 1034x467 sig=67c02862fc88532b"
+      },
+      {
+        "draws": 1,
+        "ev": 30,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp32 2068x935 sig=fb2e9bc6efb185c5"
+      },
+      {
+        "draws": 6,
+        "ev": 31,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp41 2068x935 sig=d88abfb3b0566231"
+      },
+      {
+        "draws": 1,
+        "ev": 32,
+        "frame": 2,
+        "ms": null,
+        "sig": "pass rp40 2068x935 sig=ae9f514c59165b6a"
+      }
+    ],
+    "summary_per_frame": [
+      {
+        "count": 1.0,
+        "model_mb": 7.73432,
+        "ms": 0.0,
+        "rule": "dead_store"
+      }
+    ]
+  }
+]
