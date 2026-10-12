@@ -81,11 +81,11 @@
 
 ```
 CASES=aa*3,better:0.5,better:1,better:2,better:5,worse:2
-COND="--calib judge_checkup/cal3_20261011/calib.json --pairs 10 --fan-on --cool-c 46 --cool-timeout 90 --lock-label judge"
+COND="--calib judge_checkup/cal3_20261011/calib.json --pairs 10 --cool-c 46 --cool-timeout 90 --lock-label judge"
 pf-node -o seg1 phonefarm selftest run --out @out/seg1 --cases $CASES --only aa_1,better1_1,worse2_1 $COND --template <load.spv>
 pf-node -o seg2 phonefarm selftest run --out @out/seg2 --cases $CASES --only aa_2,better0p5_1,better2_1 $COND --template <load.spv>
 pf-node -o seg3 phonefarm selftest run --out @out/seg3 --cases $CASES --only aa_3,better5_1 $COND --template <load.spv>
-pf-node -o q    phonefarm selftest quality --out @out/q --calib … --pct 5 --downs 2 --fan-on --lock-label judge
+pf-node -o q    phonefarm selftest quality --out @out/q --calib … --pct 5 --downs 2 --lock-label judge
 # 本地: 三段的考题目录 + 一份 plan.json 合到一个根下
 phonefarm selftest report --root merged --ns 5,8,10
 ```

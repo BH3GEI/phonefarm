@@ -48,9 +48,9 @@ M0 六判据（refbench DESIGN.md §8）：可重复 <0.5% 且单调比 <0.75 ·
 | `quality` | B 臂少跑 + 采样降分辨率 | 画面判据 POOR_QUALITY；只少跑不降采样的对照不得被拦 |
 
 ```
-phonefarm selftest calibrate --out D/cal --levels 0,4000,8000 --rounds 2 --fan-on   # 帧时 ≈ t0 + k·工作组数
+phonefarm selftest calibrate --out D/cal --levels 0,4000,8000 --rounds 2   # 帧时 ≈ t0 + k·工作组数
 phonefarm selftest run --out D/run --calib D/cal/calib.json \
-    --cases aa*4,better:0.5,better:1,better:2,better:5,worse:2 --pairs 10 --fan-on
+    --cases aa*4,better:0.5,better:1,better:2,better:5,worse:2 --pairs 10
 phonefarm selftest quality --out D/q --calib D/cal/calib.json --pct 5 --downs 2
 phonefarm selftest report --root D/run --ns 5,8,10           # 不碰设备, 可离线重算
 ```
@@ -65,7 +65,8 @@ phonefarm selftest report --root D/run --ns 5,8,10           # 不碰设备, 可
 - 每臂流程与 `eval`/`autoloop` 的 run_one 同构：等冷 → 起负载 → ftrace + sample_env 并行
   → 解析。ABBA 交替；基础设施失败重试一次（不看量到的数）；量到但算子没生效
   （`apply_ok=false`）的臂由判定链按 ABORT 处理，不计入。
-- 现场：停充、风扇（`--fan-on`）、可选锁频（`--lock-freq`）都在会话 guard 里，任何返回路径
+- 风扇一律不开（owner 规定），开场无条件写 fan_enable=0、收场再写一次；`--fan-on` 已取消。
+- 现场：停充、可选锁频（`--lock-freq` / `--lock-level N`）都在会话 guard 里，任何返回路径
   都还原；改之前的值存在 `~/.local/state/phonefarm/`（`PHONEFARM_STATE_DIR` 可改），
   宿主机崩溃重启后下次启动能回滚。`selftest` 和其他碰设备的子命令一样自己拿设备锁
   （`--lock-label`），`selftest report` 不拿锁。
