@@ -279,6 +279,7 @@ src/                   Rust 内核源码
   plugins/             场景插件层
   cts.rs               一致性测试 harness（双协议解析、对账、报告、结果提取）
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
+  ios.rs               iOS 设备后端（经 WebDriverAgent）+ ios-probe 真机体检
   collect.rs           有界滚动采集（组合动作原语，零 Token）：有界滚动 / 重叠去重 / 覆盖边界
   decision.rs          决策原语通路（零 Token 降级档 + 侧车协议 + 资产校验）；仓库不含模型
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计

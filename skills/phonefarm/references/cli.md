@@ -134,6 +134,8 @@ Spec: `docs/SPEC_MCP_SERVE.md`.
 
 ```bash
 phonefarm devices                           # adb and hdc devices in one list
+phonefarm ios-probe [--serial ios:<udid>]   # iOS real-device checkup: probes every WDA endpoint and
+                                            # verifies the UI-source shape against the parser's assumptions
 phonefarm last [--task T] [--json]          # latest session verdict (entry point)
 phonefarm runs [--task T] [--limit N]       # all sessions of a task
 phonefarm status [<run-id>] [--task T]      # liveness: running / died / finished

@@ -187,6 +187,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 
 ```bash
 ./phonefarm devices                        # adb / hdc / iOS 三族设备一并列出（iOS 只列 USB 上看得见的，不代表 WDA 已就绪）
+./phonefarm ios-probe                      # iOS 真机体检：逐项探 WDA 端点 + 核实界面树形状（插上手机一条命令核）
 ./phonefarm keepalive                      # 对全部在线设备巡检一轮：唤醒 + 解锁 + 不息屏
 ./phonefarm keepalive --status             # 只读报告：连接/亮屏/不息屏是否生效
 ./phonefarm keepalive --watch              # 常驻守护（默认 300s 一轮，新上线设备自动纳入）

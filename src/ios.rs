@@ -486,6 +486,258 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// ───────────────────────── 真机体检 ─────────────────────────
+//
+// 本后端唯一真正没验证过的东西是「WDA 的 JSON source 到底长什么样」。把它做成一条命令:
+// 插上手机跑一次, 解析器假设了哪些键、这台设备实际给了哪些, 一次说清。
+// 这比「代码里写着未验证」有用 —— 后者只能等人主动想起来。
+
+/// 界面树形状体检结果。解析器([`parse_wda_source`])假设的每一个键都在这里有账。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SourceShape {
+    /// 解出来的节点总数
+    pub nodes: usize,
+    /// 带 `type` 的节点数(解析器靠它推导可点/可滚)
+    pub with_type: usize,
+    /// `label`/`name`/`value` 任一非空——靠它拿到文字
+    pub with_text: usize,
+    /// 有坐标的节点数(`rect` 或平铺的 x/y/width/height)
+    pub with_rect: usize,
+    /// 用的是平铺形态(而不是 `rect` 对象)
+    pub flat_rect: bool,
+    /// 框面积非零的节点数——为 0 说明坐标全塌在原点, 点按会全打在左上角
+    pub nonempty_box: usize,
+    /// 有 `children` 字段的节点数
+    pub with_children: usize,
+}
+
+impl SourceShape {
+    /// 解析器能不能用这份 source。返回人话的原因清单(**空 = 能用**)。
+    pub fn problems(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.nodes == 0 {
+            v.push("一个节点都没解出来: 这台设备的 source 形状与解析器不匹配".into());
+            return v;
+        }
+        if self.with_type == 0 {
+            v.push("没有任何节点带 `type`: 可点/可滚的推导会全部落空".into());
+        }
+        if self.with_text == 0 {
+            v.push("没有任何节点带 label/name/value: 界面树拿不到一个字的文字".into());
+        }
+        if self.with_rect == 0 {
+            v.push("没有任何节点带坐标: 尺寸与点按都无从谈起".into());
+        } else if self.nonempty_box == 0 {
+            v.push("坐标全为零面积: 模型会看到一堆叠在左上角的元素".into());
+        }
+        v
+    }
+    pub fn ok(&self) -> bool {
+        self.problems().is_empty()
+    }
+}
+
+/// 从一份 source 原文里数出形状(纯函数, 单测钉契约)。
+pub fn analyze_source_shape(text: &str) -> SourceShape {
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return SourceShape::default();
+    };
+    let root = v.get("value").unwrap_or(&v);
+    let mut s = SourceShape::default();
+    shape_walk(root, &mut s);
+    s
+}
+
+fn shape_walk(v: &Value, s: &mut SourceShape) {
+    match v {
+        Value::Array(items) => {
+            for it in items {
+                shape_walk(it, s);
+            }
+        }
+        Value::Object(map) => {
+            s.nodes += 1;
+            if map.get("type").and_then(|x| x.as_str()).is_some_and(|x| !x.is_empty()) {
+                s.with_type += 1;
+            }
+            let has_text = ["label", "name", "value"]
+                .iter()
+                .any(|k| map.get(*k).and_then(|x| x.as_str()).is_some_and(|x| !x.trim().is_empty()));
+            if has_text {
+                s.with_text += 1;
+            }
+            let has_rect_obj = map.contains_key("rect");
+            let has_flat = ["x", "y", "width", "height"].iter().all(|k| map.contains_key(*k));
+            if has_rect_obj || has_flat {
+                if has_flat && !has_rect_obj {
+                    s.flat_rect = true;
+                }
+                s.with_rect += 1;
+                let b = rect_of(v).unwrap_or([0, 0, 0, 0]);
+                if b[2] > b[0] && b[3] > b[1] {
+                    s.nonempty_box += 1;
+                }
+            }
+            if map.contains_key("children") {
+                s.with_children += 1;
+            }
+            if let Some(children) = map.get("children").and_then(|c| c.as_array()) {
+                for c in children {
+                    shape_walk(c, s);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn probe_usage() -> &'static str {
+    "用法: phonefarm ios-probe [--serial ios:<udid>] [--json]\n\
+     \x20 逐项探 WDA 的每个端点, 并**核实界面树的形状与解析器的假设对不对**。\n\
+     \x20 退出码: 0 = 全部就绪; 1 = 有端点不通或形状不匹配; 2 = 用法错"
+}
+
+/// 真机体检: 一条命令把本后端依赖的每个环节都探一遍。
+///
+/// 存在理由: 这个后端是照 WDA 的**文档形状**写的, 没过真机。与其在文档里写
+/// 「尚未验证」等人想起来, 不如给一条命令 —— 插上手机跑一次就知道行不行、哪一环不行。
+pub fn run_ios_probe(args: &[String]) -> i32 {
+    let mut serial: Option<String> = None;
+    let mut json = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--serial" => serial = it.next().cloned(),
+            "-h" | "--help" => {
+                println!("{}", probe_usage());
+                return 2;
+            }
+            other => {
+                eprintln!("未知参数 {other}\n{}", probe_usage());
+                return 2;
+            }
+        }
+    }
+    let udid = serial
+        .as_deref()
+        .map(|s| s.strip_prefix("ios:").unwrap_or(s))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let tmp = std::env::var("PHONEFARM_TMP").unwrap_or_else(|_| "/tmp/phonefarm".to_string());
+    let me = Ios::new(udid, tmp);
+
+    let mut steps: Vec<Value> = Vec::new();
+    let mut bad = false;
+    let mut remedy: Vec<String> = Vec::new();
+    let mut step = |name: &str, ok: bool, detail: Value, steps: &mut Vec<Value>| {
+        steps.push(json!({"step": name, "ok": ok, "detail": detail}));
+        ok
+    };
+
+    // 1. 隧道 + WDA 活着
+    me.ensure_tunnel();
+    let status = me.json("GET", "/status", None, 5);
+    if !step("tunnel_and_status", status.is_some(), json!({"base": me.base}), &mut steps) {
+        bad = true;
+        remedy.push("WDA 没应答。依次查: ①手机上 WebDriverAgentRunner 已启动并保持运行; ②USB 连着且已信任本机; ③iproxy 在转(或直接设 WDA_URL=http://127.0.0.1:<port>)".into());
+    }
+
+    // 2. 会话
+    let sid = me.session_id();
+    if !step("session", sid.is_some(), json!({"sessionId": sid}), &mut steps) {
+        bad = true;
+        remedy.push("建不了 WDA 会话。确认 WDA 版本支持 W3C capabilities, 且设备没有开发者模式/信任问题".into());
+    }
+
+    // 3. 屏幕尺寸(点)
+    let mut wh = json!(null);
+    if let Some(p) = me.sess_path("/window/size") {
+        wh = me
+            .json("GET", &p, None, 10)
+            .and_then(|v| parse_window_size(&v))
+            .map(|(w, h)| json!({"w": w, "h": h}))
+            .unwrap_or(json!(null));
+    }
+    if !step("window_size", wh != json!(null), wh.clone(), &mut steps) {
+        bad = true;
+    }
+
+    // 4. 界面树: **本后端唯一真正没验证过的假设**
+    let mut shape_json = json!(null);
+    let mut shape_ok = false;
+    if let Some(p) = me.sess_path("/source?format=json") {
+        if let Some(v) = me.json("GET", &p, None, 20) {
+            let raw = v.to_string();
+            let s = analyze_source_shape(&raw);
+            shape_ok = s.ok();
+            shape_json = json!({
+                "nodes": s.nodes,
+                "with_type": s.with_type,
+                "with_text": s.with_text,
+                "with_rect": s.with_rect,
+                "flat_rect": s.flat_rect,
+                "nonempty_box": s.nonempty_box,
+                "with_children": s.with_children,
+                "problems": s.problems(),
+                "matches_parser": shape_ok,
+            });
+        }
+    }
+    if !step("ui_source_shape", shape_ok, shape_json.clone(), &mut steps) {
+        bad = true;
+        remedy.push("界面树与解析器的假设不符 —— 这是 docs/DEVICES.md 里标的那个未验证项。把上面 detail 的 problems 抄进 issue, 或改 `parse_wda_source` / `analyze_source_shape` 对齐这台设备的形状".into());
+    }
+
+    // 5. 前台应用 / 应用清单
+    let fg = me.foreground_pkg();
+    if !step("active_app", !fg.is_empty(), json!({"bundleId": fg}), &mut steps) {
+        bad = true;
+    }
+    let apps = me.launchable_apps();
+    if !step("list_apps", !apps.is_empty(), json!({"count": apps.len()}), &mut steps) {
+        bad = true;
+    }
+
+    // 6. 截图 + base64 解码(解码器是本仓库自己写的, 也要核)
+    let shot = me.json("GET", "/screenshot", None, 30).and_then(|v| {
+        let b64 = v.get("value").and_then(|x| x.as_str())?;
+        let bytes = b64_decode(b64)?;
+        let png = bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47]);
+        Some(json!({"bytes": bytes.len(), "png_magic": png}))
+    });
+    if !step("screenshot", shot.is_some(), shot.unwrap_or(json!(null)), &mut steps) {
+        bad = true;
+    }
+
+    if json {
+        println!(
+            "{}",
+            json!({"ok": !bad, "steps": steps, "remedy": remedy, "unverified_assumption": "WDA JSON source 形状"})
+        );
+    } else {
+        println!("iOS 后端真机体检 (WDA base = {})", me.base);
+        for s in &steps {
+            let mark = if s["ok"].as_bool().unwrap_or(false) { "✓" } else { "✗" };
+            println!("  {mark} {}", s["step"].as_str().unwrap_or("?"));
+            if let Some(pr) = s["detail"]["problems"].as_array() {
+                for p in pr {
+                    println!("      - {}", p.as_str().unwrap_or(""));
+                }
+            }
+        }
+        if bad {
+            println!("\n怎么修:");
+            for r in &remedy {
+                println!("  • {r}");
+            }
+        } else {
+            println!("\n全部就绪。界面树的形状与解析器的假设一致 —— 可以把 docs/DEVICES.md 里那条「尚未上真机验证」改掉了。");
+        }
+    }
+    if bad { 1 } else { 0 }
+}
+
 // ───────────────────────── Backend ─────────────────────────
 
 /// iOS 上三层改动面的可行性。
@@ -964,6 +1216,56 @@ mod tests {
         assert_eq!(b64_decode("aGVs\nbG8=").unwrap(), b"hello");
         // 非法字符拒绝, 不猜
         assert!(b64_decode("aGVs*bG8=").is_none());
+    }
+
+    #[test]
+    fn source_shape_matches_the_parser_on_a_good_page() {
+        let s = analyze_source_shape(SOURCE);
+        assert_eq!(s.nodes, 5);
+        assert_eq!(s.with_type, 5, "每个节点都带 type");
+        assert_eq!(s.with_text, 4, "Application/Table 的 label 是空的: Application 有 label=Settings…");
+        assert_eq!(s.with_rect, 5);
+        assert!(!s.flat_rect, "用的是 rect 对象形态");
+        assert_eq!(s.nonempty_box, 5, "所有框都有面积");
+        assert!(s.ok(), "合格页面不该报问题: {:?}", s.problems());
+    }
+
+    #[test]
+    fn source_shape_calls_out_each_kind_of_mismatch() {
+        // 解析不出东西: 形状不匹配 —— 这正是本后端唯一未验证的那个假设
+        let s = analyze_source_shape("<xml/>");
+        assert_eq!(s.nodes, 0);
+        assert!(!s.ok());
+        assert!(s.problems()[0].contains("形状与解析器不匹配"));
+
+        // 有节点但没有任何 type: 可点/可滚的推导全落空
+        let s2 = analyze_source_shape(r#"{"value":{"label":"x","rect":{"x":0,"y":0,"width":1,"height":1}}}"#);
+        assert!(s2.problems().iter().any(|p| p.contains("`type`")), "{:?}", s2.problems());
+
+        // 有节点但没坐标
+        let s3 = analyze_source_shape(r#"{"value":{"type":"XCUIElementTypeButton","label":"x"}}"#);
+        assert!(s3.problems().iter().any(|p| p.contains("带坐标")), "{:?}", s3.problems());
+
+        // 坐标全零面积: 元素会全叠在左上角
+        let s4 = analyze_source_shape(
+            r#"{"value":{"type":"XCUIElementTypeButton","label":"x","rect":{"x":0,"y":0,"width":0,"height":0}}}"#,
+        );
+        assert!(s4.problems().iter().any(|p| p.contains("零面积")), "{:?}", s4.problems());
+
+        // 平铺形态要被认出来(而不是当成没有坐标)
+        let flat = r#"{"value":{"type":"XCUIElementTypeButton","label":"OK","x":1,"y":2,"width":3,"height":4}}"#;
+        let s5 = analyze_source_shape(flat);
+        assert!(s5.flat_rect && s5.ok(), "{:?}", s5);
+    }
+
+    #[test]
+    fn source_shape_counts_recursively() {
+        // 嵌套: 只数根是不行的, 得下去
+        let nested = r#"{"value":{"type":"XCUIElementTypeApplication","rect":{"x":0,"y":0,"width":10,"height":10},"children":[{"type":"XCUIElementTypeButton","label":"a","rect":{"x":0,"y":0,"width":5,"height":5}},{"type":"XCUIElementTypeButton","label":"b","rect":{"x":0,"y":5,"width":5,"height":5}}]}}"#;
+        let s = analyze_source_shape(nested);
+        assert_eq!(s.nodes, 3);
+        assert_eq!(s.with_children, 1);
+        assert!(s.ok(), "{:?}", s.problems());
     }
 
     #[test]

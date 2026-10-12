@@ -842,6 +842,11 @@ fn main() {
             // 本地那档是降级占位不是模型; 侧车那一档是把 Core ML 接进来的地方。
             std::process::exit(decision::run_decide(&args[1..]));
         }
+        Some("ios-probe") => {
+            // iOS 后端真机体检: 逐项探 WDA 端点, 并核实界面树形状与解析器的假设对不对。
+            // 存在理由: 这个后端是照文档形状写的, 没过真机 —— 给人一条命令去核, 而不是等人想起来。
+            std::process::exit(ios::run_ios_probe(&args[1..]));
+        }
         Some("test-batch") => {
             // CTS 批量挂机执行器 (CTS Harness Spec): A2OH 桥接环境的 instrument 调度,
             // 双重看门狗 + 掉线自愈 + Crash Bundle + JUnit/summary 报告。纯增量子命令。
