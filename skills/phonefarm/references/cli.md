@@ -78,6 +78,20 @@ phonefarm capture --serial S [--out DIR] [--frames 200] [--max-steps N]
 
 `bench` exit codes: 0/1/2 = PASS/FAIL/ERROR. Spec: `docs/SPEC_SR_LOOP.md`.
 
+## collect — bounded scroll & collect (free)
+
+```bash
+phonefarm collect --query "关于我们" --max-swipes 8   # scroll-find: stop on hit, report position
+phonefarm collect --max-swipes 12 --json              # list collect: dedupe + honest coverage boundary
+```
+
+No model call. At most `--max-swipes` screens per invocation, and it stops the moment a
+screen yields nothing new — never scrolls blindly. Overlapping rows between adjacent
+screens are de-duplicated by exact text. `coverage.complete` says whether the whole list
+was covered (`found` / `end_of_list`) or a bounded limit was hit (`max_swipes` /
+`max_items`, more content may remain below). It produces an **inventory**, not a
+**verdict** — judging stays on the judging side. Spec: `docs/SPEC_OBSERVATION_BUDGET.md`.
+
 ## Evolution loop — hypothesis / experiment / evidence
 
 ```bash
@@ -97,7 +111,7 @@ Specs: `docs/SPEC_EVOLUTION.md`, ops guide `docs/EVOLUTION_OPS.md`.
 ## serve — MCP tool service (free)
 
 ```bash
-phonefarm serve [--root DIR]     # 21 phonefarm_* tools: 17 read-only + 4 device-touching
+phonefarm serve [--root DIR]     # 22 phonefarm_* tools: 17 read-only + 5 device-touching
 ```
 
 Spec: `docs/SPEC_MCP_SERVE.md`.

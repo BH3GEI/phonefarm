@@ -123,7 +123,7 @@ NN（端侧超分 / 插帧）是这个闭环里的**一类候选改动**，不�
 
 上层各通路互不依赖：卸掉 VLM 通路，`script` / `test-batch` / `bench` 照常工作；反之亦然。
 **多模态视觉模型（VLM）只是其中一条通路，不是这个项目的定义**——
-`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `keepalive` 全程零 Token，
+`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `collect` / `keepalive` 全程零 Token，
 不碰模型也各自成立。遥测口径全局统一，因此性能局、脚本局、CTS 局、VLM 局可以横向对比。
 
 > **🤖 给 AI Agent 用（推荐姿势）**：本项目自带 agent 说明书 `skills/phonefarm/SKILL.md`。
@@ -247,6 +247,22 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 
 脚本模式不调用任何模型，但走同一套执行与遥测管线，因此产出的记录与 VLM 局完全同构，
 `show` / `stats` / `cat` 一视同仁。规格见 `docs/SPEC_SCRIPT_MODE.md`。
+
+## 有界滚动采集（零 Token）
+
+```bash
+# 滚动查找：命中即停，回报该条目的位置
+./phonefarm collect --query "关于我们" --max-swipes 8
+
+# 列表采集：重叠读取去重，如实回报覆盖边界
+./phonefarm collect --max-swipes 12 --json
+```
+
+不调用任何模型。一次调用最多滑 `--max-swipes` 屏，某一屏不再产生新内容就立即停——
+绝不盲滑；相邻两屏必然重叠，重叠条目按文字全等去重；`coverage.complete` 如实说明是
+采完整屏列表（`found` / `end_of_list`）还是撞到了有界上限（`max_swipes` / `max_items`，
+下方可能还有未采集内容）。它产出的是**清单**，不是**结论**——判定仍归判定那一侧。
+契约见 `docs/SPEC_OBSERVATION_BUDGET.md`。
 
 脚本的 `instrument` 原语跟设备后端走：hdc 设备上合成 OH 的 `aa test`，adb 设备上合成 `am instrument`。
 
@@ -568,6 +584,7 @@ tasks/<任务名>/        程序唯一可写区域
 | `docs/SPEC_PERF_SOURCE.md` | 性能数据来源抽象：安卓 sysfs 与鸿蒙 HiSmartPerf 同一份 JSON / 命令口径出处 / null 纪律（鸿蒙侧未上真机验证） |
 | `docs/SPEC_SR_LOOP.md` | 端侧模型标尺与采集管线：bench / capture 的判定口径 |
 | `docs/SPEC_SCRIPT_MODE.md` | 确定性脚本与历史轨迹回放：纯离线 / 零 Token / 全遥测 / 重放契约 |
+| `docs/SPEC_OBSERVATION_BUDGET.md` | 观察预算契约：投影有界 / 有界滚动 / 去重 / 覆盖边界 / MCP 结构化返回 |
 | `docs/SPEC_CTS_HARNESS.md` | 一致性测试 harness：双协议解析 / 对账判定 / 结果提取 |
 | `docs/SPEC_KEEPALIVE.md` | 农场级设备保活巡检：顺序契约 / adb 与 hdc 两族差异 |
 | `docs/SPEC_MCP_SERVE.md` | MCP stdio 工具服务：工具面 / 协议子集 / 安全护栏 / octos 接法 |

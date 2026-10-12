@@ -4,7 +4,7 @@
 在同一套「设备抽象 + 记录契约 + 遥测 + 证据分级」之上，并列提供多条互不依赖的上层能力。
 
 多模态视觉模型（VLM）只是其中一条上层通路，不是这个项目的定义。
-`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `keepalive` 全程零 Token，不碰模型也能独立工作。
+`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `collect` / `keepalive` 全程零 Token，不碰模型也能独立工作。
 宿主架构实现执行回路与决策机制分离：模型只做屏幕理解与动作规划，状态采集、规则拦截、
 校验、复盘与系统监控全部由 Rust 宿主进程控制。
 
@@ -108,6 +108,17 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ./phonefarm capture --serial S --out 目录 --frames 200 [--ready-only] [--json]
 ```
 
+**有界滚动采集**（零 Token）
+
+```bash
+./phonefarm collect --query "关于我们" --max-swipes 8   # 滚动查找：命中即停 + 回报位置
+./phonefarm collect --max-swipes 12 --json              # 列表采集：重叠去重 + 覆盖边界
+```
+
+产出的是**清单**不是**结论**：一次调用最多滑 `--max-swipes` 屏，某屏无新内容立即停（绝不盲滑），
+`coverage.complete` 如实区分「采完整屏列表」与「撞到有界上限」。判定仍归判定那一侧。
+契约见 `docs/SPEC_OBSERVATION_BUDGET.md`。
+
 **Compute Shader 算子标尺**（零 Token，需 root）
 
 ```bash
@@ -176,7 +187,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 **MCP 工具服务**
 
 ```bash
-./phonefarm serve [--root 目录]    # 21 个 phonefarm_* 工具（17 只读 + 4 执行），stdio JSON-RPC 2.0
+./phonefarm serve [--root 目录]    # 22 个 phonefarm_* 工具（17 只读 + 5 执行），stdio JSON-RPC 2.0
 ```
 
 ## 安全边界与执行规范
@@ -224,9 +235,9 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ## 架构：不变内核 + 并列上层
 
 ```
- run/benchmark/quest   script   test-batch/cts-fetch   bench   capture   loop_v1   experiment
-          │              │              │                │        │         │          │
-          └──────────────┴──────────────┴────────────────┴────────┴─────────┴──────────┘
+ run/benchmark/quest   script   test-batch/cts-fetch   bench   capture   collect   loop_v1   experiment
+          │              │              │                │        │         │         │          │
+          └──────────────┴──────────────┴────────────────┴────────┴─────────┴─────────┴──────────┘
                                           │
               ┌───────────────────────────┴────────────────────────────┐
               │ 不变内核：设备抽象(adb/hdc) · 记录契约 · 遥测           │
@@ -255,12 +266,13 @@ src/                   Rust 内核源码
   plugins/             场景插件层
   cts.rs               一致性测试 harness（双协议解析、对账、报告、结果提取）
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
+  collect.rs           有界滚动采集（组合动作原语，零 Token）：有界滚动 / 重叠去重 / 覆盖边界
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
   hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测
   platform.rs          设备接口 Backend（Adb / Hdc 两个实现）+ 各平台三层可行性声明
   perfsrc.rs smartperf.rs  性能数据来源抽象：安卓 sysfs 与鸿蒙 HiSmartPerf(SP_daemon/Xpower) 同一份 JSON
   hypo.rs caps.rs mtools.rs experiment.rs   假设—实验—证据闭环
-  keepalive.rs serve.rs script.rs parallel.rs telemetry.rs device.rs
+  keepalive.rs serve.rs script.rs collect.rs parallel.rs telemetry.rs device.rs
 phonefarm.toml         控制参数、规则阈值及模型 Provider 回退链配置
 docs/                  架构契约与各能力规格（索引见 README「文档索引」）
 skills/                给 AI Agent 直接阅读的英文说明书（phonefarm / phonefarm-cts / a2oh-diagnose）

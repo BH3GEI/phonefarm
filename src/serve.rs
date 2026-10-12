@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 /// 子调用墙钟上限(查看类正常 <1s; run --detach 只起进程不等局)
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// 采集类子调用的上限天花板: MCP 单次 tools/call 约定 60s, 不得超过
+const CALL_TIMEOUT_MAX: Duration = Duration::from_secs(60);
 /// 单次工具返回文本上限(防 cat 大文件爆客户端上下文)
 const MAX_OUT: usize = 96 * 1024;
 
@@ -198,6 +200,18 @@ fn tools_list() -> Vec<Value> {
                        "settle_ms": n("settle delay in ms after actions (default 500)"),
                        "no_screen": json!({"type": "boolean", "description": "skip screenshot capture for speed"})}),
                 &["task", "script"])),
+        tool("phonefarm_collect",
+            "Bounded scroll & collect over a list screen. ZERO model tokens (no LLM). \
+             With `query`: scroll until that text appears, then report its position. Without: \
+             collect visible rows with de-duplication. Always reports an honest coverage \
+             boundary — whether the whole list was covered or a bounded limit was hit. \
+             Never scrolls blindly: stops as soon as a screen yields nothing new.",
+            obj(json!({"serial": s("device: adb serial or hdc:<key>; default = auto"),
+                       "query": s("optional text to find while scrolling; omit to collect rows"),
+                       "max_swipes": n("bounded scroll budget, default 12 (hard cap 24)"),
+                       "max_items": n("max collected rows kept in the reply, default 400"),
+                       "settle_ms": n("settle delay after each swipe, default 600")}),
+                &[])),
         tool("phonefarm_quest",
             "Autonomous Genshin Impact story and quest agent (dialogue fast-forward, interact, navigation).",
             obj(json!({"mode": s("operation mode: 'auto' | 'dialogue' | 'interact' | 'navigate' (default 'auto')"),
@@ -214,17 +228,42 @@ fn call_tool(id: Value, req: &Value) -> String {
     let args = req.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
     match build_argv(name, &args) {
         Ok(argv) => {
-            let (ok, text) = self_call(&argv);
-            rpc_result(id, json!({
-                "content": [{"type": "text", "text": text}],
-                "isError": !ok
-            }))
+            let (ok, text) = self_call(&argv, call_timeout(name, &args));
+            rpc_result(id, tool_result_payload(ok, &text))
         }
-        Err(e) => rpc_result(id, json!({
-            "content": [{"type": "text", "text": e}],
-            "isError": true
-        })),
+        Err(e) => rpc_result(id, tool_result_payload(false, &e)),
     }
+}
+
+/// 工具结果的载荷: 文本 + (解析得出对象时)结构化内容。
+///
+/// 返回约定移植自 iPhone-use(每个工具同时给文本与 `structuredContent`): 文本给人/模型读,
+/// 结构化内容给看板与程序消费, 两边是**同一份事实** —— 不各自渲染, 避免两处漂移。
+/// MCP 规范要求 `structuredContent` 是对象, 所以数组/标量/非 JSON 一律只给文本。
+fn tool_result_payload(ok: bool, text: &str) -> Value {
+    let mut v = json!({
+        "content": [{"type": "text", "text": text}],
+        "isError": !ok
+    });
+    if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+        if parsed.is_object() {
+            v["structuredContent"] = parsed;
+        }
+    }
+    v
+}
+
+/// 子调用墙钟上限: 查看类 30s; 采集类按滚动预算放宽(有界, 不超 MCP 的 60s)。
+/// 预算上限在两端都夹住 —— 客户端传超大 max_swipes 也不能把 serve 拖成挂死。
+fn call_timeout(name: &str, args: &Value) -> Duration {
+    if name == "phonefarm_collect" {
+        let swipes = arg_u64(args, "max_swipes").unwrap_or(12).min(24);
+        let settle_ms = arg_u64(args, "settle_ms").unwrap_or(600).min(2_000);
+        // 每屏: 元素树读取(估 2s) + settle; 加 5s 尾部余量
+        let est = 5 + (swipes + 1) * (2 + settle_ms.div_ceil(1000));
+        return Duration::from_secs(est.min(CALL_TIMEOUT_MAX.as_secs()));
+    }
+    CALL_TIMEOUT
 }
 
 fn arg_str<'a>(args: &'a Value, k: &str) -> Option<&'a str> {
@@ -385,6 +424,15 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             v.push("--detach".into());
             v.push(script.to_string());
         }
+        "phonefarm_collect" => {
+            v.push("collect".into());
+            push_opt(&mut v, "--serial", arg_str(args, "serial"));
+            push_opt(&mut v, "--query", arg_str(args, "query"));
+            push_opt(&mut v, "--max-swipes", arg_u64(args, "max_swipes").map(|n| n.to_string()).as_deref());
+            push_opt(&mut v, "--max-items", arg_u64(args, "max_items").map(|n| n.to_string()).as_deref());
+            push_opt(&mut v, "--settle-ms", arg_u64(args, "settle_ms").map(|n| n.to_string()).as_deref());
+            v.push("--json".into()); // serve 侧统一吃 JSON, 好把 structuredContent 一并给出
+        }
         "phonefarm_quest" => {
             v.push("quest".into());
             push_opt(&mut v, "--mode", arg_str(args, "mode"));
@@ -415,7 +463,7 @@ fn cat_jail(p: &str) -> Result<PathBuf, String> {
 
 /// 自调用 current_exe 跑 CLI 子命令; 返回 (是否成功, 文本)。
 /// 管道双线程读取防 >64KB 输出卡死; 30s 墙钟超时即 kill。
-fn self_call(argv: &[String]) -> (bool, String) {
+fn self_call(argv: &[String], timeout: Duration) -> (bool, String) {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => return (false, format!("current_exe 失败: {e}")),
@@ -446,7 +494,7 @@ fn self_call(argv: &[String]) -> (bool, String) {
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
-            Ok(None) if t0.elapsed() < CALL_TIMEOUT => {
+            Ok(None) if t0.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(20));
             }
             Ok(None) => {
@@ -470,7 +518,7 @@ fn self_call(argv: &[String]) -> (bool, String) {
     let mut timed_out = false;
     if status.is_none() {
         timed_out = true;
-        text.push_str(&format!("\n[serve: 子调用超过 {}s 被强杀]", CALL_TIMEOUT.as_secs()));
+        text.push_str(&format!("\n[serve: 子调用超过 {}s 被强杀]", timeout.as_secs()));
     }
     let (text, truncated) = truncate(text);
     let ok = !timed_out && status.map(|s| s.success()).unwrap_or(false) && !truncated;
@@ -537,7 +585,7 @@ mod tests {
         let line = json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}).to_string();
         let resp: Value = serde_json::from_str(&handle_line(&line).unwrap()).unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 21, "工具面数量变了要有意为之(SPEC_EVOLUTION §9: +hyp/pred/caps/tools 只读)");
+        assert_eq!(tools.len(), 22, "工具面数量变了要有意为之(SPEC_EVOLUTION §9: +hyp/pred/caps/tools 只读; +collect 零 Token 采集)");
         for t in tools {
             assert!(t["name"].as_str().unwrap().starts_with("phonefarm_"));
             assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
@@ -572,6 +620,45 @@ mod tests {
         // 缺必填
         assert!(build_argv("phonefarm_script", &json!({"task":"T"})).is_err());
         assert!(build_argv("phonefarm_script", &json!({"script":"s.json"})).is_err());
+    }
+
+    #[test]
+    fn build_argv_collect_is_bounded_and_json() {
+        let a = build_argv("phonefarm_collect", &json!({"query":"目标","max_swipes":5})).unwrap();
+        assert_eq!(a[0], "collect");
+        assert!(a.contains(&"--json".to_string()), "serve 侧统一吃 JSON");
+        assert!(a.windows(2).any(|w| w[0] == "--query" && w[1] == "目标"));
+        assert!(a.windows(2).any(|w| w[0] == "--max-swipes" && w[1] == "5"));
+        // 参数都可选: 裸调用也能跑(列表采集模式)
+        let b = build_argv("phonefarm_collect", &json!({})).unwrap();
+        assert_eq!(b, vec!["collect".to_string(), "--json".to_string()]);
+    }
+
+    #[test]
+    fn collect_timeout_is_bounded_by_the_mcp_ceiling() {
+        // 默认: 5 + 13*(2+1) = 44s —— 高于查看类默认, 但守着 60s 天花板
+        let d = call_timeout("phonefarm_collect", &json!({}));
+        assert!(d > CALL_TIMEOUT && d <= CALL_TIMEOUT_MAX, "got {d:?}");
+        // 客户端塞超大预算也不能突破天花板
+        let huge = call_timeout("phonefarm_collect", &json!({"max_swipes":9999,"settle_ms":999999}));
+        assert_eq!(huge, CALL_TIMEOUT_MAX);
+        // 其余工具沿用默认
+        assert_eq!(call_timeout("phonefarm_devices", &json!({})), CALL_TIMEOUT);
+    }
+
+    #[test]
+    fn tool_result_payload_attaches_structured_content_only_for_objects() {
+        let ok = tool_result_payload(true, "{\"a\":1}");
+        assert_eq!(ok["structuredContent"]["a"], 1);
+        assert_eq!(ok["isError"], false);
+        assert_eq!(ok["content"][0]["text"], "{\"a\":1}");
+        // 数组不合 MCP 规范(须为对象): 只给文本
+        let arr = tool_result_payload(true, "[1,2]");
+        assert!(arr.get("structuredContent").is_none());
+        // 非 JSON: 只给文本
+        let plain = tool_result_payload(false, "采集失败");
+        assert!(plain.get("structuredContent").is_none());
+        assert_eq!(plain["isError"], true);
     }
 
     #[test]
