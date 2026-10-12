@@ -169,6 +169,7 @@ pub fn run_eval(args: &[String]) -> i32 {
         "shader" => return eval_shader_v2(&req, &a),
         "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail),
         "gray" => gray_eval(&req, serial.as_deref(), Path::new(&evidence)),
+        "whitebox" => crate::whitebox::whitebox_eval(&req, serial.as_deref(), Path::new(&evidence)),
         other => {
             eprintln!("不认识的 kind {other}");
             return 2;
@@ -371,6 +372,12 @@ fn validate_v2(req: &Value) -> Result<(), String> {
                 }
             }
         }
+        "whitebox" => {
+            crate::whitebox::knob_extras(&req["payload"])?;
+            if launch_spec(req).is_none() {
+                return Err("kind=whitebox 需要 workload.launch.extras (白盒载体靠启动参数换设置)".into());
+            }
+        }
         other => return Err(format!("不认识的 kind {other:?}")),
     }
     Ok(())
@@ -523,7 +530,7 @@ const COOL_PROGRESS_EVERY_S: u64 = 30;
 /// 一臂开跑前的等冷: 等到 SoC 最热热区 < cool_c 或超时。回 {zone, c, waited_s, timeout}。
 /// cool_c 缺省 (null) = 不等冷, 只记一次起跑温度。`timeout_s` 由调用方按「这次评测里之前
 /// 有没有臂已经超时」给 (见 [`ARM_COOL_TIMEOUT_AFTER_MISS_S`])。
-fn arm_wait_cool(serial: &str, cool_c: Option<f64>, label: &str, timeout_s: u64) -> Value {
+pub(crate) fn arm_wait_cool(serial: &str, cool_c: Option<f64>, label: &str, timeout_s: u64) -> Value {
     let t0 = std::time::Instant::now();
     let mut last_note = 0u64;
     loop {
@@ -551,7 +558,7 @@ fn arm_wait_cool(serial: &str, cool_c: Option<f64>, label: &str, timeout_s: u64)
 }
 
 /// 这一臂最多等多久: 之前已有一臂超时就只再给 [`ARM_COOL_TIMEOUT_AFTER_MISS_S`]。
-fn arm_cool_timeout(log: &[Value]) -> u64 {
+pub(crate) fn arm_cool_timeout(log: &[Value]) -> u64 {
     if log.iter().any(|a| a["timeout"].as_bool() == Some(true)) {
         ARM_COOL_TIMEOUT_AFTER_MISS_S
     } else {
@@ -560,7 +567,7 @@ fn arm_cool_timeout(log: &[Value]) -> u64 {
 }
 
 /// 逐臂等冷记录 → conditions_observed 里的 cool_reached_c (最热的一次起跑温度) / cool_timeout。
-fn cool_summary(arms: &[Value]) -> (Option<f64>, bool) {
+pub(crate) fn cool_summary(arms: &[Value]) -> (Option<f64>, bool) {
     let worst = arms.iter().filter_map(|a| a["c"].as_f64()).reduce(f64::max);
     (worst, arms.iter().any(|a| a["timeout"].as_bool() == Some(true)))
 }
@@ -645,7 +652,7 @@ pub(crate) fn split_snapshot_diff(before: &str, after: &str) -> (Vec<String>, Ve
 
 // ══════════════ 报告装配 ══════════════
 
-fn base_report(req: &Value, kind: &str) -> Value {
+pub(crate) fn base_report(req: &Value, kind: &str) -> Value {
     json!({
         "version": 2,
         "kind": kind,
@@ -671,7 +678,7 @@ fn base_report(req: &Value, kind: &str) -> Value {
     })
 }
 
-fn unavailable(metrics: &mut Value, field: &str, reason: &str) {
+pub(crate) fn unavailable(metrics: &mut Value, field: &str, reason: &str) {
     metrics["unavailable"]
         .as_array_mut()
         .expect("unavailable 数组")
@@ -802,6 +809,63 @@ pub(crate) fn launch_spec(req: &Value) -> Option<LaunchSpec> {
     })
 }
 
+/// 带 extras 冷启动应用: 停掉 → 清掉旧的标记文件与 `also_clear` 里的文件 → 解析启动 activity →
+/// `am start -W`。am 的回显记进 outdir/am.log。(run_one_launch 与 whitebox 共用)
+pub(crate) fn start_with_extras(
+    serial: &str,
+    pkg: &str,
+    extras: &str,
+    marker: Option<&str>,
+    also_clear: &[&str],
+    outdir: &Path,
+) -> Result<(), String> {
+    let files = format!("/storage/emulated/0/Android/data/{pkg}/files");
+    let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    for f in marker.into_iter().chain(also_clear.iter().copied()) {
+        let _ = adb(serial, &["shell", &format!("rm -f {files}/{f}")], 15);
+    }
+    let comp = adb(serial, &["shell", &format!("cmd package resolve-activity --brief {pkg}")], 30);
+    let comp = comp
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| l.contains('/') && !l.starts_with('#'))
+        .ok_or(format!("解析不到 {pkg} 的启动 activity"))?
+        .to_string();
+    let am = adb(serial, &["shell", &format!("am start -W -n {comp} {extras}")], 60);
+    std::fs::write(outdir.join("am.log"), &am).ok();
+    Ok(())
+}
+
+/// 等应用进入被测窗口: 有标记文件就等它出现 (应用中途退了或超时报错), 没有就固定等
+/// [`LAUNCH_SETTLE_S`] 秒。
+pub(crate) fn wait_launch_window(serial: &str, pkg: &str, label: &str, marker: Option<&str>) -> Result<(), String> {
+    let files = format!("/storage/emulated/0/Android/data/{pkg}/files");
+    match marker {
+        Some(m) => {
+            let t0 = std::time::Instant::now();
+            loop {
+                let got = adb(serial, &["shell", &format!("cat {files}/{m} 2>/dev/null")], 15);
+                if !crate::graylayer::GrayLayer::adb_stdout(&got).trim().is_empty() {
+                    return Ok(());
+                }
+                let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
+                if crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty() {
+                    return Err(format!("{label}: {pkg} 在进入被测窗口前就退了"));
+                }
+                if t0.elapsed().as_secs() > LAUNCH_MARKER_TIMEOUT_S {
+                    return Err(format!("{label}: 等了 {LAUNCH_MARKER_TIMEOUT_S}s 还没进入被测窗口 (没有 {m})"));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+        None => {
+            std::thread::sleep(std::time::Duration::from_secs(LAUNCH_SETTLE_S));
+            Ok(())
+        }
+    }
+}
+
 /// 自驱动负载跑一轮: (可选) 带 extras 重启应用 → 等它进入被测窗口 → 功耗采样 + ftrace 采集
 /// `seconds` 秒 → 解析。回的形状与 [`run_one_with`] 相同 ({label, run_once_rc, summary, env})。
 /// `relaunch = false` 时应用已经由别人 (挂层那一步) 带着 extras 拉起来了。
@@ -817,44 +881,11 @@ pub(crate) fn run_one_launch(
     relaunch: bool,
 ) -> Result<Value, String> {
     std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
-    let files = format!("/storage/emulated/0/Android/data/{pkg}/files");
     if relaunch {
-        let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
-        if let Some(m) = &launch.marker {
-            let _ = adb(serial, &["shell", &format!("rm -f {files}/{m}")], 15);
-        }
-        let comp = adb(serial, &["shell", &format!("cmd package resolve-activity --brief {pkg}")], 30);
-        let comp = comp
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find(|l| l.contains('/') && !l.starts_with('#'))
-            .ok_or(format!("解析不到 {pkg} 的启动 activity"))?
-            .to_string();
-        let am = adb(serial, &["shell", &format!("am start -W -n {comp} {}", launch.extras)], 60);
-        std::fs::write(outdir.join("am.log"), &am).ok();
+        start_with_extras(serial, pkg, &launch.extras, launch.marker.as_deref(), &[], outdir)?;
     }
     // 等进入被测窗口
-    match &launch.marker {
-        Some(m) => {
-            let t0 = std::time::Instant::now();
-            loop {
-                let got = adb(serial, &["shell", &format!("cat {files}/{m} 2>/dev/null")], 15);
-                if !crate::graylayer::GrayLayer::adb_stdout(&got).trim().is_empty() {
-                    break;
-                }
-                let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
-                if crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty() {
-                    return Err(format!("{label}: {pkg} 在进入被测窗口前就退了"));
-                }
-                if t0.elapsed().as_secs() > LAUNCH_MARKER_TIMEOUT_S {
-                    return Err(format!("{label}: 等了 {LAUNCH_MARKER_TIMEOUT_S}s 还没进入被测窗口 (没有 {m})"));
-                }
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-        }
-        None => std::thread::sleep(std::time::Duration::from_secs(LAUNCH_SETTLE_S)),
-    }
+    wait_launch_window(serial, pkg, label, launch.marker.as_deref())?;
     // 功耗采样与 ftrace 并行, 覆盖整个采集窗
     let env_path = outdir.join("env.txt");
     let dur = seconds + 4;
@@ -1105,7 +1136,7 @@ fn eval_runs(runs: &[Value]) -> Vec<Run> {
 
 /// 两臂已跑的每一轮都量到了可信功耗、且是同一种口径 (全电池放电或全 USB 旁路), 功耗才进
 /// 判定; 混了口径这组功耗无效。空集算真 —— 后面的轮次还可能全合格。
-fn all_on_battery(knob_runs: &[Value], ctrl_runs: &[Value]) -> bool {
+pub(crate) fn all_on_battery(knob_runs: &[Value], ctrl_runs: &[Value]) -> bool {
     sysparam::power_group_ok(knob_runs.iter().chain(ctrl_runs.iter()).map(|r| &r["env"]))
 }
 
@@ -1565,7 +1596,7 @@ fn reachable(n: u32, alpha_win: f64) -> bool {
 
 /// ABBA 两臂的统计判定 (sysparam / gray 共用): 帧时 p95、平均帧率, 两臂都放电时加功耗。
 /// 回 (verdict JSON, 是否保留, 两臂是否都在放电态)。
-fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, rounds: u32) -> (Value, bool, bool) {
+pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, rounds: u32) -> (Value, bool, bool) {
     let primary = "frame_p95";
     let (a_runs, b_runs) = (eval_runs(ctrl_runs), eval_runs(knob_runs));
     // 与 autoloop 一致的判定指标表: 功耗只在两臂都处于放电态时才进判定
@@ -1643,7 +1674,7 @@ fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, rounds: u32)
 }
 
 /// 逐臂聚合进 metrics (B 臂 = 候选臂)。回候选臂功耗 (放电态才有)。
-fn aggregate_metrics(m: &mut Value, knob_runs: &[Value], ctrl_runs: &[Value], on_battery_all: bool) -> Option<f64> {
+pub(crate) fn aggregate_metrics(m: &mut Value, knob_runs: &[Value], ctrl_runs: &[Value], on_battery_all: bool) -> Option<f64> {
     let f = |runs: &[Value], k: &str| -> Option<f64> {
         let xs: Vec<f64> = runs.iter().filter_map(|r| r["summary"][k].as_f64()).collect();
         (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
