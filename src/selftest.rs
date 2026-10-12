@@ -932,6 +932,19 @@ const FAN_EN: &str = "/sys/kernel/fan/fan_enable";
 const FAN_LV: &str = "/sys/kernel/fan/fan_speed_level";
 const CHARGE_STATE: &str = "/data/local/tmp/loop_v1_charge.state";
 
+/// 手机必须静音 (owner 规定)。媒体音量 (stream 3) 不是 0 就写 0; 返回读到的原值。
+/// selftest 本身不出声, 这里只是收场核对, 防止别的流程留下的音量被带过去。
+fn ensure_muted(serial: &str) -> String {
+    let got = strip_exit(&sh(serial, "cmd media_session volume --stream 3 --get", 15)).to_string();
+    // 回包形如 "volume is 0 in range [0..15]"
+    let cur = got.split_whitespace().skip_while(|w| *w != "is").nth(1).unwrap_or("").to_string();
+    if cur != "0" {
+        sh(serial, "cmd audio set-volume 3 0", 15);
+        log(&format!("媒体音量原为 {cur:?}, 已调到 0 (手机必须静音)"));
+    }
+    cur
+}
+
 fn write_fan_off(serial: &str) {
     su(serial, &format!("echo 0 > {FAN_EN}"), 15);
 }
@@ -1036,6 +1049,7 @@ impl Session {
             self.charge_suspended = false;
         }
         write_fan_off(&self.serial);
+        v["media_volume"] = json!(ensure_muted(&self.serial));
         if hwcond::recover_stale_lock("selftest", &self.dev, &self.lock_state) == Some(false) {
             v["lock_restore"] = json!("FAILED");
         }
