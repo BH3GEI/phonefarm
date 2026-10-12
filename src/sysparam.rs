@@ -877,7 +877,10 @@ pub fn env_stats(text: &str) -> PyVal {
     // 而 current_now 在充放平衡的瞬间会过零。
     let cur_mean = avg(&currents);
     let charging = status.to_lowercase() == "charging";
-    let on_battery = !charging && cur_mean.is_some_and(|c| c < 0.0);
+    // 满电空闲 (status=Full 且 |电流| < 旁路门限) 不是放电态: 电池不进不出, 整机由 USB 供电。
+    // 2026-10-12 实测把 Full + -3 mA 当成放电, 交了 0.009 W 的「整机功耗」。
+    let full_idle = status.eq_ignore_ascii_case("full") && cur_mean.is_some_and(|c| c.abs() < BYPASS_IDLE_UA);
+    let on_battery = !charging && !full_idle && cur_mean.is_some_and(|c| c < 0.0);
 
     let now_mean = avg(&now_watts);
     // 手机整机功耗合理区间。777W 这种读数只能说明单位不对, 不能进任何均值。
@@ -899,6 +902,12 @@ pub fn env_stats(text: &str) -> PyVal {
         "旁路供电 (已停充, 整机由 USB 直供, 电池电流 ≈ 0): 用 USB 轨 |V x I|, 含充电器转换损耗; \
 不能和放电态 (电池轨) 的数混在同一组比"
             .to_string()
+    } else if full_idle {
+        format!(
+            "电池已满且不进不出 (status=Full, current_now 均值={}): 整机由 USB 供电, 但没进旁路 \
+(charge_suspend.sh 没写状态文件), 量不到可信整机功耗。charge_suspend.sh suspend 会在这种状态下关充电并记旁路",
+            PyVal::from(cur_mean).py_str()
+        )
     } else if !on_battery {
         format!(
             "非放电态 (status={}, current_now 均值={}): USB 输入功率里含给电池充电的部分, \
@@ -1497,6 +1506,31 @@ ENV 3.0 4374000 -12000 NA 5141000 197000 cpu-1-0 41000\n"
 ENV 1.0 4375000 10000 NA 5158000 216000 cpu-1-0 41000\n");
         assert_eq!(s.get("bypass"), Some(&PyVal::Bool(false)));
         assert_eq!(s.get("power_w_mean"), Some(&PyVal::Null));
+    }
+
+    /// 2026-10-12 W1 实测: 电池满电空闲 (status=Full, current_now ≈ -3 mA, USB 供电)。
+    /// 没进旁路时绝不能当放电态交出电池轨的 ~0.01 W; 进了旁路 (charge_suspend.sh 记 bypass)
+    /// 则取 USB 轨。
+    #[test]
+    fn full_and_idle_battery_is_not_discharge() {
+        let rows = "ENV 1.0 4412000 -2000 NA 4920000 806000 cpu-0-4-1 44900\n\
+ENV 3.0 4412000 -3000 NA 5083000 1009000 cpu-0-0-1 42800\n";
+        // 没有状态文件: 不是放电态, 功耗 null, 原因写明满电空闲
+        let s = env_stats(&format!("#battery_status=Full\n#battery_capacity=100\n#charge_suspended=no\n#charge_mode=\n{rows}"));
+        assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(false)));
+        assert_eq!(s.get("power_w_mean"), Some(&PyVal::Null));
+        assert_eq!(s.get("power_valid"), Some(&PyVal::Bool(false)));
+        assert!(matches!(s.get("power_usable_reason"), Some(PyVal::Str(r)) if r.contains("满")));
+        // charge_suspend.sh 判了满电旁路: 取 USB 轨
+        let s = env_stats(&format!("#battery_status=Full\n#battery_capacity=100\n#charge_suspended=yes\n#charge_mode=bypass\n{rows}"));
+        assert_eq!(s.get("bypass"), Some(&PyVal::Bool(true)));
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_bypass".into())));
+        let w = s.get("power_w_mean").unwrap().as_f64().unwrap();
+        assert!((w - (4.920 * 0.806 + 5.083 * 1.009) / 2.0).abs() < 1e-3, "{w}");
+        // 满电但拔了线在真放电: 仍是放电态
+        let s = env_stats("#battery_status=Full\n#charge_suspended=no\n#charge_mode=\n\
+ENV 1.0 4400000 -900000 NA 0 0 cpu-0-0-1 42000\n");
+        assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(true)));
     }
 
     #[test]
