@@ -118,7 +118,7 @@ fn log(msg: &str) {
 // ══════════════ 温度 / 等冷 ══════════════
 
 /// 最热的 SoC 结温 (只看 cpu-/cpullc/gpuss, 与 hwcond.rs::soc_max_c 同口径)。
-fn read_soc_temp(serial: &str) -> Option<(String, f64)> {
+pub(crate) fn read_soc_temp(serial: &str) -> Option<(String, f64)> {
     let txt = adb(
         serial,
         &[

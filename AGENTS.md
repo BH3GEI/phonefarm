@@ -113,6 +113,8 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ```bash
 ./phonefarm eval --request <eval_request.json> --serial S --json      # 评测唯一入口: v1 转交 gpu-op; v2 按 kind 路由 shader/sysparam/gray
                                                                      # sysparam 真机已验证 (probe + 1 候选端到端, optimize 可直连);
+                                                                     # sysparam / gray 每臂开跑前按 conditions.cool_c 等冷 (每 8s 读一次, 最多 300s, 超时不作废),
+                                                                     #   逐臂起跑温度记进 conditions_observed.cool_per_arm, cool_reached_c = 最热的一次
                                                                      # sysparam 改写臂施加后 +12s 与负载末尾各回读一次, 对不上 = 被厂商性能服务抢回 (contested),
                                                                      #   那一臂不进统计, conditions_observed.contested_arms 单列; 快照里只有厂商服务会动的
                                                                      #   频率边界 (kgsl.*pwrlevel、cpu.*.scaling_max/min) 变了不判留痕, 记进 snapshot_vendor_drift
