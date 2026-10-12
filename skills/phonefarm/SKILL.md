@@ -15,7 +15,7 @@ several independent upper paths on one shared foundation of device abstraction,
 record contract, telemetry, and evidence grading.
 
 A vision-language model drives **one** of those paths. It is not what the
-project is. `script`, `test-batch`, `cts-fetch`, `bench`, `capture` and
+project is. `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `collect` and
 `keepalive` spend zero tokens and work with no model at all.
 
 Architecture: decision and execution are separated. Where a model is used at
@@ -69,6 +69,7 @@ benchmarking, frame capture, farm keep-alive, read-only inspection, MCP service.
 | Conformance tests (CTS/XTS) | `test-batch` `cts-fetch` | none |
 | On-device model benchmark | `bench` | none |
 | Frame capture | `capture` | none |
+| Bounded scroll & collect | `collect` | none |
 | Performance optimization loop | `loop_v1/` toolchain (not a subcommand) | none |
 | Hypothesis-experiment-evidence | `hyp` `pred` `caps` `tools` `experiment` `export` `eval` | some |
 | Read-only inspection | `last` `runs` `show` `status` `stats` `cat` `tasks` `tree` `lessons` `campaign` `schema` `config` | none |
@@ -171,6 +172,11 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd ..
 ./phonefarm bench --serial <S> --unlock                           # roll back a stuck freq lock
 ./phonefarm capture --serial <S> --out dir --frames 200 --json
 
+# Bounded scroll & collect: no model call, at most --max-swipes screens, stops the moment a
+# screen yields nothing new. coverage.complete says whether the whole list was covered.
+./phonefarm collect --query "About us" --max-swipes 8   # scroll-find: stop on hit
+./phonefarm collect --max-swipes 12 --json             # list collect: dedupe + coverage boundary
+
 # Inspecting results (read-only, offline, zero model tokens)
 ./phonefarm last                                  # latest session verdict
 ./phonefarm show <run-id> --step N                # drill into one step
@@ -187,7 +193,7 @@ The full CLI surface is in `references/cli.md`.
 - **Only the VLM path burns tokens (real money)**: `run`, `benchmark`,
   `parallel`, and the `[evolution]` quota. Quote the cost and get the user's
   consent before long or physical-device sessions. Everything else —
-  `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `keepalive`, all
+  `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `collect`, `keepalive`, all
   read-only inspection, unit tests and builds — is free and safe to run.
 - Keys come from `./secrets.env` automatically. Never commit it; never
   fabricate keys.

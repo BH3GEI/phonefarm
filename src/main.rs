@@ -12,6 +12,7 @@ mod hwcond;
 mod brain;
 mod capture;
 mod cli;
+mod collect;
 mod cts;
 mod experiment;
 mod fleet;
@@ -814,6 +815,11 @@ fn main() {
         Some("capture") => {
             // 原神无 UI 自动巡航截图(SPEC_SR_LOOP Gate 2): 复用 genshin 插件生命周期与单步, 只抓原始帧, 纯增量子命令
             std::process::exit(capture::run_capture(&args[1..]));
+        }
+        Some("collect") => {
+            // 有界滚动采集(SPEC_OBSERVATION_BUDGET 原语 1): 组合动作, 零 Token。
+            // 语义移自 iPhone-use 的 pua_scroll_find / pua_collect_list。
+            std::process::exit(collect::run_collect(&args[1..]));
         }
         Some("test-batch") => {
             // CTS 批量挂机执行器 (CTS Harness Spec): A2OH 桥接环境的 instrument 调度,

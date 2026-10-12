@@ -31,10 +31,11 @@ phonefarm serve [--root <目录>]
 
 `id` 无论数字还是字符串都原样回显(以 `Value` 透传, 不重解释)。
 
-## 3. 工具清单(21 个 = 17 只读 + 4 执行)
+## 3. 工具清单(22 个 = 17 只读 + 5 执行)
 
 全部工具 = **对现有 CLI 契约的自调用**(`std::env::current_exe()` + 子命令), 零重构 cli.rs/runtime.rs。
 自调用 stdout→text 内容; 退出码非 0 → `isError: true` 并带上 stderr。
+**stdout 解析得出 JSON 对象时, 同一步附上 `structuredContent`**(§3.1)。
 
 清单以 `tools/list` 的实际返回为准(代码即事实)，可随时自查：
 
@@ -66,17 +67,43 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
 | `phonefarm_config` | `config [--key K] --json` | 生效配置(只读) |
 | `phonefarm_cat` | `cat <路径> [--head N] [--tail N] [--grep 词]` | 万能查看器, **路径监狱见 §4** |
 
-**执行面(4)** —— 会动设备：
+**执行面(5)** —— 会动设备：
 
 | 工具 | 自调用 | detach | 说明 |
 |---|---|---|---|
 | `phonefarm_run` | `run --task T [--serial S] [--app P] [--budget-calls N] [--assert ...] --detach "<目标>"` | 强制 | 起一局遍历，**烧 Token** |
 | `phonefarm_benchmark` | `benchmark --task T [--rounds N] ... --detach "<目标>"` | 强制 | 起多轮评测，**烧 Token** |
 | `phonefarm_script` | `script --task T ... --detach <脚本或局ID>` | 强制 | 确定性脚本执行或历史回放，零 Token |
+| `phonefarm_collect` | `collect [--query W] [--max-swipes N] [--max-items N] [--settle-ms M] --json` | 不适用(自身有界) | 有界滚动采集/查找，零 Token，**有界** |
 | `phonefarm_quest` | `quest [--mode M] [--sec N] [--serial S]` | **否，前台跑** | 场景插件的独立长跑 Agent |
 
 前三个强制 `--detach`，立即回报局 ID，进度用 `phonefarm_status` / `phonefarm_show` 轮询
-(适配客户端 60s 工具超时)。
+(适配客户端 60s 工具超时)。`phonefarm_collect` 不 detach 也不长跑: 它自己在
+`max_swipes` 屏内结束, 是**有界**的 —— 子调用超时按预算放宽, 但夹在 60s 天花板内(§3.2)。
+
+### 3.1 结构化返回
+
+每个工具的响应载荷同时给文本与结构化内容(移植自 iPhone-use 的返回约定):
+
+```json
+{"content": [{"type": "text", "text": "…原文…"}],
+ "structuredContent": { …解析得出的对象… },
+ "isError": false}
+```
+
+文本给人/模型读, `structuredContent` 给看板与程序消费 —— **同一份事实, 不各自渲染**。
+MCP 规范要求 `structuredContent` 是对象, 因而子调用输出为数组/标量/非 JSON 时该项缺席,
+文本依旧完整(截断与报错文本照常给)。
+
+### 3.2 子调用超时
+
+| 类别 | 上限 | 说明 |
+|---|---|---|
+| 查看类(默认) | 30s | `phonefarm_devices` 一类的快速读取 |
+| `phonefarm_collect` | `5 + (max_swipes+1) × (2s + settle)`, 夹在 60s 内 | 按滚动预算放宽 |
+
+客户端传超大 `max_swipes` / `settle_ms` 也会被夹住 —— **预算两端都要夹**, 否则一个工具
+就能把 serve 拖成挂死。
 
 > **已知缺口**: `phonefarm_quest` 是唯一不 detach 的执行工具，而它的 `--sec` 缺省 1800，
 > 远超客户端 60s 工具超时——经 MCP 调用时除非显式把 `sec` 压到 60 以内，否则会超时。
