@@ -771,6 +771,167 @@ fn probe_whitelist(serial: &str, evidence: &Path) -> Result<sysparam::Whitelist,
     Ok(sysparam::build_whitelist(&sysparam::parse_probe(&out)))
 }
 
+/// 自驱动负载 (`workload.launch`): 应用带 intent extras 启动后自己跑一段确定性路线
+/// (Megacity 的 city_flythrough), 不需要注入触控/手柄。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LaunchSpec {
+    /// 测量用的 extras (例 `--es scene city_flythrough --es frames 3600 ...`)。
+    pub extras: String,
+    /// 应用进入被测窗口时在自己 files/ 下落的标记文件名 (Megacity: megacity_started)。
+    /// None = 启动后固定等 [`LAUNCH_SETTLE_S`] 秒。
+    pub marker: Option<String>,
+    /// 画面比对用的静态场景 extras (相机不动, 例 `--es scene city_static --es frames 100000`)。
+    pub static_extras: Option<String>,
+}
+
+/// 没有标记文件时, 启动后等多久才开采。
+const LAUNCH_SETTLE_S: u64 = 20;
+/// 等标记文件的上限 (城市流式加载 + 预热可能很久)。
+const LAUNCH_MARKER_TIMEOUT_S: u64 = 300;
+
+pub(crate) fn launch_spec(req: &Value) -> Option<LaunchSpec> {
+    let l = &req["workload"]["launch"];
+    let extras = l["extras"].as_str()?.trim().to_string();
+    if extras.is_empty() {
+        return None;
+    }
+    Some(LaunchSpec {
+        extras,
+        marker: l["marker"].as_str().filter(|m| !m.is_empty()).map(String::from),
+        static_extras: l["static_extras"].as_str().filter(|m| !m.is_empty()).map(String::from),
+    })
+}
+
+/// 自驱动负载跑一轮: (可选) 带 extras 重启应用 → 等它进入被测窗口 → 功耗采样 + ftrace 采集
+/// `seconds` 秒 → 解析。回的形状与 [`run_one_with`] 相同 ({label, run_once_rc, summary, env})。
+/// `relaunch = false` 时应用已经由别人 (挂层那一步) 带着 extras 拉起来了。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_one_launch(
+    serial: &str,
+    label: &str,
+    outdir: &Path,
+    seconds: u64,
+    pkg: &str,
+    comm: Option<&str>,
+    launch: &LaunchSpec,
+    relaunch: bool,
+) -> Result<Value, String> {
+    std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
+    let files = format!("/storage/emulated/0/Android/data/{pkg}/files");
+    if relaunch {
+        let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+        if let Some(m) = &launch.marker {
+            let _ = adb(serial, &["shell", &format!("rm -f {files}/{m}")], 15);
+        }
+        let comp = adb(serial, &["shell", &format!("cmd package resolve-activity --brief {pkg}")], 30);
+        let comp = comp
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| l.contains('/') && !l.starts_with('#'))
+            .ok_or(format!("解析不到 {pkg} 的启动 activity"))?
+            .to_string();
+        let am = adb(serial, &["shell", &format!("am start -W -n {comp} {}", launch.extras)], 60);
+        std::fs::write(outdir.join("am.log"), &am).ok();
+    }
+    // 等进入被测窗口
+    match &launch.marker {
+        Some(m) => {
+            let t0 = std::time::Instant::now();
+            loop {
+                let got = adb(serial, &["shell", &format!("cat {files}/{m} 2>/dev/null")], 15);
+                if !crate::graylayer::GrayLayer::adb_stdout(&got).trim().is_empty() {
+                    break;
+                }
+                let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
+                if crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty() {
+                    return Err(format!("{label}: {pkg} 在进入被测窗口前就退了"));
+                }
+                if t0.elapsed().as_secs() > LAUNCH_MARKER_TIMEOUT_S {
+                    return Err(format!("{label}: 等了 {LAUNCH_MARKER_TIMEOUT_S}s 还没进入被测窗口 (没有 {m})"));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+        None => std::thread::sleep(std::time::Duration::from_secs(LAUNCH_SETTLE_S)),
+    }
+    // 功耗采样与 ftrace 并行, 覆盖整个采集窗
+    let env_path = outdir.join("env.txt");
+    let dur = seconds + 4;
+    let sampler = Command::new(adb_path())
+        .args(["-s", serial, "shell"])
+        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2'"))
+        .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let tr = format!("{DEV_TMP}/lw_{label}.txt");
+    let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {seconds} {tr}"), seconds + 120);
+    std::fs::write(outdir.join("capture.log"), &cap).ok();
+    let _ = adb(serial, &["pull", &tr, &outdir.join("trace.txt").to_string_lossy()], 120);
+    let _ = adb(serial, &["shell", &format!("rm -f {tr}")], 15);
+    if let Ok(mut s) = sampler {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            match s.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() > deadline => {
+                    let _ = s.kill();
+                    let _ = s.wait();
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(_) => break,
+            }
+        }
+    }
+    if relaunch {
+        // 量完就停掉, 别让它在还原、等冷的时候接着烧
+        let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    }
+    let trace = std::fs::read(outdir.join("trace.txt")).map_err(|e| format!("{label}: 没拉回 trace ({e})"))?;
+    let c = comm.filter(|c| !c.is_empty()).unwrap_or(crate::looptrace::DEFAULT_RENDER_COMM);
+    let d = crate::looptrace::parse(&String::from_utf8_lossy(&trace), c);
+    let summary = crate::pyjson::dumps(&d.summarize());
+    std::fs::write(outdir.join("summary.json"), &summary).map_err(|e| e.to_string())?;
+    let mut m = json!({ "label": label, "run_once_rc": 0, "launch": true });
+    m["summary"] = serde_json::from_str(&summary).map_err(|e| format!("{label}: summary 解析失败 {e}"))?;
+    if let Ok(t) = std::fs::read_to_string(&env_path) {
+        m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats(&t))).unwrap_or(Value::Null);
+    }
+    Ok(m)
+}
+
+/// storeop-check 用静态场景时, 启动后等城市装完的时间 (秒)。
+const STATIC_SETTLE_S: u64 = 60;
+/// 开/关之间的像素差占比, 最多比同状态噪声高这么多个百分点。
+const LIVE_CHECK_MARGIN_PCT: f64 = 0.5;
+
+/// storeop-check 的结果判画面: 改写要真的命中, 游戏要活着, 关~开 的差异不能明显超过同状态噪声。
+pub(crate) fn live_check_verdict(v: &Value) -> Result<(), String> {
+    if v["game_alive"].as_bool() == Some(false) {
+        return Err("开着改写时游戏退了".into());
+    }
+    if v["effective_hit"].as_u64().unwrap_or(0) == 0 {
+        return Err("改写一次都没命中 (effective_hit=0), 比对不出东西".into());
+    }
+    let rows = v["diffs"].as_array().cloned().unwrap_or_default();
+    let max_of = |kind: &str| {
+        rows.iter()
+            .filter(|r| r["kind"].as_str() == Some(kind))
+            .filter_map(|r| r["diff_px_pct"].as_f64())
+            .reduce(f64::max)
+    };
+    let (Some(on_off), Some(noise)) = (max_of("off_vs_on"), max_of("same_state")) else {
+        return Err("storeop-check 没给出关~开 与同状态的比对".into());
+    };
+    if on_off > noise + LIVE_CHECK_MARGIN_PCT {
+        return Err(format!(
+            "开/关改写之间 {on_off:.3}% 像素变了, 同状态噪声只有 {noise:.3}% (容差 {LIVE_CHECK_MARGIN_PCT} 个百分点)"
+        ));
+    }
+    Ok(())
+}
+
 /// 跑一轮负载 + ftrace 采集 + 功耗温度采样 (与 autoloop.run_one 同一编排:
 /// sample_env 与 run_once 并行, 覆盖整段负载)。渲染线程按 Unity 缺省 (UnityGfxDeviceW) 解析。
 pub(crate) fn run_one(
@@ -1090,9 +1251,12 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         .map(String::from)
         .unwrap_or_else(|| "loop_v1/scripts/workload_spin_touch_v1.json".into());
     let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen");
-    let workload_path = match resolve_path(&wl_file) {
-        Some(p) => p,
-        None => {
+    let launch = launch_spec(req);
+    let workload_path = match (resolve_path(&wl_file), &launch) {
+        (Some(p), _) => p,
+        // 自驱动负载用不到脚本
+        (None, Some(_)) => PathBuf::new(),
+        (None, None) => {
             report["verdict"]["reason"] = json!(format!(
                 "负载脚本不在: {wl_file} (按 cwd 与仓库根都找不到)"
             ));
@@ -1155,15 +1319,27 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                     su(&serial, &cmd, 30)
                 })
             };
-            let res = run_one_with(
-                serial,
-                &label,
-                &evidence.join(format!("{arm}{i}")),
-                seconds,
-                &workload_path,
-                pkg,
-                req["workload"]["render_comm"].as_str(),
-            );
+            let res = match &launch {
+                Some(l) => run_one_launch(
+                    serial,
+                    &label,
+                    &evidence.join(format!("{arm}{i}")),
+                    seconds,
+                    pkg,
+                    req["workload"]["render_comm"].as_str(),
+                    l,
+                    true,
+                ),
+                None => run_one_with(
+                    serial,
+                    &label,
+                    &evidence.join(format!("{arm}{i}")),
+                    seconds,
+                    &workload_path,
+                    pkg,
+                    req["workload"]["render_comm"].as_str(),
+                ),
+            };
             let rb_mid = rb_thread.join().unwrap_or_default();
             let mut arm_contested: Vec<String> = Vec::new();
             if arm == "knob" {
@@ -1609,8 +1785,15 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     // **两臂都挂层**, 唯一差别是改写属性 —— ctrl = 层+改写全关, knob = 层+这一组改写。
     // 要判的是"这条改写"值不值, 不是"挂层这件事"值不值; 两臂都挂层才能把层本身的
     // 开销消掉, 差值才干净地对应改写这一个改动。
-    let gl = crate::graylayer::GrayLayer::new(serial);
+    let launch = launch_spec(req);
+    if launch.is_some() && knobs.loadop {
+        report["verdict"]["reason"] = json!("自驱动负载只支持 storeop_dont_care (画面比对走孪生 pass 现场切换, loadop 没有孪生)");
+        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+    }
+    let extras = launch.as_ref().map(|l| l.extras.clone());
+    let gl = crate::graylayer::GrayLayer::new(serial).with_launch_extras(extras.clone());
     let gl_knob = crate::graylayer::GrayLayer::new(serial)
+        .with_launch_extras(extras)
         .with_storeop((knobs.storeop != "0").then(|| knobs.storeop.clone()), false);
     let mount = |arm: &str| -> Result<(), String> {
         if arm == "knob" {
@@ -1641,14 +1824,49 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let wl_file = req["workload"]["script"]
         .as_str()
         .unwrap_or("loop_v1/scripts/workload_spin_touch_v1.json");
-    let workload_path = match resolve_path(wl_file) {
-        Some(p) => p,
-        None => {
+    let workload_path = match (resolve_path(wl_file), &launch) {
+        (Some(p), _) => p,
+        (None, Some(_)) => PathBuf::new(),
+        (None, None) => {
             report["verdict"]["reason"] =
                 json!(format!("负载脚本不在: {wl_file} (按 cwd 与仓库根都找不到)"));
             return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
         }
     };
+    // 自驱动负载 (相机一直在飞) 没法在两臂之间截到同一画面: 画面比对改成上机前跑一次
+    // frame-audit storeop-check —— 同一局里用孪生 pass 现场开/关, 静态场景逐像素比。
+    // 开关之间的差异 (off_vs_on) 不能明显大于同状态之间的噪声 (same_state), 否则判画面出错。
+    let mut live_check: Option<Value> = None;
+    if let Some(l) = &launch {
+        let static_extras = l.static_extras.clone().unwrap_or_else(|| l.extras.clone());
+        let chk = crate::frameaudit::storeop_check(
+            serial,
+            &evidence.join("image_check"),
+            None,
+            &knobs.storeop,
+            2,
+            &pkg,
+            &[],
+            STATIC_SETTLE_S,
+            Some(static_extras),
+        );
+        let v = match chk {
+            Ok(v) => v,
+            Err(e) => {
+                report["verdict"]["reason"] = json!(format!("画面比对 (storeop-check) 没做成, 不上 A/B: {e}"));
+                report["evidence_dir"] = json!(evidence.display().to_string());
+                return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+            }
+        };
+        let verdict = live_check_verdict(&v);
+        if let Err(why) = &verdict {
+            report["conditions_observed"] = json!({"image_check": {"method": "storeop_check_live", "result": v}});
+            report["verdict"]["reason"] = json!(format!("画面出错: {why}"));
+            report["evidence_dir"] = json!(evidence.display().to_string());
+            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+        }
+        live_check = Some(v);
+    }
     let mut knob_runs: Vec<Value> = Vec::new();
     let mut ctrl_runs: Vec<Value> = Vec::new();
     let mut abort_reason: Option<String> = None;
@@ -1679,6 +1897,39 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                     abort_reason = Some(format!("{arm}{i} 重启后没回到游戏场景: {e}"));
                     break 'rounds;
                 }
+            }
+            if let Some(l) = &launch {
+                let res = run_one_launch(
+                    serial,
+                    &format!("gray_{arm}{i}"),
+                    &evidence.join(format!("{arm}{i}")),
+                    seconds,
+                    &pkg,
+                    req["workload"]["render_comm"].as_str(),
+                    l,
+                    false,
+                );
+                match res {
+                    Ok(mut m) => {
+                        if let (Some(t), Some(cap)) = (run_soc_temp_max(&m), temp_cap) {
+                            if t > cap {
+                                abort_reason = Some(format!("{arm} 臂第 {i} 轮 SoC 结温 {t}C 超过上限 {cap}C"));
+                                break 'rounds;
+                            }
+                        }
+                        if arm == "knob" {
+                            m["layer_hits"] = json!(layer_hits(serial, &pkg, evidence));
+                            knob_runs.push(m);
+                        } else {
+                            ctrl_runs.push(m);
+                        }
+                    }
+                    Err(e) => {
+                        abort_reason = Some(e);
+                        break 'rounds;
+                    }
+                }
+                continue;
             }
             std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
             match grab_rgba(serial) {
@@ -1726,6 +1977,9 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                 }
             }
         }
+        if launch.is_some() {
+            continue; // 画面比对已在上机前用 storeop-check 做过
+        }
         let (k, c) = (&shots["knob"], &shots["ctrl"]);
         let Some(p) = psnr_rgba(&k.2, &c.2) else {
             abort_reason = Some(format!("第 {i} 轮两臂截图尺寸不一样 ({}x{} vs {}x{}), 画面比对做不了", k.0, k.1, c.0, c.1));
@@ -1768,10 +2022,14 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         "hits": hits,
         "apply_ok": hits > 0,
         "restored": restore_clean,
-        "image_check": {
-            "min_psnr_db": min_psnr,
-            "psnr_knob_vs_ctrl_db": psnr_knob_vs_ctrl,
-            "psnr_ctrl_vs_ctrl_db": psnr_ctrl_vs_ctrl,
+        "image_check": match &live_check {
+            Some(v) => json!({"method": "storeop_check_live", "result": v}),
+            None => json!({
+                "method": "same_spot_screenshot",
+                "min_psnr_db": min_psnr,
+                "psnr_knob_vs_ctrl_db": psnr_knob_vs_ctrl,
+                "psnr_ctrl_vs_ctrl_db": psnr_ctrl_vs_ctrl,
+            }),
         },
     });
     report["evidence_dir"] = json!(evidence.display().to_string());
@@ -2250,6 +2508,35 @@ mod path_tests {
             arm_cool_timeout(&[json!({"timeout": false}), json!({"timeout": true})]),
             ARM_COOL_TIMEOUT_AFTER_MISS_S
         );
+    }
+
+    #[test]
+    fn launch_spec_is_read_from_the_workload() {
+        let req = json!({"workload": {"launch": {"extras": "--es scene city_flythrough", "marker": "megacity_started",
+            "static_extras": "--es scene city_static"}}});
+        let l = launch_spec(&req).unwrap();
+        assert_eq!(l.marker.as_deref(), Some("megacity_started"));
+        assert_eq!(l.static_extras.as_deref(), Some("--es scene city_static"));
+        assert!(launch_spec(&json!({"workload": {}})).is_none());
+        assert!(launch_spec(&json!({"workload": {"launch": {"extras": " "}}})).is_none());
+    }
+
+    #[test]
+    fn live_check_passes_only_when_toggling_looks_like_noise() {
+        let ok = json!({"game_alive": true, "effective_hit": 1, "diffs": [
+            {"kind": "noise_1s", "diff_px_pct": 0.1},
+            {"kind": "off_vs_on", "diff_px_pct": 0.4},
+            {"kind": "same_state", "diff_px_pct": 0.3}]});
+        assert!(live_check_verdict(&ok).is_ok());
+        let mut bad = ok.clone();
+        bad["diffs"][1]["diff_px_pct"] = json!(12.0);
+        assert!(live_check_verdict(&bad).unwrap_err().contains("12.000%"));
+        let mut miss = ok.clone();
+        miss["effective_hit"] = json!(0);
+        assert!(live_check_verdict(&miss).is_err());
+        let mut dead = ok;
+        dead["game_alive"] = json!(false);
+        assert!(live_check_verdict(&dead).is_err());
     }
 }
 
