@@ -113,6 +113,9 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ```bash
 ./phonefarm eval --request <eval_request.json> --serial S --json      # 评测唯一入口: v1 转交 gpu-op; v2 按 kind 路由 shader/sysparam/gray
                                                                      # sysparam 真机已验证 (probe + 1 候选端到端, optimize 可直连);
+                                                                     # 自驱动负载 workload.launch = {extras, marker, static_extras} (Megacity city_flythrough):
+                                                                     #   sysparam 每臂带 extras 重启应用、等 marker 落地再采; gray 挂层时带 extras 启动;
+                                                                     #   gray 的画面比对改为上机前跑一次 storeop-check (static_extras 场景, 孪生 pass 现场开关)
                                                                      # sysparam / gray 每臂开跑前按 conditions.cool_c 等冷 (每 8s 读一次, 最多 300s, 超时不作废),
                                                                      #   逐臂起跑温度记进 conditions_observed.cool_per_arm, cool_reached_c = 最热的一次
                                                                      # sysparam 改写臂施加后 +12s 与负载末尾各回读一次, 对不上 = 被厂商性能服务抢回 (contested),

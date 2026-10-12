@@ -1133,7 +1133,7 @@ fn ui_rects(w: usize, h: usize) -> Vec<(usize, usize, usize, usize)> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<Value, String> {
+pub(crate) fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<Value, String> {
     std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
     let gl = GrayLayer::new(serial).with_so(so).with_storeop(Some(rule.to_string()), true).with_launch_extras(extras);
     let _ = gl.off();
