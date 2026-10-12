@@ -1563,6 +1563,10 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         "rail": env["power_rail"],
         "battery_status": env["battery_status"],
         "battery_current_now_ua": env["current_now_ua_mean"].as_f64().map(|x| x as i64),
+        "usb_input_w_mean": env["usb_input_w_mean"],
+        "bypass": env["bypass"],
+        "power_usable_reason": env["power_usable_reason"],
+        "fan_state": env["fan_state"],
         "battery_capacity_pct": env["battery_capacity_pct"].as_str().and_then(|s| s.parse::<i64>().ok()),
         "on_battery": env["on_battery"],
         "source": env["power_source"],
@@ -1592,6 +1596,30 @@ fn reachable(n: u32, alpha_win: f64) -> bool {
         }
     }
     2.0 / c < alpha_win
+}
+
+/// 功耗的辅助证据: GPU 平均频率 (sample_env 的 GPU 行)、总线带宽投票中位与 GPU 忙碌时间
+/// (parse-trace)。只报不判 —— 不进 wins / regressions, 不影响是否保留; 功耗量不准时它们说明
+/// 「GPU 那头确实少干了活」(2026-10-12 W1: 去 MSAA 后频率 −13%、带宽投票 −15%, 5 对完全分开,
+/// 而忙碌时间不变: DVFS 把省下的活换成了降频)。缺数据的项记 null。
+pub(crate) fn aux_compare(a_runs: &[Run], b_runs: &[Run]) -> Value {
+    let mut out = serde_json::Map::new();
+    for metric in ["gpu_clk_mhz_mean", "bw_median", "gpu_active_mean"] {
+        let cmp = loopstat::compare(a_runs, b_runs, metric);
+        let sv = |k: &str| cmp.get(k).map(to_serde).unwrap_or(Value::Null);
+        out.insert(
+            metric.to_string(),
+            if cmp.get("error").is_some() {
+                Value::Null
+            } else {
+                json!({
+                    "a_mean": sv("a_mean"), "b_mean": sv("b_mean"),
+                    "diff_pct": sv("diff_pct"), "p": sv("perm_p_two_sided"), "ci95": sv("ci95"),
+                })
+            },
+        );
+    }
+    json!({"note": "辅助证据, 只报不判: 不进 wins/regressions, 不替代功耗", "metrics": Value::Object(out)})
 }
 
 /// ABBA 两臂的统计判定 (sysparam / gray 共用): 帧时 p95、平均帧率, 两臂都放电时加功耗。
@@ -1651,6 +1679,7 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
         ));
     }
     let keep = !wins.is_empty() && regressions.is_empty();
+    let aux = aux_compare(&a_runs, &b_runs);
     let verdict = json!({
         "is_pareto_improvement": keep,
         "p_value": p_primary,
@@ -1662,6 +1691,7 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
         "wins": wins,
         "regressions": regressions,
         "per_metric": Value::Object(per_metric.into_iter().collect()),
+        "aux": aux,
         "reason": if keep {
             json!(format!("改善 {} 且无显著退化", metrics_list.iter().find(|(m, _)| wins.first() == Some(&m.to_string())).map(|(m, _)| m.clone()).unwrap_or_default()))
         } else if !regressions.is_empty() {

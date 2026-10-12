@@ -326,9 +326,14 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     }
     report["metrics"] = m;
     let env = knob_runs.last().or(ctrl_runs.last()).and_then(|r| r.get("env")).cloned().unwrap_or(json!({}));
+    // 复核用: 电池状态、电池电流、USB 轨读数都带上 (满电空闲时只有 USB 轨可信)
     report["power_source"] = json!({
         "rail": env["power_rail"], "battery_status": env["battery_status"],
-        "on_battery": env["on_battery"], "source": env["power_source"],
+        "battery_current_now_ua": env["current_now_ua_mean"], "battery_capacity_pct": env["battery_capacity_pct"],
+        "usb_input_w_mean": env["usb_input_w_mean"],
+        "on_battery": env["on_battery"], "bypass": env["bypass"], "source": env["power_source"],
+        "power_usable_reason": env["power_usable_reason"],
+        "fan_state": env["fan_state"],
         "charging_suspended_via": suspended_via,
     });
     if measure_only {
