@@ -786,6 +786,73 @@ fn ocr_bin() -> Result<PathBuf, String> {
     }
 }
 
+/// 像一句话的 OCR 条目 (对话框正文): 英文 ≥ 4 个词, 或中文 ≥ 8 个字。
+fn sentence_like(t: &str) -> bool {
+    tokens(t).len() >= 4 || norm(t).chars().filter(|c| !c.is_ascii()).count() >= 8
+}
+
+/// 第二遍 OCR 要放大看的区域: 把「一句话」的条目按上下相邻聚成块 (对话框正文),
+/// 每块往下多看 4 行 (按钮通常在正文下方)、上面 1 行、左右各 15% 外加 5% 屏宽。
+/// 整屏 OCR 对正文下面的小按钮 (10-11 Megacity 的「OK」) 会漏, 裁出来单独认就认得出。
+/// 返回 [x1,y1,x2,y2] (像素, 已截到屏幕内); 超过半屏的块不要 (那不是对话框)。
+pub fn zoom_regions(items: &[OcrItem], w: u32, h: u32) -> Vec<[i32; 4]> {
+    let mut sent: Vec<[i32; 4]> = items.iter().filter(|i| sentence_like(&i.t)).map(|i| i.b).collect();
+    sent.sort_by_key(|b| b[1]);
+    let mut blocks: Vec<([i32; 4], i32)> = Vec::new(); // (并集框, 行高)
+    for b in sent {
+        let lh = (b[3] - b[1]).max(1);
+        if let Some((u, l)) = blocks.last_mut() {
+            let x_overlap = b[0] < u[2] && b[2] > u[0];
+            if x_overlap && b[1] - u[3] <= 2 * (*l).max(lh) {
+                *u = [u[0].min(b[0]), u[1].min(b[1]), u[2].max(b[2]), u[3].max(b[3])];
+                *l = (*l).max(lh);
+                continue;
+            }
+        }
+        blocks.push((b, lh));
+    }
+    let (w, h) = (w as i32, h as i32);
+    blocks
+        .into_iter()
+        .map(|(u, lh)| {
+            let mx = (u[2] - u[0]) * 15 / 100 + w / 20;
+            [(u[0] - mx).max(0), (u[1] - lh).max(0), (u[2] + mx).min(w), (u[3] + 4 * lh).min(h)]
+        })
+        .filter(|r| (r[2] - r[0]) as i64 * (r[3] - r[1]) as i64 * 2 <= w as i64 * h as i64)
+        .collect()
+}
+
+/// 对 `zoom_regions` 的每块裁图放大 1.5 倍再认一遍, 坐标换回整屏; 和第一遍重复的 (中心落在
+/// 已有框里) 不要。
+fn zoom_ocr(bin: &Path, img: &image::RgbImage, items: &[OcrItem], tmp: &Path) -> Vec<OcrItem> {
+    let (w, h) = img.dimensions();
+    let mut out = Vec::new();
+    for r in zoom_regions(items, w, h) {
+        let (cw, ch) = ((r[2] - r[0]) as u32, (r[3] - r[1]) as u32);
+        if cw < 8 || ch < 8 {
+            continue;
+        }
+        let crop = image::imageops::crop_imm(img, r[0] as u32, r[1] as u32, cw, ch).to_image();
+        let big = image::imageops::resize(&crop, cw * 3 / 2, ch * 3 / 2, image::imageops::FilterType::CatmullRom);
+        if big.save_with_format(tmp, image::ImageFormat::Jpeg).is_err() {
+            continue;
+        }
+        for mut it in run_ocr(bin, tmp) {
+            for k in 0..4 {
+                let off = if k % 2 == 0 { r[0] } else { r[1] };
+                it.b[k] = it.b[k] * 2 / 3 + off;
+            }
+            let (cx, cy) = it.center();
+            let dup = items.iter().chain(out.iter()).any(|e: &OcrItem| cx >= e.b[0] && cx <= e.b[2] && cy >= e.b[1] && cy <= e.b[3]);
+            if !dup {
+                out.push(it);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(tmp);
+    out
+}
+
 fn run_ocr(bin: &Path, img: &Path) -> Vec<OcrItem> {
     let Ok(o) = Command::new(bin).arg(img).output() else { return vec![] };
     String::from_utf8_lossy(&o.stdout)
@@ -1000,10 +1067,20 @@ fn enter(dev: &Dev, cfg: &EnterCfg) -> EnterResult {
         }
 
         let _ = img.save_with_format(&ocr_img, image::ImageFormat::Jpeg);
-        let items = run_ocr(&ocr, &ocr_img);
+        let mut items = run_ocr(&ocr, &ocr_img);
         let fg_ok = fg == cfg.pkg;
         let uniform = near_uniform(&img);
         let mut dec = classify(&items, fg_ok, &fg, cfg.policy, &banned);
+        // 认不出可点的东西时, 把对话框正文附近裁出来放大再认一遍 (小按钮整屏认会漏)
+        let mut zoomed = 0;
+        if fg_ok && !uniform && dec.act == Act::Probe {
+            let extra = zoom_ocr(&ocr, &img, &items, &cfg.out.join("_zoom.jpg"));
+            if !extra.is_empty() {
+                zoomed = extra.len();
+                items.extend(extra);
+                dec = classify(&items, fg_ok, &fg, cfg.policy, &banned);
+            }
+        }
         if fg_ok && uniform && dec.act == Act::Probe {
             dec = Decision { screen: Screen::Loading, act: Act::Wait { why: "纯色画面 (黑屏过场)".into() } };
         }
@@ -1014,6 +1091,7 @@ fn enter(dev: &Dev, cfg: &EnterCfg) -> EnterResult {
             "n": n, "t_s": (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0,
             "fg": fg, "screen": dec.screen, "act": dec.act,
             "ocr": items.iter().take(12).map(|i| i.t.clone()).collect::<Vec<_>>(),
+            "zoom_items": zoomed,
             "shot": shot.file_name().map(|s| s.to_string_lossy().to_string()),
         });
 
@@ -1913,6 +1991,29 @@ CHARGE_STATE status=Charging current_now=-632000 capacity=100 on_battery=no";
         assert!(!suspend_took("CHARGE_SKIP: 电量 20% 低于停充下限 30%, 不停充"));
         assert!(suspend_took("CHARGE_SUSPENDED /sys/class/qcom-battery/charging_enabled: 1 -> 0\nCHARGE_STATE status=Discharging current_now=-640000 capacity=100 on_battery=yes"));
         assert!(suspend_took("CHARGE_ALREADY_ON_BATTERY (本来就在放电态, 不需要停充)"));
+    }
+
+    #[test]
+    fn zoom_finds_the_dialog_body_not_the_menu() {
+        // 10-11 Megacity 冷启动 (2688x1216): 左边菜单, 中间一个只有正文被认出、「OK」漏掉的对话框
+        let s = |t: &str, b: [i32; 4]| OcrItem { t: t.into(), b: b.map(|v| v * 28 / 10) };
+        let items = vec![
+            s("SINGLE PLAYER", [142, 202, 252, 218]),
+            s("MULTIPLAYER", [148, 232, 246, 248]),
+            s("OPTIONS", [164, 260, 230, 276]),
+            s("QUIT", [180, 290, 216, 308]),
+            s("TO USE UNITYIS DASHBOARD SERYICES，", [390, 184, 568, 196]),
+            s("YOU NEED TO LINKYOUR UNITY", [408, 196, 552, 208]),
+            s("PROIECT TOA PROJECT ID.", [418, 210, 540, 222]),
+            s("V.15.0", [926, 414, 958, 424]),
+        ];
+        let r = zoom_regions(&items, 2688, 1216);
+        assert_eq!(r.len(), 1, "{r:?}");
+        let ok = (480 * 28 / 10, 242 * 28 / 10); // 截图里 OK 的位置
+        assert!(ok.0 > r[0][0] && ok.0 < r[0][2] && ok.1 > r[0][1] && ok.1 < r[0][3], "{r:?} 没盖住 OK {ok:?}");
+        assert!(r[0][0] > 252 * 28 / 10, "不该把左边菜单裁进来: {r:?}");
+        // 只有按钮没有正文: 不放大
+        assert!(zoom_regions(&items[..4], 2688, 1216).is_empty());
     }
 
     #[test]
