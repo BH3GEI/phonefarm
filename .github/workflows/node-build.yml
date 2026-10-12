@@ -122,6 +122,23 @@ jobs:
           json.dump(info, open("build.json", "w"), indent=2)
           print(json.dumps(info, indent=2))
           PY
+      - name: 推 git ref 镜像 refs/node-build/sha/<提交>
+        # 节点（国内网络）访问 release 资产要跳转到 release-assets.githubusercontent.com（Fastly），时好时坏；
+        # 节点拉源码走的 ssh github.com 一直稳。所以产物也做成一个孤立提交推到隐藏 ref（不在 refs/heads 下，
+        # 普通 clone/fetch 不会下载它），节点用 git 按提交号取。ref 更新是原子的，没有覆盖窗口。
+        run: |
+          mkdir mirror && cp out/* build.json mirror/ && cd mirror
+          git init -q && git config user.name node-build && git config user.email node-build@users.noreply.github.com
+          git add -A && git commit -qm "node-build $GITHUB_SHA"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/$GH_REPO.git"
+          git push -q -f "$remote" "HEAD:refs/node-build/sha/$GITHUB_SHA"
+          echo "已推 refs/node-build/sha/$GITHUB_SHA -> $(git rev-parse HEAD)"
+          # 只留最近 8 个（按产物提交时间）
+          git ls-remote "$remote" 'refs/node-build/sha/*' | while read -r oid ref; do
+            echo "$(gh api "repos/$GH_REPO/git/commits/$oid" -q .committer.date) $ref"
+          done | sort -r | tail -n +9 | while read -r _ ref; do
+            echo "删旧 ref $ref"; git push -q "$remote" ":$ref"
+          done
       - name: 上传到 release node-build
         run: |
           # 只有比 release 现有 sha 更新（是它的后代）才覆盖，防止排队的旧提交盖掉新产物
