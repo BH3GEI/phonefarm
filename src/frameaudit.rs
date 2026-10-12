@@ -457,6 +457,23 @@ fn ev_sig(ev: &Ev) -> String {
 }
 
 pub(crate) fn find(t: &Timeline) -> Vec<Finding> {
+    // 自检: 有 draw 的 pass 却一处描述符引用都没看到 = 层看不见这个游戏的「读」
+    // (例: 描述符走了层没钩的路径)。这时任何「没人读」的结论都是假阳性, 一律不报。
+    // 2026-10-11 Megacity (Unity 6) 实测踩到: 未钩描述符模板时 4096² 阴影图被判成白存。
+    let draws: u64 = t.evs.iter().filter(|e| e.kind == "pass").map(|e| u(&e.raw, "dr") + u(&e.raw, "dri") + u(&e.raw, "drn")).sum();
+    let refs: usize = t.evs.iter().map(|e| e.raw["rd"].as_array().map(|a| a.len()).unwrap_or(0) + e.raw["wr"].as_array().map(|a| a.len()).unwrap_or(0)).sum();
+    if draws > 0 && refs == 0 {
+        return vec![Finding {
+            rule: "reads_invisible",
+            frame: 0,
+            ev: 0,
+            att: None,
+            bytes: 0.0,
+            ms: None,
+            certain: true,
+            why: format!("有 {draws} 笔 draw 却没看到任何描述符引用: 层看不见这个游戏的读, 白存/白画/transient 结论全部不可信, 已全部不报 (诊断 {})", t.diag),
+        }];
+    }
     // 每个子资源的访问序列 (事件下标, 访问)
     let mut seq: BTreeMap<Sub, Vec<(usize, Acc)>> = BTreeMap::new();
     for i in 0..t.evs.len() {
@@ -752,8 +769,10 @@ pub(crate) fn frame_stats(t: &Timeline, f: usize) -> Value {
     let mut lo_load = 0u64;
     let mut empty_pass = 0u64;
     let mut query_passes = 0u64;
+    let mut refs = 0u64;
     for ev in &t.evs[lo..hi] {
         *kinds.entry(ev.kind.clone()).or_default() += 1;
+        refs += (ev.raw["rd"].as_array().map(|a| a.len()).unwrap_or(0) + ev.raw["wr"].as_array().map(|a| a.len()).unwrap_or(0)) as u64;
         if ev.kind == "pass" {
             passes += 1;
             let d = u(&ev.raw, "dr") + u(&ev.raw, "dri") + u(&ev.raw, "drn");
@@ -788,6 +807,7 @@ pub(crate) fn frame_stats(t: &Timeline, f: usize) -> Value {
         "draws": draws,
         "empty_passes": empty_pass,
         "query_passes": query_passes,
+        "descriptor_refs": refs,
         "load_attachments": lo_load,
         "model_load_mb": (load_b / 1e6 * 100.0).round() / 100.0,
         "model_store_mb": (store_b / 1e6 * 100.0).round() / 100.0,
@@ -1530,6 +1550,22 @@ mod tests {
         assert_eq!(parse_taps("1342,651; 10,20"), vec![(1342, 651), (10, 20)]);
         assert!(parse_taps("").is_empty());
         assert_eq!(parse_taps("x,1;3,4"), vec![(3, 4)]);
+    }
+
+    /// 有 draw 却零描述符引用: 不报任何「没人读」, 只报 reads_invisible
+    #[test]
+    fn invisible_reads_suppress_dead_findings() {
+        let mut j = fixture();
+        for f in j["frames"].as_array_mut().unwrap() {
+            for e in f["submits"][0]["cbs"][0]["ev"].as_array_mut().unwrap() {
+                e.as_object_mut().unwrap().remove("rd");
+            }
+        }
+        let t = Timeline::from_json(&j).unwrap();
+        let fs = find(&t);
+        assert_eq!(fs.len(), 1, "{fs:#?}");
+        assert_eq!(fs[0].rule, "reads_invisible");
+        assert_eq!(frame_stats(&t, 0)["descriptor_refs"], json!(0));
     }
 
     #[test]
