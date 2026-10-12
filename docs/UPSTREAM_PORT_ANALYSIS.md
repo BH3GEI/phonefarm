@@ -323,12 +323,17 @@ web view helper 未沙箱 / UIKit app 忽略 SIGTERM（1.5 s 后 SIGKILL）/ app
 
 ## 6. 建议的移植批次
 
+> **进展**：批次 0/1 已落地（PR #49，已合入）。批次 2 已落地在 PR #50（iOS 后端，未上真机验证）。
+> 批次 3/4 未开始。
+
 按「价值 / 与硬边界冲突程度 / 可验证性」排序：
 
 - **批次 0（先做，纯文档）**：把本文件转成正式设计稿，加 `THIRD_PARTY_NOTICES.md`，明确署名与边界。
 - **批次 1（零风险，收益高）**：C3 观察预算契约 + C1.5 组合动作原语 + C1.8 `structuredContent`。
   —— 直接降 token，不碰判定口径，可独立测试。
 - **批次 2（新能力）**：C2 `platform::Ios` 后端（WDA over USB），先只实现 `devices`/`capture`/`script` 三条零 token 路径。
+  —— **已落地**：`src/ios.rs` 实现了完整 `Backend`，`devices` 枚举三族并列；
+  **未上真机验证**（WDA 各版本的 JSON source 形状与端点可用性未核）。
 - **批次 3（本地模型）**：B2/B3 —— 以 sidecar 形式接 Laya 做「降级决策器」，不进判定层。
 - **批次 4（看板）**：C4 屏幕 widget 接进看板网页。
 - **暂不做**：A 树全部（除 A4.12/A2.11 外均为 iOS 模拟器专有）；B1 表单填写；B4/B5 演示与基准。

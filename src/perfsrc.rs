@@ -36,6 +36,8 @@ pub const SRC_HARMONY_SMARTPERF: &str = "harmony_smartperf";
 /// 安卓侧的 HiSmartPerf 通路 (设备端 `GamePerfToolCollector`, 见 `gpdaemon`)。
 /// 与 `harmony_smartperf` 同名不同物: 那边是 `SP_daemon` 落盘 CSV, 这边是 socket 实时流。
 pub const SRC_ANDROID_SMARTPERF: &str = "android_smartperf";
+/// iOS 侧**没有**性能来源。
+pub const SRC_IOS_NONE: &str = "ios_none";
 
 /// `unavailable` 里的特殊字段名: 不是某一个字段缺了, 是**整条采集通路不可用**
 /// (设备端没有 SP_daemon、不是鸿蒙设备等)。调用方据此把退出码与「设备在、但这轮没采到」区分开。
@@ -687,12 +689,37 @@ pub fn for_device(phone: &Device, a: &PerfArgs) -> Box<dyn PerfSource> {
             xpower_out: a.xpower_out.as_ref().map(std::path::PathBuf::from),
             ..Default::default()
         }),
+        // iOS 走**如实失败**的路, 而不是悄悄退回安卓的 sysfs: 后者会拿着一个空的
+        // `shell` 结果往下走, 最后交出一份「数字全是 null, 但 source 写着 android_sysfs」
+        // 的报告 —— 那是比失败更坏的东西。
+        "wda" => Box::new(IosNoSource),
         _ => match a.android_source {
             AndroidSource::Sysfs => Box::new(AndroidSysfs { rail: a.rail }),
             AndroidSource::SmartPerf => {
                 Box::new(AndroidSmartPerf { pkg: a.pkg.clone(), ..Default::default() })
             }
         },
+    }
+}
+
+/// iOS: 整条性能通路不可用。
+///
+/// 依据: WDA 不提供帧时与功耗(确定); iOS 设备侧也没有安卓那样的 sysfs 电源轨、
+/// 没有 ftrace、没有 shell —— 本后端连 `shell` 都如实返回空串。
+/// 与「采到了但某个字段缺」不同, 这里是 `FIELD_PIPELINE`(整条通路)。
+pub struct IosNoSource;
+
+impl PerfSource for IosNoSource {
+    fn id(&self) -> &'static str {
+        SRC_IOS_NONE
+    }
+    fn collect(&self, _phone: &Device, _rounds: u32) -> PerfSnapshot {
+        let mut snap = PerfSnapshot::empty(SRC_IOS_NONE);
+        snap.miss(
+            FIELD_PIPELINE,
+            "iOS 后端没有性能数据来源: WDA 不提供帧时与功耗, 设备侧也没有 sysfs/ftrace 可读",
+        );
+        snap
     }
 }
 

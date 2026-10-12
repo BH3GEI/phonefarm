@@ -1,6 +1,7 @@
 # phonefarm
 
-设备自动化与实测基础设施：一个 Rust 内核，两种设备后端（Android `adb` / OpenHarmony `hdc`），
+设备自动化与实测基础设施：一个 Rust 内核，三种设备后端（Android `adb` / OpenHarmony `hdc` /
+iOS `wda`），
 在同一套「设备抽象 + 记录契约 + 遥测 + 证据分级」之上，并列提供多条互不依赖的上层能力。
 
 多模态视觉模型（VLM）只是其中一条上层通路，不是这个项目的定义。
@@ -13,7 +14,7 @@
 整套东西是一个 harness。用户只提一种任务——「把某个游戏在某台手机上优化一下」，
 内部自动决定用哪几层。本仓库是底座那一层，四件事：
 
-- 设备：adb / hdc 两族的连接、保活、确定性脚本回放。新增一种设备/平台 = 实现 `platform::Backend`
+- 设备：adb / hdc / iOS(WebDriverAgent) 三族的连接、保活、确定性脚本回放。新增一种设备/平台 = 实现 `platform::Backend`
   并登记 serial 前缀，各平台能开哪几层及原因见 `docs/DEVICES.md`。
 - 应用改动（`knobs/`）：黑档系统参数，灰档 Vulkan layer 注入。
 - 测量：安卓 sysfs 电源轨加 raw ftrace kgsl，鸿蒙 HiSmartPerf，上层拿同一份 JSON；
@@ -50,7 +51,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 **设备与农场运维**（零 Token）
 
 ```bash
-./phonefarm devices                        # adb 与 hdc 两族设备一并列出
+./phonefarm devices                        # adb / hdc / iOS 三族设备一并列出（iOS 只列 USB 上看得见的，不代表 WDA 已就绪）
 ./phonefarm keepalive [--status|--watch]   # 农场级保活：唤醒 + 解锁 + 不息屏
 ./phonefarm fleet [--json]                 # 农场只读快照：每台手机的在线/型号/电量/温度/风扇/
                                            # 前台应用/保活策略 + 设备锁。别人持锁时自动降成
@@ -269,7 +270,7 @@ src/                   Rust 内核源码
   collect.rs           有界滚动采集（组合动作原语，零 Token）：有界滚动 / 重叠去重 / 覆盖边界
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
   hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测
-  platform.rs          设备接口 Backend（Adb / Hdc 两个实现）+ 各平台三层可行性声明
+  platform.rs          设备接口 Backend（Adb / Hdc / ios::Ios 三个实现）+ 各平台三层可行性声明
   perfsrc.rs smartperf.rs  性能数据来源抽象：安卓 sysfs 与鸿蒙 HiSmartPerf(SP_daemon/Xpower) 同一份 JSON
   hypo.rs caps.rs mtools.rs experiment.rs   假设—实验—证据闭环
   keepalive.rs serve.rs script.rs collect.rs parallel.rs telemetry.rs device.rs

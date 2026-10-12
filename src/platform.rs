@@ -184,6 +184,15 @@ pub fn open(serial: Option<String>, tmp: String) -> Box<dyn Backend> {
             let key = s["hdc:".len()..].trim().to_string();
             Box::new(Hdc::new(if key.is_empty() { None } else { Some(key) }, tmp))
         }
+        // iOS: 构造不碰设备(隧道与 session 都是首次用到时才建), 所以这条分支与
+        // 上面两条一样是纯选择。
+        Some(s) if s.starts_with("ios:") => {
+            let udid = s["ios:".len()..].trim().to_string();
+            Box::new(crate::ios::Ios::new(
+                if udid.is_empty() { None } else { Some(udid) },
+                tmp,
+            ))
+        }
         other => Box::new(Adb::new(other, tmp)),
     }
 }
@@ -316,11 +325,21 @@ mod tests {
         assert_eq!(open(Some("hdc:".into()), "/tmp".into()).platform(), "openharmony");
         assert_eq!(open(Some("emulator-5554".into()), "/tmp".into()).transport(), "adb");
         assert_eq!(open(None, "/tmp".into()).platform(), "android");
+        // iOS 经 WebDriverAgent; udid 可省(WDA 只有一台目标时不需要)
+        assert_eq!(open(Some("ios:".into()), "/tmp".into()).transport(), "wda");
+        assert_eq!(
+            open(Some("ios:00008130-001A2B3C".into()), "/tmp".into()).platform(),
+            "ios"
+        );
     }
 
     #[test]
     fn every_platform_answers_for_every_layer_once() {
-        for b in [open(None, "/tmp".into()), open(Some("hdc:x".into()), "/tmp".into())] {
+        for b in [
+            open(None, "/tmp".into()),
+            open(Some("hdc:x".into()), "/tmp".into()),
+            open(Some("ios:x".into()), "/tmp".into()),
+        ] {
             let ls = b.layers();
             for want in [Layer::Shader, Layer::Gray, Layer::Sysparam, Layer::Measure] {
                 let n = ls.iter().filter(|l| l.layer == want).count();

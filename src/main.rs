@@ -13,6 +13,7 @@ mod brain;
 mod capture;
 mod cli;
 mod collect;
+mod ios;
 mod cts;
 mod experiment;
 mod fleet;
@@ -405,6 +406,20 @@ fn main() {
                         println!("hdc:{l}");
                     }
                 }
+            }
+            // iOS: 经 WebDriverAgent, serial 形态 "ios:<udid>"。
+            // 这里只列 USB 上看得见的设备(libimobiledevice 的 idevice_id);
+            // 能不能用还取决于手机上 WDA 是否已装并启动 —— 枚举不替这条说话。
+            match std::process::Command::new("idevice_id").arg("-l").output() {
+                Ok(out) => {
+                    for l in String::from_utf8_lossy(&out.stdout).lines() {
+                        let l = l.trim();
+                        if !l.is_empty() {
+                            println!("ios:{l}");
+                        }
+                    }
+                }
+                Err(_) => eprintln!("(未找到 idevice_id, 不列 iOS; 装 libimobiledevice 或设 WDA_URL 直连已有隧道)"),
             }
         }
         Some("run") => {
