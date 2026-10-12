@@ -29,8 +29,9 @@
     **仅借语义，无代码**：FluidUse 是 Swift + Core ML，本仓库是 Rust。
   - **资产可复现管线**（`src/decision.rs` 的 `verify_manifest`）——对应上游的 pinned
     manifest + SHA-256 + 按需下载。本仓库只做校验，不做下载。
-  - **本仓库不随附、不构建、不下载 FluidUse 的模型**。Core ML 包只能在 Apple 侧用
-    Core ML 运行时加载；`phonefarm decide --sidecar` 是把它接进来的插座，不是它本身。
+  - **本仓库不随附任何训练好的权重**。Core ML 包只能在 Apple 侧用 Core ML 运行时加载；
+    `phonefarm decide --sidecar` 是把它接进来的插座，`tools/decision-sidecar/` 是那颗插座
+    的参考实现（Swift + Core ML，含一个 137 字节的参考模型）。真模型得使用者自己拿来。
 
 ## 3. iPhone-use
 
@@ -45,6 +46,10 @@
   - **观察预算契约**（`docs/SPEC_OBSERVATION_BUDGET.md`）——对应上游 `server/wda_client.py`
     的紧凑控件树 / 去重 / 有界滚动 / 截图复用
   - **组合动作原语**（`src/collect.rs`）——对应上游 `pua_scroll_find` 与 `pua_collect_list`
+  - **设备屏幕观战窗口**（`src/screen.rs` / `src/screen_widget.html` /
+    `docs/SPEC_SCREEN_WIDGET.md`）——对应上游的实时屏幕 widget（`ui/`）与屏幕流通路
+    （`server/wda_screen.py`）：手机外壳、设备状态、操作光效、点击/拖动提示、暂停恢复、
+    屏幕流不落盘。仅借语义，无代码。
   - **MCP `structuredContent`**（`src/serve.rs`）——对应上游 `structuredContent` 返回约定
   - 上游自身的依赖（Appium / WebDriverAgent / appium-ios-device）与本仓库无关：
     本仓库不随附 WebDriverAgent，也不负责安装它。`iproxy` / `idevice_id` 来自
