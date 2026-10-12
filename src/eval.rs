@@ -512,6 +512,37 @@ pub(crate) fn snapshot(serial: &str) -> String {
     su(serial, &format!("sh {DEV_TMP}/device_snapshot.sh"), 60)
 }
 
+/// 每臂开跑前等冷的上限。等不到不作废 (组内交替让两臂承受同样的残余热漂移), 但如实记下。
+const ARM_COOL_TIMEOUT_S: u64 = 300;
+
+/// 一臂开跑前的等冷: 等到 SoC 最热热区 < cool_c 或超时。回 {zone, c, waited_s, timeout}。
+/// cool_c 缺省 (null) = 不等冷, 只记一次起跑温度。
+fn arm_wait_cool(serial: &str, cool_c: Option<f64>) -> Value {
+    let t0 = std::time::Instant::now();
+    loop {
+        let cur = crate::autoloop::read_soc_temp(serial);
+        let waited = (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0;
+        let Some((zone, c)) = cur else {
+            return json!({"zone": null, "c": null, "waited_s": waited, "timeout": false, "note": "读不到 SoC 热区"});
+        };
+        match cool_c {
+            Some(target) if c >= target => {
+                if t0.elapsed().as_secs() >= ARM_COOL_TIMEOUT_S {
+                    return json!({"zone": zone, "c": c, "waited_s": waited, "timeout": true});
+                }
+                std::thread::sleep(std::time::Duration::from_secs(8));
+            }
+            _ => return json!({"zone": zone, "c": c, "waited_s": waited, "timeout": false}),
+        }
+    }
+}
+
+/// 逐臂等冷记录 → conditions_observed 里的 cool_reached_c (最热的一次起跑温度) / cool_timeout。
+fn cool_summary(arms: &[Value]) -> (Option<f64>, bool) {
+    let worst = arms.iter().filter_map(|a| a["c"].as_f64()).reduce(f64::max);
+    (worst, arms.iter().any(|a| a["timeout"].as_bool() == Some(true)))
+}
+
 /// 施加后隔多少秒回读 (knobs/DESIGN.md: 厂商性能服务约 10 秒内改回)。
 const READBACK_AFTER_S: u64 = 12;
 
@@ -1063,8 +1094,14 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let mut curtailed: Option<Value> = None;
 
     let mut contested: Vec<Value> = Vec::new();
+    let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
+    let mut cool_log: Vec<Value> = Vec::new();
     'pairs: for i in 1..=rounds {
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
+            // 每臂开跑前按请求的 cool_c 等冷 (施加之前等: 等的那几分钟里厂商服务有足够时间把刚写的值改回去)
+            let mut c = arm_wait_cool(serial, cool_c);
+            c["arm"] = json!(format!("{arm}{i}"));
+            cool_log.push(c);
             if arm == "knob" {
                 let out = su(
                     serial,
@@ -1196,7 +1233,12 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     // 只有其余的键变了才判留痕作废。前者如实记进报告。
     let (vendor_drift, other_drift) = split_snapshot_diff(&snap_before, &snap_after);
 
+    let (cool_reached, cool_timeout) = cool_summary(&cool_log);
     report["conditions_observed"] = json!({
+        "cool_c_target": cool_c,
+        "cool_reached_c": cool_reached,
+        "cool_timeout": cool_timeout,
+        "cool_per_arm": cool_log,
         "temp_cap_c": req["conditions"]["temp_cap_c"],
         "apply_ok": apply_ok,
         "snapshot_identical": snapshot_identical,
@@ -1590,11 +1632,17 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let mut psnr_knob_vs_ctrl: Vec<f64> = Vec::new();
     let mut psnr_ctrl_vs_ctrl: Vec<f64> = Vec::new();
     let mut prev_ctrl: Option<(u32, u32, Vec<u8>)> = None;
+    let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
+    let mut cool_log: Vec<Value> = Vec::new();
     'rounds: for i in 1..=rounds {
         let mut shots: std::collections::BTreeMap<&str, (u32, u32, Vec<u8>)> = Default::default();
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 层是 CreateInstance 时读的, 切属性必须重启目标 —— force-stop 是两臂切换的一部分
             let _ = gl.off();
+            // 游戏关着的时候等冷最快; 等到请求的 cool_c 或超时
+            let mut c = arm_wait_cool(serial, cool_c);
+            c["arm"] = json!(format!("{arm}{i}"));
+            cool_log.push(c);
             if let Err(e) = mount(arm) {
                 abort_reason = Some(format!("{arm} 臂挂层失败: {e}"));
                 break 'rounds;
@@ -1686,7 +1734,12 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         .unwrap_or(0);
     let restore_clean = gl_off_clean(&restore_log);
     let min_of = |v: &[f64]| v.iter().cloned().reduce(f64::min);
+    let (cool_reached, cool_timeout) = cool_summary(&cool_log);
     report["conditions_observed"] = json!({
+        "cool_c_target": cool_c,
+        "cool_reached_c": cool_reached,
+        "cool_timeout": cool_timeout,
+        "cool_per_arm": cool_log,
         "hits": hits,
         "apply_ok": hits > 0,
         "restored": restore_clean,
@@ -2151,6 +2204,17 @@ mod path_tests {
         let c = b.replace("governor=walt", "governor=performance");
         let (_, o) = split_snapshot_diff(a, &c);
         assert_eq!(o, vec!["cpu.policy6.governor: walt → performance".to_string()]);
+    }
+
+    #[test]
+    fn cool_summary_takes_the_hottest_start_and_any_timeout() {
+        let arms = vec![
+            json!({"c": 41.2, "timeout": false}),
+            json!({"c": 47.9, "timeout": true}),
+            json!({"c": null, "timeout": false}),
+        ];
+        assert_eq!(cool_summary(&arms), (Some(47.9), true));
+        assert_eq!(cool_summary(&[]), (None, false));
     }
 }
 
