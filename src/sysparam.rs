@@ -739,6 +739,30 @@ pub fn rule_doc(temp_cap_c: &PyVal, pairs: &PyVal, power_available: bool, power_
 ///
 /// 另外把 `power_rail` / `battery_status` / `current_now` / `voltage_now` 原样留下,
 /// 停充测量做好之后可以回头核这批数据。
+/// 旁路判定用的「电池不进不出」门限 (µA), 与 charge_suspend.sh 的 BYPASS_IDLE_UA 一致。
+pub const BYPASS_IDLE_UA: f64 = 50_000.0;
+
+/// 一组 A/B (或一批基线) 的功耗能不能进判定: 每一轮都量到了可信功耗, 且**同一种口径**
+/// (全是电池放电, 或全是 USB 旁路)。两种口径混在一组里 = 这组功耗无效 —— USB 轨含充电器
+/// 转换损耗, 和电池轨不是同一个量。旧证据没有 `power_valid` / `power_source` 两个键时,
+/// 按旧口径 `on_battery` 认。空集为真 (调用方自己管「一轮都没有」)。
+pub fn power_group_ok<'a>(envs: impl IntoIterator<Item = &'a serde_json::Value>) -> bool {
+    let mut src: Option<String> = None;
+    for e in envs {
+        let valid = e["power_valid"].as_bool().unwrap_or_else(|| e["on_battery"].as_bool().unwrap_or(false));
+        if !valid {
+            return false;
+        }
+        let s = e["power_source"].as_str().unwrap_or("battery").to_string();
+        match &src {
+            None => src = Some(s),
+            Some(x) if *x != s => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
 pub fn env_stats(text: &str) -> PyVal {
     let (mut vi_watts, mut now_watts, mut usb_watts) = (vec![], vec![], vec![]);
     let (mut currents, mut voltages): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
@@ -746,6 +770,7 @@ pub fn env_stats(text: &str) -> PyVal {
     let mut status = String::new();
     let mut capacity: Option<String> = None;
     let mut charge_suspended = false;
+    let mut charge_mode = String::new();
     let mut fan_state: Option<String> = None;
     let mut n = 0usize;
     // GPU <uptime> <max_pwrlevel> <gpuclk Hz>: 厂商性能服务会改 GPU 上限, 逐样本核对
@@ -765,6 +790,10 @@ pub fn env_stats(text: &str) -> PyVal {
         }
         if let Some(v) = line.strip_prefix("#charge_suspended=") {
             charge_suspended = v.trim() == "yes";
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("#charge_mode=") {
+            charge_mode = v.trim().to_string();
             continue;
         }
         if let Some(v) = line.strip_prefix("#fan_state=") {
@@ -854,8 +883,23 @@ pub fn env_stats(text: &str) -> PyVal {
     // 手机整机功耗合理区间。777W 这种读数只能说明单位不对, 不能进任何均值。
     let now_plausible = now_mean.is_some_and(|m| PLAUSIBLE_W.0 <= m && m <= PLAUSIBLE_W.1);
 
+    // 旁路 (bypass): charge_suspend.sh 判成「USB 直供、电池不进不出」(状态文件第三行 bypass)。
+    // 这时 status 仍是 Charging、电池电流 ≈ 0, 整机功耗在 USB 轨上: 取 USB 的 |V x I|
+    // (含充电器转换损耗, 但口径稳定)。电池电流均值必须真的 ≈ 0, 否则说明中途又充上了。
+    let bypass = !on_battery
+        && charge_suspended
+        && charge_mode == "bypass"
+        && cur_mean.is_some_and(|c| c.abs() < BYPASS_IDLE_UA)
+        && !usb_watts.is_empty();
+
     let (mut power_w_mean, mut power_w_median) = (PyVal::Null, PyVal::Null);
-    let reason: String = if !on_battery {
+    let reason: String = if bypass {
+        power_w_mean = PyVal::from(avg(&usb_watts));
+        power_w_median = PyVal::Float(py_round(crate::pyjson::median_f64(&usb_watts).unwrap_or(0.0), 4));
+        "旁路供电 (已停充, 整机由 USB 直供, 电池电流 ≈ 0): 用 USB 轨 |V x I|, 含充电器转换损耗; \
+不能和放电态 (电池轨) 的数混在同一组比"
+            .to_string()
+    } else if !on_battery {
         format!(
             "非放电态 (status={}, current_now 均值={}): USB 输入功率里含给电池充电的部分, \
 且充电电流随电量单调衰减, 量不到整机功耗。跑之前用 charge_suspend.sh 停充即可",
@@ -883,7 +927,9 @@ pub fn env_stats(text: &str) -> PyVal {
         "battery_charging" => charging,
         "charge_suspended" => charge_suspended,
         "on_battery" => on_battery,
-        "power_source" => if on_battery { "battery" } else { "usb" },
+        "bypass" => bypass,
+        "power_valid" => (on_battery || bypass) && !matches!(power_w_mean, PyVal::Null),
+        "power_source" => if on_battery { "battery" } else if bypass { "usb_bypass" } else { "usb" },
         "fan_state" => fan_state,
         "power_rail" => "battery",
         "current_now_ua_mean" => cur_mean,
@@ -1424,6 +1470,49 @@ ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
         let s = env_stats("#battery_status=Not charging\nENV 1.0 4000000 0 NA 0 0 cpu-1-0 41000\n");
         assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(false)));
         assert_eq!(s.get("power_w_mean"), Some(&PyVal::Null));
+    }
+
+    /// 10-11 手机节点 (USB-C PD) 上实测的旁路供电: 停充后 status 仍是 Charging, 电池电流
+    /// 衰减到 ≈0, USB 0.13-0.22 A @ 5.15 V。功耗取 USB 轨, 口径标 usb_bypass。
+    #[test]
+    fn bypass_takes_usb_rail_power_only_when_the_battery_is_really_idle() {
+        let hdr = "#battery_status=Charging\n#battery_capacity=96\n#charge_suspended=yes\n#charge_mode=bypass\n";
+        let s = env_stats(&format!(
+            "{hdr}ENV 1.0 4375000 29000 NA 5158000 216000 cpu-1-0 41000\n\
+ENV 3.0 4374000 -12000 NA 5141000 197000 cpu-1-0 41000\n"
+        ));
+        assert_eq!(s.get("bypass"), Some(&PyVal::Bool(true)));
+        assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(false)));
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_bypass".into())));
+        assert_eq!(s.get("power_valid"), Some(&PyVal::Bool(true)));
+        let w = s.get("power_w_mean").unwrap().as_f64().unwrap();
+        assert!((w - (5.158 * 0.216 + 5.141 * 0.197) / 2.0).abs() < 1e-3, "{w}");
+        // 状态文件说旁路, 但电池其实在充 (+1.9 A): 不算, 功耗 null
+        let s = env_stats(&format!("{hdr}ENV 1.0 4436000 1926000 NA 4762000 2134000 cpu-1-0 41000\n"));
+        assert_eq!(s.get("bypass"), Some(&PyVal::Bool(false)));
+        assert_eq!(s.get("power_w_mean"), Some(&PyVal::Null));
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb".into())));
+        // 没停充 (没有状态文件) 时电池恰好 ≈0: 不算旁路
+        let s = env_stats("#battery_status=Charging\n#charge_suspended=no\n#charge_mode=\n\
+ENV 1.0 4375000 10000 NA 5158000 216000 cpu-1-0 41000\n");
+        assert_eq!(s.get("bypass"), Some(&PyVal::Bool(false)));
+        assert_eq!(s.get("power_w_mean"), Some(&PyVal::Null));
+    }
+
+    #[test]
+    fn mixing_battery_and_bypass_power_in_one_group_invalidates_power() {
+        use serde_json::json;
+        let bat = json!({"on_battery": true, "power_valid": true, "power_source": "battery"});
+        let byp = json!({"on_battery": false, "power_valid": true, "power_source": "usb_bypass"});
+        let usb = json!({"on_battery": false, "power_valid": false, "power_source": "usb"});
+        let old = json!({"on_battery": true}); // 旧证据: 没有 power_valid / power_source
+        assert!(power_group_ok([&bat, &bat]));
+        assert!(power_group_ok([&byp, &byp]));
+        assert!(!power_group_ok([&bat, &byp]), "两种口径混在一组");
+        assert!(!power_group_ok([&byp, &usb]));
+        assert!(power_group_ok([&old, &bat]), "旧证据按电池放电认");
+        assert!(!power_group_ok([&old, &byp]));
+        assert!(power_group_ok(std::iter::empty::<&serde_json::Value>()));
     }
 
     // ── 判定 ──

@@ -644,7 +644,8 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
                 temp_cap_c: PyVal::Float(temp_cap_c),
                 apply_ok,
                 snapshot_identical: ours_identical,
-                power_available,
+                // 这一组里混了功耗口径 (电池放电 / USB 旁路) 或有轮没量到: 这组功耗不进判定
+                power_available: power_available && sysparam::power_group_ok(all_runs.iter().map(|(_, m)| &m["env"])),
             },
         )
     };
@@ -965,8 +966,8 @@ pub fn run_autoloop(args: &[String]) -> i32 {
         .collect();
     power_reasons.sort();
     power_reasons.dedup();
-    let on_battery_all = !base_runs.is_empty()
-        && base_runs.iter().all(|(_, m)| m["env"]["on_battery"].as_bool() == Some(true));
+    // 基线轮全部量到同一口径的可信功耗 (全电池放电, 或全 USB 旁路)
+    let on_battery_all = !base_runs.is_empty() && sysparam::power_group_ok(base_runs.iter().map(|(_, m)| &m["env"]));
     let power_available = match a.power_in_verdict.as_str() {
         "on" => true,
         "off" => false,
