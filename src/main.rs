@@ -195,7 +195,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        fleet [--json] [--serial S] [--screenshot-dir 目录]
        (农场只读快照: 一趟 shell 把每台手机的在线/型号/电量/温度/风扇/亮屏/前台应用/
         保活策略/设备锁读齐, 采不到的字段留空并写明原因。截图默认关, 且别人持锁时不截)
-解析:  parse-trace <trace.txt> [--full] [--comm 线程名]   (ftrace 文本 -> 帧时序/GPU 活跃/排队/带宽指标, 纯离线)
+解析:  parse-trace <trace.txt> [--full] [--comm 线程名] [--spf N]   (ftrace 文本 -> 帧时序/GPU 活跃/排队/带宽指标, 纯离线)
        attribute <summary.json>                          (一轮 summary -> 主因判定 + 正交带宽维, 纯离线)
        analyze <A臂glob> [B臂glob] [--metric M]           (离散度 + 漂移 + 精确置换检验 + 置换反演 CI)
        curtail-replay <A臂glob> <B臂glob> [--alpha A] [--metrics m1,m2]  (确定性截断离线回放: 截在哪、判定是否与跑满一致)
