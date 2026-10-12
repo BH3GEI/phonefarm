@@ -1,0 +1,149 @@
+{
+ "crash_log_lines": 0,
+ "diffs": [
+  {
+   "diff_px_pct": 3.287,
+   "kind": "noise_1s",
+   "max": 225,
+   "mean_abs": 1.624,
+   "pair": "段0(关) 第1张~第2张"
+  },
+  {
+   "diff_px_pct": 11.412,
+   "kind": "off_vs_on",
+   "max": 228,
+   "mean_abs": 3.556,
+   "pair": "段0~段1"
+  },
+  {
+   "diff_px_pct": 15.404,
+   "kind": "same_state",
+   "max": 240,
+   "mean_abs": 4.603,
+   "pair": "段0~段2"
+  },
+  {
+   "diff_px_pct": 6.351,
+   "kind": "noise_1s",
+   "max": 228,
+   "mean_abs": 2.517,
+   "pair": "段1(开) 第1张~第2张"
+  },
+  {
+   "diff_px_pct": 12.41,
+   "kind": "off_vs_on",
+   "max": 241,
+   "mean_abs": 3.779,
+   "pair": "段1~段2"
+  },
+  {
+   "diff_px_pct": 22.008,
+   "kind": "same_state",
+   "max": 255,
+   "mean_abs": 8.221,
+   "pair": "段1~段3"
+  },
+  {
+   "diff_px_pct": 12.897,
+   "kind": "noise_1s",
+   "max": 251,
+   "mean_abs": 4.343,
+   "pair": "段2(关) 第1张~第2张"
+  },
+  {
+   "diff_px_pct": 20.244,
+   "kind": "off_vs_on",
+   "max": 255,
+   "mean_abs": 7.386,
+   "pair": "段2~段3"
+  },
+  {
+   "diff_px_pct": 17.024,
+   "kind": "same_state",
+   "max": 240,
+   "mean_abs": 5.155,
+   "pair": "段2~段4"
+  },
+  {
+   "diff_px_pct": 4.997,
+   "kind": "noise_1s",
+   "max": 230,
+   "mean_abs": 2.026,
+   "pair": "段3(开) 第1张~第2张"
+  },
+  {
+   "diff_px_pct": 16.02,
+   "kind": "off_vs_on",
+   "max": 255,
+   "mean_abs": 6.569,
+   "pair": "段3~段4"
+  },
+  {
+   "diff_px_pct": 4.641,
+   "kind": "noise_1s",
+   "max": 230,
+   "mean_abs": 1.904,
+   "pair": "段4(关) 第1张~第2张"
+  }
+ ],
+ "effective": [
+  {
+   "attachment": 0,
+   "begins": 716,
+   "field": "storeOp",
+   "from": "STORE",
+   "pass": 72,
+   "to": "DONT_CARE"
+  },
+  {
+   "attachment": 0,
+   "begins": 716,
+   "field": "stencilStoreOp",
+   "from": "STORE",
+   "pass": 72,
+   "to": "DONT_CARE"
+  },
+  {
+   "attachment": 1,
+   "begins": 716,
+   "field": "storeOp",
+   "from": "STORE",
+   "pass": 72,
+   "to": "DONT_CARE"
+  },
+  {
+   "attachment": 1,
+   "begins": 716,
+   "field": "stencilStoreOp",
+   "from": "STORE",
+   "pass": 72,
+   "to": "DONT_CARE"
+  },
+  {
+   "attachment": 2,
+   "begins": 748,
+   "field": "storeOp",
+   "from": "STORE",
+   "pass": 98,
+   "to": "DONT_CARE"
+  },
+  {
+   "attachment": 2,
+   "begins": 748,
+   "field": "stencilStoreOp",
+   "from": "STORE",
+   "pass": 98,
+   "to": "DONT_CARE"
+  }
+ ],
+ "effective_hit": 6,
+ "frameaudit_on_captured": true,
+ "game_alive": true,
+ "restore": "已摘层。回读:\n  debug.vulkan.layers = []\n  state               = [#adb_exit=1]",
+ "rounds": 2,
+ "rule": "15a51a879df99c32:2,9d0b4db80bf552b8:0,9d0b4db80bf552b8:1",
+ "screen": [
+  2688,
+  1216
+ ]
+}
