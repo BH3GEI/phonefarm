@@ -23,8 +23,14 @@
 - 版权: Copyright FluidInference
 - 引入 commit: `9384e70`
 - 本仓库移植的部分:
-  - 资产可复现管线（pinned manifest + SHA-256 校验）——工程模式，无代码
-  - 本地决策模型运行时的接入口设计（`docs/UPSTREAM_PORT_ANALYSIS.md` §5.2）——尚未落地
+  - **决策原语通路**（`src/decision.rs` / `docs/SPEC_DECISION_PATH.md`）——对应上游的
+    typed decisions（`choice` / `score` / `noul`）协议形状，以及桥接层的会话纪律
+    （保序 / 一次一个 / 超时即杀 / 杀掉即 closed / 模型侧错误不杀会话 / stderr 尾部）。
+    **仅借语义，无代码**：FluidUse 是 Swift + Core ML，本仓库是 Rust。
+  - **资产可复现管线**（`src/decision.rs` 的 `verify_manifest`）——对应上游的 pinned
+    manifest + SHA-256 + 按需下载。本仓库只做校验，不做下载。
+  - **本仓库不随附、不构建、不下载 FluidUse 的模型**。Core ML 包只能在 Apple 侧用
+    Core ML 运行时加载；`phonefarm decide --sidecar` 是把它接进来的插座，不是它本身。
 
 ## 3. iPhone-use
 
@@ -102,6 +108,7 @@ SOFTWARE.
 
 ## Apache License 2.0 (FluidUse)
 
-FluidUse is licensed under the Apache License, Version 2.0. 全文见
-<https://www.apache.org/licenses/LICENSE-2.0>。本仓库未复制 FluidUse 的源代码，
-若后续引入，须随附完整许可全文与 NOTICE 文件（如有）。
+FluidUse is licensed under the Apache License, Version 2.0. 本仓库引入了它的
+**协议与会话纪律语义**（`src/decision.rs`），未复制其源代码。若后续直接复制其源码，
+须随附完整许可全文与 NOTICE 文件（如有）。全文见
+<https://www.apache.org/licenses/LICENSE-2.0>。

@@ -120,6 +120,18 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 `coverage.complete` 如实区分「采完整屏列表」与「撞到有界上限」。判定仍归判定那一侧。
 契约见 `docs/SPEC_OBSERVATION_BUDGET.md`。
 
+**决策原语**（零 Token 降级档）
+
+```bash
+./phonefarm decide --local --seed 7 --request 请求.json      # 降级档；同 seed 逐位可复现
+./phonefarm decide --sidecar "你的桥" --request 请求.json     # 外部进程（Core ML 那一半接在这里）
+./phonefarm decide --verify 模型目录 --manifest 清单.json     # 只校验资产，不推理
+```
+
+一个 state + 一组 typed question（`choice`/`score`/`noul`）→ 一组 typed answer。
+**仓库不含任何模型**：`--local` 那档是降级占位不是模型（概率均匀、未校准），
+只在「总比停摆强」这个意义上成立。契约见 `docs/SPEC_DECISION_PATH.md`。
+
 **Compute Shader 算子标尺**（零 Token，需 root）
 
 ```bash
@@ -268,12 +280,13 @@ src/                   Rust 内核源码
   cts.rs               一致性测试 harness（双协议解析、对账、报告、结果提取）
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
   collect.rs           有界滚动采集（组合动作原语，零 Token）：有界滚动 / 重叠去重 / 覆盖边界
+  decision.rs          决策原语通路（零 Token 降级档 + 侧车协议 + 资产校验）；仓库不含模型
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
   hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测
   platform.rs          设备接口 Backend（Adb / Hdc / ios::Ios 三个实现）+ 各平台三层可行性声明
   perfsrc.rs smartperf.rs  性能数据来源抽象：安卓 sysfs 与鸿蒙 HiSmartPerf(SP_daemon/Xpower) 同一份 JSON
   hypo.rs caps.rs mtools.rs experiment.rs   假设—实验—证据闭环
-  keepalive.rs serve.rs script.rs collect.rs parallel.rs telemetry.rs device.rs
+  keepalive.rs serve.rs script.rs collect.rs decision.rs parallel.rs telemetry.rs device.rs
 phonefarm.toml         控制参数、规则阈值及模型 Provider 回退链配置
 docs/                  架构契约与各能力规格（索引见 README「文档索引」）
 skills/                给 AI Agent 直接阅读的英文说明书（phonefarm / phonefarm-cts / a2oh-diagnose）

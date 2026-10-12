@@ -92,6 +92,20 @@ was covered (`found` / `end_of_list`) or a bounded limit was hit (`max_swipes` /
 `max_items`, more content may remain below). It produces an **inventory**, not a
 **verdict** — judging stays on the judging side. Spec: `docs/SPEC_OBSERVATION_BUDGET.md`.
 
+## decide — typed decisions, zero tokens
+
+```bash
+phonefarm decide --local --seed 7 --request request.json      # degraded tier
+phonefarm decide --sidecar "your bridge" --request request.json
+phonefarm decide --verify model-dir --manifest manifest.json  # assets only, no inference
+```
+
+One `state` + a list of typed questions (`choice` / `score` / `noul`) -> a list of typed answers.
+**This repo ships no model.** `--local` is a *degraded placeholder*, not a model: its
+probabilities are uniform and uncalibrated, and it exists only so the loop keeps moving when
+the cloud is down. Same request + same seed -> bit-identical answers. `--sidecar` is the socket
+a real (Core ML) model plugs into. Spec: `docs/SPEC_DECISION_PATH.md`.
+
 ## Evolution loop — hypothesis / experiment / evidence
 
 ```bash

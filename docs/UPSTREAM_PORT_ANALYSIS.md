@@ -324,7 +324,7 @@ web view helper 未沙箱 / UIKit app 忽略 SIGTERM（1.5 s 后 SIGKILL）/ app
 ## 6. 建议的移植批次
 
 > **进展**：批次 0/1 已落地（PR #49，已合入）。批次 2 已落地在 PR #50（iOS 后端，未上真机验证）。
-> 批次 3/4 未开始。
+> 批次 3 的协议那一半已落地（PR #51）；模型那一半未落地。批次 4 未开始。
 
 按「价值 / 与硬边界冲突程度 / 可验证性」排序：
 
@@ -335,6 +335,9 @@ web view helper 未沙箱 / UIKit app 忽略 SIGTERM（1.5 s 后 SIGKILL）/ app
   —— **已落地**：`src/ios.rs` 实现了完整 `Backend`，`devices` 枚举三族并列；
   **未上真机验证**（WDA 各版本的 JSON source 形状与端点可用性未核）。
 - **批次 3（本地模型）**：B2/B3 —— 以 sidecar 形式接 Laya 做「降级决策器」，不进判定层。
+  —— **协议那一半已落地**（`src/decision.rs`，PR #51）：typed decisions 协议、会话纪律、
+  资产校验、零 Token 降级档。**模型那一半未落地** —— 仓库不含 Core ML 包，
+  `--sidecar` 是把模型接进来的插座；接法仍是待定项。
 - **批次 4（看板）**：C4 屏幕 widget 接进看板网页。
 - **暂不做**：A 树全部（除 A4.12/A2.11 外均为 iOS 模拟器专有）；B1 表单填写；B4/B5 演示与基准。
 

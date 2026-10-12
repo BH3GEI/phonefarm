@@ -266,6 +266,25 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 下方可能还有未采集内容）。它产出的是**清单**，不是**结论**——判定仍归判定那一侧。
 契约见 `docs/SPEC_OBSERVATION_BUDGET.md`。
 
+## 决策原语（零 Token 降级档）
+
+```bash
+# 本地降级档：同一请求 + 同一 seed → 逐位相同的答案
+./phonefarm decide --local --seed 7 --request 请求.json
+
+# 侧车：一行一个 JSON 的外部进程（把 Core ML 那一半接进来的地方）
+./phonefarm decide --sidecar "你的桥" --request 请求.json
+
+# 只校验模型资产（SHA-256/尺寸），不推理
+./phonefarm decide --verify 模型目录 --manifest 清单.json
+```
+
+一个 state + 一组 typed question（`choice` / `score` / `noul`）→ 一组 typed answer。
+**本轮落地的只是「插座」**：仓库不含任何模型，`--local` 那档是**降级占位不是模型** ——
+它的概率是均匀的、没有校准，只在「总比停摆强」这个意义上成立，不构成「省了钱而且没损失」。
+协议、会话纪律（保序 / 超时即杀 / 杀掉即 closed）与资产校验都落成了可测的代码。
+契约见 `docs/SPEC_DECISION_PATH.md`。
+
 脚本的 `instrument` 原语跟设备后端走：hdc 设备上合成 OH 的 `aa test`，adb 设备上合成 `am instrument`。
 
 ## 一致性测试 harness（CTS / XTS）
@@ -587,6 +606,7 @@ tasks/<任务名>/        程序唯一可写区域
 | `docs/SPEC_SR_LOOP.md` | 端侧模型标尺与采集管线：bench / capture 的判定口径 |
 | `docs/SPEC_SCRIPT_MODE.md` | 确定性脚本与历史轨迹回放：纯离线 / 零 Token / 全遥测 / 重放契约 |
 | `docs/SPEC_OBSERVATION_BUDGET.md` | 观察预算契约：投影有界 / 有界滚动 / 去重 / 覆盖边界 / MCP 结构化返回 |
+| `docs/SPEC_DECISION_PATH.md` | 决策原语通路：typed decisions 协议 / 会话纪律 / 资产校验 / 降级档的诚实边界 |
 | `docs/SPEC_CTS_HARNESS.md` | 一致性测试 harness：双协议解析 / 对账判定 / 结果提取 |
 | `docs/SPEC_KEEPALIVE.md` | 农场级设备保活巡检：顺序契约 / adb 与 hdc 两族差异 |
 | `docs/SPEC_MCP_SERVE.md` | MCP stdio 工具服务：工具面 / 协议子集 / 安全护栏 / octos 接法 |

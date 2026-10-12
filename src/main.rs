@@ -13,6 +13,7 @@ mod brain;
 mod capture;
 mod cli;
 mod collect;
+mod decision;
 mod ios;
 mod cts;
 mod experiment;
@@ -835,6 +836,11 @@ fn main() {
             // 有界滚动采集(SPEC_OBSERVATION_BUDGET 原语 1): 组合动作, 零 Token。
             // 语义移自 iPhone-use 的 pua_scroll_find / pua_collect_list。
             std::process::exit(collect::run_collect(&args[1..]));
+        }
+        Some("decide") => {
+            // 决策原语(typed decisions: choice/score/noul), 零 Token。
+            // 本地那档是降级占位不是模型; 侧车那一档是把 Core ML 接进来的地方。
+            std::process::exit(decision::run_decide(&args[1..]));
         }
         Some("test-batch") => {
             // CTS 批量挂机执行器 (CTS Harness Spec): A2OH 桥接环境的 instrument 调度,
