@@ -1317,10 +1317,17 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let mut cool_log: Vec<Value> = Vec::new();
     'pairs: for i in 1..=rounds {
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
+            // 风扇按死在关 (owner 规矩), 再等冷 —— 风扇状态会改等冷的结果
+            let fan = arm_fan_off(serial);
             // 每臂开跑前按请求的 cool_c 等冷 (施加之前等: 等的那几分钟里厂商服务有足够时间把刚写的值改回去)
             let mut c = arm_wait_cool(serial, cool_c, &format!("{arm}{i}"), arm_cool_timeout(&cool_log));
             c["arm"] = json!(format!("{arm}{i}"));
+            c["fan"] = fan.clone();
             cool_log.push(c);
+            if let Some(e) = fan_still_on(&fan) {
+                abort_reason = Some(format!("{arm}{i}: {e}"));
+                break;
+            }
             if arm == "knob" {
                 let out = su(
                     serial,
@@ -1514,6 +1521,13 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         }
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
+    if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
+        report["verdict"]["reason"] = json!(e);
+        if suspended_via.is_some() {
+            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
+        }
+        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+    }
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
     report["verdict"] = verdict;
     if !contested.is_empty() {
@@ -1596,6 +1610,48 @@ fn reachable(n: u32, alpha_win: f64) -> bool {
         }
     }
     2.0 / c < alpha_win
+}
+
+/// 风扇开关节点 (红魔 NX809J)。owner 规矩: 风扇默认必须关 (噪音)。
+const FAN_EN_NODE: &str = "/sys/kernel/fan/fan_enable";
+
+/// 每臂开测前: 读风扇开关, 不是 0 就写 0 并回读。回 {before, after, forced};
+/// 没有风扇节点 (别的机型) 时 before/after 为 null。2026-10-12 W1 实测: 不知谁开着的风扇
+/// 在前 4 对开、第 5 对关, 整组功耗作废 —— 所以每臂都按死, 不信上一个人。
+pub(crate) fn arm_fan_off(serial: &str) -> Value {
+    let rd = |s: &str| {
+        crate::graylayer::GrayLayer::adb_stdout(&su(s, &format!("cat {FAN_EN_NODE} 2>/dev/null"), 15))
+            .trim()
+            .to_string()
+    };
+    let before = rd(serial);
+    if before.is_empty() {
+        return json!({"before": null, "after": null, "forced": false});
+    }
+    let forced = before != "0";
+    if forced {
+        su(serial, &format!("echo 0 > {FAN_EN_NODE}"), 15);
+    }
+    let after = rd(serial);
+    json!({"before": before, "after": after, "forced": forced})
+}
+
+/// [`arm_fan_off`] 之后风扇仍开着 (写不进去): 这一臂不能量。
+pub(crate) fn fan_still_on(fan: &Value) -> Option<String> {
+    match fan["after"].as_str() {
+        Some(a) if a != "0" => Some(format!("风扇关不掉 (fan_enable 写 0 后回读 {a}), 按规矩风扇必须关, 不量")),
+        _ => None,
+    }
+}
+
+/// 两臂测量期间 (sample_env 逐臂记的 fan_state) 风扇状态必须一致, 不一致这组整体作废。
+pub(crate) fn fan_mismatch(knob_runs: &[Value], ctrl_runs: &[Value]) -> Option<String> {
+    let seen: std::collections::BTreeSet<String> = knob_runs
+        .iter()
+        .chain(ctrl_runs.iter())
+        .filter_map(|r| r["env"]["fan_state"].as_str().map(String::from))
+        .collect();
+    (seen.len() > 1).then(|| format!("测量期间各臂风扇状态不一致 {seen:?}: 风扇自己耗电、还改热态, 这组不可比"))
 }
 
 /// 功耗的辅助证据: GPU 平均频率 (sample_env 的 GPU 行)、总线带宽投票中位与 GPU 忙碌时间
@@ -1943,10 +1999,16 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 层是 CreateInstance 时读的, 切属性必须重启目标 —— force-stop 是两臂切换的一部分
             let _ = gl.off();
+            let fan = arm_fan_off(serial);
             // 游戏关着的时候等冷最快; 等到请求的 cool_c 或超时
             let mut c = arm_wait_cool(serial, cool_c, &format!("{arm}{i}"), arm_cool_timeout(&cool_log));
             c["arm"] = json!(format!("{arm}{i}"));
+            c["fan"] = fan.clone();
             cool_log.push(c);
+            if let Some(e) = fan_still_on(&fan) {
+                abort_reason = Some(format!("{arm}{i}: {e}"));
+                break 'rounds;
+            }
             if let Err(e) = mount(arm) {
                 abort_reason = Some(format!("{arm} 臂挂层失败: {e}"));
                 break 'rounds;
@@ -2110,6 +2172,10 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
+    if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
+        report["verdict"]["reason"] = json!(e);
+        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+    }
     // 画面过了门槛: 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
     report["verdict"] = verdict;
@@ -2386,6 +2452,20 @@ bus.DDR.boost_freq.effect=live\n";
 
     /// 功耗与结温来自 sample_env (env), parse-trace 的 summary 里没有这两项。
     /// 判定视图只读 summary 的话, 功耗永远「缺数据」、70 °C 温度上限永远不触发。
+    #[test]
+    fn fan_guard_flags_still_on_and_mismatched_arms() {
+        assert!(fan_still_on(&json!({"before": "1", "after": "0", "forced": true})).is_none());
+        assert!(fan_still_on(&json!({"before": "1", "after": "1", "forced": true})).is_some());
+        assert!(fan_still_on(&json!({"before": null, "after": null, "forced": false})).is_none());
+        let on = json!({"env": {"fan_state": "fan_enable=1,fan_speed_level=5,fan_speed_pwm="}});
+        let off = json!({"env": {"fan_state": "fan_enable=0,fan_speed_level=5,fan_speed_pwm="}});
+        // 2026-10-12 W1 的形态: 前几臂开、最后一对关
+        assert!(fan_mismatch(&[on.clone(), off.clone()], &[on.clone()]).is_some());
+        assert!(fan_mismatch(&[off.clone(), off.clone()], &[off.clone()]).is_none());
+        // 没记风扇的 (别的机型) 不算不一致
+        assert!(fan_mismatch(&[json!({"env": {}})], &[off]).is_none());
+    }
+
     #[test]
     fn run_view_carries_power_and_temp_from_env() {
         let m = json!({
