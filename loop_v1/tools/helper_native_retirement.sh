@@ -185,9 +185,8 @@ fi
 cat "$R/native.stdout"
 printf 'ACTOR %s %s %s\nCHILD %s %s %s\nSTAGE %s %s\n' "$ACT" "$AST" "$ACT" "$NP" "$NS" "$NP" "$MODE" "$RUN"
 if [ "$MODE" = remove ]; then
- identity; absent "$MP" && absent "$CP" && CLOSE_NP=$NP
+ identity; absent "$MP" && absent "$CP" && absent "$NP" && absent "$AP" && absent "$CLOSE_NP" || exit 77
  __PRIOR_CHECKS__
- absent "$AP" && absent "$CLOSE_NP" || exit 77
  [ "$(cat "$D/session.closed/owner")" = "$TOKEN $BOOT $RUN" ] || exit 77
  # Only the strict helper inventory checked above and this bound operation are removed.
  rm -rf "$D"

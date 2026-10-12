@@ -534,6 +534,8 @@ mod tests {
             "close_extra",
             "interrupt_close",
             "interrupt_remove",
+            "late_prior_pid",
+            "late_prior_group",
         ] {
             let root = base.join(format!(
                 "native-helper-{}-{}-{scenario}",
@@ -676,6 +678,8 @@ mod tests {
                 "closed_link",
                 "close_extra",
                 "interrupt_remove",
+                "late_prior_pid",
+                "late_prior_group",
             ]
             .contains(&scenario);
             let o = cmd.output().unwrap();
@@ -729,6 +733,18 @@ mod tests {
                 }
                 if scenario == "close_extra" {
                     fs::write(d.join("run_close/unregistered"), "foreign").unwrap();
+                }
+                if ["late_prior_pid", "late_prior_group"].contains(&scenario) {
+                    let cat = bin.join("cat");
+                    let marker = root.join("late-group");
+                    let late = if scenario == "late_prior_pid" {
+                        proof.child.pid
+                    } else {
+                        900
+                    };
+                    fs::write(&cat,format!("#!/bin/sh\n/bin/cat \"$@\" || exit $?\ncase \"${{1:-}}\" in *_remove/native.stdout) mkdir {p}/{late}; printf '%s\\n' {stat} > {p}/{late}/stat; printf '%s\\n' {group} > {marker} ;; esac\n",p=quote(proc.to_str().unwrap()),stat=quote(&line(late,proof.child.group,999)),group=proof.child.group,marker=quote(marker.to_str().unwrap()))).unwrap();
+                    fs::set_permissions(&cat, fs::Permissions::from_mode(0o700)).unwrap();
+                    fs::write(&kill,format!("#!/bin/sh\nif [ \"$1\" = -KILL ]; then kill -KILL -- \"$3\"; exit $?; fi\nif [ -f {marker} ] && [ \"$3\" = -{group} ]; then exit 0; fi\necho 'No such process' >&2; exit 1\n",marker=quote(marker.to_str().unwrap()),group=proof.child.group)).unwrap();
                 }
                 if scenario == "interrupt_remove" {
                     fs::write(bin.join("rm"),format!("#!/bin/sh\nif [ \"${{2:-}}\" = {} ]; then exit 90; fi\nexec /bin/rm \"$@\"\n",quote(d.to_str().unwrap()))).unwrap();

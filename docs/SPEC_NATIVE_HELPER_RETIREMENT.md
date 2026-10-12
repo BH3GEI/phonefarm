@@ -115,3 +115,10 @@ Each stat is accepted only at <=4096 bytes. The unchanged reader's physical
 file reader remains bounded at 64KiB; its aggregate2MiB output and mandatory
 terminal must complete before table acceptance. Overflow/partial output never
 proves any PID/group absent.
+
+A final independent check specifically preserves CLOSE_NP separately from the
+current phase native PID. Both are checked immediately before deletion, after
+printing the native snapshot. A prior close PID or its group appearing after
+the complete table is still UNKNOWN and must leave the owned directory intact.
+Actual host counterexamples register that late PID/group after native stdout;
+old10710 incorrectly removed the directory, new source rejects removal.
