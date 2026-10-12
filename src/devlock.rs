@@ -83,8 +83,8 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
     if sub == "selftest" && matches!(rest.first().map(|s| s.as_str()), None | Some("report")) {
         return false;
     }
-    // frame-audit 只有 capture 碰设备, analyze 纯离线
-    if sub == "frame-audit" && rest.first().map(|s| s.as_str()) != Some("capture") {
+    // frame-audit: capture / storeop-check 碰设备, analyze 纯离线
+    if sub == "frame-audit" && !matches!(rest.first().map(|s| s.as_str()), Some("capture") | Some("storeop-check")) {
         return false;
     }
     if matches!(sub, "eval" | "gpu-op") {
@@ -293,6 +293,17 @@ fn heartbeat(script: PathBuf, label: String, stop: Arc<AtomicBool>) -> std::thre
 
 #[cfg(test)]
 mod tests {
+
+    /// storeop-check 也碰设备: 不拿锁的话 --lock-label 不会被剥掉, 子命令解析直接报错退出 (2026-10-11 真机踩到)
+    #[test]
+    fn frame_audit_device_subcommands_take_lock() {
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(needs_lock("frame-audit", &v(&["capture", "--out", "x"])));
+        assert!(needs_lock("frame-audit", &v(&["storeop-check", "--rule", "a:1"])));
+        assert!(!needs_lock("frame-audit", &v(&["analyze", "f.json"])));
+        assert!(!needs_lock("frame-audit", &v(&[])));
+    }
+
     use super::*;
 
     fn v(xs: &[&str]) -> Vec<String> {
