@@ -176,6 +176,12 @@ struct DevDisp {
     PFN_vkCmdBeginQuery CmdBeginQuery = nullptr;            // frameaudit: pass 里有没有查询 (遮挡查询的 pass 不能当白画)
     PFN_vkCmdEndQuery CmdEndQuery = nullptr;
     PFN_vkCmdCopyQueryPoolResults CmdCopyQueryPoolResults = nullptr;
+    // 描述符模板 / push 描述符: Unity 6 等引擎不走 vkUpdateDescriptorSets, 不钩就看不见「读」
+    PFN_vkCreateDescriptorUpdateTemplate CreateDescriptorUpdateTemplate = nullptr;
+    PFN_vkDestroyDescriptorUpdateTemplate DestroyDescriptorUpdateTemplate = nullptr;
+    PFN_vkUpdateDescriptorSetWithTemplate UpdateDescriptorSetWithTemplate = nullptr;
+    PFN_vkCmdPushDescriptorSetKHR CmdPushDescriptorSetKHR = nullptr;
+    PFN_vkCmdPushDescriptorSetWithTemplateKHR CmdPushDescriptorSetWithTemplateKHR = nullptr;
     float ts_period_ns = 0.f;                               // VkPhysicalDeviceLimits::timestampPeriod
     VkDevice dev = VK_NULL_HANDLE;
     VkPhysicalDevice phys = VK_NULL_HANDLE;                 // 查显存类型用
@@ -454,6 +460,8 @@ struct FaCb {
     std::vector<FaEv> ev;
     int open = -1;
     VkDescriptorSet gfx[8] = {}, comp[8] = {};
+    // push 描述符压进来的图 (view, 是否 storage): 没有 set 句柄, 直接按绑定点挂在 cb 上
+    std::vector<std::pair<VkImageView, bool>> push_gfx, push_comp;
     uint32_t barriers = 0;
     bool ts = false, overflow = false;
 };
@@ -477,7 +485,8 @@ struct FaState {
     std::map<void*, uint32_t> qid;     // 队列 -> 小编号
     uint64_t cb_unseen = 0, ev_overflow = 0, v2_copies = 0, submit2 = 0, dyn_passes = 0, sec_merged = 0;
     uint64_t ts_skipped = 0;
-    uint64_t q_outside = 0, q_copies = 0;   // pass 外开的查询 / 查询结果拷进 buffer (GPU 侧消费, 如条件渲染)
+    uint64_t q_outside = 0, q_copies = 0;
+    uint64_t tmpl_updates = 0, push_writes = 0;   // 走模板 / push 的描述符更新次数 (诊断「读看不见」用)   // pass 外开的查询 / 查询结果拷进 buffer (GPU 侧消费, 如条件渲染)
 };
 static std::map<VkQueryPool, uint32_t> g_qpool_type;   // 应用建的查询池 -> VkQueryType (本层自己的时间戳池不走钩子)
 static FaState g_fa;
@@ -512,6 +521,10 @@ static void fa_add_set(FaEv& e, VkDescriptorSet s) {
         bool storage = st != g_set_storage.end() && st->second.count(bv.first);
         (storage ? e.writes : e.reads).insert(fa_pack(r));
     }
+}
+static void fa_add_view(FaEv& e, VkImageView v, bool storage) {
+    SubRes r = fa_view_res(v);
+    if (r.img) (storage ? e.writes : e.reads).insert(fa_pack(r));
 }
 // 调用方持 g_mtx。返回新事件 (满了返回 nullptr)
 static FaEv* fa_push(VkCommandBuffer cb, FaEv&& e) {
@@ -937,6 +950,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     RK_GDPA(CmdBeginQuery, PFN_vkCmdBeginQuery, "vkCmdBeginQuery");
     RK_GDPA(CmdEndQuery, PFN_vkCmdEndQuery, "vkCmdEndQuery");
     RK_GDPA(CmdCopyQueryPoolResults, PFN_vkCmdCopyQueryPoolResults, "vkCmdCopyQueryPoolResults");
+    RK_GDPA(CreateDescriptorUpdateTemplate, PFN_vkCreateDescriptorUpdateTemplate, "vkCreateDescriptorUpdateTemplate");
+    if (!d.CreateDescriptorUpdateTemplate) RK_GDPA(CreateDescriptorUpdateTemplate, PFN_vkCreateDescriptorUpdateTemplate, "vkCreateDescriptorUpdateTemplateKHR");
+    RK_GDPA(DestroyDescriptorUpdateTemplate, PFN_vkDestroyDescriptorUpdateTemplate, "vkDestroyDescriptorUpdateTemplate");
+    if (!d.DestroyDescriptorUpdateTemplate) RK_GDPA(DestroyDescriptorUpdateTemplate, PFN_vkDestroyDescriptorUpdateTemplate, "vkDestroyDescriptorUpdateTemplateKHR");
+    RK_GDPA(UpdateDescriptorSetWithTemplate, PFN_vkUpdateDescriptorSetWithTemplate, "vkUpdateDescriptorSetWithTemplate");
+    if (!d.UpdateDescriptorSetWithTemplate) RK_GDPA(UpdateDescriptorSetWithTemplate, PFN_vkUpdateDescriptorSetWithTemplate, "vkUpdateDescriptorSetWithTemplateKHR");
+    RK_GDPA(CmdPushDescriptorSetKHR, PFN_vkCmdPushDescriptorSetKHR, "vkCmdPushDescriptorSetKHR");
+    RK_GDPA(CmdPushDescriptorSetWithTemplateKHR, PFN_vkCmdPushDescriptorSetWithTemplateKHR, "vkCmdPushDescriptorSetWithTemplateKHR");
 #undef RK_GDPA
     if (inst) {
         auto gpp = (PFN_vkGetPhysicalDeviceProperties)gipa(inst, "vkGetPhysicalDeviceProperties");
@@ -1257,6 +1278,22 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateImageView(
     }
     return r;
 }
+static bool is_image_desc(uint32_t t) {
+    return t == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || t == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+           t == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || t == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+}
+// 记一条 image 描述符写 (调用方持 g_mtx)
+static void note_image_desc(VkDescriptorSet set, uint32_t binding, uint32_t elem, uint32_t type,
+                            VkImageView view, VkSampler samp) {
+    if (view == VK_NULL_HANDLE) return;
+    uint32_t kk = elem + (binding << 8);
+    g_set_views[set][kk] = view;
+    g_set_samplers[set][kk] = samp;
+    if (g_frameaudit) {
+        auto& st = g_set_storage[set];
+        if (type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) st.insert(kk); else st.erase(kk);
+    }
+}
 // 描述符里绑了哪些采样图 —— 只记 image 类的 binding, buffer 一概不碰
 static VKAPI_ATTR void VKAPI_CALL rk_UpdateDescriptorSets(
     VkDevice dev, uint32_t nw, const VkWriteDescriptorSet* w, uint32_t nc, const VkCopyDescriptorSet* c) {
@@ -1272,18 +1309,9 @@ static VKAPI_ATTR void VKAPI_CALL rk_UpdateDescriptorSets(
                 ws.descriptorType != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE &&
                 ws.descriptorType != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
                 ws.descriptorType != VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) continue;
-            auto& m = g_set_views[ws.dstSet];
-            auto& ms = g_set_samplers[ws.dstSet];
             for (uint32_t j = 0; j < ws.descriptorCount; j++)
-                if (ws.pImageInfo[j].imageView != VK_NULL_HANDLE) {
-                    uint32_t kk = ws.dstArrayElement + j + (ws.dstBinding << 8);
-                    m[kk] = ws.pImageInfo[j].imageView;
-                    ms[kk] = ws.pImageInfo[j].sampler;
-                    if (g_frameaudit) {
-                        auto& st = g_set_storage[ws.dstSet];
-                        if (ws.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) st.insert(kk); else st.erase(kk);
-                    }
-                }
+                note_image_desc(ws.dstSet, ws.dstBinding, ws.dstArrayElement + j, ws.descriptorType,
+                                ws.pImageInfo[j].imageView, ws.pImageInfo[j].sampler);
         }
     }
     d.UpdateDescriptorSets(dev, nw, w, nc, c);
@@ -1860,6 +1888,7 @@ static void note_pass(VkCommandBuffer cb, const VkRenderPassBeginInfo* bi, const
         if (ri != g_rp_fa.end()) e.subpasses = 1;   // NextSubpass 再加
         FaCb& c = g_facb[cb];
         for (auto s : c.gfx) if (s) fa_add_set(e, s);   // pass 前已绑的 set 在 pass 内照样生效
+        for (auto& pv : c.push_gfx) fa_add_view(e, pv.first, pv.second);
         e.ts0 = fa_ts(cb, d);
         if (fa_push(cb, std::move(e))) c.open = (int)c.ev.size() - 1;
     }
@@ -2115,12 +2144,13 @@ static void fa_write_file(const DevDisp& d) {   // 调用方持 g_mtx
              "{\"knob\":\"gray_frameaudit\",\"version\":1,\"pkg\":\"%s\",\"go\":%ld,\"arm_frame\":%llu,"
              "\"swapchain\":{\"w\":%u,\"h\":%u,\"fmt\":%u},\"ts_enabled\":%s,\"ts_period_ns\":%.6f,\"ts_slots\":[%u,%u],"
              "\"ts_available\":%u,\"diag\":{\"cb_unseen\":%llu,\"ev_overflow\":%llu,\"submit2\":%llu,\"dyn_passes\":%llu,"
-             "\"sec_merged\":%llu,\"ts_skipped\":%llu,\"q_outside\":%llu,\"q_copies\":%llu},",
+             "\"sec_merged\":%llu,\"ts_skipped\":%llu,\"q_outside\":%llu,\"q_copies\":%llu,\"tmpl_updates\":%llu,\"push_writes\":%llu},",
              self_pkg().c_str(), g_fa.go, (unsigned long long)g_fa.arm_frame, g_swap_w, g_swap_h, g_swap_fmt,
              g_frameaudit_ts ? "true" : "false", (double)g_fa.period, g_fa.ts_lo, g_fa.ts_next, avail,
              (unsigned long long)g_fa.cb_unseen, (unsigned long long)g_fa.ev_overflow, (unsigned long long)g_fa.submit2,
              (unsigned long long)g_fa.dyn_passes, (unsigned long long)g_fa.sec_merged, (unsigned long long)g_fa.ts_skipped,
-             (unsigned long long)g_fa.q_outside, (unsigned long long)g_fa.q_copies);
+             (unsigned long long)g_fa.q_outside, (unsigned long long)g_fa.q_copies,
+             (unsigned long long)g_fa.tmpl_updates, (unsigned long long)g_fa.push_writes);
     std::string json = std::string(hdr) + "\"images\":" + imgs + ",\"ts\":" + ts + ",\"frames\":" + frames + "}";
     std::string pkg = self_pkg();
     const std::string cands[] = {
@@ -2240,6 +2270,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRendering(VkCommandBuffer cb, const
         }
         FaCb& c = g_facb[cb];
         for (auto s : c.gfx) if (s) fa_add_set(e, s);
+        for (auto& pv : c.push_gfx) fa_add_view(e, pv.first, pv.second);
         e.ts0 = fa_ts(cb, d);
         if (fa_push(cb, std::move(e))) c.open = (int)c.ev.size() - 1;
     }
@@ -2265,6 +2296,7 @@ static void fa_dispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z, 
     FaEv e; e.kind = FA_DISPATCH; e.gx = x; e.gy = y; e.gz = z; e.indirect = ind;
     FaCb& c = g_facb[cb];
     for (auto s : c.comp) if (s) fa_add_set(e, s);
+    for (auto& pv : c.push_comp) fa_add_view(e, pv.first, pv.second);
     fa_push(cb, std::move(e));
 }
 static VKAPI_ATTR void VKAPI_CALL rk_CmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
@@ -2418,6 +2450,82 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdUpdateBuffer(VkCommandBuffer cb, VkBuffe
     DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdUpdateBuffer) { RK_LOG_ONCE("CmdUpdateBuffer: 无下层"); return; }
     { std::lock_guard<std::mutex> lk(g_mtx); FaEv e; e.kind = FA_FILL_BUF; e.bytes = sz; fa_push(cb, std::move(e)); }
     d.CmdUpdateBuffer(cb, b, o, sz, p);
+}
+// ── 描述符模板 / push 描述符 ──
+struct TmplEntry { uint32_t binding, elem, count, type; size_t offset, stride; };
+static std::map<VkDescriptorUpdateTemplate, std::vector<TmplEntry>> g_tmpl;
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDescriptorUpdateTemplate(VkDevice dev, const VkDescriptorUpdateTemplateCreateInfo* ci,
+    const VkAllocationCallbacks* a, VkDescriptorUpdateTemplate* out) {
+    DevDisp d; if (!dev_of(key(dev), &d) || !d.CreateDescriptorUpdateTemplate) { RK_LOG_ONCE("CreateDescriptorUpdateTemplate: 无下层"); return VK_ERROR_INITIALIZATION_FAILED; }
+    VkResult r = d.CreateDescriptorUpdateTemplate(dev, ci, a, out);
+    if (r == VK_SUCCESS && ci) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto& v = g_tmpl[*out];
+        for (uint32_t i = 0; i < ci->descriptorUpdateEntryCount; i++) {
+            const auto& en = ci->pDescriptorUpdateEntries[i];
+            if (is_image_desc(en.descriptorType))
+                v.push_back({en.dstBinding, en.dstArrayElement, en.descriptorCount, (uint32_t)en.descriptorType, en.offset, en.stride});
+        }
+    }
+    return r;
+}
+static VKAPI_ATTR void VKAPI_CALL rk_DestroyDescriptorUpdateTemplate(VkDevice dev, VkDescriptorUpdateTemplate t, const VkAllocationCallbacks* a) {
+    DevDisp d; if (!dev_of(key(dev), &d) || !d.DestroyDescriptorUpdateTemplate) { RK_LOG_ONCE("DestroyDescriptorUpdateTemplate: 无下层"); return; }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_tmpl.erase(t); }
+    d.DestroyDescriptorUpdateTemplate(dev, t, a);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_UpdateDescriptorSetWithTemplate(VkDevice dev, VkDescriptorSet set, VkDescriptorUpdateTemplate t, const void* data) {
+    DevDisp d; if (!dev_of(key(dev), &d) || !d.UpdateDescriptorSetWithTemplate) { RK_LOG_ONCE("UpdateDescriptorSetWithTemplate: 无下层"); return; }
+    if (data) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_set_gen[set]++;
+        g_fa.tmpl_updates++;
+        auto it = g_tmpl.find(t);
+        if (it != g_tmpl.end())
+            for (const auto& en : it->second)
+                for (uint32_t j = 0; j < en.count; j++) {
+                    auto* ii = reinterpret_cast<const VkDescriptorImageInfo*>(static_cast<const char*>(data) + en.offset + j * en.stride);
+                    note_image_desc(set, en.binding, en.elem + j, en.type, ii->imageView, ii->sampler);
+                }
+    }
+    d.UpdateDescriptorSetWithTemplate(dev, set, t, data);
+}
+// push: 图直接挂到 cb 的绑定点上; pass 开着就同时记进当前 pass 的读
+static void note_push(VkCommandBuffer cb, VkPipelineBindPoint bp, VkImageView v, uint32_t type) {   // 持锁
+    if (v == VK_NULL_HANDLE) return;
+    g_fa.push_writes++;
+    FaCb& c = g_facb[cb];
+    bool st = type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    auto& lst = bp == VK_PIPELINE_BIND_POINT_COMPUTE ? c.push_comp : c.push_gfx;
+    if (lst.size() < 64) lst.push_back({v, st});
+    if (bp == VK_PIPELINE_BIND_POINT_GRAPHICS) if (FaEv* e = fa_open(cb)) fa_add_view(*e, v, st);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdPushDescriptorSetKHR(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout pl,
+    uint32_t set, uint32_t n, const VkWriteDescriptorSet* w) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdPushDescriptorSetKHR) { RK_LOG_ONCE("CmdPushDescriptorSetKHR: 无下层"); return; }
+    if (w) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        for (uint32_t i = 0; i < n; i++)
+            if (w[i].pImageInfo && is_image_desc(w[i].descriptorType))
+                for (uint32_t j = 0; j < w[i].descriptorCount; j++) note_push(cb, bp, w[i].pImageInfo[j].imageView, w[i].descriptorType);
+    }
+    d.CmdPushDescriptorSetKHR(cb, bp, pl, set, n, w);
+}
+static VKAPI_ATTR void VKAPI_CALL rk_CmdPushDescriptorSetWithTemplateKHR(VkCommandBuffer cb, VkDescriptorUpdateTemplate t,
+    VkPipelineLayout pl, uint32_t set, const void* data) {
+    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdPushDescriptorSetWithTemplateKHR) { RK_LOG_ONCE("CmdPushDescriptorSetWithTemplateKHR: 无下层"); return; }
+    if (data) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto it = g_tmpl.find(t);
+        // 模板没记绑定点 (push 模板的 pipelineBindPoint 在 CreateInfo 里, 这里按图形算: 保守地多算读)
+        if (it != g_tmpl.end())
+            for (const auto& en : it->second)
+                for (uint32_t j = 0; j < en.count; j++) {
+                    auto* ii = reinterpret_cast<const VkDescriptorImageInfo*>(static_cast<const char*>(data) + en.offset + j * en.stride);
+                    note_push(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ii->imageView, en.type);
+                }
+    }
+    d.CmdPushDescriptorSetWithTemplateKHR(cb, t, pl, set, data);
 }
 static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateQueryPool(VkDevice dev, const VkQueryPoolCreateInfo* ci,
                                                          const VkAllocationCallbacks* a, VkQueryPool* out) {
@@ -2638,6 +2746,12 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
         RK_HOOK("vkCmdBeginQuery", rk_CmdBeginQuery);
         RK_HOOK("vkCmdEndQuery", rk_CmdEndQuery);
         RK_HOOK("vkCmdCopyQueryPoolResults", rk_CmdCopyQueryPoolResults);
+        RK_HOOK("vkCreateDescriptorUpdateTemplate", rk_CreateDescriptorUpdateTemplate);
+        RK_HOOK("vkCreateDescriptorUpdateTemplateKHR", rk_CreateDescriptorUpdateTemplate);
+        RK_HOOK("vkDestroyDescriptorUpdateTemplate", rk_DestroyDescriptorUpdateTemplate);
+        RK_HOOK("vkDestroyDescriptorUpdateTemplateKHR", rk_DestroyDescriptorUpdateTemplate);
+        RK_HOOK("vkUpdateDescriptorSetWithTemplate", rk_UpdateDescriptorSetWithTemplate);
+        RK_HOOK("vkUpdateDescriptorSetWithTemplateKHR", rk_UpdateDescriptorSetWithTemplate);
     }
     RK_HOOK("vkCreateRenderPass2", rk_CreateRenderPass2);
     RK_HOOK("vkCreateRenderPass2KHR", rk_CreateRenderPass2);
@@ -2702,6 +2816,12 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_HOOK("vkCmdBeginQuery", rk_CmdBeginQuery);
         RK_HOOK("vkCmdEndQuery", rk_CmdEndQuery);
         RK_HOOK("vkCmdCopyQueryPoolResults", rk_CmdCopyQueryPoolResults);
+        RK_HOOK("vkCreateDescriptorUpdateTemplate", rk_CreateDescriptorUpdateTemplate);
+        RK_HOOK("vkCreateDescriptorUpdateTemplateKHR", rk_CreateDescriptorUpdateTemplate);
+        RK_HOOK("vkDestroyDescriptorUpdateTemplate", rk_DestroyDescriptorUpdateTemplate);
+        RK_HOOK("vkDestroyDescriptorUpdateTemplateKHR", rk_DestroyDescriptorUpdateTemplate);
+        RK_HOOK("vkUpdateDescriptorSetWithTemplate", rk_UpdateDescriptorSetWithTemplate);
+        RK_HOOK("vkUpdateDescriptorSetWithTemplateKHR", rk_UpdateDescriptorSetWithTemplate);
     }
     if (dev == VK_NULL_HANDLE) return nullptr;
     DevDisp d;
@@ -2728,6 +2848,8 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_OPT("vkCmdPipelineBarrier2KHR", CmdPipelineBarrier2, rk_CmdPipelineBarrier2);
         RK_OPT("vkQueueSubmit2", QueueSubmit2, rk_QueueSubmit2);
         RK_OPT("vkQueueSubmit2KHR", QueueSubmit2, rk_QueueSubmit2);
+        RK_OPT("vkCmdPushDescriptorSetKHR", CmdPushDescriptorSetKHR, rk_CmdPushDescriptorSetKHR);
+        RK_OPT("vkCmdPushDescriptorSetWithTemplateKHR", CmdPushDescriptorSetWithTemplateKHR, rk_CmdPushDescriptorSetWithTemplateKHR);
 #undef RK_OPT
     }
     return d.gdpa ? d.gdpa(dev, name) : nullptr;
