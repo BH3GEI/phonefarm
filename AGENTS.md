@@ -132,6 +132,18 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 **仓库不含任何模型**：`--local` 那档是降级占位不是模型（概率均匀、未校准），
 只在「总比停摆强」这个意义上成立。契约见 `docs/SPEC_DECISION_PATH.md`。
 
+**设备屏幕观战窗口**（零 Token，只读）
+
+```bash
+./phonefarm screen                                    # 浏览器看画面 + 刚点了哪
+./phonefarm screen --interval-ms 1000 --actions tasks/局/log.jsonl
+```
+
+一个 std-only 的本地 HTTP 服务 + 一份自包含 HTML（无外链、无构建）。
+它**不拿设备锁** —— 拿锁就没法在别人跑局时观战，而观战正是它的用途；
+代价写在 `--help` 与页面上：**每秒一次 screencap 会影响帧时与功耗，做判定性测量时别开着它**。
+契约见 `docs/SPEC_SCREEN_WIDGET.md`。
+
 **Compute Shader 算子标尺**（零 Token，需 root）
 
 ```bash
@@ -281,17 +293,19 @@ src/                   Rust 内核源码
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
   ios.rs               iOS 设备后端（经 WebDriverAgent）+ ios-probe 真机体检
   collect.rs           有界滚动采集（组合动作原语，零 Token）：有界滚动 / 重叠去重 / 覆盖边界
-  decision.rs          决策原语通路（零 Token 降级档 + 侧车协议 + 资产校验）；仓库不含模型
+  screen.rs            设备屏幕观战窗口（零 Token，只读；不拿设备锁）+ screen_widget.html
+  decision.rs          决策原语通路（零 Token 降级档 + 侧车协议 + 资产校验）；仓库不含训练权重
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
   hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测
   platform.rs          设备接口 Backend（Adb / Hdc / ios::Ios 三个实现）+ 各平台三层可行性声明
   perfsrc.rs smartperf.rs  性能数据来源抽象：安卓 sysfs 与鸿蒙 HiSmartPerf(SP_daemon/Xpower) 同一份 JSON
   hypo.rs caps.rs mtools.rs experiment.rs   假设—实验—证据闭环
-  keepalive.rs serve.rs script.rs collect.rs decision.rs parallel.rs telemetry.rs device.rs
+  keepalive.rs serve.rs script.rs collect.rs screen.rs decision.rs parallel.rs telemetry.rs device.rs
 phonefarm.toml         控制参数、规则阈值及模型 Provider 回退链配置
 docs/                  架构契约与各能力规格（索引见 README「文档索引」）
 skills/                给 AI Agent 直接阅读的英文说明书（phonefarm / phonefarm-cts / a2oh-diagnose）
 examples/              示例脚本与 CTS profile 样例
+tools/decision-sidecar/  决策侧车（Swift + Core ML）：把真模型接进 decide --sidecar
 round.sh               单轮调度外壳脚本（保留兼容，生产建议用 benchmark）
 ocr.swift / ocr        OCR 辅助识别模块
 tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campaign.tsv、runs/<局ID>/）

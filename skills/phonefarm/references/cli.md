@@ -100,6 +100,23 @@ phonefarm decide --sidecar "your bridge" --request request.json
 phonefarm decide --verify model-dir --manifest manifest.json  # assets only, no inference
 ```
 
+A Core ML sidecar already exists: `tools/decision-sidecar/` (Swift + Core ML, `make build && make test`).
+It ships a 137-byte *reference* model that proves the path end to end -- it is a lexical scorer,
+not a trained model. See its README for how to swap in real weights.
+
+## screen — live device screen (free, read-only)
+
+```bash
+phonefarm screen                                        # browser: live screen + tap/drag highlights
+phonefarm screen --interval-ms 1000 --actions <log.jsonl>
+```
+
+A std-only local HTTP server plus one self-contained HTML page (no CDN, no build step).
+It does **not** take the device lock -- taking it would make the window useless for watching
+someone else's run, which is its whole purpose. The price is written in `--help` and on the page:
+**one screencap per interval moves the GPU and CPU, so do not leave it open during a judged
+measurement.** Spec: `docs/SPEC_SCREEN_WIDGET.md`.
+
 One `state` + a list of typed questions (`choice` / `score` / `noul`) -> a list of typed answers.
 **This repo ships no model.** `--local` is a *degraded placeholder*, not a model: its
 probabilities are uniform and uncalibrated, and it exists only so the loop keeps moving when

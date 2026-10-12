@@ -125,7 +125,7 @@ NN（端侧超分 / 插帧）是这个闭环里的**一类候选改动**，不�
 
 上层各通路互不依赖：卸掉 VLM 通路，`script` / `test-batch` / `bench` 照常工作；反之亦然。
 **多模态视觉模型（VLM）只是其中一条通路，不是这个项目的定义**——
-`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `collect` / `keepalive` 全程零 Token，
+`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `collect` / `screen` / `decide` / `keepalive` 全程零 Token，
 不碰模型也各自成立。遥测口径全局统一，因此性能局、脚本局、CTS 局、VLM 局可以横向对比。
 
 > **🤖 给 AI Agent 用（推荐姿势）**：本项目自带 agent 说明书 `skills/phonefarm/SKILL.md`。
@@ -188,6 +188,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ```bash
 ./phonefarm devices                        # adb / hdc / iOS 三族设备一并列出（iOS 只列 USB 上看得见的，不代表 WDA 已就绪）
 ./phonefarm ios-probe                      # iOS 真机体检：逐项探 WDA 端点 + 核实界面树形状（插上手机一条命令核）
+./phonefarm screen                         # 设备屏幕观战窗口：浏览器里看画面 + 刚点了哪（零 Token，只读）
 ./phonefarm keepalive                      # 对全部在线设备巡检一轮：唤醒 + 解锁 + 不息屏
 ./phonefarm keepalive --status             # 只读报告：连接/亮屏/不息屏是否生效
 ./phonefarm keepalive --watch              # 常驻守护（默认 300s 一轮，新上线设备自动纳入）
@@ -608,6 +609,7 @@ tasks/<任务名>/        程序唯一可写区域
 | `docs/SPEC_SCRIPT_MODE.md` | 确定性脚本与历史轨迹回放：纯离线 / 零 Token / 全遥测 / 重放契约 |
 | `docs/SPEC_OBSERVATION_BUDGET.md` | 观察预算契约：投影有界 / 有界滚动 / 去重 / 覆盖边界 / MCP 结构化返回 |
 | `docs/SPEC_DECISION_PATH.md` | 决策原语通路：typed decisions 协议 / 会话纪律 / 资产校验 / 降级档的诚实边界 |
+| `docs/SPEC_SCREEN_WIDGET.md` | 设备屏幕观战窗口：只读 / 取帧口径 / 动作叠加 / 它自身的代价 |
 | `docs/SPEC_CTS_HARNESS.md` | 一致性测试 harness：双协议解析 / 对账判定 / 结果提取 |
 | `docs/SPEC_KEEPALIVE.md` | 农场级设备保活巡检：顺序契约 / adb 与 hdc 两族差异 |
 | `docs/SPEC_MCP_SERVE.md` | MCP stdio 工具服务：工具面 / 协议子集 / 安全护栏 / octos 接法 |

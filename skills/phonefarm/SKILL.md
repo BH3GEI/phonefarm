@@ -15,7 +15,7 @@ several independent upper paths on one shared foundation of device abstraction,
 record contract, telemetry, and evidence grading.
 
 A vision-language model drives **one** of those paths. It is not what the
-project is. `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `collect`, `decide` and
+project is. `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `collect`, `decide`, `screen` and
 `keepalive` spend zero tokens and work with no model at all.
 
 Architecture: decision and execution are separated. Where a model is used at
@@ -71,6 +71,7 @@ benchmarking, frame capture, farm keep-alive, read-only inspection, MCP service.
 | Frame capture | `capture` | none |
 | Bounded scroll & collect | `collect` | none |
 | Typed decisions (local degraded) | `decide` | none |
+| Live device screen (`screen`) | `screen` | none |
 | Performance optimization loop | `loop_v1/` toolchain (not a subcommand) | none |
 | Hypothesis-experiment-evidence | `hyp` `pred` `caps` `tools` `experiment` `export` `eval` | some |
 | Read-only inspection | `last` `runs` `show` `status` `stats` `cat` `tasks` `tree` `lessons` `campaign` `schema` `config` | none |
@@ -184,6 +185,12 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd ..
 ./phonefarm decide --sidecar "your bridge" --request request.json   # plug a real model in here
 ./phonefarm decide --verify model-dir --manifest manifest.json      # assets only, no inference
 
+# Live device screen in a browser: read-only, no device lock. It does NOT cost tokens,
+# but one screencap per interval moves the GPU/CPU -- do not leave it open during a judged
+# measurement.
+./phonefarm screen
+./phonefarm screen --interval-ms 1000 --actions tasks/<task>/runs/<run>/log.jsonl
+
 # Inspecting results (read-only, offline, zero model tokens)
 ./phonefarm last                                  # latest session verdict
 ./phonefarm show <run-id> --step N                # drill into one step
@@ -200,7 +207,7 @@ The full CLI surface is in `references/cli.md`.
 - **Only the VLM path burns tokens (real money)**: `run`, `benchmark`,
   `parallel`, and the `[evolution]` quota. Quote the cost and get the user's
   consent before long or physical-device sessions. Everything else —
-  `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `collect`, `decide`, `keepalive`, all
+  `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `collect`, `decide`, `screen`, `keepalive`, all
   read-only inspection, unit tests and builds — is free and safe to run.
 - Keys come from `./secrets.env` automatically. Never commit it; never
   fabricate keys.

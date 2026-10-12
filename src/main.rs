@@ -52,6 +52,7 @@ mod refbenchreport;
 mod smartperf;
 mod plugins;
 mod runtime;
+mod screen;
 mod script;
 mod selftest;
 mod serve;
@@ -846,6 +847,11 @@ fn main() {
             // iOS 后端真机体检: 逐项探 WDA 端点, 并核实界面树形状与解析器的假设对不对。
             // 存在理由: 这个后端是照文档形状写的, 没过真机 —— 给人一条命令去核, 而不是等人想起来。
             std::process::exit(ios::run_ios_probe(&args[1..]));
+        }
+        Some("screen") => {
+            // 设备屏幕观战窗口(SPEC_SCREEN_WIDGET): 零 Token 只读。
+            // 语义移自 iPhone-use 的实时屏幕 widget。不拿设备锁 —— 拿锁就没法观战。
+            std::process::exit(screen::run_screen(&args[1..]));
         }
         Some("test-batch") => {
             // CTS 批量挂机执行器 (CTS Harness Spec): A2OH 桥接环境的 instrument 调度,

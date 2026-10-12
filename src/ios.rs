@@ -630,7 +630,7 @@ pub fn run_ios_probe(args: &[String]) -> i32 {
     let mut steps: Vec<Value> = Vec::new();
     let mut bad = false;
     let mut remedy: Vec<String> = Vec::new();
-    let mut step = |name: &str, ok: bool, detail: Value, steps: &mut Vec<Value>| {
+    let step = |name: &str, ok: bool, detail: Value, steps: &mut Vec<Value>| {
         steps.push(json!({"step": name, "ok": ok, "detail": detail}));
         ok
     };

@@ -1037,6 +1037,54 @@ exit 3
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 真侧车端到端。**默认跳过** —— Core ML 只在 Apple 侧有, 不能塞进必跑集。
+    ///
+    /// ```bash
+    /// make -C tools/decision-sidecar build
+    /// PHONEFARM_DECISION_SIDECAR="$(pwd)/tools/decision-sidecar/build/decision-sidecar \
+    ///   --model $(pwd)/tools/decision-sidecar/reference.mlmodel" cargo test real_sidecar
+    /// ```
+    ///
+    /// 这条测试的价值在于: 它是唯一会**真的把答案按语义区分开**的测试。
+    /// 假侧车只能验协议; 真侧车能验「同一组选项、两段不同的状态, 选出了不同的东西」——
+    /// 也就是「这条路真的在做事, 而不是在回一个常量」。
+    #[test]
+    fn real_sidecar_end_to_end_when_asked() {
+        let Ok(cmd) = std::env::var("PHONEFARM_DECISION_SIDECAR") else {
+            return; // 没配就不跑: 不能用环境缺失把它变成红灯
+        };
+        let ask = |state: &str| DecisionRequest {
+            state: state.to_string(),
+            questions: vec![Question::Choice {
+                id: "want".into(),
+                instructions: "客户想要什么?".into(),
+                options: vec![
+                    Option_ { label: "refund".into(), description: "退款".into() },
+                    Option_ { label: "order_status".into(), description: "查单".into() },
+                    Option_ { label: "technical_help".into(), description: "技术支持".into() },
+                ],
+            }],
+        };
+        let mut d = match SidecarDecider::start(&cmd, Duration::from_secs(60), Duration::from_secs(60)) {
+            Ok(d) => d,
+            Err(e) => panic!("真侧车起不来: {e}"),
+        };
+        let pick = |d: &mut SidecarDecider, state: &str| match d.decide(&ask(state)).unwrap().remove(0) {
+            Answer::Choice { selected, .. } => selected,
+            other => panic!("应当是 choice: {other:?}"),
+        };
+        let a = pick(&mut d, "客户为订单 #4471 被重复扣款，没有人回复。今天就要退款。");
+        let b = pick(&mut d, "登录之后一直白屏，重启 App 也没有用，我的订单页面打不开。");
+        assert_eq!(a, "refund", "要退款的诉求应当选 refund");
+        assert_eq!(b, "technical_help", "白屏打不开应当选 technical_help");
+        assert_ne!(a, b, "同一组选项、两段不同的状态, 必须选出不同的东西 —— 否则这条路只是在回常量");
+        assert_eq!(
+            pick(&mut d, "客户为订单 #4471 被重复扣款，没有人回复。今天就要退款。"),
+            a,
+            "同一请求重复问必须逐位一致"
+        );
+    }
+
     #[test]
     fn manifest_hash_mismatch_is_reported_case_insensitively() {
         let dir = std::env::temp_dir().join(format!("pf_manifest_ci_{}", std::process::id()));
