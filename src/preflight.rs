@@ -76,7 +76,10 @@ pub fn run_preflight(args: &[String]) -> i32 {
         eprintln!("preflight: 判不出用哪台设备（零台/多台在线，--serial 指定）");
         return 3;
     };
-    let tmp = std::env::temp_dir().join("phonefarm-preflight").display().to_string();
+    // run_timeout 把 stdout 写进 <tmp>/_cmd.out —— 目录不存在就读不回任何东西
+    let tmpd = std::env::temp_dir().join("phonefarm-preflight");
+    let _ = std::fs::create_dir_all(&tmpd);
+    let tmp = tmpd.display().to_string();
     let phone = Device::new(Some(serial.clone()), tmp);
 
     // 锁在别人手里 → 轻量档: 只 cat sysfs（风扇/温度/充电），不拉 cmd/dumpsys 进程——
@@ -138,24 +141,20 @@ pub fn run_preflight(args: &[String]) -> i32 {
         }
     }
 
-    // ── thermal：SoC 最高温（修不了，只能等冷）──
+    // ── thermal：SoC 结温（修不了，只能等冷）。cpu-hw-trip-* 这类区报的是跳变阈值
+    //    (105°C) 不是温度，口径与 fleet 一致走 hwcond::soc_max_c（按前缀 + 跳哨兵值）──
     let zones = phone.shell(
-        "for z in /sys/class/thermal/thermal_zone*; do cat $z/temp 2>/dev/null; done",
+        "for z in /sys/class/thermal/thermal_zone*; do echo \"$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)\"; done",
         8000,
     );
-    let max_mc = zones
-        .lines()
-        .filter_map(|l| l.trim().parse::<f64>().ok())
-        .fold(f64::MIN, f64::max);
-    if max_mc == f64::MIN {
-        checks.push(Check { name: "thermal", status: "na".into(), detail: "读不到温度区".into() });
-    } else {
-        let c = max_mc / 1000.0;
-        checks.push(if c < temp_cap {
-            pass("thermal", format!("SoC 最高 {c:.1}°C < {temp_cap:.0}°C"))
+    let zones = crate::hwcond::parse_thermal(&zones);
+    match crate::hwcond::soc_max_c(&zones) {
+        None => checks.push(Check { name: "thermal", status: "na".into(), detail: "读不到 SoC 温度区".into() }),
+        Some((ty, c)) => checks.push(if c < temp_cap {
+            pass("thermal", format!("SoC 最高 {c:.1}°C ({ty}) < {temp_cap:.0}°C"))
         } else {
-            fail("thermal", format!("SoC 最高 {c:.1}°C ≥ 上限 {temp_cap:.0}°C，先等冷"))
-        });
+            fail("thermal", format!("SoC 最高 {c:.1}°C ({ty}) ≥ 上限 {temp_cap:.0}°C，先等冷"))
+        }),
     }
 
     // ── charging / screen：只报不查（screen 要 dumpsys，轻量档跳过）──
