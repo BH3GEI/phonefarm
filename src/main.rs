@@ -38,6 +38,7 @@ mod onboard;
 mod fold;
 mod gamepad;
 mod frameaudit;
+mod preflight;
 mod grayab;
 mod graylayer;
 mod shotdiff;
@@ -390,6 +391,10 @@ fn main() {
         Some("fleet") => {
             // 农场只读快照: 一趟把每台手机的状态读齐 (供上层面板消费)
             std::process::exit(fleet::run_fleet(&args[1..]));
+        }
+        Some("preflight") => {
+            // 开测前的环境不变量核查 (风扇常关/静音/温度; --fix 自动修能修的)
+            std::process::exit(preflight::run_preflight(&args[1..]));
         }
         Some("devices") => {
             // 两族并列,各自 best-effort(某族工具不在 PATH 就跳过):

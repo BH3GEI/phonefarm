@@ -58,6 +58,7 @@ const LOCKED: [&str; 22] = [
     "experiment",
     "selftest",
     "frame-audit",
+    "preflight",
 ];
 
 /// 从参数里剥下来的锁选项。
@@ -79,6 +80,10 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
     }
     if rest.iter().any(|a| a == "-h" || a == "--help") {
         return false;
+    }
+    // preflight: 只读核查不拿锁; --fix 要写风扇/音量，跟测量一样排队
+    if sub == "preflight" {
+        return rest.iter().any(|a| a == "--fix");
     }
     // selftest report 只读本地证据目录、不带子命令只打用法, 都不碰设备
     if sub == "selftest" && matches!(rest.first().map(|s| s.as_str()), None | Some("report")) {
