@@ -245,6 +245,7 @@ pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -
 
     let mut meta = Meta::default();
     let mut submits: Vec<(f64, i64, i64)> = Vec::new();
+    let mut truncated: Vec<(f64, i64, i64)> = Vec::new();
     let mut retires: HashMap<(i64, i64), Retire> = HashMap::new();
     let mut buslevel = Vec::new();
     let mut pwrlevel = Vec::new();
@@ -283,12 +284,18 @@ pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -
 
         match ev {
             "adreno_cmdbatch_submitted" => {
-                if m["comm"].trim() == render_comm {
-                    if let (Some(&ctx), Some(&ts)) = (f.get("ctx"), f.get("ts")) {
+                // ftrace 在 comm 列放不下时写成 "<...>", 提交还在, 只是名字丢了
+                // (2026-10-14 better1_1 重考: 6/20 臂因此 n_frames=0)。整窗一个正常
+                // 名字都没有时, 才把截断的提交算进来, 避免和别的进程的提交混在一起。
+                let comm = m["comm"].trim();
+                if let (Some(&ctx), Some(&ts)) = (f.get("ctx"), f.get("ts")) {
+                    if comm == render_comm {
                         if !render_ctxs.contains(&ctx) {
                             render_ctxs.push(ctx);
                         }
                         submits.push((wall, ctx, ts));
+                    } else if comm == "<...>" {
+                        truncated.push((wall, ctx, ts));
                     }
                 }
             }
@@ -324,6 +331,14 @@ pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -
         }
     }
 
+    if submits.is_empty() && !truncated.is_empty() {
+        submits = truncated;
+        for &(_, ctx, _) in &submits {
+            if !render_ctxs.contains(&ctx) {
+                render_ctxs.push(ctx);
+            }
+        }
+    }
     submits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     render_ctxs.sort_unstable();
 

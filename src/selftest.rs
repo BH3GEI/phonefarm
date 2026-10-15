@@ -1222,8 +1222,10 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     let apply_ok = checks.as_object().map(|o| o.values().all(|v| v == &json!(true))).unwrap_or(false);
     let sm = pv(&summary);
     let span = sm["span_s"].as_f64().unwrap_or(0.0);
-    // 应用若在采集窗内就跑完退出, 窗口会短一截 —— 那是 frames 设小了, 这一臂不算量成
-    let capture_ok = sm["n_frames"].as_u64().unwrap_or(0) > 0 && span >= c.capdur_s as f64 * 0.9;
+    // 采集窗 10s, 跑满也常落在 8.0–8.9s。 0.9 把这些有帧的臂整组判废
+    // (2026-10-14 better1_1 重考：20 臂里 13 臂 span 8.0–8.9 且 n_frames>2300，三轮 ABORT)。
+    // 改到 0.8。真正没采到 (n_frames=0 或 span 远低于谱) 仍然不算。
+    let capture_ok = sm["n_frames"].as_u64().unwrap_or(0) > 0 && span >= c.capdur_s as f64 * 0.8;
     let arm = json!({
         "label": label, "load": load.to_json(), "remote_spv": remote_spv,
         "started_at": started_at, "cool": cool, "cool_s": py_round(cool_s, 1),
