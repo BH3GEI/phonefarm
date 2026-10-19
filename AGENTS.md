@@ -15,7 +15,7 @@ iOS `wda`），
 内部自动决定用哪几层。本仓库是底座那一层，四件事：
 
 - 设备：adb / hdc / iOS(WebDriverAgent) 三族的连接、保活、确定性脚本回放。新增一种设备/平台 = 实现 `platform::Backend`
-  并登记 serial 前缀，各平台能开哪几层及原因见 `docs/DEVICES.md`。
+  并登记 serial 前缀，各平台能开哪几层及原因见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DEVICES.md`。
 - 应用改动（`knobs/`）：黑档系统参数，灰档 Vulkan layer 注入。
 - 测量：安卓 sysfs 电源轨加 raw ftrace kgsl，鸿蒙 HiSmartPerf，上层拿同一份 JSON；
   测功耗期间停充。
@@ -118,7 +118,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 
 产出的是**清单**不是**结论**：一次调用最多滑 `--max-swipes` 屏，某屏无新内容立即停（绝不盲滑），
 `coverage.complete` 如实区分「采完整屏列表」与「撞到有界上限」。判定仍归判定那一侧。
-契约见 `docs/SPEC_OBSERVATION_BUDGET.md`。
+契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_OBSERVATION_BUDGET.md`。
 
 **决策原语**（零 Token 降级档）
 
@@ -130,7 +130,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 
 一个 state + 一组 typed question（`choice`/`score`/`noul`）→ 一组 typed answer。
 **仓库不含任何模型**：`--local` 那档是降级占位不是模型（概率均匀、未校准），
-只在「总比停摆强」这个意义上成立。契约见 `docs/SPEC_DECISION_PATH.md`。
+只在「总比停摆强」这个意义上成立。契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_DECISION_PATH.md`。
 
 **设备屏幕观战窗口**（零 Token，只读）
 
@@ -142,7 +142,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 一个 std-only 的本地 HTTP 服务 + 一份自包含 HTML（无外链、无构建）。
 它**不拿设备锁** —— 拿锁就没法在别人跑局时观战，而观战正是它的用途；
 代价写在 `--help` 与页面上：**每秒一次 screencap 会影响帧时与功耗，做判定性测量时别开着它**。
-契约见 `docs/SPEC_SCREEN_WIDGET.md`。
+契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_SCREEN_WIDGET.md`。
 
 **Compute Shader 算子标尺**（零 Token，需 root）
 
@@ -165,7 +165,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
 ```
 
-`game_opt_loop` 决策层的物理采样与统计裁决端，契约见 `docs/SPEC_GPU_OP.md`。
+`game_opt_loop` 决策层的物理采样与统计裁决端，契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_GPU_OP.md`。
 设备条件化与功耗遥测在 `src/hwcond.rs`（与 `bench` 共享），统计在 `src/gpustat.rs`。
 设备侧 `vkop_runner` 已构建（`tools/vkop/android_aarch64_vkop_runner`，源码与 `build.sh` 同目录）。
 画质补测支持真机参考帧集，回包里 `quality_reference` 记清真值出处。
@@ -173,7 +173,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 **性能优化闭环**（零 Token，需 root）
 
 实现在 `loop_v1/`（工具链 + 纯函数解析器），**不是 phonefarm 子命令**。
-跑法与五条判据见 `loop_v1/README.md`；候选改动从 `docs/MOBILE_GPU_OPT_ROUTES.md` 的清单里挑。
+跑法与五条判据见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/loop_v1/README.md`；候选改动从 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MOBILE_GPU_OPT_ROUTES.md` 的清单里挑。
 
 三条纪律，动手前必须清楚：
 
@@ -182,7 +182,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 - **解析全是纯函数**，同一份 trace 每次重算必须逐字节一致
 
 帧时序走 raw ftrace 的 kgsl 事件（不侵入游戏进程）。`SurfaceFlinger --latency`、
-`gfxinfo`、Perfetto GPU producer 三条路都已在本机实测排除，别再重复试，原因见 `loop_v1/README.md`。
+`gfxinfo`、Perfetto GPU producer 三条路都已在本机实测排除，别再重复试，原因见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/loop_v1/README.md`。
 
 **假设—实验—证据闭环**
 
@@ -285,7 +285,7 @@ loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/�
   refbench/            白盒靶子的驱动侧（靶子本身在同级 refbench 仓库）；判定链已知答案自检 phonefarm selftest 的用法也在这里
   auto/                自动挑旋钮：白名单探测 → 冻结规则 → 大模型选参 → 逐组对照
 knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，
-                       说明见 knobs/README.md；原 HGamey/knobs 仓库已归档并入，shell 正在往 Rust 收）
+                       说明见 https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/README.md；原 HGamey/knobs 仓库已归档并入，shell 正在往 Rust 收）
 src/                   Rust 内核源码
   universal/           通用核心：统一动作协议、三大算子、优先级引擎、插件契约
   plugins/             场景插件层
@@ -317,4 +317,12 @@ tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campa
   `cat ...stepN.xml.gz` 查原始 UI 树做离线解析与断言复盘。
 - 局 ID 支持前缀模糊匹配。
 - VLM 通路严格遵守单步六阶段回路（采集 → 组装 → 决策 → 校验 → 执行 → 验收）。
-- 核心架构契约见 `docs/DESIGN.md`；任何核心功能升级或协议重写，必须先做 SPEC 定义，并与既有架构保持一致。
+- 核心架构契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DESIGN.md`；任何核心功能升级或协议重写，必须先做 SPEC 定义，并与既有架构保持一致。
+
+## 代码仓库只放代码
+
+- 不要在本仓库新增或修改说明文档、图片、PPT、PDF、实验报告。
+- 这次改了什么、为什么改：写在 commit message 正文。
+- 一个功能或修复的完整说明、验证方法、实验数字、截图：写在 PR 描述。
+- 长期文档（设计、规格、架构图、进展汇报）：提交到 https://github.com/HGamey/docs ，本仓库的旧文档在那里的 `repos/<仓库名>/` 下。
+- 允许的例外：根目录 README.md（40 行以内）、AGENTS.md、skills/、许可证、程序或测试要读的数据。CI 检查 `code-only` 会拦下其他文档类文件。

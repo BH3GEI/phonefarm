@@ -38,7 +38,7 @@ changing the kernel.
   cli / telemetry, plus one module per upper path)
 - Text files: `phonefarm.toml` (config + thresholds + prompts + provider chain)
   and the `tasks/<task>/` data directories
-- Design contract: `docs/DESIGN.md` (layering / record contract / six-step loop /
+- Design contract: `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DESIGN.md` (layering / record contract / six-step loop /
   task isolation / write permissions)
 
 ## Directory layout

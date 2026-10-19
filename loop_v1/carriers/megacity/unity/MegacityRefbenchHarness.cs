@@ -69,7 +69,7 @@ namespace Megacity.Refbench
         int    m_Frames, m_Warmup, m_Settle;
         float  m_ResScale;
 
-        // ---- 白盒旋钮 (阶段 3, docs/MEGACITY_WHITEBOX_KNOBS.md W1–W7) ----
+        // ---- 白盒旋钮 (阶段 3, https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MEGACITY_WHITEBOX_KNOBS.md W1–W7) ----
         // 全部可选; 不给就不碰。生效结果逐条写进 json 的 "knobs": 想要的值、怎么改的
         // (prop / field / none / failed:...)、改完回读的实际值。改不动就如实记, 绝不静默降级。
         string m_KMsaa, m_KStoreOpt, m_KFeatOff, m_KFogEvent, m_KSsaoSrc, m_KSsaoAfterOpaque, m_KShadowRes, m_KDepthPriming;

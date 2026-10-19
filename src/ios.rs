@@ -686,7 +686,7 @@ pub fn run_ios_probe(args: &[String]) -> i32 {
     }
     if !step("ui_source_shape", shape_ok, shape_json.clone(), &mut steps) {
         bad = true;
-        remedy.push("界面树与解析器的假设不符 —— 这是 docs/DEVICES.md 里标的那个未验证项。把上面 detail 的 problems 抄进 issue, 或改 `parse_wda_source` / `analyze_source_shape` 对齐这台设备的形状".into());
+        remedy.push("界面树与解析器的假设不符 —— 这是 https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DEVICES.md 里标的那个未验证项。把上面 detail 的 problems 抄进 issue, 或改 `parse_wda_source` / `analyze_source_shape` 对齐这台设备的形状".into());
     }
 
     // 5. 前台应用 / 应用清单
@@ -732,7 +732,7 @@ pub fn run_ios_probe(args: &[String]) -> i32 {
                 println!("  • {r}");
             }
         } else {
-            println!("\n全部就绪。界面树的形状与解析器的假设一致 —— 可以把 docs/DEVICES.md 里那条「尚未上真机验证」改掉了。");
+            println!("\n全部就绪。界面树的形状与解析器的假设一致 —— 可以把 https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DEVICES.md 里那条「尚未上真机验证」改掉了。");
         }
     }
     if bad { 1 } else { 0 }

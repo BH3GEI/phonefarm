@@ -3,7 +3,7 @@
 //! 语义移植自 iPhone-use 的 `pua_scroll_find` / `pua_collect_list`
 //! (https://github.com/zhongerxin/iPhone-use, MIT, © 2026 ZHONG XIN, commit 08ed5b0)。
 //! **只借语义, 不搬代码** —— 实现与注释均为本仓库重写; 来源登记见 THIRD_PARTY_NOTICES.md,
-//! 契约见 docs/SPEC_OBSERVATION_BUDGET.md。
+//! 契约见 https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_OBSERVATION_BUDGET.md。
 //!
 //! 三件事:
 //!   1. **有界滚动**: 一次调用最多滑 max_swipes 屏, 某一屏不再产生新内容立即停, 绝不盲滑;

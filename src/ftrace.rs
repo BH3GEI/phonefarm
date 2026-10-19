@@ -2,7 +2,7 @@
 //!
 //! 为什么走 raw ftrace: `SurfaceFlinger --latency` 在 Android 16 上已失效,
 //! `gfxinfo` 测不到走 SurfaceView 的应用, Perfetto 的 GPU producer 在本机驱动未注册 ——
-//! 三条路都已实测排除 (见 `loop_v1/README.md`)。raw ftrace 是纯文本、root 可开、
+//! 三条路都已实测排除 (见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/loop_v1/README.md`)。raw ftrace 是纯文本、root 可开、
 //! 不侵入被测进程, 一次采集同时拿到帧节奏与 GPU 执行时长。
 //!
 //! 纪律: 解析全是纯函数, 同一份 trace 每次重算逐字节一致;

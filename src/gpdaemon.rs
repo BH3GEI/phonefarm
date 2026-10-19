@@ -46,7 +46,7 @@
 //!     数据却只从这条通道出来 —— 只连控制通道的话, `startCollect` 回 `ret=0` 一切正常,
 //!     然后你一条样本都收不到。
 //!
-//! **单位口径** (同一时刻与 `hwcond` 直读 sysfs 比对出来的, 见 `docs/SPEC_PERF_SOURCE.md` 第 7 节):
+//! **单位口径** (同一时刻与 `hwcond` 直读 sysfs 比对出来的, 见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_PERF_SOURCE.md` 第 7 节):
 //!
 //! | 字段 | 实测 | 结论 |
 //! |---|---|---|

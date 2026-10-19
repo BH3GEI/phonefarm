@@ -1,6 +1,6 @@
 // phonefarm 决策侧车 —— 把 Core ML 决策模型接进 `phonefarm decide --sidecar`。
 //
-// 协议(与 `docs/SPEC_DECISION_PATH.md` §4 一致, 一行一个 JSON):
+// 协议(与 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_DECISION_PATH.md` §4 一致, 一行一个 JSON):
 //
 //   → {"op":"hello","protocol":1}
 //   ← {"op":"ready","protocol":1,"model":"…","units":"…"}
@@ -256,7 +256,7 @@ func main() -> Int32 {
 
     guard let path = modelPath, !path.isEmpty else {
         FileHandle.standardError.write(
-            "必须给 --model 或设 PHONEFARM_DECISION_MODEL。模型从哪来见 tools/decision-sidecar/README.md\n"
+            "必须给 --model 或设 PHONEFARM_DECISION_MODEL。模型从哪来见 https://github.com/HGamey/docs/blob/main/repos/phonefarm/tools/decision-sidecar/README.md\n"
                 .data(using: .utf8)!)
         return 2
     }

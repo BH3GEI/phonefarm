@@ -1113,7 +1113,7 @@ impl Hdc {
 /// Android 零扰动由构造保证: 不带前缀时行为与旧 Adb 直连一字不差。
 ///
 /// 新增一种设备/平台: 实现 `platform::Backend`, 在 `platform::open` 登记前缀即可,
-/// 这里不用动 (见 docs/DEVICES.md)。
+/// 这里不用动 (见 https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DEVICES.md)。
 pub struct Device {
     b: Box<dyn crate::platform::Backend>,
 }

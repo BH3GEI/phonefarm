@@ -572,7 +572,7 @@ pub(crate) fn cool_summary(arms: &[Value]) -> (Option<f64>, bool) {
     (worst, arms.iter().any(|a| a["timeout"].as_bool() == Some(true)))
 }
 
-/// 施加后隔多少秒回读 (knobs/DESIGN.md: 厂商性能服务约 10 秒内改回)。
+/// 施加后隔多少秒回读 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md: 厂商性能服务约 10 秒内改回)。
 const READBACK_AFTER_S: u64 = 12;
 
 /// 读回 plan 里每一项当前值的一条 shell 命令。输出每行 `<路径>=<值>`。
@@ -1346,7 +1346,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                 }
             }
             let label = format!("sp_{arm}{i}");
-            // 施加后隔十几秒回读一次 (knobs/DESIGN.md: 写得进不等于守得住, 厂商性能服务
+            // 施加后隔十几秒回读一次 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md: 写得进不等于守得住, 厂商性能服务
             // perf2-hal / zperfcubeservice 会在约 10 秒内把 GPU/CPU 频率边界改回去)。
             // 两臂都读 —— 只在改写臂读的话, 那一次 adb 调用本身就成了两臂之间的差别。
             let rb_cmd = readback_cmd(&plan);

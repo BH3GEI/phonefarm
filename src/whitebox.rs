@@ -2,7 +2,7 @@
 //!
 //! 两臂唯一的区别是启动 extras: 对照臂用 `workload.launch.extras` (基准), 改写臂在它后面
 //! 追加 `payload.knobs` 里的白盒旋钮 (`--es msaa 1` 之类, 旋钮清单见
-//! docs/MEGACITY_WHITEBOX_KNOBS.md 与 loop_v1/carriers/megacity/contract/launch.json)。
+//! https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MEGACITY_WHITEBOX_KNOBS.md 与 loop_v1/carriers/megacity/contract/launch.json)。
 //! 启动、等标记、采集、功耗、等冷、统计判定全部复用 eval 的 workload.launch 那套
 //! (#117), 这里只加白盒特有的三件事:
 //!
