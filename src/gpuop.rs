@@ -894,7 +894,7 @@ fn locate_runner(a: &GpuOpArgs) -> Result<String, String> {
          用 VkQueryPool 时间戳量 dispatch 的 GPU 侧耗时并算 PSNR。\n\
          用 NDK (aarch64-linux-androidNN-clang++) 编出 arm64-v8a 二进制后, \n\
          放到 tools/vkop/ 或用 --runner / PF_VKOP_RUNNER 指路。\n\
-         回包契约见 src/gpuop.rs 的 RunnerReport 与 docs/SPEC_GPU_OP.md §6。"
+         回包契约见 src/gpuop.rs 的 RunnerReport 与 https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_GPU_OP.md §6。"
     ))
 }
 

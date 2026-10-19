@@ -128,7 +128,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd ..
   (via ssh) — sync the repo there and rebuild before running.
 - Switch targets with `--serial`, e.g. `--serial emulator-5554` or
   `--serial hdc:<connect key>`.
-- Farm-level keep-alive (`docs/SPEC_KEEPALIVE.md`): `phonefarm keepalive`
+- Farm-level keep-alive (`https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_KEEPALIVE.md`): `phonefarm keepalive`
   wakes + unlocks every connected device and enforces the never-sleep
   policy (idempotent, re-runnable); `--status` is the read-only report,
   `--watch [sec]` (default 300s) is the resident watchdog that
@@ -223,7 +223,7 @@ The full CLI surface is in `references/cli.md`.
 - Report in plain language, no jargon. Do not write battle scores into the
   README.
 - New capabilities: write a SPEC first, implement second. The architecture
-  contract lives in `docs/DESIGN.md`.
+  contract lives in `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DESIGN.md`.
 
 ## Workflow hints
 
@@ -243,7 +243,7 @@ The full CLI surface is in `references/cli.md`.
   newline-delimited JSON-RPC tools (`phonefarm_*`): 17 read-only + 4 that touch
   the device. `run` / `benchmark` / `script` are always detached — poll with
   `phonefarm_status`; `cat` is jailed to the tasks root; raw-shell probe/exec
-  are not exposed. Spec: `docs/SPEC_MCP_SERVE.md`.
+  are not exposed. Spec: `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_MCP_SERVE.md`.
 - For conformance-test work specifically, the `phonefarm-cts` skill has the
   full contract (verdict enum, reconciliation rules, both wire protocols).
 
@@ -255,7 +255,7 @@ The full CLI surface is in `references/cli.md`.
 
 In the repo checkout (not bundled with this skill):
 
-- `loop_v1/README.md` — the performance optimization loop. Read it **before**
+- `https://github.com/HGamey/docs/blob/main/repos/phonefarm/loop_v1/README.md` — the performance optimization loop. Read it **before**
   attempting any frame-timing work: `SurfaceFlinger --latency`, `gfxinfo` and
   the Perfetto GPU producer have all been ruled out on real hardware there, and
   raw ftrace kgsl is what is actually used. Its three disciplines are binding:
@@ -263,5 +263,5 @@ In the repo checkout (not bundled with this skill):
   sysfs write is restored on exit and the device snapshot must match line for
   line; parsing is pure functions so re-running on the same trace is
   byte-identical.
-- `docs/MOBILE_GPU_OPT_ROUTES.md` — candidate optimization routes, each tagged
+- `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MOBILE_GPU_OPT_ROUTES.md` — candidate optimization routes, each tagged
   with how it would be verified inside that loop

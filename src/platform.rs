@@ -20,7 +20,7 @@
 //! 这份声明给上层 (game_opt_loop 的摸底与计划) 和人看; 真正开不开仍以真机摸底为准。
 //!
 //! 现状里还有几处没走这个接口、直接调 adb 的 (测评的采样进程、截图快路、fleet 的
-//! 设备枚举、keepalive), 清单与原因见 `docs/DEVICES.md`。
+//! 设备枚举、keepalive), 清单与原因见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DEVICES.md`。
 
 use crate::device::{Adb, FullNode, Hdc, Node, SysState};
 
@@ -197,7 +197,7 @@ pub fn open(serial: Option<String>, tmp: String) -> Box<dyn Backend> {
     }
 }
 
-/// Android 上三层的可行性。依据: knobs/gray/FEASIBILITY.md 的真机结论,
+/// Android 上三层的可行性。依据: https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/gray/FEASIBILITY.md 的真机结论,
 /// 与 game_opt_loop optimize 在 NX809J 上的实跑。
 pub const ANDROID_LAYERS: [LayerSupport; 4] = [
     LayerSupport {

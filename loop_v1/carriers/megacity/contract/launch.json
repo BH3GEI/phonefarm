@@ -179,6 +179,6 @@
   "prerequisites": {
     "record_audio": "首次安装后 Vivox 会弹录音权限框, 框一出应用被挂起、协程停摆。harness 现在会切单机模式(上游只在非单机时实例化 Vivox)绕开它; run 脚本仍会 pm grant android.permission.RECORD_AUDIO 作双保险, 这步是幂等的。"
   },
-  "knobs_note": "白盒旋钮 (docs/MEGACITY_WHITEBOX_KNOBS.md)。全部可选, 不给就不碰。城市装完、预热前一次性生效; 每条的想要值/改法(prop|field|none|failed:..)/回读实际值写进输出 json 的 knobs。改法不是 prop/field 的那一臂作废, 不能当对照。",
+  "knobs_note": "白盒旋钮 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MEGACITY_WHITEBOX_KNOBS.md)。全部可选, 不给就不碰。城市装完、预热前一次性生效; 每条的想要值/改法(prop|field|none|failed:..)/回读实际值写进输出 json 的 knobs。改法不是 prop/field 的那一臂作废, 不能当对照。",
   "launch_template_knobs": " --es msaa {msaa} --es store_opt {store_opt} --es feat_off {feat_off} --es fog_event {fog_event} --es ssao_src {ssao_src} --es ssao_after_opaque {ssao_after_opaque} --es shadowres {shadowres} --es depth_priming {depth_priming}"
 }
