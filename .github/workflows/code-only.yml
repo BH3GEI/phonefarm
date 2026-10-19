@@ -1,9 +1,11 @@
-# 代码仓库只放代码：PR 新增或修改了文档类文件（.md、图片、PPT、PDF、drawio 等）时失败。
+# 代码仓库只放代码：PR 或直接推到 main 的提交新增或修改了文档类文件（.md、图片、PPT、PDF、drawio 等）时失败。
 # 说明写进 commit message 和 PR 描述，长期文档放 https://github.com/HGamey/docs 。
 # 允许的例外见 HGamey/docs 的 README「规则：代码仓库只放代码」。
 name: code-only
 on:
   pull_request:
+  push:
+    branches: [main]
 permissions:
   contents: read
 jobs:
@@ -15,7 +17,7 @@ jobs:
           fetch-depth: 0
       - name: 检查文档类文件
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -euo pipefail
           changed=$(git -c core.quotepath=off diff --name-only --diff-filter=AMR "$BASE"...HEAD)
