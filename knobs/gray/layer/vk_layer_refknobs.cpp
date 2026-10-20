@@ -2648,6 +2648,8 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyImageView(VkDevice dev, VkImageView 
     d.DestroyImageView(dev, v, a);
 }
 
+void npuprobe_on_present(uint64_t frame);   // npuprobe.cpp
+
 static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR* pi) {
     DevDisp d;
     if (!dev_of(key(q), &d) || !d.QueuePresentKHR) {
@@ -2660,6 +2662,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
         if (on != g_storeop_on.exchange(on)) RK_LOG("storeop 现场切换: %s (frame=%llu)", on ? "开" : "关", (unsigned long long)f);
     }
     if (g_frameaudit) fa_on_present(d, f, pi);
+    npuprobe_on_present(f);
     if (g_dump_passes) {
         {
             // 本帧提交执行了哪些 pass -> frames_seen。录制数 (begins) 代替不了它:
