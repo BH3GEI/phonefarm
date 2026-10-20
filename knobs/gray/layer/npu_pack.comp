@@ -1,0 +1,24 @@
+#version 450
+// npuop: 游戏低分辨率画面 -> NPU 输入 (uint8 RGB, 行优先, 紧密排列), 量化 q = round(v / scale + zp)
+// 每个线程 4 个像素 = 12 字节 = 3 个 uint; 要求 w*h 是 4 的倍数 (1134x514 满足)
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D src;
+layout(std430, binding = 1) writeonly buffer Out { uint d[]; };
+layout(push_constant) uniform P { int w; int h; float inv_scale; float zp; } pc;
+
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    uint n = uint(pc.w * pc.h);
+    uint p0 = g * 4u;
+    if (p0 >= n) return;
+    uint b[12];
+    for (uint k = 0u; k < 4u; k++) {
+        uint p = p0 + k;
+        ivec2 xy = ivec2(int(p % uint(pc.w)), int(p / uint(pc.w)));
+        vec3 c = texelFetch(src, xy, 0).rgb;
+        uvec3 q = uvec3(clamp(round(c * pc.inv_scale + pc.zp), 0.0, 255.0));
+        b[k * 3u] = q.r; b[k * 3u + 1u] = q.g; b[k * 3u + 2u] = q.b;
+    }
+    for (uint j = 0u; j < 3u; j++)
+        d[g * 3u + j] = b[j * 4u] | (b[j * 4u + 1u] << 8) | (b[j * 4u + 2u] << 16) | (b[j * 4u + 3u] << 24);
+}

@@ -1,9 +1,9 @@
-// npuprobe: 层被游戏进程加载时, 验证游戏进程 (普通应用, 无 root) 能不能用 NPU 跑超分。
+// npuprobe: 游戏进程 (普通应用, 无 root) 里的 NPU (HTP) 运行时。两个用户:
+//   - debug.knobs.npuprobe=1: 只验证能不能跑 —— 第 INIT_FRAME 帧初始化, 之后 RUN_FRAMES 帧每帧推理一次并计时。
+//     =2 只开设备写日志, 不加载任何库; =3 只写日志 (排查游戏为什么退出)。
+//   - npuop (vk_layer_refknobs.cpp): 用 npu_rt_init / npu_rt_run 真正替换游戏的放大。
 // 不开线程: 原神会杀掉层自己创建的线程 (2026-10-20 实测, 只开线程写日志也会 SIGSEGV)。
-// 所以全部工作在游戏线程的 vkQueuePresentKHR 里同步做: 第 INIT_FRAME 帧初始化 (卡一帧),
-// 之后 RUN_FRAMES 帧每帧推理一次并计时。
-// debug.knobs.npuprobe=1 启用完整探测; =2 只开设备写日志, 不加载任何库; =3 只开线程写日志 (排查游戏为什么退出)。
-// 全程只读, 不碰游戏的 Vulkan 调用。
+// 所以全部工作在游戏线程的 vkQueuePresentKHR 里同步做。
 //
 // 需要和层放在同一个 nativeLibraryDir 的文件 (游戏沙箱只读得到自己的目录):
 //   libtensorflowlite_jni.so      TFLite 运行时 (tensorflow-lite 2.16.1 AAR)
@@ -27,30 +27,30 @@
 #include <unistd.h>
 #include <string>
 
+// 与 vk_layer_refknobs.cpp 共用的接口
+struct NpuIo {
+    size_t in_bytes = 0, out_bytes = 0;
+    float in_scale = 0, out_scale = 0;
+    int in_zp = 0, out_zp = 0;
+};
+void npu_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
 namespace {
 
 FILE* g_out = nullptr;
+bool g_out_tried = false;
 int g_mode = 0;
 
-void nlog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-void nlog(const char* fmt, ...) {
-    char buf[512];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
-    va_end(ap);
-    __android_log_print(ANDROID_LOG_INFO, "refknobs-npu", "%s", buf);
-    if (g_out) { fprintf(g_out, "%s\n", buf); fflush(g_out); }
-}
-#define NLOG(...) nlog(__VA_ARGS__)
-
 void open_out() {
+    if (g_out_tried) return;
+    g_out_tried = true;
     char pkg[256] = {0};
     FILE* f = fopen("/proc/self/cmdline", "r");
     if (f) { fread(pkg, 1, sizeof pkg - 1, f); fclose(f); }
     std::string path = std::string("/storage/emulated/0/Android/data/") + pkg + "/files/npuprobe.txt";
     g_out = fopen(path.c_str(), "a");
 }
+#define NLOG(...) npu_log(__VA_ARGS__)
 
 double now_ms() {
     timespec t;
@@ -72,29 +72,34 @@ bool sym(void* h, const char* name, T& out) {
     return out != nullptr;
 }
 
-const uint64_t INIT_FRAME = 300, RUN_FRAMES = 60;
+struct QuantParams { float scale; int32_t zero_point; };
 void* g_it = nullptr;
 int (*g_invoke)(void*) = nullptr;
-double g_sum = 0, g_max = 0;
-int g_runs = 0;
+void* (*g_get_in)(void*, int) = nullptr;
+const void* (*g_get_out)(void*, int) = nullptr;
+size_t (*g_bytes)(const void*) = nullptr;
+int (*g_copy_from)(void*, const void*, size_t) = nullptr;
+int (*g_copy_to)(const void*, void*, size_t) = nullptr;
+QuantParams (*g_qparams)(const void*) = nullptr;
 
-void* probe(void*) {
+// 加载运行库, 建好解释器 (HTP 平衡档)。成功后 g_it 非空。
+bool rt_load() {
     open_out();
     std::string dir = self_dir();
     NLOG("开始, 目录 %s, uid %d", dir.c_str(), getuid());
 
-    if (g_mode == 3) { NLOG("模式 3, 不碰设备"); return nullptr; }
+    if (g_mode == 3) { NLOG("模式 3, 不碰设备"); return false; }
     int fd = open("/dev/fastrpc-cdsp", O_RDONLY | O_NONBLOCK);
     NLOG("open /dev/fastrpc-cdsp: %s", fd >= 0 ? "成功" : strerror(errno));
     if (fd >= 0) close(fd);
-    if (g_mode == 2) { NLOG("模式 2, 到此为止"); return nullptr; }
+    if (g_mode == 2) { NLOG("模式 2, 到此为止"); return false; }
 
     std::string adsp = dir + ";/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp";
     setenv("ADSP_LIBRARY_PATH", adsp.c_str(), 1);
 
     void* tfl = dlopen((dir + "/libtensorflowlite_jni.so").c_str(), RTLD_NOW | RTLD_LOCAL);
     void* qd = dlopen((dir + "/libQnnTFLiteDelegate.so").c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (!tfl || !qd) { NLOG("dlopen 失败: %s", dlerror()); return nullptr; }
+    if (!tfl || !qd) { NLOG("dlopen 失败: %s", dlerror()); return false; }
 
     using CreateDel = void* (*)(char**, char**, size_t, void (*)(const char*));
     using ModelCreate = void* (*)(const char*);
@@ -102,22 +107,22 @@ void* probe(void*) {
     using OptAddDel = void (*)(void*, void*);
     using InterpCreate = void* (*)(void*, void*);
     using Status = int (*)(void*);
-    using GetIn = void* (*)(void*, int);
-    using Bytes = size_t (*)(const void*);
-    using Data = void* (*)(const void*);
     CreateDel create_del; ModelCreate model_create; OptCreate opt_create; OptAddDel opt_add;
-    InterpCreate interp_create; Status alloc, invoke; GetIn get_in; Bytes bytes; Data data;
+    InterpCreate interp_create; Status alloc;
     if (!sym(qd, "tflite_plugin_create_delegate", create_del) ||
         !sym(tfl, "TfLiteModelCreateFromFile", model_create) ||
         !sym(tfl, "TfLiteInterpreterOptionsCreate", opt_create) ||
         !sym(tfl, "TfLiteInterpreterOptionsAddDelegate", opt_add) ||
         !sym(tfl, "TfLiteInterpreterCreate", interp_create) ||
         !sym(tfl, "TfLiteInterpreterAllocateTensors", alloc) ||
-        !sym(tfl, "TfLiteInterpreterInvoke", invoke) ||
-        !sym(tfl, "TfLiteInterpreterGetInputTensor", get_in) ||
-        !sym(tfl, "TfLiteTensorByteSize", bytes) ||
-        !sym(tfl, "TfLiteTensorData", data))
-        return nullptr;
+        !sym(tfl, "TfLiteInterpreterInvoke", g_invoke) ||
+        !sym(tfl, "TfLiteInterpreterGetInputTensor", g_get_in) ||
+        !sym(tfl, "TfLiteInterpreterGetOutputTensor", g_get_out) ||
+        !sym(tfl, "TfLiteTensorByteSize", g_bytes) ||
+        !sym(tfl, "TfLiteTensorCopyFromBuffer", g_copy_from) ||
+        !sym(tfl, "TfLiteTensorCopyToBuffer", g_copy_to) ||
+        !sym(tfl, "TfLiteTensorQuantizationParams", g_qparams))
+        return false;
 
     std::string lib = dir + "/libQnnHtp.so";
     const char* keys[] = {"backend_type", "library_path", "skel_library_dir", "htp_performance_mode"};
@@ -125,19 +130,19 @@ void* probe(void*) {
     double t0 = now_ms();
     void* del = create_del((char**)keys, (char**)vals, 4, nullptr);
     void* model = model_create((dir + "/libnpusr_model.so").c_str());
-    if (!del || !model) { NLOG("代理或模型创建失败 del=%p model=%p", del, model); return nullptr; }
+    if (!del || !model) { NLOG("代理或模型创建失败 del=%p model=%p", del, model); return false; }
     void* opt = opt_create();
     opt_add(opt, del);
     void* it = interp_create(model, opt);
-    if (!it || alloc(it) != 0) { NLOG("解释器创建失败"); return nullptr; }
+    if (!it || alloc(it) != 0) { NLOG("解释器创建失败"); return false; }
     NLOG("初始化 %.0f ms", now_ms() - t0);
-
-    void* in = get_in(it, 0);
-    memset(data(in), 128, bytes(in));
     g_it = it;
-    g_invoke = invoke;
-    return nullptr;   // 不释放: 退出时析构会 abort (见 tools 里的 handoff 测试)
+    return true;   // 不释放: 退出时析构会 abort (见 tools 里的 handoff 测试)
 }
+
+const uint64_t INIT_FRAME = 300, RUN_FRAMES = 60;
+double g_sum = 0, g_max = 0;
+int g_runs = 0;
 
 __attribute__((constructor)) void npuprobe_init() {
     char v[PROP_VALUE_MAX] = {0};
@@ -148,12 +153,49 @@ __attribute__((constructor)) void npuprobe_init() {
 
 }  // namespace
 
+void npu_log(const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    __android_log_print(ANDROID_LOG_INFO, "refknobs-npu", "%s", buf);
+    open_out();
+    if (g_out) { fprintf(g_out, "%s\n", buf); fflush(g_out); }
+}
+
+// npuop 用: 建好运行时并报出输入输出的字节数与量化参数
+bool npu_rt_init(NpuIo* io) {
+    if (!g_it && !rt_load()) return false;
+    const void* ti = g_get_in(g_it, 0);
+    const void* to = g_get_out(g_it, 0);
+    QuantParams qi = g_qparams(ti), qo = g_qparams(to);
+    io->in_bytes = g_bytes(ti); io->out_bytes = g_bytes(to);
+    io->in_scale = qi.scale; io->in_zp = qi.zero_point;
+    io->out_scale = qo.scale; io->out_zp = qo.zero_point;
+    NLOG("模型: 输入 %zu B (scale %.6f zp %d), 输出 %zu B (scale %.6f zp %d)",
+         io->in_bytes, io->in_scale, io->in_zp, io->out_bytes, io->out_scale, io->out_zp);
+    return true;
+}
+
+// npuop 用: 一次推理, in/out 为打包好的 uint8 RGB
+bool npu_rt_run(const void* in, size_t in_bytes, void* out, size_t out_bytes) {
+    if (!g_it) return false;
+    if (g_copy_from(g_get_in(g_it, 0), in, in_bytes) != 0) return false;
+    if (g_invoke(g_it) != 0) return false;
+    return g_copy_to(g_get_out(g_it, 0), out, out_bytes) == 0;
+}
+
 // vk_layer_refknobs.cpp 的 rk_QueuePresentKHR 每帧调用
 void npuprobe_on_present(uint64_t frame) {
     if (!g_mode || frame < INIT_FRAME) return;
     if (frame == INIT_FRAME) {
         double t0 = now_ms();
-        probe(nullptr);
+        if (rt_load()) {
+            void* in = g_get_in(g_it, 0);
+            std::string zeros(g_bytes(in), (char)128);
+            g_copy_from(in, zeros.data(), zeros.size());
+        }
         NLOG("第 %llu 帧初始化, 卡了 %.0f ms", (unsigned long long)frame, now_ms() - t0);
         return;
     }

@@ -1,0 +1,25 @@
+#version 450
+// npuop: NPU 输出 (uint8 RGB, 行优先) -> 放大后的图 (rgba8 storage image), 反量化 v = (q - zp) * scale
+// 每个线程 4 个像素; 要求 w*h 是 4 的倍数
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer In { uint d[]; };
+layout(binding = 1, rgba8) uniform writeonly image2D dst;
+layout(push_constant) uniform P { int w; int h; float scale; float zp; } pc;
+
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    uint n = uint(pc.w * pc.h);
+    uint p0 = g * 4u;
+    if (p0 >= n) return;
+    uint w3[3] = uint[3](d[g * 3u], d[g * 3u + 1u], d[g * 3u + 2u]);
+    for (uint k = 0u; k < 4u; k++) {
+        vec3 c;
+        for (uint ch = 0u; ch < 3u; ch++) {
+            uint byte_i = k * 3u + ch;
+            float q = float((w3[byte_i / 4u] >> ((byte_i % 4u) * 8u)) & 0xFFu);
+            c[ch] = clamp((q - pc.zp) * pc.scale, 0.0, 1.0);
+        }
+        uint p = p0 + k;
+        imageStore(dst, ivec2(int(p % uint(pc.w)), int(p / uint(pc.w))), vec4(c, 1.0));
+    }
+}
