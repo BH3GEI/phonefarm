@@ -2029,6 +2029,21 @@ const HW_WATCH_MAX_S: u64 = 900;
 /// 例: 一臂全程 0 档、另一臂有 1/4 时间被压到 17 档 → 0.25 > 0.2, 剔除这一对。
 pub(crate) const GPU_LEVEL_TV_MAX: f64 = 0.2;
 
+/// 每臂一个新的停止标记文件名: 设备端 sample_hw.sh 不删任何文件 (铁律: 不删除),
+/// 开始时已存在的标记它不认, 所以同一 label 再跑一次 (下一次评测) 也必须换名字。
+/// `nonce` 取主机时间纳秒 + 进程号, 见 [`hw_stop_nonce`]。纯函数, 便于测试。
+pub(crate) fn hw_stop_path(label: &str, nonce: &str) -> String {
+    format!("{DEV_TMP}/sample_hw_{label}_{nonce}.stop")
+}
+
+fn hw_stop_nonce() -> String {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{ns}_{}", std::process::id())
+}
+
 /// 测量窗口内逐秒记 GPU 上限档与风扇设定档 (设备端 sample_hw.sh, 只读)。
 /// 两臂用同一个 [`HwWatch`], 所以这一路 adb 调用本身不造成两臂差别。
 pub(crate) struct HwWatch {
@@ -2041,7 +2056,7 @@ pub(crate) struct HwWatch {
 impl HwWatch {
     pub(crate) fn start(serial: &str, outdir: &Path, label: &str) -> Self {
         let path = outdir.join("hw.txt");
-        let stop = format!("{DEV_TMP}/sample_hw_{label}.stop");
+        let stop = hw_stop_path(label, &hw_stop_nonce());
         let child = std::fs::File::create(&path).ok().and_then(|f| {
             Command::new(adb_path())
                 .args(["-s", serial, "shell"])
@@ -2110,6 +2125,8 @@ fn fractions<T: Ord + Clone>(xs: &[T]) -> std::collections::BTreeMap<T, f64> {
 pub(crate) fn hw_stats(text: &str) -> Value {
     let (mut levels, mut fans): (Vec<i64>, Vec<String>) = (vec![], vec![]);
     let mut n = 0usize;
+    // 停止标记在脚本开始时就已存在 (脚本不认它, 只按最长秒数停): 记下来, 说明这一臂的记录可能比测量窗长
+    let stop_preexisting = text.lines().any(|l| l.trim().starts_with("#stop_preexisting"));
     for line in text.lines() {
         let Some(rest) = line.trim().strip_prefix("HW ") else { continue };
         let p: Vec<&str> = rest.split_whitespace().collect();
@@ -2133,6 +2150,7 @@ pub(crate) fn hw_stats(text: &str) -> Value {
         "gpu_pwrlevel_frac": lv_frac,
         "fan_runs": runs_of(&fans).into_iter().map(|(v, c)| json!([v, c])).collect::<Vec<_>>(),
         "fan_states": fan_states,
+        "stop_preexisting": stop_preexisting,
     })
 }
 
@@ -3506,6 +3524,20 @@ bus.DDR.boost_freq.effect=live\n";
     }
 
     /// 审计 #9 #11: 逐秒 GPU 档位/风扇记录的解析, 以及同一对两臂环境不一致时只剔除那一对。
+    #[test]
+    fn hw_stop_path_is_fresh_per_arm_and_preexisting_stop_is_recorded() {
+        // 同一 label 两次评测: nonce 不同, 文件名就不同 (设备端不删旧标记, 只能换名字)
+        let a = hw_stop_path("sp_knob1", "1_2");
+        let b = hw_stop_path("sp_knob1", "3_2");
+        assert_ne!(a, b);
+        assert!(a.starts_with(DEV_TMP) && a.ends_with(".stop") && a.contains("sp_knob1"));
+        assert_ne!(hw_stop_nonce(), "");
+        let s = hw_stats("#sample_hw v1 max=900 stop=/x\n#stop_preexisting /x\nHW 1.0 0 -\n#sample_hw done\n");
+        assert_eq!(s["stop_preexisting"], true);
+        assert_eq!(s["n"], 1);
+        assert_eq!(hw_stats("HW 1.0 0 -\n")["stop_preexisting"], false);
+    }
+
     #[test]
     fn hw_stats_parses_per_second_levels_and_fan() {
         let t = "#sample_hw v1 max=900\n\
