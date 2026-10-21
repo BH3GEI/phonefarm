@@ -179,6 +179,9 @@ pub fn run_eval(args: &[String]) -> i32 {
             return 2;
         }
     };
+    // 每份回包都带记分卡 (verdict.scorecard): 逐维度一行, 只有安全和「没测成」让结果无效
+    let policy = crate::scorecard::ImagePolicy::from_request(&req).unwrap_or(crate::scorecard::ImagePolicy::Gate);
+    let report = report.map(|r| crate::scorecard::attach(&r, policy));
     match report {
         Ok(r) => {
             println!("{r}");
@@ -359,6 +362,8 @@ fn validate_v2(req: &Value) -> Result<(), String> {
         None | Some(Some("full")) | Some(Some("screen")) => {}
         _ => return Err("protocol.stage 只认 \"full\" / \"screen\" (省略 = full)".into()),
     }
+    // 画质策略: gate (缺省, 画面不过门槛就停) / report (基于模型的候选: 只记差距, 性能照判)
+    crate::scorecard::ImagePolicy::from_request(req)?;
     // 结构性防护: sysparam / gray / whitebox 走精确置换检验 (judge_runs), 改善一侧用 alpha/K。
     // rounds 太少时最小可达 p 就够不着 alpha/K, 这个请求在数学上判不出任何改善 —— 收端
     // 拒收, 不碰设备。功耗进不进表要等数据, 按最严的 K=3 算。
@@ -2388,14 +2393,26 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
             (Some(d), "higher") => d > 0.0,
             _ => false,
         };
+        // 锁帧时的帧预算 (judge/v1-scorecard): 负载被上限钉住时, frame_p95 变长但帧还放得进
+        // 帧预算 (p95 ≤ 1000/cap × (1+余量)、fps 守住上限、丢帧不增加) 就不算退化; 帧预算用掉多少照报。
+        let capped = match (fps_cap, metric.as_str()) {
+            (Some(cap), "frame_p95") => Some(crate::scorecard::capped_budget_check(cap, knob_runs, ctrl_runs)),
+            _ => None,
+        };
+        let mut capped_exempt = false;
         let status = if cmp.get("error").is_some() || diff.is_none() {
             "缺数据"
         } else if improved && !guard_only(metric) && p.is_some_and(|x| x < alpha_win) {
             wins.push(metric.to_string());
             "显著改善"
         } else if !improved && diff.is_some_and(|x| x != 0.0) && p.is_some_and(|x| x < alpha) {
-            regressions.push(metric.to_string());
-            "显著变差"
+            if capped.as_ref().is_some_and(|c| c["ok"].as_bool() == Some(true)) {
+                capped_exempt = true;
+                "锁帧内变长 (帧预算内, 不算退化)"
+            } else {
+                regressions.push(metric.to_string());
+                "显著变差"
+            }
         } else {
             "无显著变化"
         };
@@ -2417,6 +2434,12 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
                 });
                 if guard_only(metric) {
                     e["role"] = json!("guard_only");
+                }
+                if let Some(c) = &capped {
+                    e["capped"] = c.clone();
+                    if capped_exempt {
+                        e["role"] = json!("capped_budget");
+                    }
                 }
                 e
             }
@@ -2692,6 +2715,10 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         .unwrap_or(GRAY_MIN_PSNR_DB);
     let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
     let temp_cap = req["conditions"]["temp_cap_c"].as_f64();
+    // 画质策略 (judge/v1-scorecard): report 下画面判据只记差距, 不否决性能判定
+    let policy = crate::scorecard::ImagePolicy::from_request(req).unwrap_or(crate::scorecard::ImagePolicy::Gate);
+    // 候选臂旋钮自报按设计处理的帧低于这个比例 → 这一臂未按设计施加, 连同对照臂剔除
+    let min_frac = crate::scorecard::min_applied_frac(req);
 
     // 改写在碰设备之前解析: 不认识的开关直接 ABORT, 设备一下都不碰
     let knobs = match parse_gray_rewrites(&req["payload"]) {
@@ -2758,6 +2785,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     // frame-audit storeop-check —— 同一局里用孪生 pass 现场开/关, 静态场景逐像素比。
     // 开关之间的差异 (off_vs_on) 不能明显大于同状态之间的噪声 (same_state), 否则判画面出错。
     let mut live_check: Option<Value> = None;
+    let mut live_gap: Option<String> = None;
     if let Some(l) = &launch {
         let static_extras = l.static_extras.clone().unwrap_or_else(|| l.extras.clone());
         let chk = crate::frameaudit::storeop_check(
@@ -2781,10 +2809,14 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         };
         let verdict = live_check_verdict(&v);
         if let Err(why) = &verdict {
-            report["conditions_observed"] = json!({"image_check": {"method": "storeop_check_live", "result": v}});
-            report["verdict"]["reason"] = json!(format!("画面出错: {why}"));
-            report["evidence_dir"] = json!(evidence.display().to_string());
-            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+            if !policy.is_report() {
+                report["conditions_observed"] = json!({"image_check": {"method": "storeop_check_live", "result": v}});
+                report["verdict"]["reason"] = json!(format!("画面出错: {why}"));
+                report["evidence_dir"] = json!(evidence.display().to_string());
+                return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+            }
+            // report: 画面差距记下, 性能照量
+            live_gap = Some(why.clone());
         }
         live_check = Some(v);
     }
@@ -2809,6 +2841,8 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let order_seed = curtail::order_seed(req["protocol"]["order_seed"].as_u64());
     let knob_first = curtail::knob_first_order(rounds as usize, order_seed);
     let mut dropped: Vec<Value> = Vec::new();
+    // 候选臂未按设计施加 (旋钮自报回退 / 部分施加) 被剔除的对
+    let mut unapplied: Vec<Value> = Vec::new();
     push_hw_script(serial);
     'rounds: for i in 1..=rounds {
         let mut shots: std::collections::BTreeMap<&str, (u32, u32, Vec<u8>)> = Default::default();
@@ -2867,12 +2901,18 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                         }
                         m["round"] = json!(i);
                         if arm == "knob" {
-                            m["layer_hits"] = json!(layer_hits(serial, &pkg, evidence));
+                            let (hits, marker) = layer_out(serial, &pkg, evidence);
+                            m["layer_hits"] = json!(hits);
+                            if let Some(mk) = &marker {
+                                m["knob_application"] = crate::scorecard::knob_application(mk, min_frac);
+                            }
                             knob_runs.push(m);
                         } else {
                             ctrl_runs.push(m);
                         }
-                        settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true);
+                        if !settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true) {
+                            crate::scorecard::settle_application(i, &mut knob_runs, &mut ctrl_runs, &mut unapplied);
+                        }
                     }
                     Err(e) => {
                         abort_reason = Some(e);
@@ -2937,13 +2977,19 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                     if arm == "knob" {
                         // 命中 marker 要在**这一臂跑完后立刻**采: 下一次 mount_layer
                         // 会把三个落点全删了重写, 拖到循环外读到的就是初始化的空表
-                        let hits_now = layer_hits(serial, &pkg, evidence);
+                        let (hits_now, marker) = layer_out(serial, &pkg, evidence);
                         m["layer_hits"] = json!(hits_now);
+                        // 旋钮自报的施加程度 (npuop 回退双线性等): 同一份 marker, 同一时刻读
+                        if let Some(mk) = &marker {
+                            m["knob_application"] = crate::scorecard::knob_application(mk, min_frac);
+                        }
                         knob_runs.push(m);
                     } else {
                         ctrl_runs.push(m);
                     }
-                    settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true);
+                    if !settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true) {
+                        crate::scorecard::settle_application(i, &mut knob_runs, &mut ctrl_runs, &mut unapplied);
+                    }
                 }
                 Err(e) => {
                     abort_reason = Some(e);
@@ -3004,6 +3050,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let hits = knob_runs
         .iter()
         .chain(dropped.iter().map(|d| &d["knob"]))
+        .chain(unapplied.iter().map(|d| &d["knob"]))
         .filter_map(|r| r["layer_hits"].as_u64())
         .max()
         .unwrap_or(0);
@@ -3017,6 +3064,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         "cool_per_arm": cool_log,
         "arm_order": curtail::order_note(order_seed, rounds as usize),
         "env_consistency": consistency_note(&dropped, true),
+        "knob_application": crate::scorecard::application_note(&unapplied, &knob_runs, min_frac),
         "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
         "hits": hits,
         "apply_ok": hits > 0,
@@ -3042,20 +3090,45 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     });
     report["evidence_dir"] = json!(evidence.display().to_string());
 
-    // 画面没通过就作废这一轮: 先于其它检查报出来, 因为它影响的是后面所有数据的意义。
+    // 画面差距。gate: 画面没通过就作废这一轮 (先于其它检查报出来, 原行为);
+    // report: 差距只记进 verdict.quality_gap, 性能照判。
+    let mut gap_open: Vec<String> = Vec::new();
+    if let Some(why) = &live_gap {
+        gap_open.push(format!("storeop-check: {why}"));
+    }
     if let Some(ImageRuling::Fail(reason)) = &image_ruling {
-        if abort_reason.is_none() {
+        if policy.is_report() {
+            gap_open.push(format!("全帧 PSNR: {reason}"));
+        } else if abort_reason.is_none() {
             abort_reason = Some(format!("画面出错: {reason} (截图见 evidence_dir)"));
         }
     }
     let mut image_unverified: Option<String> = None;
     match iq.as_ref().map(|(v, _)| v) {
+        Some(crate::iqjudge::IqVerdict::Fail(reason)) if policy.is_report() => gap_open.push(format!("画质判据: {reason}")),
         Some(crate::iqjudge::IqVerdict::Fail(reason)) if abort_reason.is_none() => {
             abort_reason = Some(format!("画面出错 (画质判据): {reason} (截图见 evidence_dir)"));
         }
         Some(crate::iqjudge::IqVerdict::Inconclusive(r)) => image_unverified = Some(r.clone()),
         _ => {}
     }
+    let gap_state = if !gap_open.is_empty() {
+        crate::scorecard::GapState::Open(gap_open.join("; "))
+    } else if let Some(r) = &image_unverified {
+        crate::scorecard::GapState::Unverified(r.clone())
+    } else {
+        crate::scorecard::GapState::Closed
+    };
+    let gap_json = crate::scorecard::quality_gap_json(
+        policy,
+        &gap_state,
+        if live_check.is_some() { "storeop_check_live" } else { "iq_judge+psnr_gate" },
+        match (&live_check, &iq) {
+            (Some(v), _) => json!({"storeop_check": v}),
+            (None, Some((_, rep))) => json!({"checks": rep["checks"], "iq": rep, "psnr_db_used": best_knob, "noise_floor_db": noise_floor}),
+            _ => Value::Null,
+        },
+    );
 
     if let Some(reason) = abort_reason {
         report["verdict"]["reason"] = json!(reason);
@@ -3072,6 +3145,13 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
+    if knob_runs.is_empty() && !unapplied.is_empty() {
+        report["verdict"]["reason"] = json!(format!(
+            "没测成: {} 对的候选臂都未按设计施加 (旋钮自报回退或部分施加), 全部剔除 (见 conditions_observed.knob_application)",
+            unapplied.len()
+        ));
+        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+    }
     if knob_runs.is_empty() && !dropped.is_empty() {
         report["verdict"]["reason"] = json!(format!(
             "{} 对两臂测量环境都不一致 (风扇或 GPU 档位), 全部剔除, 没有可比的数据 (见 conditions_observed.env_consistency)",
@@ -3079,7 +3159,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         ));
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
-    // 画面过了门槛: 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
+    // 画面过了门槛 (或 report 下差距已记下): 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
     report["verdict"] = verdict;
     append_dropped_reason(&mut report, &dropped);
@@ -3093,15 +3173,17 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         unavailable(&mut m, "fps_p95_ms", "本轮没拿到可用的帧时序");
     }
     report["metrics"] = m;
-    report["status"] = json!(if keep { "PASS" } else { "REJECT" });
-    if let (true, Some(why)) = (keep, &image_unverified) {
-        // 性能过了, 画面没确认不变: 不算增益
-        report["status"] = json!("REJECT");
-        report["verdict"]["would_keep"] = json!(true);
-        report["verdict"]["image_unverified"] = json!(why);
+    if !unapplied.is_empty() {
         let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
-        report["verdict"]["reason"] = json!(format!("性能统计通过, 但画面没能确认不变 ({why}), 不算增益 (统计结果: {r})"));
+        let rounds: Vec<String> = unapplied.iter().map(|d| d["round"].to_string()).collect();
+        report["verdict"]["reason"] = json!(format!(
+            "{r} (第 {} 对候选臂未按设计施加, 已剔除, 见 conditions_observed.knob_application)",
+            rounds.join("、")
+        ));
     }
+    // 状态: 画面差距关闭才可能 PASS; report 下性能过了而差距没关闭 → KEEP_WITH_QUALITY_GAP;
+    // gate 下画面没确认不变 → REJECT (原行为)
+    crate::scorecard::finalize_status(&mut report, keep, policy, &gap_state, gap_json);
     Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
 }
 
@@ -3120,9 +3202,9 @@ fn gl_off_clean(restore_log: &str) -> bool {
 /// 命中的口径: **sum(effective[].begins)** —— 改写了但一次都没被绑定的 pass 不算命中
 /// (层自报 unavailable_reason = "rewritten pass never bound")。readonly 探针变体
 /// 没有改写, 退回 render_pass_begins (层确实看到了帧)。多个落点取最大。
-fn layer_hits(serial: &str, pkg: &str, evidence: &Path) -> Option<u64> {
+fn layer_out(serial: &str, pkg: &str, evidence: &Path) -> (Option<u64>, Option<Value>) {
     if pkg.is_empty() {
-        return None;
+        return (None, None);
     }
     let candidates = [
         format!("/storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json"),
@@ -3130,6 +3212,7 @@ fn layer_hits(serial: &str, pkg: &str, evidence: &Path) -> Option<u64> {
         format!("{DEV_TMP}/knobs_layer_out.{pkg}.json"),
     ];
     let mut best: Option<u64> = None;
+    let mut marker: Option<Value> = None;
     for (i, path) in candidates.iter().enumerate() {
         let out = su(serial, &format!("cat {path} 2>/dev/null"), 30);
         if !out.contains("\"effective\"") {
@@ -3156,9 +3239,13 @@ fn layer_hits(serial: &str, pkg: &str, evidence: &Path) -> Option<u64> {
             .as_u64()
             .unwrap_or(0);
         let hits = if begins > 0 { begins } else { fallback };
+        // 命中最多的那个落点的 marker 一起回去 (旋钮自报的回退 / 施加程度在里面)
+        if best.is_none_or(|b| hits >= b) {
+            marker = Some(v);
+        }
         best = Some(best.unwrap_or(0).max(hits));
     }
-    best
+    (best, marker)
 }
 
 #[cfg(test)]
@@ -3190,6 +3277,17 @@ mod tests {
         let mut r = v2_req("sysparam", json!({"params": {}}));
         r.as_object_mut().unwrap().remove("protocol");
         assert_eq!(validate_err(&r), "v2 缺必填字段 protocol");
+    }
+
+    /// judge/v1-scorecard: image_policy 只认 gate / report, 写错在碰设备前拒收。
+    #[test]
+    fn image_policy_is_validated_before_any_device_touch() {
+        let mut r = v2_req("sysparam", json!({"params": {}}));
+        assert!(validate_ok(&r), "缺省 = gate");
+        r["protocol"]["image_policy"] = json!("report");
+        assert!(validate_ok(&r));
+        r["protocol"]["image_policy"] = json!("ignore");
+        assert!(validate_err(&r).contains("image_policy"));
     }
 
     #[test]
@@ -3690,6 +3788,43 @@ junk\n\
         let mut r = runs(&[33.3, 33.4]);
         r.push(json!({"summary": {}}));
         assert_eq!(fps_lock_cap(&r), None);
+    }
+
+    /// judge/v1-scorecard: 锁帧时 p95 变长但帧还放得进帧预算 → 不算退化, 报帧预算用掉多少;
+    /// 帧真丢了照样算退化; 不锁帧时规则不变。
+    #[test]
+    fn capped_p95_within_budget_is_not_a_regression() {
+        let arm = |tag: &str, p95: &[f64], fps: f64, p50: f64| -> Vec<Value> {
+            p95.iter()
+                .enumerate()
+                .map(|(i, p)| json!({"label": format!("{tag}{i}"), "summary": {"frame_p95": p, "fps_mean": fps, "frame_p50": p50}, "env": {}}))
+                .collect()
+        };
+        // 锁 30: 帧预算 33.33 ms。候选臂 p95 全部更长 (33.0..33.4), 但都 ≤ 33.33 × 1.05, fps 一样守在 29.95
+        let ctrl = arm("c", &[30.0, 30.1, 30.2, 30.3, 30.4], 29.95, 33.33);
+        let knob = arm("k", &[33.0, 33.1, 33.2, 33.3, 33.4], 29.95, 33.33);
+        let (v, _keep, _) = judge_runs(&ctrl, &knob, 0.05, 5);
+        assert_eq!(v["regressions"], json!([]), "{v}");
+        let pm = &v["per_metric"]["frame_p95"];
+        assert_eq!(pm["role"], "capped_budget");
+        assert!(pm["status"].as_str().unwrap().contains("帧预算内"));
+        assert_eq!(pm["capped"]["ok"], true);
+        assert!((pm["capped"]["headroom_used_pct"].as_f64().unwrap() - 100.2).abs() < 0.1, "{pm}");
+        // 帧真丢了 (fps 掉出上限): 照样显著变差
+        let knob_lost = arm("k", &[33.0, 33.1, 33.2, 33.3, 33.4], 28.5, 33.33);
+        let (v, keep, _) = judge_runs(&ctrl, &knob_lost, 0.05, 5);
+        assert!(v["regressions"].as_array().unwrap().contains(&json!("frame_p95")), "{v}");
+        assert!(!keep);
+        // p95 超出帧预算: 照样显著变差
+        let knob_over = arm("k", &[36.0, 36.1, 36.2, 36.3, 36.4], 29.95, 33.33);
+        let (v, _, _) = judge_runs(&ctrl, &knob_over, 0.05, 5);
+        assert!(v["regressions"].as_array().unwrap().contains(&json!("frame_p95")));
+        // 不锁帧 (p50 12.5 ms ≈ 80 fps, 不是常见上限): 严格规则不变
+        let ctrl_u = arm("c", &[10.0, 10.1, 10.2, 10.3, 10.4], 80.0, 12.5);
+        let knob_u = arm("k", &[11.0, 11.1, 11.2, 11.3, 11.4], 80.0, 12.5);
+        let (v, _, _) = judge_runs(&ctrl_u, &knob_u, 0.05, 5);
+        assert_eq!(v["regressions"], json!(["frame_p95"]));
+        assert!(v["per_metric"]["frame_p95"].get("capped").is_none());
     }
 
     #[test]

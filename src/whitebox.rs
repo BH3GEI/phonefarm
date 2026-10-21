@@ -177,6 +177,9 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     };
     let qc = quality_changing(&knobs) ;
     let measure_only = !qc.is_empty() || req["payload"]["measure_only"].as_bool().unwrap_or(false);
+    // 画质策略 (judge/v1-scorecard): report 下画面判据只记差距, 性能照量照判
+    let policy = crate::scorecard::ImagePolicy::from_request(req).unwrap_or(crate::scorecard::ImagePolicy::Gate);
+    let mut gap_open: Vec<String> = Vec::new();
     let pkg = req["package"].as_str().unwrap_or("com.unity.megacity.metro").to_string();
     let base_extras = launch.extras.clone();
     let knob_full = format!("{base_extras} {kx}");
@@ -230,6 +233,10 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                         // 只量上限的旋钮本来就会改画面, 不按画面判; 噪声底照样记下来
                         image["gate"] = gate.gate("skipped_measure_only");
                     }
+                    crate::eval::ImageRuling::Fail(reason) if policy.is_report() => {
+                        image["gate"] = gate.gate("failed");
+                        gap_open.push(format!("全帧 PSNR: {reason}"));
+                    }
                     crate::eval::ImageRuling::Fail(reason) => {
                         image["gate"] = gate.gate("failed");
                         image_fail = Some(reason);
@@ -238,7 +245,13 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
             }
             (a, b, c) => {
                 let errs: Vec<String> = [a.err(), b.err(), c.err()].into_iter().flatten().collect();
-                image_fail = Some(format!("静态场景截图失败: {}", if errs.is_empty() { "截到的图解析不了".into() } else { errs.join("; ") }));
+                let why = format!("静态场景截图失败: {}", if errs.is_empty() { "截到的图解析不了".into() } else { errs.join("; ") });
+                if policy.is_report() {
+                    // report: 画面没比成只记「判不了」, 性能照量
+                    image["shot_error"] = json!(why);
+                } else {
+                    image_fail = Some(why);
+                }
             }
         }
     } else {
@@ -247,6 +260,9 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     // 画质判据: 不通过 = 画面出错 (与 PSNR 门槛同等处理); 判不了 = 照常量性能, 但不许判 PASS (增益要求画面确认不变)
     let mut image_unverified: Option<String> = None;
     match &iq_verdict {
+        Some(crate::iqjudge::IqVerdict::Fail(r)) if !measure_only && policy.is_report() => {
+            gap_open.push(format!("画质判据: {r}"));
+        }
         Some(crate::iqjudge::IqVerdict::Fail(r)) if !measure_only && image_fail.is_none() => {
             image_fail = Some(format!("画质判据不通过: {r}"));
         }
@@ -259,6 +275,22 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     if launch.static_extras.is_none() {
         image_unverified = Some("没有静态画面可比 (workload.launch 缺 static_extras)".into());
     }
+    if let (None, Some(e)) = (&image_unverified, image["shot_error"].as_str()) {
+        image_unverified = Some(e.to_string());
+    }
+    let gap_state = if !gap_open.is_empty() {
+        crate::scorecard::GapState::Open(gap_open.join("; "))
+    } else if let Some(r) = &image_unverified {
+        crate::scorecard::GapState::Unverified(r.clone())
+    } else {
+        crate::scorecard::GapState::Closed
+    };
+    let gap_json = crate::scorecard::quality_gap_json(
+        policy,
+        &gap_state,
+        "iq_judge+psnr_gate",
+        json!({"checks": image["iq"]["checks"], "iq": image["iq"], "psnr_db_used": image["psnr_db_used"], "noise_floor_db": image["noise_floor_db"]}),
+    );
     report["image_check"] = image;
     if let Some(e) = image_fail {
         report["verdict"]["reason"] = json!(e);
@@ -424,15 +456,11 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
             if qc.is_empty() { "payload.measure_only".to_string() } else { qc.join(",") }
         ));
         report["status"] = json!("REJECT");
-    } else if let (true, Some(why)) = (keep, &image_unverified) {
-        // 性能过了, 画面没确认不变: 不算增益
-        report["status"] = json!("REJECT");
-        report["verdict"]["would_keep"] = json!(true);
-        report["verdict"]["image_unverified"] = json!(why);
-        let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
-        report["verdict"]["reason"] = json!(format!("性能统计通过, 但画面没能确认不变 ({why}), 不算增益 (统计结果: {r})"));
+        report["verdict"]["is_pareto_improvement"] = json!(false);
     } else {
-        report["status"] = json!(if keep { "PASS" } else { "REJECT" });
+        // 画面差距关闭才可能 PASS; report 下性能过了而差距没关闭 → KEEP_WITH_QUALITY_GAP;
+        // gate 下画面没确认不变 → REJECT (原行为)
+        crate::scorecard::finalize_status(&mut report, keep, policy, &gap_state, gap_json);
     }
     done(&report)
 }
