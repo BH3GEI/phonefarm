@@ -516,13 +516,15 @@ pub(crate) fn repo_root() -> PathBuf {
 }
 
 pub(crate) const DEV_TMP: &str = "/data/local/tmp";
-pub(crate) const DEV_SCRIPTS: [&str; 6] = [
+pub(crate) const DEV_SCRIPTS: [&str; 7] = [
     "device_snapshot.sh",
     "ftrace_capture.sh",
     "knob_sysparam.sh",
     "probe_sysparam.sh",
     "sample_env.sh",
     "charge_suspend.sh",
+    // 测量窗口内逐秒记 GPU 上限档与风扇设定档 (审计 #9、#11, 见 [`HwWatch`])
+    "sample_hw.sh",
 ];
 
 pub(crate) fn push_tools(serial: &str) -> Result<(), String> {
@@ -1141,6 +1143,10 @@ pub(crate) fn run_one_launch(
     }
     // 等进入被测窗口
     wait_launch_window(serial, pkg, label, launch.marker.as_deref())?;
+    // 游戏启动后厂商游戏模式会把风扇打开 (审计 #11: msaa1 开跑前 0, 测量中 10/10 臂是开的):
+    // 进入被测窗口后再按死一次, 再起逐秒的 GPU 档位/风扇记录
+    let fan_after_marker = arm_fan_off(serial);
+    let hw = HwWatch::start(serial, outdir, label);
     // 功耗采样与 ftrace 并行, 覆盖整个采集窗
     let env_path = outdir.join("env.txt");
     // 上限放宽: 正常由停止标志结束, 上限只防标志一直不出现 (ftrace 起得慢时也不会先于采集结束)
@@ -1155,6 +1161,7 @@ pub(crate) fn run_one_launch(
         .stderr(std::process::Stdio::null())
         .spawn();
     let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {seconds} {tr} {pkg}"), seconds + 120);
+    let hw = hw.finish();
     std::fs::write(outdir.join("capture.log"), &cap).ok();
     let _ = adb(serial, &["pull", &tr, &outdir.join("trace.txt").to_string_lossy()], 120);
     let _ = adb(serial, &["shell", &format!("rm -f {tr}")], 15);
@@ -1182,7 +1189,7 @@ pub(crate) fn run_one_launch(
     let d = crate::looptrace::parse(&String::from_utf8_lossy(&trace), c);
     let summary = crate::pyjson::dumps(&d.summarize());
     std::fs::write(outdir.join("summary.json"), &summary).map_err(|e| e.to_string())?;
-    let mut m = json!({ "label": label, "run_once_rc": 0, "launch": true });
+    let mut m = json!({ "label": label, "run_once_rc": 0, "launch": true, "hw": hw, "fan_after_marker": fan_after_marker });
     m["summary"] = serde_json::from_str(&summary).map_err(|e| format!("{label}: summary 解析失败 {e}"))?;
     if let Ok(t) = std::fs::read_to_string(&env_path) {
         // 功耗只取 trace 采集窗内的样本 (审计 #3)
@@ -1250,6 +1257,8 @@ pub(crate) fn run_one_with(
 ) -> Result<Value, String> {
     std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
     let root = repo_root();
+    // 逐秒 GPU 档位/风扇记录, 覆盖 run_once 的整段 (含 LEAD)
+    let hw = HwWatch::start(serial, outdir, label);
     // LEAD 6 秒 + 采集 seconds 秒; 余量 20 秒只是上限, 正常由停止标志结束
     let dur = seconds + 6 + 20;
     let env_path = outdir.join("env.txt");
@@ -1283,6 +1292,7 @@ pub(crate) fn run_one_with(
         )
         .env("PF_BIN", std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm")))
         .output();
+    let hw = hw.finish();
     if let Ok(mut s) = sampler {
         // 采样器卡死不能把整个 eval 挂住: 等一段时间, 超时就杀 (负载收尾后的
         // env 尾巴本来就只要几秒)
@@ -1308,7 +1318,7 @@ pub(crate) fn run_one_with(
         }
         Err(e) => return Err(format!("run_once 起不了: {e}")),
     };
-    let mut m = json!({ "label": label, "run_once_rc": rc });
+    let mut m = json!({ "label": label, "run_once_rc": rc, "hw": hw });
     let sp = outdir.join("summary.json");
     // 指定了渲染线程: 在本进程里按它重解析 trace.txt, 覆盖 run_once.sh 按 Unity 缺省解析出的
     // summary.json。放在这里而不是给 run_once.sh 加参数, 是为了换个仓库根 (手机节点上的
@@ -1562,6 +1572,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                 .or_else(|| Some("/sys/class/qcom-battery/charging_enabled".into()));
         }
     }
+    // 停充成功后等电池停止吸电再开第一臂 (审计 #13)
+    let charge_settle = suspended_via.as_ref().map(|_| wait_charge_settled(serial));
 
     let plan_local = evidence.join("plan.txt");
     let push = adb(serial, &["push", &plan_local.to_string_lossy(), &format!("{DEV_TMP}/loop_v1_sysparam.plan")], 60);
@@ -1618,8 +1630,14 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let mut cool_log: Vec<Value> = Vec::new();
     let hold_min = hold_min_frac(req);
     let mut hold_log: Vec<Value> = Vec::new();
+    // 臂序随机 (审计 #13), 种子进报告; 环境不一致的对单独剔除 (审计 #9 #11)
+    let order_seed = curtail::order_seed(req["protocol"]["order_seed"].as_u64());
+    let knob_first = curtail::knob_first_order(rounds as usize, order_seed);
+    let mut dropped: Vec<Value> = Vec::new();
+    // 这组参数改的就是 GPU 档位时, 改写臂档位不同是设计如此, 不拿它判不可比
+    let check_gpu = !plan.contains("pwrlevel");
     'pairs: for i in 1..=rounds {
-        for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
+        for arm in if knob_first[i as usize - 1] { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 风扇按死在关 (owner 规矩), 再等冷 —— 风扇状态会改等冷的结果
             let fan = arm_fan_off(serial);
             // 每臂开跑前按请求的 cool_c 等冷 (施加之前等: 等的那几分钟里厂商服务有足够时间把刚写的值改回去)
@@ -1725,6 +1743,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             match res {
                 Ok(mut m) => {
                     m["sysparam_hold"] = hold_rec;
+                    m["round"] = json!(i);
                     // 温度上限: 超了这一组作废
                     let t = run_soc_temp_max(&m);
                     if let (Some(t), Some(cap)) = (t, req["conditions"]["temp_cap_c"].as_f64()) {
@@ -1747,6 +1766,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                         } else {
                             ctrl_runs.push(m);
                         }
+                        settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, check_gpu);
                     }
                     if restore_fail.is_some() {
                         abort_reason = Some("旋钮还原失败, 后续数据不可信".into());
@@ -1806,6 +1826,11 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         "cool_timeout": cool_timeout,
         "cool_per_arm": cool_log,
         "temp_cap_c": req["conditions"]["temp_cap_c"],
+        "arm_order": curtail::order_note(order_seed, rounds as usize),
+        "charge_settle": charge_settle,
+        "env_consistency": consistency_note(&dropped, check_gpu),
+        // 只记不判: 各对之间风扇状态不同 (每对内部一致) 不再整组作废
+        "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
         "apply_ok": apply_ok,
         "snapshot_identical": snapshot_identical,
         "restored": restore_fail.is_none(),
@@ -1853,8 +1878,11 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         }
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
-    if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
-        report["verdict"]["reason"] = json!(e);
+    if knob_runs.is_empty() && !dropped.is_empty() {
+        report["verdict"]["reason"] = json!(format!(
+            "{} 对两臂测量环境都不一致 (风扇或 GPU 档位), 全部剔除, 没有可比的数据 (见 conditions_observed.env_consistency)",
+            dropped.len()
+        ));
         if suspended_via.is_some() {
             let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         }
@@ -1862,6 +1890,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     }
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
     report["verdict"] = verdict;
+    append_dropped_reason(&mut report, &dropped);
     if !contested.is_empty() {
         let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
         report["verdict"]["reason"] = json!(format!(
@@ -1986,6 +2015,251 @@ pub(crate) fn fan_mismatch(knob_runs: &[Value], ctrl_runs: &[Value]) -> Option<S
         .filter_map(|r| r["env"]["fan_state"].as_str().map(String::from))
         .collect();
     (seen.len() > 1).then(|| format!("测量期间各臂风扇状态不一致 {seen:?}: 风扇自己耗电、还改热态, 这组不可比"))
+}
+
+// ══════════════ 臂间环境一致性 (审计 #9 #11 #13) ══════════════
+
+/// sample_hw.sh 自己跑的上限 (秒)。正常由 [`HwWatch::finish`] 写停止标记结束, 这只是兜底。
+const HW_WATCH_MAX_S: u64 = 900;
+/// 同一对两臂的 GPU 上限档分布, 总变差距离 (½·Σ|p_knob − p_ctrl|) 超过它就判不可比。
+/// 例: 一臂全程 0 档、另一臂有 1/4 时间被压到 17 档 → 0.25 > 0.2, 剔除这一对。
+pub(crate) const GPU_LEVEL_TV_MAX: f64 = 0.2;
+
+/// 测量窗口内逐秒记 GPU 上限档与风扇设定档 (设备端 sample_hw.sh, 只读)。
+/// 两臂用同一个 [`HwWatch`], 所以这一路 adb 调用本身不造成两臂差别。
+pub(crate) struct HwWatch {
+    child: Option<std::process::Child>,
+    path: PathBuf,
+    stop: String,
+    serial: String,
+}
+
+impl HwWatch {
+    pub(crate) fn start(serial: &str, outdir: &Path, label: &str) -> Self {
+        let path = outdir.join("hw.txt");
+        let stop = format!("{DEV_TMP}/sample_hw_{label}.stop");
+        let child = std::fs::File::create(&path).ok().and_then(|f| {
+            Command::new(adb_path())
+                .args(["-s", serial, "shell"])
+                .arg(format!("su -c 'sh {DEV_TMP}/sample_hw.sh {HW_WATCH_MAX_S} {stop}'"))
+                .stdout(f)
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()
+        });
+        Self { child, path, stop, serial: serial.to_string() }
+    }
+
+    /// 停掉采样并解析 ([`hw_stats`])。没采到 (脚本不在、没 root) 时 n=0, 一致性核对跳过这一项。
+    pub(crate) fn finish(mut self) -> Value {
+        if let Some(mut ch) = self.child.take() {
+            let _ = su(&self.serial, &format!("touch {}", self.stop), 15);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match ch.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) if std::time::Instant::now() > deadline => {
+                        let _ = ch.kill();
+                        let _ = ch.wait();
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                }
+            }
+        }
+        hw_stats(&std::fs::read_to_string(&self.path).unwrap_or_default())
+    }
+}
+
+/// 只推 sample_hw.sh (gray 不走 push_tools)。推不上不致命: 采不到就跳过这一项核对, 报告里看得到 n=0。
+pub(crate) fn push_hw_script(serial: &str) {
+    let p = repo_root().join("loop_v1/auto/sample_hw.sh");
+    if p.exists() {
+        let _ = adb(serial, &["push", &p.to_string_lossy(), DEV_TMP], 60);
+    }
+}
+
+/// 游程编码: [[值, 连续样本数], ...], 保留先后顺序。
+fn runs_of<T: PartialEq + Clone>(xs: &[T]) -> Vec<(T, usize)> {
+    let mut out: Vec<(T, usize)> = Vec::new();
+    for x in xs {
+        match out.last_mut() {
+            Some((v, n)) if v == x => *n += 1,
+            _ => out.push((x.clone(), 1)),
+        }
+    }
+    out
+}
+
+/// 各取值所占样本比例。
+fn fractions<T: Ord + Clone>(xs: &[T]) -> std::collections::BTreeMap<T, f64> {
+    let mut m: std::collections::BTreeMap<T, f64> = Default::default();
+    for x in xs {
+        *m.entry(x.clone()).or_default() += 1.0;
+    }
+    let n = xs.len().max(1) as f64;
+    m.values_mut().for_each(|v| *v /= n);
+    m
+}
+
+/// sample_hw.sh 输出 → {n, gpu_pwrlevel_runs, gpu_pwrlevel_frac, fan_runs, fan_states}。纯函数。
+pub(crate) fn hw_stats(text: &str) -> Value {
+    let (mut levels, mut fans): (Vec<i64>, Vec<String>) = (vec![], vec![]);
+    let mut n = 0usize;
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("HW ") else { continue };
+        let p: Vec<&str> = rest.split_whitespace().collect();
+        if p.len() < 3 {
+            continue;
+        }
+        n += 1;
+        if let Ok(l) = p[1].parse::<i64>() {
+            levels.push(l);
+        }
+        if p[2] != "-" {
+            fans.push(p[2].to_string());
+        }
+    }
+    let lv_frac: serde_json::Map<String, Value> =
+        fractions(&levels).into_iter().map(|(k, v)| (k.to_string(), json!((v * 1000.0).round() / 1000.0))).collect();
+    let fan_states: Vec<String> = fractions(&fans).into_keys().collect();
+    json!({
+        "n": n,
+        "gpu_pwrlevel_runs": runs_of(&levels).into_iter().map(|(v, c)| json!([v, c])).collect::<Vec<_>>(),
+        "gpu_pwrlevel_frac": lv_frac,
+        "fan_runs": runs_of(&fans).into_iter().map(|(v, c)| json!([v, c])).collect::<Vec<_>>(),
+        "fan_states": fan_states,
+    })
+}
+
+/// 两个档位分布的总变差距离。
+fn level_tv(a: &Value, b: &Value) -> Option<f64> {
+    let (a, b) = (a.as_object()?, b.as_object()?);
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let tv = keys
+        .into_iter()
+        .map(|k| (a.get(k).and_then(Value::as_f64).unwrap_or(0.0) - b.get(k).and_then(Value::as_f64).unwrap_or(0.0)).abs())
+        .sum::<f64>()
+        / 2.0;
+    Some(tv)
+}
+
+/// 一臂测量期间见到的风扇设定档集合: 优先逐秒记录 (hw.fan_states), 没有就退回 sample_env 开头那一行。
+fn arm_fan_states(m: &Value) -> Option<std::collections::BTreeSet<String>> {
+    if let Some(xs) = m["hw"]["fan_states"].as_array().filter(|x| !x.is_empty()) {
+        return Some(xs.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+    }
+    m["env"]["fan_state"].as_str().map(|s| std::iter::once(s.to_string()).collect())
+}
+
+/// 同一对两臂的测量环境是否可比: 风扇设定档集合必须相同; `check_gpu` 时 GPU 上限档分布的
+/// 总变差距离不超过 [`GPU_LEVEL_TV_MAX`]。缺数据的那一项不判 (旧证据、没采到), 只判两臂都有的。
+/// sysparam 改的就是 GPU 档位时调用方传 `check_gpu = false` (改写臂档位不同是设计如此)。
+pub(crate) fn pair_env_check(knob: &Value, ctrl: &Value, check_gpu: bool) -> Result<(), String> {
+    if let (Some(fk), Some(fc)) = (arm_fan_states(knob), arm_fan_states(ctrl)) {
+        if fk != fc {
+            return Err(format!("风扇状态不一致: 改写臂 {fk:?} / 对照臂 {fc:?}"));
+        }
+    }
+    if check_gpu {
+        if let Some(tv) = level_tv(&knob["hw"]["gpu_pwrlevel_frac"], &ctrl["hw"]["gpu_pwrlevel_frac"]) {
+            if tv > GPU_LEVEL_TV_MAX {
+                return Err(format!(
+                    "GPU 上限档分布不一致 (总变差 {tv:.2} > {GPU_LEVEL_TV_MAX}): 改写臂 {} / 对照臂 {}",
+                    knob["hw"]["gpu_pwrlevel_frac"], ctrl["hw"]["gpu_pwrlevel_frac"]
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 第 `round` 对两臂都量完时核对环境一致性; 不可比就把这一对两臂都拿出统计, 记进 `dropped`。
+/// 只剔这一对, 其余对照常判定 (以前风扇不一致是整组作废)。回 true = 剔除了。
+pub(crate) fn settle_pair(
+    round: u32,
+    knob_runs: &mut Vec<Value>,
+    ctrl_runs: &mut Vec<Value>,
+    dropped: &mut Vec<Value>,
+    check_gpu: bool,
+) -> bool {
+    let is_round = |r: &Value| r["round"].as_u64() == Some(round as u64);
+    let (Some(ki), Some(ci)) = (knob_runs.iter().position(is_round), ctrl_runs.iter().position(is_round)) else {
+        return false;
+    };
+    match pair_env_check(&knob_runs[ki], &ctrl_runs[ci], check_gpu) {
+        Ok(()) => false,
+        Err(why) => {
+            let (k, c) = (knob_runs.remove(ki), ctrl_runs.remove(ci));
+            dropped.push(json!({
+                "round": round, "reason": why,
+                "knob": {"label": k["label"], "hw": k["hw"], "fan_state": k["env"]["fan_state"], "layer_hits": k["layer_hits"]},
+                "ctrl": {"label": c["label"], "hw": c["hw"], "fan_state": c["env"]["fan_state"]},
+            }));
+            true
+        }
+    }
+}
+
+/// 回包里的一致性记录 (`conditions_observed.env_consistency`)。
+pub(crate) fn consistency_note(dropped: &[Value], check_gpu: bool) -> Value {
+    json!({
+        "dropped_pairs": dropped.len(),
+        "dropped": dropped,
+        "gpu_level_checked": check_gpu,
+        "rule": format!(
+            "每对两臂: 风扇设定档集合必须相同; GPU 上限档分布总变差 <= {GPU_LEVEL_TV_MAX} (sysparam 改 GPU 档位时不比这一项)。\
+             不可比只剔除那一对, 写在这里"
+        ),
+    })
+}
+
+/// 判定理由后面补上剔除了几对。
+pub(crate) fn append_dropped_reason(report: &mut Value, dropped: &[Value]) {
+    if dropped.is_empty() {
+        return;
+    }
+    let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
+    let rounds: Vec<String> = dropped.iter().map(|d| d["round"].to_string()).collect();
+    report["verdict"]["reason"] = json!(format!(
+        "{r} (第 {} 对两臂测量环境不一致, 已剔除, 见 conditions_observed.env_consistency)",
+        rounds.join("、")
+    ));
+}
+
+/// 停充后电池电流 (µA, 正 = 在充) 低于它, 算电池已不再吸电。与 charge_suspend.sh 的 BYPASS_IDLE_UA 一致。
+const CHARGE_SETTLE_UA: i64 = 50_000;
+/// 停充后等电池停止吸电的上限。10-11 实测电流约 45 s 才落到 ~0。
+const CHARGE_SETTLE_MAX_S: u64 = 120;
+
+/// 这一读数算不算已停止吸电。读不出数的不算。
+pub(crate) fn charge_settled(ua: Option<i64>) -> bool {
+    ua.is_some_and(|x| x <= CHARGE_SETTLE_UA)
+}
+
+/// 停充成功后、第一臂之前: 等电池电流降到约 0 (连续两次读数 <= [`CHARGE_SETTLE_UA`])。
+/// 审计 #13: 以前最初约 45 秒电池仍在吸电, 那段总落在先跑的那一臂上。超时不作废, 如实记录。
+pub(crate) fn wait_charge_settled(serial: &str) -> Value {
+    let t0 = std::time::Instant::now();
+    let mut samples: Vec<Value> = Vec::new();
+    let mut ok_streak = 0;
+    loop {
+        let out = su(serial, "cat /sys/class/power_supply/battery/current_now", 15);
+        let ua = crate::graylayer::GrayLayer::adb_stdout(&out).trim().parse::<i64>().ok();
+        let t = t0.elapsed().as_secs();
+        samples.push(json!([t, ua]));
+        ok_streak = if charge_settled(ua) { ok_streak + 1 } else { 0 };
+        if ok_streak >= 2 {
+            return json!({"settled": true, "waited_s": t, "threshold_ua": CHARGE_SETTLE_UA, "samples": samples});
+        }
+        if t >= CHARGE_SETTLE_MAX_S {
+            return json!({"settled": false, "waited_s": t, "threshold_ua": CHARGE_SETTLE_UA, "samples": samples});
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
 }
 
 /// 功耗的辅助证据: GPU 平均频率 (sample_env 的 GPU 行)、总线带宽投票中位与 GPU 忙碌时间
@@ -2425,11 +2699,19 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     // 同设置重拍 (对照臂隔一段再拍一张): 单轮评测唯一的噪声底来源
     let mut noise_within_round: Vec<f64> = Vec::new();
     let mut prev_ctrl: Option<(u32, u32, Vec<u8>)> = None;
+    // 改写臂同样重拍一张 (审计 #14: 以前只有对照臂多等 8 秒、多拍一张, 晚约 10 秒开测,
+    // ABBA 抵消不了)。两臂等待与截图次数对齐; 这一组只记录, 不进噪声底 (画面门槛口径不变)
+    let mut knob_within_round: Vec<f64> = Vec::new();
     let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
     let mut cool_log: Vec<Value> = Vec::new();
+    // 臂序随机 (审计 #13), 种子进报告; 环境不一致的对单独剔除 (审计 #9 #11)
+    let order_seed = curtail::order_seed(req["protocol"]["order_seed"].as_u64());
+    let knob_first = curtail::knob_first_order(rounds as usize, order_seed);
+    let mut dropped: Vec<Value> = Vec::new();
+    push_hw_script(serial);
     'rounds: for i in 1..=rounds {
         let mut shots: std::collections::BTreeMap<&str, (u32, u32, Vec<u8>)> = Default::default();
-        for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
+        for arm in if knob_first[i as usize - 1] { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 层是 CreateInstance 时读的, 切属性必须重启目标 —— force-stop 是两臂切换的一部分
             let _ = gl.off();
             let fan = arm_fan_off(serial);
@@ -2454,6 +2736,15 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                     break 'rounds;
                 }
             }
+            // 挂层重启了游戏, 厂商游戏模式可能又把风扇打开 (审计 #11): 开测前再按死一次
+            let fan_after_mount = arm_fan_off(serial);
+            if let Some(c) = cool_log.last_mut() {
+                c["fan_after_mount"] = fan_after_mount.clone();
+            }
+            if let Some(e) = fan_still_on(&fan_after_mount) {
+                abort_reason = Some(format!("{arm}{i} 挂层后: {e}"));
+                break 'rounds;
+            }
             if let Some(l) = &launch {
                 let res = run_one_launch(
                     serial,
@@ -2473,12 +2764,14 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                                 break 'rounds;
                             }
                         }
+                        m["round"] = json!(i);
                         if arm == "knob" {
                             m["layer_hits"] = json!(layer_hits(serial, &pkg, evidence));
                             knob_runs.push(m);
                         } else {
                             ctrl_runs.push(m);
                         }
+                        settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true);
                     }
                     Err(e) => {
                         abort_reason = Some(e);
@@ -2498,15 +2791,18 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                     break 'rounds;
                 }
             }
-            // 对照臂多拍一张 (同样的等待再拍): 这一对就是本轮场景的噪声底。
+            // 每臂都多拍一张 (同样的等待再拍)。对照臂这一对就是本轮场景的噪声底:
             // 只有轮数 ≥ 2 才拿得到跨轮对照对对照, 单轮评测以前没有任何噪声底可依 ——
             // 固定 30 dB 阈值在会动的场景里比噪声底还高, 候选会被误判成「画面出错」。
-            if arm == "ctrl" {
-                std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
-                if let Ok(again) = grab_rgba(serial) {
-                    save_png(&evidence.join(format!("shot_ctrl{i}_repeat.png")), &again);
-                    if let Some(q) = psnr_rgba(&shots["ctrl"].2, &again.2) {
+            // 改写臂也拍, 是为了两臂开测前的等待与截图次数一样 (审计 #14); 它只记录, 不进噪声底。
+            std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
+            if let Ok(again) = grab_rgba(serial) {
+                save_png(&evidence.join(format!("shot_{arm}{i}_repeat.png")), &again);
+                if let Some(q) = psnr_rgba(&shots[arm].2, &again.2) {
+                    if arm == "ctrl" {
                         noise_within_round.push(q);
+                    } else {
+                        knob_within_round.push(q);
                     }
                 }
             }
@@ -2527,6 +2823,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                             break 'rounds;
                         }
                     }
+                    m["round"] = json!(i);
                     if arm == "knob" {
                         // 命中 marker 要在**这一臂跑完后立刻**采: 下一次 mount_layer
                         // 会把三个落点全删了重写, 拖到循环外读到的就是初始化的空表
@@ -2536,6 +2833,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                     } else {
                         ctrl_runs.push(m);
                     }
+                    settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true);
                 }
                 Err(e) => {
                     abort_reason = Some(e);
@@ -2581,8 +2879,10 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     };
 
     // 各 knob 臂采到的命中取最大 (require_hit 判的是"改写到底有没有真生效过一次")
+    // 环境不一致被剔除的那几对, 改写臂的命中照样算 (剔除只影响统计, 不影响「改写生效过没有」)
     let hits = knob_runs
         .iter()
+        .chain(dropped.iter().map(|d| &d["knob"]))
         .filter_map(|r| r["layer_hits"].as_u64())
         .max()
         .unwrap_or(0);
@@ -2594,6 +2894,9 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         "cool_reached_c": cool_reached,
         "cool_timeout": cool_timeout,
         "cool_per_arm": cool_log,
+        "arm_order": curtail::order_note(order_seed, rounds as usize),
+        "env_consistency": consistency_note(&dropped, true),
+        "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
         "hits": hits,
         "apply_ok": hits > 0,
         "restored": restore_clean,
@@ -2605,6 +2908,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                 "psnr_knob_vs_ctrl_db": psnr_knob_vs_ctrl,
                 "psnr_ctrl_vs_ctrl_db": psnr_ctrl_vs_ctrl,
                 "noise_within_round_db": noise_within_round,
+                "knob_within_round_db": knob_within_round,
                 "noise_floor_db": noise_floor,
                 "psnr_db_used": best_knob,
                 "gate": image_ruling.as_ref().map(|r| match r {
@@ -2638,13 +2942,17 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
-    if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
-        report["verdict"]["reason"] = json!(e);
+    if knob_runs.is_empty() && !dropped.is_empty() {
+        report["verdict"]["reason"] = json!(format!(
+            "{} 对两臂测量环境都不一致 (风扇或 GPU 档位), 全部剔除, 没有可比的数据 (见 conditions_observed.env_consistency)",
+            dropped.len()
+        ));
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
     // 画面过了门槛: 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
     report["verdict"] = verdict;
+    append_dropped_reason(&mut report, &dropped);
     let mut m = report["metrics"].take();
     let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
     m["psnr_db"] = json!(min_of(&psnr_knob_vs_ctrl));
@@ -3122,6 +3430,94 @@ bus.DDR.boost_freq.effect=live\n";
         assert!(fan_mismatch(&[off.clone(), off.clone()], &[off.clone()]).is_none());
         // 没记风扇的 (别的机型) 不算不一致
         assert!(fan_mismatch(&[json!({"env": {}})], &[off]).is_none());
+    }
+
+    /// 审计 #9 #11: 逐秒 GPU 档位/风扇记录的解析, 以及同一对两臂环境不一致时只剔除那一对。
+    #[test]
+    fn hw_stats_parses_per_second_levels_and_fan() {
+        let t = "#sample_hw v1 max=900\n\
+HW 10.0 0 fan_enable=0,fan_speed_level=5\n\
+HW 11.0 0 fan_enable=0,fan_speed_level=5\n\
+HW 12.0 17 fan_enable=1,fan_speed_level=4\n\
+HW 13.0 NA -\n\
+junk\n\
+#sample_hw done\n";
+        let s = hw_stats(t);
+        assert_eq!(s["n"], 4);
+        assert_eq!(s["gpu_pwrlevel_runs"], json!([[0, 2], [17, 1]]));
+        assert_eq!(s["gpu_pwrlevel_frac"], json!({"0": 0.667, "17": 0.333}));
+        assert_eq!(s["fan_runs"], json!([["fan_enable=0,fan_speed_level=5", 2], ["fan_enable=1,fan_speed_level=4", 1]]));
+        assert_eq!(s["fan_states"].as_array().unwrap().len(), 2);
+        // 空输入 (脚本不在设备上): n=0, 什么都不判
+        let e = hw_stats("");
+        assert_eq!(e["n"], 0);
+        assert_eq!(e["gpu_pwrlevel_frac"], json!({}));
+    }
+
+    fn arm_hw(round: u32, label: &str, levels: &[(i64, usize)], fan: &str) -> Value {
+        let mut t = String::new();
+        for (l, c) in levels {
+            for _ in 0..*c {
+                t.push_str(&format!("HW 1.0 {l} {fan}\n"));
+            }
+        }
+        json!({"label": label, "round": round, "hw": hw_stats(&t), "env": {"fan_state": "fan_enable=0"}})
+    }
+
+    #[test]
+    fn pair_env_check_flags_fan_and_gpu_level_differences() {
+        let k = arm_hw(1, "k1", &[(0, 30)], "fan_enable=0");
+        let c = arm_hw(1, "c1", &[(0, 28), (17, 2)], "fan_enable=0");
+        // 档位分布只差 2/30 → 可比
+        assert!(pair_env_check(&k, &c, true).is_ok());
+        // 1/3 时间被压到 17 档 → 不可比
+        let c2 = arm_hw(1, "c1", &[(0, 20), (17, 10)], "fan_enable=0");
+        let e = pair_env_check(&k, &c2, true).unwrap_err();
+        assert!(e.contains("GPU 上限档"), "{e}");
+        // sysparam 改的就是档位: 不比这一项
+        assert!(pair_env_check(&k, &c2, false).is_ok());
+        // 风扇中途被打开 → 不可比 (不管 GPU 查不查)
+        let c3 = arm_hw(1, "c1", &[(0, 30)], "fan_enable=1");
+        assert!(pair_env_check(&k, &c3, false).unwrap_err().contains("风扇"));
+        // 没有逐秒记录的旧证据: 退回 sample_env 开头那一行, 一致就可比
+        let old_k = json!({"env": {"fan_state": "fan_enable=0"}});
+        let old_c = json!({"env": {"fan_state": "fan_enable=0"}});
+        assert!(pair_env_check(&old_k, &old_c, true).is_ok());
+        let old_on = json!({"env": {"fan_state": "fan_enable=1"}});
+        assert!(pair_env_check(&old_k, &old_on, true).is_err());
+        // 别的机型没风扇节点: 不判
+        assert!(pair_env_check(&json!({"env": {}}), &json!({"env": {}}), true).is_ok());
+    }
+
+    #[test]
+    fn settle_pair_drops_only_the_inconsistent_pair() {
+        let mut knob = vec![arm_hw(1, "k1", &[(0, 30)], "fan_enable=0")];
+        let mut ctrl = vec![arm_hw(1, "c1", &[(0, 30)], "fan_enable=0")];
+        let mut dropped = Vec::new();
+        assert!(!settle_pair(1, &mut knob, &mut ctrl, &mut dropped, true));
+        // 第 2 对只量完一臂: 不判
+        ctrl.push(arm_hw(2, "c2", &[(0, 30)], "fan_enable=1"));
+        assert!(!settle_pair(2, &mut knob, &mut ctrl, &mut dropped, true));
+        knob.push(arm_hw(2, "k2", &[(0, 30)], "fan_enable=0"));
+        assert!(settle_pair(2, &mut knob, &mut ctrl, &mut dropped, true));
+        assert_eq!((knob.len(), ctrl.len()), (1, 1));
+        assert_eq!(knob[0]["label"], "k1");
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0]["round"], 2);
+        let note = consistency_note(&dropped, true);
+        assert_eq!(note["dropped_pairs"], 1);
+        let mut report = json!({"verdict": {"reason": "没有任何指标显著改善"}});
+        append_dropped_reason(&mut report, &dropped);
+        assert!(report["verdict"]["reason"].as_str().unwrap().contains("第 2 对"));
+    }
+
+    #[test]
+    fn charge_settled_means_battery_no_longer_charging() {
+        assert!(!charge_settled(Some(1_930_000))); // 停充刚生效, 电池还在吸电
+        assert!(!charge_settled(Some(60_000)));
+        assert!(charge_settled(Some(30_000))); // 旁路: 约 0
+        assert!(charge_settled(Some(-800_000))); // 放电
+        assert!(!charge_settled(None));
     }
 
     #[test]
