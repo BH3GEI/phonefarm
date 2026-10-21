@@ -1143,13 +1143,16 @@ pub(crate) fn all_on_battery(knob_runs: &[Value], ctrl_runs: &[Value]) -> bool {
 /// 跑满时**可能**进入判定的「显著改善」检验, 各取最宽的 alpha_win:
 /// 帧时/帧率至少在 2 指标表里 (alpha/2); 功耗只有在已跑的轮全在放电态时才可能进表,
 /// 进表时是 3 指标 (alpha/3)。覆盖所有可能的指标表, 截断只会更保守。
-fn sysparam_win_tests(alpha: f64, power_possible: bool) -> Vec<curtail::WinTest> {
+/// `fps_lock_possible` (已跑的轮全钉在同一个帧率上限, 见 [`fps_lock_cap`]): 跑满后 fps_mean
+/// 可能只守退化、不占预算, 帧时最宽到 alpha/1, 功耗最宽到 alpha/2。
+fn sysparam_win_tests(alpha: f64, power_possible: bool, fps_lock_possible: bool) -> Vec<curtail::WinTest> {
+    let k_min = if fps_lock_possible { 1.0 } else { 2.0 };
     let mut t = vec![
-        curtail::WinTest::new("frame_p95", true, alpha / 2.0),
+        curtail::WinTest::new("frame_p95", true, alpha / k_min),
         curtail::WinTest::new("fps_mean", false, alpha / 2.0),
     ];
     if power_possible {
-        t.push(curtail::WinTest::new("power_w_mean", true, alpha / 3.0));
+        t.push(curtail::WinTest::new("power_w_mean", true, alpha / (k_min + 1.0)));
     }
     t
 }
@@ -1435,7 +1438,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             // 确定性截断: 剩下的臂无论量出什么, 都不可能有指标显著改善 → 跑满也必然不是
             // KEEP, 现在停 (论证见 src/curtail.rs)。KEEP 一侧永远不提前锁定。
             if curtail {
-                let tests = sysparam_win_tests(alpha, all_on_battery(&knob_runs, &ctrl_runs));
+                let lock_possible = fps_lock_cap(ctrl_runs.iter().chain(knob_runs.iter())).is_some();
+                let tests = sysparam_win_tests(alpha, all_on_battery(&knob_runs, &ctrl_runs), lock_possible);
                 let (left_a, left_b) = (
                     (rounds as usize).saturating_sub(ctrl_runs.len()),
                     (rounds as usize).saturating_sub(knob_runs.len()),
@@ -1703,7 +1707,11 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
     let mut wins: Vec<String> = Vec::new();
     let mut regressions: Vec<String> = Vec::new();
     let mut per_metric: Vec<(String, Value)> = Vec::new();
-    let alpha_win = alpha / metrics_list.len() as f64;
+    // 审计 #8: 负载被帧率上限钉住时 (Megacity 旧包锁 30 fps), fps_mean 不可能显著改善,
+    // 只用来守退化, 不占 Bonferroni 预算, 也不能算 win。
+    let fps_cap = fps_lock_cap(ctrl_runs.iter().chain(knob_runs.iter()));
+    let guard_only = |m: &str| fps_cap.is_some() && m == "fps_mean";
+    let alpha_win = alpha / metrics_list.iter().filter(|(m, _)| !guard_only(m)).count() as f64;
     for (metric, better) in &metrics_list {
         let cmp = loopstat::compare(&a_runs, &b_runs, metric);
         let diff = cmp.get("diff_mean").and_then(|v| v.as_f64());
@@ -1715,7 +1723,7 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
         };
         let status = if cmp.get("error").is_some() || diff.is_none() {
             "缺数据"
-        } else if improved && p.is_some_and(|x| x < alpha_win) {
+        } else if improved && !guard_only(metric) && p.is_some_and(|x| x < alpha_win) {
             wins.push(metric.to_string());
             "显著改善"
         } else if !improved && diff.is_some_and(|x| x != 0.0) && p.is_some_and(|x| x < alpha) {
@@ -1731,7 +1739,7 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
             metric.to_string(),
             {
                 let sv = |k: &str| cmp.get(k).map(to_serde).unwrap_or(Value::Null);
-                json!({
+                let mut e = json!({
                     "status": status,
                     "a_mean": sv("a_mean"),
                     "b_mean": sv("b_mean"),
@@ -1739,7 +1747,11 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
                     "diff_pct": sv("diff_pct"),
                     "p": sv("perm_p_two_sided"),
                     "ci95": sv("ci95"),
-                })
+                });
+                if guard_only(metric) {
+                    e["role"] = json!("guard_only");
+                }
+                e
             }
         ));
     }
@@ -1757,6 +1769,8 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
         "regressions": regressions,
         "per_metric": Value::Object(per_metric.into_iter().collect()),
         "aux": aux,
+        // 两臂每轮 fps_mean 都钉在这个上限上: fps_mean 只守退化 (per_metric.fps_mean.role)
+        "fps_locked_cap": fps_cap,
         "reason": if keep {
             json!(format!("改善 {} 且无显著退化", metrics_list.iter().find(|(m, _)| wins.first() == Some(&m.to_string())).map(|(m, _)| m.clone()).unwrap_or_default()))
         } else if !regressions.is_empty() {
@@ -1766,6 +1780,23 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
         },
     });
     (verdict, keep, on_battery_all)
+}
+
+/// 负载是不是被帧率上限钉住了: 每一轮的 frame_p50 都贴着同一个常见限帧上限
+/// (沿用归因那一处的口径 [`crate::looptrace::detect_fps_cap`]: 帧周期中位数离 1000/cap 不超过 2%)。
+/// 是就回这个上限 (fps)。没有轮、有一轮缺 frame_p50、或有一轮离开上限都回 None。
+/// 实测依据 (审计 #8): Megacity 旧包 targetFrameRate=-1 锁 30 fps, frame_p50 约 33.3 ms。
+/// 只看两臂合在一起的帧周期水平, 不看两臂之差; 候选若真把上限打破 (有一轮离开上限), fps_mean 照常可以 win。
+pub(crate) fn fps_lock_cap<'a>(runs: impl IntoIterator<Item = &'a Value>) -> Option<f64> {
+    let mut cap = None;
+    for r in runs {
+        let c = crate::looptrace::detect_fps_cap(r["summary"]["frame_p50"].as_f64()?)?;
+        if cap.is_some_and(|x| x != c) {
+            return None;
+        }
+        cap = Some(c);
+    }
+    cap.map(|c| c as f64)
 }
 
 /// 逐臂聚合进 metrics (B 臂 = 候选臂)。回候选臂功耗 (放电态才有)。
@@ -2597,6 +2628,73 @@ bus.DDR.boost_freq.effect=live\n";
         assert!(fan_mismatch(&[off.clone(), off.clone()], &[off.clone()]).is_none());
         // 没记风扇的 (别的机型) 不算不一致
         assert!(fan_mismatch(&[json!({"env": {}})], &[off]).is_none());
+    }
+
+    /// 审计 #8: 锁帧负载上 fps_mean 只守退化。
+    #[test]
+    fn fps_lock_cap_detects_frame_capped_loads() {
+        let runs = |xs: &[f64]| -> Vec<Value> { xs.iter().map(|&p| json!({"summary": {"frame_p50": p}})).collect() };
+        // Megacity 旧包实测 frame_p50 约 33.3 ms
+        assert_eq!(fps_lock_cap(&runs(&[33.3, 33.4, 33.2, 33.5])), Some(30.0));
+        assert_eq!(fps_lock_cap(&runs(&[16.6, 16.7])), Some(60.0));
+        // 解锁后帧率跳台阶 (审计 #9 的 231 / 258 / 287 fps): 不是锁帧
+        assert_eq!(fps_lock_cap(&runs(&[4.33, 3.88, 3.48])), None);
+        // 有一轮离开上限 (候选把上限打破了) 就不算锁帧
+        assert_eq!(fps_lock_cap(&runs(&[33.3, 33.4, 24.0])), None);
+        // 两轮贴着不同上限: 不算同一个锁
+        assert_eq!(fps_lock_cap(&runs(&[33.3, 16.6])), None);
+        // 没有数据、或有一轮缺 frame_p50: 不下结论
+        assert_eq!(fps_lock_cap(&runs(&[])), None);
+        let mut r = runs(&[33.3, 33.4]);
+        r.push(json!({"summary": {}}));
+        assert_eq!(fps_lock_cap(&r), None);
+    }
+
+    #[test]
+    fn locked_fps_is_guard_only_and_frees_the_budget() {
+        let arm = |tag: &str, p95: &[f64], fps: &[f64]| -> Vec<Value> {
+            p95.iter()
+                .zip(fps)
+                .enumerate()
+                .map(|(i, (p, f))| json!({"label": format!("{tag}{i}"), "summary": {"frame_p95": p, "fps_mean": f, "frame_p50": if *f < 40.0 { 33.33 } else { 1000.0 / f }}, "env": {}}))
+                .collect()
+        };
+        // 5v5 锁 30 fps (frame_p50 33.33 ms, 与 Megacity 旧包实测相同), 候选臂帧时 p95 全部更短, 帧率全部略高
+        let ctrl = arm("c", &[36.0, 36.1, 36.2, 36.3, 36.4], &[29.40, 29.41, 29.42, 29.43, 29.44]);
+        let knob = arm("k", &[34.0, 34.1, 34.2, 34.3, 34.4], &[29.60, 29.61, 29.62, 29.63, 29.64]);
+        let (v, keep, on_batt) = judge_runs(&ctrl, &knob, 0.05, 5);
+        assert!(!on_batt);
+        assert_eq!(v["fps_locked_cap"], json!(30.0));
+        assert_eq!(v["per_metric"]["fps_mean"]["role"], json!("guard_only"));
+        assert_eq!(v["per_metric"]["fps_mean"]["status"], json!("无显著变化"));
+        // 表里只剩 frame_p95 占预算: alpha_win = 0.05 / 1
+        assert!((v["alpha_win"].as_f64().unwrap() - 0.05).abs() < 1e-12);
+        assert_eq!(v["wins"], json!(["frame_p95"]));
+        assert!(keep);
+
+        // 锁帧照样守退化: 候选臂帧率全部更低 → 显著变差
+        let knob_slow = arm("k", &[34.0, 34.1, 34.2, 34.3, 34.4], &[29.20, 29.21, 29.22, 29.23, 29.24]);
+        let (v, keep, _) = judge_runs(&ctrl, &knob_slow, 0.05, 5);
+        assert_eq!(v["regressions"], json!(["fps_mean"]));
+        assert!(!keep);
+
+        // 不锁帧时 fps_mean 照常占一份预算、可以 win
+        let ctrl_u = arm("c", &[8.0, 8.1, 8.2, 8.3, 8.4], &[231.0, 232.0, 233.0, 234.0, 235.0]);
+        let knob_u = arm("k", &[7.0, 7.1, 7.2, 7.3, 7.4], &[258.0, 259.0, 260.0, 261.0, 262.0]);
+        let (v, _, _) = judge_runs(&ctrl_u, &knob_u, 0.05, 5);
+        assert_eq!(v["fps_locked_cap"], Value::Null);
+        assert!(v["per_metric"]["fps_mean"].get("role").is_none());
+        assert!((v["alpha_win"].as_f64().unwrap() - 0.025).abs() < 1e-12);
+        assert_eq!(v["wins"], json!(["frame_p95", "fps_mean"]));
+    }
+
+    #[test]
+    fn curtail_tests_widen_when_fps_may_be_locked() {
+        let get = |t: &[curtail::WinTest], m: &str| t.iter().find(|x| x.metric == m).map(|x| x.alpha_win);
+        let t = sysparam_win_tests(0.05, true, false);
+        assert_eq!((get(&t, "frame_p95"), get(&t, "power_w_mean")), (Some(0.025), Some(0.05 / 3.0)));
+        let t = sysparam_win_tests(0.05, true, true);
+        assert_eq!((get(&t, "frame_p95"), get(&t, "fps_mean"), get(&t, "power_w_mean")), (Some(0.05), Some(0.025), Some(0.025)));
     }
 
     #[test]

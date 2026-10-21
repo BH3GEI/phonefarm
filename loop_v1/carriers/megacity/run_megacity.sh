@@ -134,8 +134,13 @@ if st.get("ready") != "yes":
 expect = os.environ.get("EXPECT_SHA", "")
 if expect and m["route"]["sha256"] != expect:
     bad.append("包内路线与仓库不一致: 包=" + m["route"]["sha256"][:12] + " 仓库=" + expect[:12])
-if m["frames_rendered"] != m["params"]["frames"]:
+# pace=time (harness 0.3.0 起的缺省) 按时间跑满 route_seconds, 帧数随帧率变, 不核对帧数;
+# 旧包没有 pace 字段, 等同 pace=frame
+fp = m.get("frame_pacing", {})
+if m["params"].get("pace", "frame") == "frame" and m["frames_rendered"] != m["params"]["frames"]:
     bad.append(f"帧数不足 {m['frames_rendered']}/{m['params']['frames']}")
+if m["graphics"].get("target_frame_rate") == -1 and m["params"].get("vsync") == "off":
+    bad.append("vsync=off 但 targetFrameRate=-1 (安卓上等于锁 30 fps, 旧包)")
 
 if bad:
     open(os.path.join(out, "INVALID"), "w").write("; ".join(bad) + "\n")
@@ -145,5 +150,7 @@ if bad:
 print(f"[{label}] fps={s['fps_mean']} spf={s['submits_per_frame']} "
       f"p50={s['frame_p50']}ms p95={s['frame_p95']}ms gpu={s['gpu_active_mean']}ms bw={s['bw_median']} "
       f"route={m['route']['name']}@{m['route']['sha256'][:12]} "
+      f"cap: target={fp.get('target_frame_rate')} refresh={fp.get('display_refresh_hz')}Hz "
+      f"warmup_fps={fp.get('warmup_observed_fps')} pace={fp.get('pace')} "
       f"entities={m.get('streaming',{}).get('entities')}")
 PYEOF
