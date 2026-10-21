@@ -92,6 +92,24 @@ bypass_wait() {   # $1 = 写节点前的电流; 成功返回 0
   return 1
 }
 
+# 开跑前查 USB 输入上限 (审计 #5): 旁路时整机全靠 USB, 上限不够 (实测停充后被限到约 0.49 A)
+# 负载一大电池就会补电。不够就明确打「供电不足」, 主机端 sysparam::usb_supply_note 收进回包。
+# 只读, 不改任何节点。需求默认 6 W, 可用环境变量 USB_NEED_MW 改 (毫瓦, 整数)。
+USB_NEED_MW=${USB_NEED_MW:-6000}
+usb_limit_check() {
+  U=/sys/class/power_supply/usb
+  lim=$(cat $U/input_current_limit 2>/dev/null)
+  case "$lim" in ''|*[!0-9]*|0) lim=$(cat $U/current_max 2>/dev/null) ;; esac
+  uv=$(cat $U/voltage_now 2>/dev/null)
+  case "$lim" in ''|*[!0-9]*|0) echo "CHARGE_USB_LIMIT 读不到 USB 输入上限 (input_current_limit/current_max), 没法开跑前判供电够不够"; return 0 ;; esac
+  case "$uv" in ''|*[!0-9]*|0) echo "CHARGE_USB_LIMIT limit_ua=$lim 读不到 USB 电压, 没法开跑前判供电够不够"; return 0 ;; esac
+  mw=$(( (lim / 1000) * (uv / 1000) / 1000 ))
+  echo "CHARGE_USB_LIMIT limit_ua=$lim usb_uv=$uv max_mw=$mw need_mw=$USB_NEED_MW"
+  if [ "$mw" -lt "$USB_NEED_MW" ] 2>/dev/null; then
+    echo "CHARGE_SUPPLY_LOW 供电不足: USB 输入上限约 ${mw} mW, 低于 ${USB_NEED_MW} mW。负载大时电池会补电, 功耗按 USB 与电池两轨同刻相加计 (混合口径, 不能跨任务比)"
+  fi
+}
+
 report_state() {
   printf 'CHARGE_STATE status=%s current_now=%s capacity=%s on_battery=%s\n' \
     "$(bstat)" "$(bcur)" "$(bcap)" "$(on_battery && echo yes || echo no)"
@@ -120,6 +138,7 @@ case "${1:-status}" in
         printf '%s\n%s\n%s\n' "$path" "$saved" "bypass" > "$STATE"
         echo 0 > "$path" 2>/dev/null
         echo "CHARGE_SUSPENDED_BYPASS $path: $saved -> $(cat "$path" 2>/dev/null) (电池已满且不进不出, 按旁路: 整机由 USB 供电, 关充电防止测量中途补电)"
+        usb_limit_check
         report_state
         exit 0
       done
@@ -169,6 +188,7 @@ case "${1:-status}" in
       if bypass_wait "$pre_cur"; then
         printf '%s\n%s\n%s\n' "$path" "$saved" "bypass" > "$STATE"
         echo "CHARGE_SUSPENDED_BYPASS $path: $saved -> $want (整机由 USB 直接供电, 电池电流 $pre_cur -> $(bcur) uA)"
+        usb_limit_check
         report_state
         exit 0
       fi
@@ -216,6 +236,7 @@ CANDS
     else
       echo "state: 未停充"
     fi
+    usb_limit_check
     report_state
     ;;
 
