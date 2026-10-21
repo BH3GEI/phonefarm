@@ -1411,10 +1411,57 @@ fn eval_runs(runs: &[Value]) -> Vec<Run> {
 }
 
 /// 按对取舍后的功耗 (审计 #5): 一臂不合格只剔除那一对, 不再整组作废。
+///
+/// 每臂都带 `round` (sysparam / gray / whitebox 都写) 时按轮对齐, 不按下标:
+/// 改写臂被判 contested (fix-B 守不住) 时只拿掉候选臂, 对照臂还在; 臂序随机 (fix-F) 时
+/// 截断可能停在一轮中间。这两种情况下按下标配对会把不同轮的两臂当成一对, 一臂不合格就错剔
+/// 另一轮的臂。没有 `round` 的旧证据仍按下标配对。
+/// 回的 `ctrl` / `knob` 与传入的 runs 一一对应 (下标相同), `dropped` 里的轮次是真实轮号。
 pub(crate) fn power_pairs_of(knob_runs: &[Value], ctrl_runs: &[Value]) -> sysparam::PowerPairs {
-    let c: Vec<&Value> = ctrl_runs.iter().map(|r| &r["env"]).collect();
-    let k: Vec<&Value> = knob_runs.iter().map(|r| &r["env"]).collect();
-    sysparam::power_pairs(&c, &k)
+    let round_of = |r: &Value| r["round"].as_u64().map(|x| x as usize);
+    let all_have_round = knob_runs.iter().chain(ctrl_runs.iter()).all(|r| round_of(r).is_some());
+    if !all_have_round {
+        let c: Vec<&Value> = ctrl_runs.iter().map(|r| &r["env"]).collect();
+        let k: Vec<&Value> = knob_runs.iter().map(|r| &r["env"]).collect();
+        return sysparam::power_pairs(&c, &k);
+    }
+    let mut rounds: Vec<usize> = knob_runs.iter().chain(ctrl_runs.iter()).filter_map(round_of).collect();
+    rounds.sort_unstable();
+    rounds.dedup();
+    // 同一轮同一臂只该有一个; 万一有重复, 按下标配对的旧办法兜底, 不猜
+    let dup = |runs: &[Value]| {
+        let mut xs: Vec<usize> = runs.iter().filter_map(round_of).collect();
+        let n = xs.len();
+        xs.sort_unstable();
+        xs.dedup();
+        xs.len() != n
+    };
+    if dup(knob_runs) || dup(ctrl_runs) {
+        let c: Vec<&Value> = ctrl_runs.iter().map(|r| &r["env"]).collect();
+        let k: Vec<&Value> = knob_runs.iter().map(|r| &r["env"]).collect();
+        return sysparam::power_pairs(&c, &k);
+    }
+    let pos = |runs: &[Value], rd: usize| runs.iter().position(|r| round_of(r) == Some(rd));
+    let ci: Vec<Option<usize>> = rounds.iter().map(|&rd| pos(ctrl_runs, rd)).collect();
+    let ki: Vec<Option<usize>> = rounds.iter().map(|&rd| pos(knob_runs, rd)).collect();
+    let c: Vec<Option<&Value>> = ci.iter().map(|o| o.map(|i| &ctrl_runs[i]["env"])).collect();
+    let k: Vec<Option<&Value>> = ki.iter().map(|o| o.map(|i| &knob_runs[i]["env"])).collect();
+    let mut pp = sysparam::power_pairs_slots(&c, &k, &rounds);
+    // 槽 → 传入 runs 的下标
+    let (mut cv, mut kv) = (vec![None; ctrl_runs.len()], vec![None; knob_runs.len()]);
+    for (j, o) in ci.iter().enumerate() {
+        if let Some(i) = o {
+            cv[*i] = pp.ctrl[j];
+        }
+    }
+    for (j, o) in ki.iter().enumerate() {
+        if let Some(i) = o {
+            kv[*i] = pp.knob[j];
+        }
+    }
+    pp.ctrl = cv;
+    pp.knob = kv;
+    pp
 }
 
 /// 功耗能不能进判定: 按对剔除不合格的之后, 两臂各至少 2 个同口径的可信值。
@@ -4087,5 +4134,43 @@ probe.game_running_end=yes\nprobe.game_foreground_end=yes\n"
         let mut m = json!({});
         let w = aggregate_metrics(&mut m, &knob, &ctrl, power_in).unwrap();
         assert!((w - (2.51 + 2.53 + 2.54 + 2.55 + 2.56) / 5.0).abs() < 1e-9, "{w}");
+    }
+
+    /// 合并后 C/D/B/F 的组合: 功耗按「轮」配对, 不按下标。
+    /// 第 2 轮改写臂被判 contested (B) 只拿掉候选臂; 第 4 轮对照臂功耗不可信 (D)。
+    /// 按下标配对时 ctrl[1] (第 2 轮) 会和 knob[1] (第 3 轮) 配成一对, 第 4 轮的剔除也会错位。
+    #[test]
+    fn power_pairs_align_by_round_when_an_arm_is_missing() {
+        let run = |label: &str, round: u64, w: Option<f64>| {
+            json!({
+                "label": label, "round": round,
+                "summary": {"frame_p95": 16.0, "fps_mean": 60.0},
+                "env": match w {
+                    Some(w) => json!({"power_valid": true, "power_source": "battery",
+                                      "power_w_mean": w, "power_mixed_w_mean": w}),
+                    None => json!({"power_valid": false, "power_source": "usb", "power_w_mean": null,
+                                   "power_usable_reason": "非放电态 (测试)"}),
+                },
+            })
+        };
+        let ctrl = vec![run("c1", 1, Some(3.01)), run("c2", 2, Some(3.02)), run("c3", 3, Some(3.03)), run("c4", 4, None), run("c5", 5, Some(3.05))];
+        // 第 2 轮候选臂 contested, 没进 knob_runs
+        let knob = vec![run("k1", 1, Some(2.51)), run("k3", 3, Some(2.53)), run("k4", 4, Some(2.54)), run("k5", 5, Some(2.55))];
+        let pp = power_pairs_of(&knob, &ctrl);
+        // 结果与传入 runs 一一对应
+        assert_eq!(pp.ctrl, vec![Some(3.01), Some(3.02), Some(3.03), None, Some(3.05)]);
+        assert_eq!(pp.knob, vec![Some(2.51), Some(2.53), None, Some(2.55)]);
+        assert_eq!(pp.dropped.len(), 1);
+        assert_eq!(pp.dropped[0].0, 4, "剔的是真实的第 4 轮");
+        assert!(pp.dropped[0].1.contains("对照臂"));
+        // 没有 round 的旧证据: 仍按下标配对 (行为不变)
+        let strip = |v: &[Value]| -> Vec<Value> {
+            v.iter().map(|r| { let mut r = r.clone(); r.as_object_mut().unwrap().remove("round"); r }).collect()
+        };
+        let old = power_pairs_of(&strip(&knob), &strip(&ctrl));
+        assert_eq!(old.ctrl.len(), 5);
+        assert_eq!(old.knob.len(), 4);
+        assert_eq!(old.dropped[0].0, 4);
+        assert_eq!(old.knob[3], None, "按下标时第 4 个候选臂 (实为第 5 轮) 被错剔");
     }
 }

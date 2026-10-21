@@ -845,8 +845,33 @@ fn arm_power(e: &serde_json::Value) -> (bool, String, Option<f64>, Option<f64>, 
 ///    电池放电与旁路在这个口径下是同一个量); 否则取臂数最多的口径, 其余口径的臂当不可信。
 /// 3. 一对里任一臂不可信, 剔除这一对 (两臂都不进), 原因写进 `dropped`。
 pub fn power_pairs<'a>(ctrl: &[&'a serde_json::Value], knob: &[&'a serde_json::Value]) -> PowerPairs {
-    let arms: Vec<_> = ctrl.iter().chain(knob.iter()).map(|e| arm_power(e)).collect();
-    let supply_short = ctrl.iter().chain(knob.iter()).any(|e| e["supply_short"].as_bool() == Some(true) && arm_power(e).0);
+    let (nc, nk) = (ctrl.len(), knob.len());
+    let n = nc.max(nk);
+    let c: Vec<Option<&serde_json::Value>> = (0..n).map(|i| ctrl.get(i).copied()).collect();
+    let k: Vec<Option<&serde_json::Value>> = (0..n).map(|i| knob.get(i).copied()).collect();
+    let rounds: Vec<usize> = (1..=n).collect();
+    let mut out = power_pairs_slots(&c, &k, &rounds);
+    out.ctrl.truncate(nc);
+    out.knob.truncate(nk);
+    out
+}
+
+/// [`power_pairs`] 的本体, 按「轮」对齐: 第 j 个槽是第 `round_no[j]` 轮, `ctrl[j]` / `knob[j]`
+/// 是这一轮的对照臂 / 候选臂, 缺的一臂为 None (中途停下、或候选臂没进统计)。
+/// 只有一臂的轮自成一组, 合格就留; 两臂都在时任一臂不可信就剔除这一对。
+/// 回的 `ctrl` / `knob` 按槽排列 (长度 = 槽数), `dropped` 里的轮次是 `round_no` 的值。
+pub fn power_pairs_slots(
+    ctrl: &[Option<&serde_json::Value>],
+    knob: &[Option<&serde_json::Value>],
+    round_no: &[usize],
+) -> PowerPairs {
+    let n = ctrl.len().max(knob.len());
+    fn slot<'a>(v: &[Option<&'a serde_json::Value>], j: usize) -> Option<&'a serde_json::Value> {
+        v.get(j).copied().flatten()
+    }
+    let present: Vec<&serde_json::Value> = (0..n).flat_map(|j| [slot(ctrl, j), slot(knob, j)]).flatten().collect();
+    let supply_short = present.iter().any(|e| e["supply_short"].as_bool() == Some(true) && arm_power(e).0);
+    let arms: Vec<_> = present.iter().map(|e| arm_power(e)).collect();
     let mut rails: Vec<(String, usize)> = Vec::new();
     for (ok, r, ..) in &arms {
         if *ok {
@@ -867,7 +892,8 @@ pub fn power_pairs<'a>(ctrl: &[&'a serde_json::Value], knob: &[&'a serde_json::V
         }).map(|(r, _)| r.clone())
     };
     // 每臂: Ok(值) 或 Err(原因)
-    let judge = |a: &(bool, String, Option<f64>, Option<f64>, String)| -> Result<f64, String> {
+    let judge = |e: &serde_json::Value| -> Result<f64, String> {
+        let a = arm_power(e);
         if !a.0 {
             return Err(a.4.clone());
         }
@@ -879,25 +905,25 @@ pub fn power_pairs<'a>(ctrl: &[&'a serde_json::Value], knob: &[&'a serde_json::V
             _ => a.2.ok_or_else(|| a.4.clone()),
         }
     };
-    let (nc, nk) = (ctrl.len(), knob.len());
     let mut out = PowerPairs {
-        ctrl: vec![None; nc],
-        knob: vec![None; nk],
+        ctrl: vec![None; n],
+        knob: vec![None; n],
         rail: main_rail.clone(),
         unified_to_mixed,
         dropped: Vec::new(),
         supply_short,
     };
-    for i in 0..nc.max(nk) {
-        let c = (i < nc).then(|| judge(&arms[i]));
-        let k = (i < nk).then(|| judge(&arms[nc + i]));
+    for j in 0..n {
+        let c = slot(ctrl, j).map(&judge);
+        let k = slot(knob, j).map(&judge);
         match (c, k) {
             (Some(Ok(a)), Some(Ok(b))) => {
-                out.ctrl[i] = Some(a);
-                out.knob[i] = Some(b);
+                out.ctrl[j] = Some(a);
+                out.knob[j] = Some(b);
             }
-            (Some(Ok(a)), None) => out.ctrl[i] = Some(a),
-            (None, Some(Ok(b))) => out.knob[i] = Some(b),
+            (Some(Ok(a)), None) => out.ctrl[j] = Some(a),
+            (None, Some(Ok(b))) => out.knob[j] = Some(b),
+            (None, None) => {}
             (c, k) => {
                 let mut why: Vec<String> = Vec::new();
                 if let Some(Err(e)) = c {
@@ -906,7 +932,7 @@ pub fn power_pairs<'a>(ctrl: &[&'a serde_json::Value], knob: &[&'a serde_json::V
                 if let Some(Err(e)) = k {
                     why.push(format!("候选臂: {e}"));
                 }
-                out.dropped.push((i + 1, why.join(" / ")));
+                out.dropped.push((round_no.get(j).copied().unwrap_or(j + 1), why.join(" / ")));
             }
         }
     }
@@ -2369,6 +2395,53 @@ ENV 3.0 4000000 -800000 NA 5000000 490000 cpu-1-0 41000\n",
         let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
         assert_eq!(pp.kept(), (2, 3));
         assert!(pp.dropped.is_empty() && pp.note().is_none());
+    }
+
+    /// 合并后 C 与 D 的组合顺序: 功耗样本先按 trace 采集窗截取 (C), 截窗后的样本再做供电分类 (D),
+    /// 最后在一组里按对剔除 (D)。窗外的充电样本不能影响分类, 窗内的充电样本不能被窗外的放电样本掩盖。
+    #[test]
+    fn power_is_clipped_then_classified_then_pair_dropped() {
+        let hdr = "#sample_env v2 dur=14 interval=2 power_interval=0.2 stop=/x\n#battery_status=Discharging\n\
+#charge_suspended=no\n#charge_mode=\n";
+        // 窗外 (第一个点与 99.5、101.5) 在充电, 窗内 [100, 101] 纯电池放电 1 A × 4 V
+        let good = format!(
+            "{hdr}ENV 99.00 4000000 1500000 NA 5000000 2000000 cpu-1-0 45000\n\
+PWR 99.50 4000000 1500000 NA 5000000 2000000\n\
+PWR 100.20 4000000 -1000000 NA 0 0\n\
+PWR 100.60 4000000 -1000000 NA 0 0\n\
+ENV 101.00 4000000 -1000000 NA 0 0 cpu-1-0 45000\n\
+PWR 101.50 4000000 1500000 NA 5000000 2000000\n"
+        );
+        // 反过来: 窗外放电, 窗内在充电
+        let bad = format!(
+            "{hdr}ENV 99.00 4000000 -1000000 NA 0 0 cpu-1-0 45000\n\
+PWR 99.50 4000000 -1000000 NA 0 0\n\
+PWR 100.20 4000000 1500000 NA 5000000 2000000\n\
+PWR 100.60 4000000 1500000 NA 5000000 2000000\n\
+ENV 101.00 4000000 1500000 NA 5000000 2000000 cpu-1-0 45000\n\
+PWR 101.50 4000000 -1000000 NA 0 0\n"
+        );
+        let w = Some((100.0, 101.0));
+        let g = env_stats_window(&good, w);
+        assert_eq!(g.get("supply_mode"), Some(&PyVal::Str("battery".into())), "只看窗内: 放电");
+        assert_eq!(g.get("power_valid"), Some(&PyVal::Bool(true)));
+        assert_eq!(g.get("power_w_mean").and_then(|v| v.as_f64()), Some(4.0));
+        // 不截窗时窗外的充电样本会把它拖成非放电态 —— 说明分类确实在截窗之后
+        assert_ne!(env_stats(&good).get("supply_mode"), Some(&PyVal::Str("battery".into())));
+        let b = env_stats_window(&bad, w);
+        assert_eq!(b.get("supply_mode"), Some(&PyVal::Str("not_discharging".into())), "窗内在充电");
+        assert_eq!(b.get("power_valid"), Some(&PyVal::Bool(false)));
+        // 按对剔除: 第 2 轮对照臂不可信, 只剔第 2 对
+        let to_json = |v: &PyVal| -> serde_json::Value { serde_json::from_str(&crate::pyjson::dumps(v)).unwrap() };
+        let (g, b) = (to_json(&g), to_json(&b));
+        let ctrl = [&g, &b, &g];
+        let knob = [&g, &g, &g];
+        let pp = power_pairs(&ctrl, &knob);
+        assert_eq!(pp.kept(), (2, 2));
+        assert!(pp.usable());
+        assert_eq!(pp.dropped.len(), 1);
+        assert_eq!(pp.dropped[0].0, 2);
+        assert!(pp.dropped[0].1.contains("对照臂"), "{:?}", pp.dropped);
     }
 
     #[test]
