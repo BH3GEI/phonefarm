@@ -101,6 +101,10 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
         if rest.iter().any(|a| a == "--unlock") {
             return true;
         }
+        // eval --validate-only: 只做离线校验, 不碰设备
+        if sub == "eval" && rest.iter().any(|a| a == "--validate-only") {
+            return false;
+        }
         return match rest.iter().position(|a| a == "--request") {
             Some(i) => rest
                 .get(i + 1)
@@ -375,5 +379,13 @@ mod tests {
         std::fs::remove_file(&f).ok();
         // --unlock 回滚锁频态是写设备
         assert!(needs_lock("gpu-op", &v(&["--serial", "S", "--unlock"])));
+    }
+
+    /// eval --validate-only 是离线 dry-run: 请求文件在也不排队拿锁
+    #[test]
+    fn eval_validate_only_does_not_queue() {
+        let existing = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        assert!(!needs_lock("eval", &v(&["--request", existing, "--validate-only"])));
+        assert!(needs_lock("eval", &v(&["--request", existing])));
     }
 }
