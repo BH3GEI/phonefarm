@@ -27,6 +27,13 @@ SETTLE_TRIES=12      # 12 x 1s = 12s, 与 hwcond.rs 的 SUSPEND_SETTLE_MS 一致
                      # (不用 sleep 0.5: Android 的 sh 不保证支持小数秒)
 BYPASS_MAX_S=90      # 旁路判定最多等这么久 (电量计读数是平滑过的, 10-11 实测约 45 s 才落到 ~0)
 BYPASS_IDLE_UA=50000 # |电池电流| 低于它 = 电池不进不出
+MIXED_TRIES=3        # 混合供电判据要连续这么多次读数成立 (与 hwcond.rs 的 MIXED_TRIES 一致)
+# 审查 R1 #2: 整个 suspend 的总时限。8 个候选 × (12 s 等放电 + 最多 78 s 等旁路) 本来可达 12 分钟,
+# 主机端 (eval.rs CHARGE_SUSPEND_TIMEOUT_S) 的超时只需覆盖这个数 + 一个候选的收尾。
+SUSPEND_TOTAL_MAX_S=${SUSPEND_TOTAL_MAX_S:-300}
+read _up0 _rest < /proc/uptime 2>/dev/null || _up0=0
+T0=${_up0%.*}
+elapsed() { read _up _rest < /proc/uptime 2>/dev/null || _up=0; echo $(( ${_up%.*} - T0 )); }
 
 # "<路径> <how>" —— how: one=写1 / zero=写0 / cap=把上限压到当前电量以下
 CANDIDATES="/sys/class/power_supply/battery/input_suspend one
@@ -75,18 +82,45 @@ FULL_BYPASS_NODES="/sys/class/qcom-battery/battery_charging_enabled
 # 掉到 0.13-0.22 A, 电池 +1.93 A 约 45 s 衰减到 +0.03 A。
 # 判据: 写节点前电池在充 (> BYPASS_IDLE_UA) 且 12 s 内电流降了三成以上 (节点确实起作用),
 # 或写之前就几乎不进不出; 然后最多等到 BYPASS_MAX_S 让 |I| < BYPASS_IDLE_UA。
-bypass_wait() {   # $1 = 写节点前的电流; 成功返回 0
+# 混合供电 (审查 R1 #2): USB 供电不足时 status 仍写 Charging、电池却在放电 (fix-D 单测锁定的现场:
+# Charging、-0.6 A)。on_battery 与旁路判据在这种现场都判不过, 以前会换候选再来、最后 CHARGE_FAIL。
+# 判据 (与 hwcond.rs 的 mixed_settled 一致): 写后电池电流 < -BYPASS_IDLE_UA (确实在放电), 且比写前
+# 降了至少 |写前| 的三成 (节点确实起作用; 写前 ≈ 0 时只要在放电就算)。连续 MIXED_TRIES 次读数都成立。
+mixed_one() {   # $1 = 写前电流 $2 = 当前电流; 成立返回 0
+  pre=$1; cur=$2
+  case "$pre" in ''|*[!0-9-]*) return 1 ;; esac
+  case "$cur" in ''|*[!0-9-]*) return 1 ;; esac
+  [ "$cur" -lt "-$BYPASS_IDLE_UA" ] 2>/dev/null || return 1
+  apre=$(abs "$pre")
+  [ $(( (pre - cur) * 10 )) -ge $((apre * 3)) ] 2>/dev/null
+}
+
+# 返回 0 = 旁路成立; 2 = 混合供电成立; 1 = 都不成立 (或总时限到)
+bypass_wait() {   # $1 = 写节点前的电流
   pre=$1; cur=$(bcur)
   case "$cur" in ''|*[!0-9-]*) return 1 ;; esac
   apre=$(abs "$pre"); acur=$(abs "$cur")
+  bypass_possible=1
   if [ "$apre" -gt "$BYPASS_IDLE_UA" ] 2>/dev/null; then
-    [ "$pre" -gt 0 ] 2>/dev/null || return 1                # 写之前在放电: 不是旁路的样子
-    [ $((cur * 10)) -le $((pre * 7)) ] 2>/dev/null || return 1   # 没降三成: 节点没起作用
+    [ "$pre" -gt 0 ] 2>/dev/null || bypass_possible=0                # 写之前在放电: 不是旁路的样子
+    [ $((cur * 10)) -le $((pre * 7)) ] 2>/dev/null || bypass_possible=0   # 没降三成: 节点没起作用
   fi
   t=$SETTLE_TRIES
+  mixed_n=0
+  reads=0
   while [ "$t" -lt "$BYPASS_MAX_S" ]; do
-    acur=$(abs "$(bcur)")
-    [ "$acur" -lt "$BYPASS_IDLE_UA" ] 2>/dev/null && return 0
+    [ "$(elapsed)" -ge "$SUSPEND_TOTAL_MAX_S" ] 2>/dev/null && return 1
+    cur=$(bcur); acur=$(abs "$cur")
+    [ "$bypass_possible" = 1 ] && [ "$acur" -lt "$BYPASS_IDLE_UA" ] 2>/dev/null && return 0
+    if mixed_one "$pre" "$cur"; then
+      mixed_n=$((mixed_n + 1))
+      [ "$mixed_n" -ge "$MIXED_TRIES" ] && return 2
+    else
+      mixed_n=0
+    fi
+    reads=$((reads + 1))
+    # 旁路不可能、混合也连一次都没成立: 不用等满 BYPASS_MAX_S
+    [ "$bypass_possible" = 0 ] && [ "$mixed_n" = 0 ] && [ "$reads" -ge "$MIXED_TRIES" ] && return 1
     sleep 1; t=$((t + 1))
   done
   return 1
@@ -156,6 +190,10 @@ case "${1:-status}" in
     # exit 0 只退子 shell, 成功路径就得靠外面再判一次 —— 少一层拐弯少一个坑。
     while IFS=' ' read -r path how; do
       [ -n "${path:-}" ] || continue
+      if [ "$(elapsed)" -ge "$SUSPEND_TOTAL_MAX_S" ] 2>/dev/null; then
+        echo "CHARGE_TIMEOUT 总时限 ${SUSPEND_TOTAL_MAX_S}s 已到, 不再试 $path 及之后的候选"
+        break
+      fi
       saved=$(cat "$path" 2>/dev/null)
       [ -n "$saved" ] || continue          # 这台机器没有这个节点
       case "$how" in
@@ -185,9 +223,18 @@ case "${1:-status}" in
         report_state
         exit 0
       fi
-      if bypass_wait "$pre_cur"; then
+      bypass_wait "$pre_cur"; bw=$?
+      if [ "$bw" = 0 ]; then
         printf '%s\n%s\n%s\n' "$path" "$saved" "bypass" > "$STATE"
         echo "CHARGE_SUSPENDED_BYPASS $path: $saved -> $want (整机由 USB 直接供电, 电池电流 $pre_cur -> $(bcur) uA)"
+        usb_limit_check
+        report_state
+        exit 0
+      fi
+      if [ "$bw" = 2 ]; then
+        # 状态文件第三行保持 battery: 电池在放电, sample_env / env_stats 按两轨同刻相加 (混合口径) 计
+        printf '%s\n%s\n%s\n' "$path" "$saved" "battery" > "$STATE"
+        echo "CHARGE_SUSPENDED_MIXED $path: $saved -> $want (混合供电: USB 供电不足, 电池同时在放电, 电池电流 $pre_cur -> $(bcur) uA, status 仍 $(bstat))"
         usb_limit_check
         report_state
         exit 0

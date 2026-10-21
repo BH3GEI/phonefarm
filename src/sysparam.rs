@@ -1363,8 +1363,42 @@ USB 均值 {} W): 用 USB 轨与电池轨同一时刻的功率相加; USB 那份
             "power_sample_hz".into(),
             PyVal::from(w.filter(|(a, b)| b > a).map(|(a, b)| py_round(n_power_used as f64 / (b - a), 2))),
         ));
+        // 审查 R1 #1 #8: 取窗口径下功耗只有两件事都成立才可信 ——
+        //  · env.txt 是 v2 采样器写的 (首行 `#sample_env v2`): 旧 sample_env.sh 不认停止标志,
+        //    3 个点/窗、负载结束后接着采空闲段, 数是错的但不报错;
+        //  · trace 头给了采集窗: 没窗就是全段 (含采集前准备与收尾), 与截了窗的另一臂差 30–70%,
+        //    同组相减没有意义。
+        // 这两种情况下 power_w_mean 照算 (离线复核用), 但 power_valid=false, 不进判定。
+        let mut invalid: Vec<&str> = Vec::new();
+        if !sample_env_v2_header(text) {
+            invalid.push("env.txt 首行不是 `#sample_env v2` (设备端 sample_env.sh 是旧版, 没按停止标志截止)");
+        }
+        if w.is_none() {
+            invalid.push("trace 头没有 capture_start/end_uptime, 功耗没截窗");
+        }
+        if !invalid.is_empty() {
+            for (k, v) in kvs.iter_mut() {
+                match k.as_str() {
+                    "power_valid" | "power_cross_run_comparable" => *v = PyVal::Bool(false),
+                    "power_usable_reason" => {
+                        if let PyVal::Str(s) = v {
+                            *s = format!("{s} [功耗作废: {}]", invalid.join("; "));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
     out
+}
+
+/// env.txt 是不是 v2 采样器 (`sample_env.sh` 2026-10-21 版) 写的: 第一个非空行以 `#sample_env v2` 开头。
+pub fn sample_env_v2_header(text: &str) -> bool {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .is_some_and(|l| l.starts_with("#sample_env v2"))
 }
 
 // ══════════════ 判定 ══════════════
@@ -2291,6 +2325,29 @@ GPU 101.50 3 160000000\n\
         assert_eq!(s.get("power_sample_hz"), Some(&PyVal::Null));
         let early = env_stats_window(V2_TEXT, Some((99.0, 102.0)));
         assert_eq!(early.get("n_power_samples_used").and_then(|v| v.as_i64()), Some(6));
+    }
+
+    /// 审查 R1 #1 #8: 没有 v2 头 (旧采样器) 或没有采集窗 (没截窗) 时功耗不可信, 不进判定;
+    /// 数照算, 原因写明。两件都齐时不受影响。
+    #[test]
+    fn env_stats_window_invalidates_power_without_v2_header_or_window() {
+        let ok = env_stats_window(V2_TEXT, Some((100.0, 101.0)));
+        assert_eq!(ok.get("power_valid"), Some(&PyVal::Bool(true)));
+        assert!(!ok.get("power_usable_reason").unwrap().py_str().contains("功耗作废"));
+
+        let no_window = env_stats_window(V2_TEXT, None);
+        assert_eq!(no_window.get("power_valid"), Some(&PyVal::Bool(false)));
+        assert_eq!(no_window.get("power_cross_run_comparable"), Some(&PyVal::Bool(false)));
+        assert!(no_window.get("power_w_mean").and_then(|v| v.as_f64()).is_some(), "数照算, 只是不可信");
+        assert!(no_window.get("power_usable_reason").unwrap().py_str().contains("没截窗"));
+
+        let v1 = V2_TEXT.replacen("#sample_env v2", "#sample_env v1", 1);
+        let old = env_stats_window(&v1, Some((100.0, 101.0)));
+        assert_eq!(old.get("power_valid"), Some(&PyVal::Bool(false)));
+        assert!(old.get("power_usable_reason").unwrap().py_str().contains("#sample_env v2"));
+        assert!(!sample_env_v2_header(&v1));
+        assert!(sample_env_v2_header("\n  #sample_env v2 dur=1\n"));
+        assert!(!sample_env_v2_header("#battery_status=x\n#sample_env v2\n"), "必须是首行");
     }
 
     /// 旧口径 (env_stats) 对没有 PWR 行的旧证据不变: 不截窗、不丢点、不加新键。

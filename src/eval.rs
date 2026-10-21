@@ -1191,12 +1191,34 @@ pub(crate) fn run_one_launch(
     std::fs::write(outdir.join("summary.json"), &summary).map_err(|e| e.to_string())?;
     let mut m = json!({ "label": label, "run_once_rc": 0, "launch": true, "hw": hw, "fan_after_marker": fan_after_marker });
     m["summary"] = serde_json::from_str(&summary).map_err(|e| format!("{label}: summary 解析失败 {e}"))?;
+    // ftrace_capture.sh 带了包名: 回来的必须是按目标线程号归因的新版产出 (审查 R1 #1 #6)
+    check_frame_attribution(&m["summary"]).map_err(|e| format!("{label}: {e}"))?;
     if let Ok(t) = std::fs::read_to_string(&env_path) {
         // 功耗只取 trace 采集窗内的样本 (审计 #3)
         let w = sysparam::capture_window_from_trace(&String::from_utf8_lossy(&trace));
         m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats_window(&t, w))).unwrap_or(Value::Null);
     }
     Ok(m)
+}
+
+/// 审查 R1 #1 #6: ftrace_capture.sh 收到包名时, 回来的 summary 必须带 `frame_attribution`
+/// (按目标线程号认帧; 没有 = 设备上是旧脚本, 忽略第三参数、按线程名认帧, 别的进程的同名线程
+/// 会混进来), 且目标线程至少一个 (`n_target_tids == 0` = 采集时 `pidof` 为空, 目标进程不在,
+/// 零帧; 以前要 10 臂全 n_frames=0 才发现)。两种情况都不能当数据, 直接 Err。
+pub(crate) fn check_frame_attribution(summary: &Value) -> Result<(), String> {
+    if summary.get("frame_attribution").is_none() {
+        return Err("summary 没有 frame_attribution: 设备端 ftrace_capture.sh 是旧版 (不按目标线程号认帧), \
+                    先 push_tools 把新脚本推上去再跑"
+            .into());
+    }
+    let n = summary["n_target_tids"].as_u64().unwrap_or(0);
+    if n == 0 {
+        return Err(format!(
+            "目标进程没找到 (n_target_tids=0, target_pid={}): 采集时游戏不在跑, 零帧不算数据",
+            summary["target_pid"].as_str().unwrap_or("")
+        ));
+    }
+    Ok(())
 }
 
 /// storeop-check 用静态场景时, 启动后等城市装完的时间 (秒)。
@@ -1335,6 +1357,8 @@ pub(crate) fn run_one_with(
         }
         None => return Err(format!("{label}: 没拿到可用 summary.json (负载或采集失败, rc={rc})")),
     }
+    // run_once.sh 把 PKG 传给了 ftrace_capture.sh: 回来的必须是按目标线程号归因的新版产出 (审查 R1 #1 #6)
+    check_frame_attribution(&m["summary"]).map_err(|e| format!("{label}: {e}"))?;
     if let Ok(t) = std::fs::read_to_string(&env_path) {
         // 功耗温度解析在 src/sysparam.rs (与 autoloop 同一份口径); 功耗只取 trace 采集窗内 (审计 #3)
         let w = std::fs::read(outdir.join("trace.txt"))
@@ -1532,8 +1556,11 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let probe_only = req["payload"]["probe_only"].as_bool().unwrap_or(false);
 
     // ── 白名单: 请求带着就用它的 (但结构上仍按本端 Spec 解析), 没带就真机探 ──
+    // probe_only 时这里不探 (审查 R1 #4: 以前探两遍, fix-B 之后每遍约 5 分钟, 第二遍还覆盖
+    // 第一遍的 probe.txt / probe_gate.txt), 下面带着快照只探一遍。
     let wl = match whitelist_from_payload(req) {
         Some(w) if !w.is_empty() => w,
+        _ if probe_only => sysparam::Whitelist::default(),
         _ => probe_whitelist(serial, evidence, req)?,
     };
 
@@ -1542,7 +1569,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         push_tools(serial)?;
         let before = snapshot(serial);
         std::fs::write(evidence.join("snap_before.txt"), &before).map_err(|e| e.to_string())?;
-        let wl2 = probe_whitelist(serial, evidence, req)?; // 探测本身要写节点, 重探一遍拿全量
+        let wl2 = probe_whitelist(serial, evidence, req)?; // 探测本身要写节点, 夹在两次快照之间探这一遍
         let after = snapshot(serial);
         std::fs::write(evidence.join("snap_after.txt"), &after).map_err(|e| e.to_string())?;
         let identical = before == after;
@@ -1600,27 +1627,36 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     }
     push_tools(serial)?;
 
+    // 审查 R1 #10: 上一次崩溃 / Ctrl-C 留下的旋钮或停充状态先对账、还原, 记进回包;
+    // 再装信号处理, 这一次被打断时也把还原跑掉。
+    let preexisting = reconcile_preexisting(serial, evidence);
+    cleanup::install();
+    cleanup::register(serial, &format!("su -c 'sh {DEV_TMP}/knob_sysparam.sh restore'"));
+    cleanup::register(serial, &format!("su -c 'sh {DEV_TMP}/charge_suspend.sh restore'"));
+
     // 停充尝试: 请求要求且节点没指定时由接收端自己探 (charge_suspend.sh 内置节点表)。
     // 失败不致命 —— 拿不到放电态就只是功耗不进判定, 帧时帧率照常测。
     let want_suspend = req["conditions"]["charging_suspend"]["enabled"].as_bool().unwrap_or(false);
     let mut suspended_via: Option<String> = None;
     let mut usb_supply_note: Option<String> = None;
     if want_suspend {
-        let out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
+        let mut out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), CHARGE_SUSPEND_TIMEOUT_S);
         std::fs::write(evidence.join("charge_suspend.log"), &out).map_err(|e| e.to_string())?;
+        if !adb_ok(&out) {
+            // 审查 R1 #2: 超时 / adb 断了不等于没停充 —— 设备端脚本可能已经写了 STATE。
+            // 用 status 对账, 停了就按停了算 (结束时一样要还原)。
+            let st = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh status"), 30);
+            std::fs::write(evidence.join("charge_suspend_status.log"), &st).map_err(|e| e.to_string())?;
+            eprintln!("[eval] 停充脚本没正常结束 ({}), 已用 status 对账", out.lines().last().unwrap_or(""));
+            out.push('\n');
+            out.push_str(&st);
+        }
         // 开跑前的 USB 输入上限检查 (charge_suspend.sh 旁路时输出): 供电不足要明确写进回包
         usb_supply_note = sysparam::usb_supply_note(&out);
         if let Some(n) = &usb_supply_note {
             eprintln!("[eval] {n}");
         }
-        if adb_ok(&out) && out.contains("CHARGE_SUSPENDED") {
-            // 脚本自己回显用的哪个节点; 原样记进报告
-            suspended_via = out
-                .lines()
-                .find(|l| l.contains("node="))
-                .map(|l| l.trim().to_string())
-                .or_else(|| Some("/sys/class/qcom-battery/charging_enabled".into()));
-        }
+        suspended_via = charge_suspended_via(&out);
     }
     // 停充成功后等电池停止吸电再开第一臂 (审计 #13)
     let charge_settle = suspended_via.as_ref().map(|_| wait_charge_settled(serial));
@@ -1629,6 +1665,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let push = adb(serial, &["push", &plan_local.to_string_lossy(), &format!("{DEV_TMP}/loop_v1_sysparam.plan")], 60);
     if !push.ends_with("#adb_exit=0") {
         report["verdict"]["reason"] = json!(format!("plan 下发失败: {push}"));
+        // 停充可能已经做了: 一样要还原 (无 STATE 时是空操作)
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
@@ -1646,6 +1684,10 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         .unwrap_or_else(|| "loop_v1/scripts/workload_spin_touch_v1.json".into());
     let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen");
     let launch = launch_spec(req);
+    if launch.is_some() {
+        // 自驱动负载是我们拉起来的: 被打断时也停掉, 别让它留在前台接着烧
+        cleanup::register(serial, &format!("am force-stop {pkg}"));
+    }
     let workload_path = match (resolve_path(&wl_file), &launch) {
         (Some(p), _) => p,
         // 自驱动负载用不到脚本
@@ -1833,14 +1875,17 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             // KEEP, 现在停 (论证见 src/curtail.rs)。KEEP 一侧永远不提前锁定。
             if curtail {
                 let lock_possible = fps_lock_cap(ctrl_runs.iter().chain(knob_runs.iter())).is_some();
-                let (left_a, left_b) = (
-                    (rounds as usize).saturating_sub(ctrl_runs.len()),
-                    (rounds as usize).saturating_sub(knob_runs.len()),
-                );
+                // 审查 R1 #3: contested 的改写臂与 settle_pair 剔掉的对都不会再跑, 不能当「还没跑」
+                let (left_a, left_b) = remaining_arms(rounds as usize, ctrl_runs.len(), knob_runs.len(), contested.len(), dropped.len());
                 let pp = power_pairs_of(&knob_runs, &ctrl_runs);
                 let tests = sysparam_win_tests(alpha, pp.possible(left_a, left_b), lock_possible);
-                if !curtail::keep_possible(&eval_runs_power(&ctrl_runs, &pp.ctrl), &eval_runs_power(&knob_runs, &pp.knob), left_a, left_b, &tests) {
-                    curtailed = Some(curtail_note(knob_runs.len(), ctrl_runs.len(), rounds, &tests));
+                if !keep_reachable(ctrl_runs.len() + left_a, knob_runs.len() + left_b, &tests)
+                    || !curtail::keep_possible(&eval_runs_power(&ctrl_runs, &pp.ctrl), &eval_runs_power(&knob_runs, &pp.knob), left_a, left_b, &tests)
+                {
+                    let mut note = curtail_note(knob_runs.len(), ctrl_runs.len(), rounds, &tests);
+                    note["contested_arms"] = json!(contested.len());
+                    note["dropped_pairs"] = json!(dropped.len());
+                    curtailed = Some(note);
                     break 'pairs;
                 }
             }
@@ -1851,7 +1896,9 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     }
 
     // ── 还原 + 快照核对 ──
-    if suspended_via.is_some() {
+    // 停充无条件还原 (审查 R1 #2 #10): 没有 STATE 时脚本是空操作 (CHARGE_NOT_SUSPENDED);
+    // 超时后设备端才写成的 STATE、CHARGE_ALREADY_SUSPENDED 认下来的 STATE 都在这里一并还原。
+    {
         let cr = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         std::fs::write(evidence.join("charge_restore.log"), &cr).map_err(|e| e.to_string())?;
         if !adb_ok(&cr) {
@@ -1862,6 +1909,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     if restore_log.contains("KNOB_RESTORE_FAIL") && restore_fail.is_none() {
         restore_fail = Some(restore_log);
     }
+    // 两样都还原过了, 中断时不必再跑 (还原失败的已经记在 restore_fail 里, 下次开跑前对账会再还原一次)
+    cleanup::clear();
     let snap_after = snapshot(serial);
     std::fs::write(evidence.join("snap_after.txt"), &snap_after).map_err(|e| e.to_string())?;
     let snapshot_identical = snap_before == snap_after;
@@ -1879,6 +1928,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         "temp_cap_c": req["conditions"]["temp_cap_c"],
         "arm_order": curtail::order_note(order_seed, rounds as usize),
         "charge_settle": charge_settle,
+        // 开跑前对账: 上一次留下的旋钮 / 停充状态 (审查 R1 #10), 已还原
+        "preexisting_state": preexisting,
         "env_consistency": consistency_note(&dropped, check_gpu),
         // 只记不判: 各对之间风扇状态不同 (每对内部一致) 不再整组作废
         "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
@@ -1905,17 +1956,13 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
 
     // ── 判定 ──
     if let Some(reason) = abort_reason.clone().or_else(|| restore_fail.clone().map(|r| format!("旋钮还原失败: {r}"))) {
-        if suspended_via.is_some() {
-            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
-        }
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         report["verdict"]["reason"] = json!(reason);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
     if !other_drift.is_empty() {
         report["verdict"]["reason"] = json!(format!("轮末设备快照与轮前不一致, 留痕: {}", other_drift.join("; ")));
-        if suspended_via.is_some() {
-            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
-        }
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
@@ -1924,9 +1971,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             "改写臂 {} 臂在测量窗口内都没守住 (守住时间比例低于门槛, contested), 没有一臂量的是这组参数",
             contested.len()
         ));
-        if suspended_via.is_some() {
-            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
-        }
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
     if knob_runs.is_empty() && !dropped.is_empty() {
@@ -1934,9 +1979,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             "{} 对两臂测量环境都不一致 (风扇或 GPU 档位), 全部剔除, 没有可比的数据 (见 conditions_observed.env_consistency)",
             dropped.len()
         ));
-        if suspended_via.is_some() {
-            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
-        }
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
@@ -2137,7 +2180,9 @@ impl HwWatch {
     }
 }
 
-/// 只推 sample_hw.sh (gray 不走 push_tools)。推不上不致命: 采不到就跳过这一项核对, 报告里看得到 n=0。
+/// 只推 sample_hw.sh。推不上不致命: 采不到就跳过这一项核对, 报告里看得到 n=0。
+/// (gray 自审查 R1 #1 起改走 push_tools 推全套; 这个函数留给只需要 sample_hw.sh 的调用方。)
+#[allow(dead_code)]
 pub(crate) fn push_hw_script(serial: &str) {
     let p = repo_root().join("loop_v1/auto/sample_hw.sh");
     if p.exists() {
@@ -2328,6 +2373,155 @@ pub(crate) fn wait_charge_settled(serial: &str) -> Value {
             return json!({"settled": false, "waited_s": t, "threshold_ua": CHARGE_SETTLE_UA, "samples": samples});
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// `charge_suspend.sh suspend` 的主机端超时 (秒)。审查 R1 #2: 以前 90 s, 单候选最坏就要 90 s + 启动,
+/// 超时先到, 设备端脚本却接着跑、几分钟后写成 STATE, 没人还原。现在脚本自己限总时长
+/// (SUSPEND_TOTAL_MAX_S=300, 每个候选开始前与等旁路的每一秒都查), 主机端只要盖过它加一个候选的收尾
+/// (12 s 等放电 + 几次读数)。
+pub(crate) const CHARGE_SUSPEND_TIMEOUT_S: u64 = 300 + 60;
+
+/// charge_suspend.sh 的输出 (suspend 的回显, 超时后再接上 status 的回显) 里认出「现在是停充状态」:
+/// `CHARGE_SUSPENDED` / `_BYPASS` / `_MIXED`, `CHARGE_ALREADY_SUSPENDED` (别人留下的, 这次也负责还原,
+/// 审查 R1 #2 #10), 或 status 的 `state: 已停充`。返回记进报告的那一行。
+pub(crate) fn charge_suspended_via(out: &str) -> Option<String> {
+    out.lines().map(str::trim).find_map(|l| {
+        if l.starts_with("CHARGE_SUSPENDED") || l.starts_with("CHARGE_ALREADY_SUSPENDED") || l.starts_with("state: 已停充") {
+            Some(l.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// 开跑前对账 (审查 R1 #10): `knob_sysparam.sh status` / `charge_suspend.sh status` 的回显里有没有
+/// 上一次留下的状态。返回 (旋钮已施加, 已停充)。
+pub(crate) fn parse_preexisting(knob_status: &str, charge_status: &str) -> (bool, bool) {
+    let has = |s: &str, tok: &str| s.lines().any(|l| l.trim().starts_with(tok));
+    (has(knob_status, "state: 已施加"), has(charge_status, "state: 已停充"))
+}
+
+/// 开跑前对账并还原残留 (审查 R1 #10): 上一次崩溃 / Ctrl-C 留下的旋钮 STATE 会让这次 apply 回
+/// `KNOB_ALREADY_APPLIED`, 停充 STATE 会让这次 suspend 回 `CHARGE_ALREADY_SUSPENDED`、结束时不还原。
+/// 回包 `conditions_observed.preexisting_state` 原样记下对账结果与还原回显。
+pub(crate) fn reconcile_preexisting(serial: &str, evidence: &Path) -> Value {
+    let ks = su(serial, &format!("sh {DEV_TMP}/knob_sysparam.sh status"), 60);
+    let cs = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh status"), 60);
+    let (knob_applied, charge_suspended) = parse_preexisting(&ks, &cs);
+    let mut v = json!({
+        "knob_applied": knob_applied,
+        "charge_suspended": charge_suspended,
+        "knob_status": ks.trim(),
+        "charge_status": cs.trim(),
+    });
+    if knob_applied {
+        let r = su(serial, &format!("sh {DEV_TMP}/knob_sysparam.sh restore"), 120);
+        eprintln!("[eval] 开跑前发现上次留下的旋钮状态, 已还原: {}", r.lines().last().unwrap_or(""));
+        v["knob_restore"] = json!(r.trim());
+    }
+    if charge_suspended {
+        let r = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
+        eprintln!("[eval] 开跑前发现上次留下的停充状态, 已还原: {}", r.lines().last().unwrap_or(""));
+        v["charge_restore"] = json!(r.trim());
+    }
+    let _ = std::fs::write(evidence.join("preexisting_state.txt"), format!("# knob status\n{ks}\n# charge status\n{cs}\n"));
+    v
+}
+
+/// 截断用的「两臂还会各跑几臂」(审查 R1 #3)。contested 的改写臂 (守不住, 不进 knob_runs) 与
+/// settle_pair 剔掉的对 (两臂都移走) 都已经跑过了, 不能再算成「还没跑」—— 否则 keep_possible 永远偏乐观,
+/// 守不住的候选会把 10 臂全跑完。
+pub(crate) fn remaining_arms(rounds: usize, ctrl_done: usize, knob_done: usize, contested: usize, dropped: usize) -> (usize, usize) {
+    (
+        rounds.saturating_sub(ctrl_done + dropped),
+        rounds.saturating_sub(knob_done + contested + dropped),
+    )
+}
+
+/// 跑满后两臂最多能凑到 `n_a_max` / `n_b_max` 个样本, 这个样本量在数学上还判得出显著改善吗
+/// (审查 R1 #3)。两臂等量时就是 [`loopstat::ensure_resolvable`] 的判据 (最小双侧 p = 2/C(2n,n));
+/// 不等量时精确置换的最小 p 是 1/C(na+nb, na) (与 curtail::win_p_floor 的系数一致)。
+/// 取各检验里最宽的 alpha_win: 连它都够不着, KEEP 才真不可达。没有检验时不截。
+pub(crate) fn keep_reachable(n_a_max: usize, n_b_max: usize, tests: &[curtail::WinTest]) -> bool {
+    let Some(alpha_win) = tests.iter().map(|t| t.alpha_win).reduce(f64::max) else {
+        return true;
+    };
+    if n_a_max == n_b_max {
+        return loopstat::ensure_resolvable(n_a_max, alpha_win, "").is_ok();
+    }
+    if n_a_max < 2 || n_b_max < 2 {
+        return false;
+    }
+    let (n, k) = (n_a_max + n_b_max, n_a_max.min(n_b_max));
+    let mut c = 1.0_f64;
+    for i in 0..k {
+        c = c * (n - i) as f64 / (i + 1) as f64;
+    }
+    crate::pyjson::py_round(1.0 / c, 6) < alpha_win
+}
+
+/// 审查 R1 #10: Ctrl-C / SIGTERM 时把登记的还原命令跑掉 (旋钮 restore、停充 restore、停掉游戏),
+/// 不留残留。信号处理函数里只置一个标志; 真正跑 adb 的是一条看门线程 —— 信号上下文里不能起进程。
+pub(crate) mod cleanup {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, Once};
+
+    static HIT: AtomicBool = AtomicBool::new(false);
+    static INSTALLED: Once = Once::new();
+    static ACTIONS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+    #[cfg(unix)]
+    extern "C" {
+        // libc 的 signal(2); 只为这两个信号引一个 libc crate 不划算, 直接声明外部符号 (同 decision.rs 的 kill)
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+
+    extern "C" fn on_signal(_sig: i32) {
+        HIT.store(true, Ordering::SeqCst);
+    }
+
+    /// 登记一条「被打断时要跑」的 adb shell 命令 (su 的自己带 `su -c '...'`)。同一条只登记一次。
+    pub fn register(serial: &str, shell_cmd: &str) {
+        if let Ok(mut a) = ACTIONS.lock() {
+            let item = (serial.to_string(), shell_cmd.to_string());
+            if !a.contains(&item) {
+                a.push(item);
+            }
+        }
+    }
+
+    /// 目前登记的命令 (单测与报错用)。
+    pub fn pending() -> Vec<(String, String)> {
+        ACTIONS.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+
+    pub fn clear() {
+        if let Ok(mut a) = ACTIONS.lock() {
+            a.clear();
+        }
+    }
+
+    /// 装一次信号处理 + 看门线程。进程本来就要在 eval 结束时退出, 看门线程不必回收。
+    pub fn install() {
+        INSTALLED.call_once(|| {
+            #[cfg(unix)]
+            unsafe {
+                signal(2, on_signal); // SIGINT
+                signal(15, on_signal); // SIGTERM
+            }
+            std::thread::spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if HIT.load(Ordering::SeqCst) {
+                    eprintln!("[eval] 收到中断, 先跑还原再退出");
+                    for (serial, cmd) in pending() {
+                        let out = super::adb(&serial, &["shell", &cmd], 120);
+                        eprintln!("[eval] 还原 {cmd}: {}", out.lines().last().unwrap_or(""));
+                    }
+                    std::process::exit(130);
+                }
+            });
+        });
     }
 }
 
@@ -2809,7 +3003,9 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let order_seed = curtail::order_seed(req["protocol"]["order_seed"].as_u64());
     let knob_first = curtail::knob_first_order(rounds as usize, order_seed);
     let mut dropped: Vec<Value> = Vec::new();
-    push_hw_script(serial);
+    // 审查 R1 #1: 以前只推 sample_hw.sh, 设备上留着旧的 ftrace_capture.sh / sample_env.sh 时
+    // 灰档两臂按线程名认帧、不认停止标志, 而且不报错。全套都推 (push_tools 含 sample_hw.sh)。
+    push_tools(serial)?;
     'rounds: for i in 1..=rounds {
         let mut shots: std::collections::BTreeMap<&str, (u32, u32, Vec<u8>)> = Default::default();
         for arm in if knob_first[i as usize - 1] { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
@@ -3164,6 +3360,109 @@ fn layer_hits(serial: &str, pkg: &str, evidence: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 审查 R1 #1 #6: 旧脚本的 summary (没有 frame_attribution) 与目标进程没找到 (n_target_tids=0) 都 Err。
+    #[test]
+    fn frame_attribution_must_be_present_and_nonempty() {
+        let old = json!({"n_frames": 1800, "frame_p95": 16.7});
+        let e = check_frame_attribution(&old).unwrap_err();
+        assert!(e.contains("frame_attribution") && e.contains("旧版"), "{e}");
+        let none = json!({"frame_attribution": "target_tids", "target_pid": "", "n_target_tids": 0, "n_frames": 0});
+        let e = check_frame_attribution(&none).unwrap_err();
+        assert!(e.contains("n_target_tids=0"), "{e}");
+        let ok = json!({"frame_attribution": "target_tids", "target_pid": "100", "n_target_tids": 3, "n_frames": 1800});
+        assert!(check_frame_attribution(&ok).is_ok());
+    }
+
+    /// 审查 R1 #2 #10: 三种停充成功回显、别人留下的 STATE、超时后 status 的对账都认成「已停充, 结束要还原」。
+    #[test]
+    fn charge_suspended_is_recognized_from_every_success_shape_and_from_status() {
+        assert!(charge_suspended_via("CHARGE_SUSPENDED /sys/x: 1 -> 0\nCHARGE_STATE ...\n#adb_exit=0").is_some());
+        assert!(charge_suspended_via("CHARGE_SUSPENDED_BYPASS /sys/x: 1 -> 0 (...)\n#adb_exit=0").is_some());
+        let m = charge_suspended_via("CHARGE_TRY_FAILED /sys/a (写 1 无效)\nCHARGE_SUSPENDED_MIXED /sys/x: 1 -> 0 (混合供电)\n#adb_exit=0").unwrap();
+        assert!(m.starts_with("CHARGE_SUSPENDED_MIXED"));
+        assert!(charge_suspended_via("CHARGE_ALREADY_SUSPENDED (state=/data/local/tmp/loop_v1_charge.state)\n#adb_exit=0").is_some());
+        // 主机端超时, 再接上 status 的回显: 设备端其实已经停充
+        let timed_out = "#adb_exit=timeout\nstate: 已停充 (/sys/x 原值 1 供电 battery)\nCHARGE_STATE ...\n#adb_exit=0";
+        assert!(charge_suspended_via(timed_out).unwrap().starts_with("state: 已停充"));
+        assert!(charge_suspended_via("CHARGE_FAIL: 所有候选节点都没能把设备转成放电态\n#adb_exit=1").is_none());
+        assert!(charge_suspended_via("#adb_exit=timeout\nstate: 未停充\n#adb_exit=0").is_none());
+        assert!(charge_suspended_via("CHARGE_SKIP: 电量 20% 低于停充下限 30%, 不停充\n#adb_exit=1").is_none());
+        assert_eq!(CHARGE_SUSPEND_TIMEOUT_S, 360);
+    }
+
+    /// 审查 R1 #10: 开跑前对账只看 status 的 state 行。
+    #[test]
+    fn preexisting_state_is_parsed_from_status_outputs() {
+        assert_eq!(parse_preexisting("state: 未施加\n#adb_exit=0", "state: 未停充\nCHARGE_STATE ...\n#adb_exit=0"), (false, false));
+        assert_eq!(
+            parse_preexisting("state: 已施加\n/sys/a cur=1 orig=0\n#adb_exit=0", "state: 已停充 (/sys/x 原值 1 供电 bypass)\n#adb_exit=0"),
+            (true, true)
+        );
+        assert_eq!(parse_preexisting("#adb_exit=timeout", ""), (false, false));
+    }
+
+    /// 审查 R1 #3: contested 的改写臂与剔掉的对都已经跑过, 剩余臂数要扣掉; 样本量够不着 alpha_win 时 KEEP 不可达。
+    #[test]
+    fn curtail_counts_contested_and_dropped_as_already_run() {
+        // rounds=5: 跑完第 2 轮, 第 2 轮改写臂 contested → knob 1 臂、ctrl 2 臂
+        assert_eq!(remaining_arms(5, 2, 1, 1, 0), (3, 3));
+        // 旧算法把 contested 当没跑: left_b 会是 4
+        assert_ne!(remaining_arms(5, 2, 1, 1, 0).1, 4);
+        // 再剔掉一对 (第 3 轮两臂不可比): ctrl 2、knob 1、dropped 1 → 各剩 2
+        assert_eq!(remaining_arms(5, 2, 1, 1, 1), (2, 2));
+        assert_eq!(remaining_arms(5, 5, 3, 2, 0), (0, 0));
+        assert_eq!(remaining_arms(5, 9, 9, 9, 9), (0, 0));
+
+        let tests = sysparam_win_tests(0.05, false, false); // 最宽 alpha_win = 0.025
+        // 5v5 够 (2/C(10,5) = 0.0079); 3v3 不够 (0.1); 3v5 不等量 1/C(8,3) = 0.0179 够, 3v6 够
+        assert!(keep_reachable(5, 5, &tests));
+        assert!(!keep_reachable(3, 3, &tests));
+        assert!(keep_reachable(5, 3, &tests));
+        // alpha/3 (功耗可能进表) 下 3v5 (0.0179 > 0.0167) 就不够了
+        let t3 = sysparam_win_tests(0.05, true, false);
+        assert_eq!(t3.iter().map(|t| t.alpha_win).reduce(f64::max), Some(0.025), "取的是最宽的");
+        let strict = vec![curtail::WinTest::new("power_w_mean", true, 0.05 / 3.0)];
+        assert!(!keep_reachable(5, 3, &strict));
+        assert!(keep_reachable(5, 4, &strict), "4v5: 1/C(9,4) = 0.0079");
+        // 一臂凑不到 2 个: 不可达; 没有检验: 不截
+        assert!(!keep_reachable(1, 5, &tests));
+        assert!(keep_reachable(1, 1, &[]));
+        // 审查里的现场: rounds=5、第 2 个 contested 出现后 knob 最多 3 臂 vs ctrl 5 臂, alpha/3 下够不着
+        let (la, lb) = remaining_arms(5, 3, 1, 2, 0);
+        assert!(!keep_reachable(3 + la, 1 + lb, &strict));
+    }
+
+    /// 审查 R1 #10: 中断时要跑的还原命令登记一次、可查、可清。
+    #[test]
+    fn cleanup_registry_dedups_and_clears() {
+        cleanup::clear();
+        cleanup::register("S1", "su -c 'sh /data/local/tmp/knob_sysparam.sh restore'");
+        cleanup::register("S1", "su -c 'sh /data/local/tmp/knob_sysparam.sh restore'");
+        cleanup::register("S1", "am force-stop com.x");
+        let p = cleanup::pending();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[1].1, "am force-stop com.x");
+        cleanup::clear();
+        assert!(cleanup::pending().is_empty());
+    }
+
+    /// 审查 R1 #2 #7: 设备端脚本里的判据与保护要在 (脚本没有单测, 这里锁住关键行)。
+    #[test]
+    fn device_scripts_carry_the_r1_fixes() {
+        let root = repo_root();
+        let cs = std::fs::read_to_string(root.join("loop_v1/auto/charge_suspend.sh")).unwrap();
+        assert!(cs.contains("CHARGE_SUSPENDED_MIXED"));
+        assert!(cs.contains("mixed_one()"));
+        assert!(cs.contains("SUSPEND_TOTAL_MAX_S=${SUSPEND_TOTAL_MAX_S:-300}"));
+        assert!(cs.contains("CHARGE_TIMEOUT"));
+        assert!(CHARGE_SUSPEND_TIMEOUT_S >= 300 + 12, "主机端超时要盖过脚本总时限 + 一个候选的收尾");
+        let se = std::fs::read_to_string(root.join("loop_v1/auto/sample_env.sh")).unwrap();
+        assert!(se.contains("sleep \"$PWR_IVL\" 2>/dev/null || PWR_IVL=1"));
+        assert!(se.contains("power_interval=$PWR_IVL stop="));
+        // 头部要在保护之后打, 记的才是实际生效的间隔
+        assert!(se.find("|| PWR_IVL=1").unwrap() < se.find("#sample_env v2 dur=").unwrap());
+    }
 
     fn v2_req(kind: &str, payload: Value) -> Value {
         json!({

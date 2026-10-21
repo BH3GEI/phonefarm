@@ -799,7 +799,8 @@ pub struct ChargeSuspend {
     saved: String,
     state_path: std::path::PathBuf,
     restored: bool,
-    /// 停充后的供电方式: `Battery` (电池放电) 或 `Bypass` (USB 直供, 电池不进不出)
+    /// 停充后的供电方式: `Battery` (电池放电)、`Bypass` (USB 直供, 电池不进不出) 或
+    /// `Mixed` (USB 供电不足, 电池同时在放电; 审查 R1 #2)
     mode: SupplyMode,
 }
 
@@ -821,6 +822,28 @@ pub fn bypass_settled(pre_ua: Option<i64>, after_ua: &[i64]) -> bool {
         }
     }
     after_ua.iter().any(|c| (c.abs() as f64) < thr)
+}
+
+/// 审查 R1 #2: 混合供电现场 (USB 供电不足, status 仍写 Charging, 电池却在放电; fix-D 单测锁定的
+/// 就是 Charging、−0.6 A) 的停充成功判据, 与 charge_suspend.sh 的 `mixed_one` 同一判据:
+/// 写后电池电流 < −BYPASS_IDLE_UA (确实在放电), 且比写前降了至少 |写前| 的三成 (节点确实起作用;
+/// 写前 ≈ 0 时只要在放电就算)。`on_battery` (status 不是 Charging) 与 `bypass_settled` (|I| → 0)
+/// 在这种现场都判不过, 以前会换候选再来、最后 CHARGE_FAIL。
+pub fn mixed_settled(pre_ua: Option<i64>, after_ua: i64) -> bool {
+    let thr = crate::sysparam::BYPASS_IDLE_UA;
+    if (after_ua as f64) >= -thr {
+        return false;
+    }
+    let Some(pre) = pre_ua else { return false };
+    ((pre - after_ua) as f64) * 10.0 >= (pre.abs() as f64) * 3.0
+}
+
+/// 混合判据要连续几次读数都成立 (电量计读数会抖)。与 charge_suspend.sh 的 MIXED_TRIES 一致。
+pub const MIXED_TRIES: usize = 3;
+
+/// 这一串写后读数的末尾是否连续 [`MIXED_TRIES`] 次满足 [`mixed_settled`]。
+pub fn mixed_streak(pre_ua: Option<i64>, after_ua: &[i64]) -> bool {
+    after_ua.len() >= MIXED_TRIES && after_ua.iter().rev().take(MIXED_TRIES).all(|c| mixed_settled(pre_ua, *c))
 }
 
 /// 状态文件的格式: 第一行节点路径, 第二行原值。两行都在才算一份有效的遗留状态。
@@ -920,12 +943,29 @@ impl ChargeSuspend {
                     if bypass_settled(bat.current_ua, &seen) {
                         break;
                     }
+                    // 混合供电 (审查 R1 #2): 连续几次读数都在放电且比写前降了三成, 不用等到 |I| → 0
+                    if mixed_streak(bat.current_ua, &seen) {
+                        break;
+                    }
                     // 第一次读数就没降三成: 节点没起作用, 不用再等
-                    if i == 0 && !bypass_settled(bat.current_ua, &[c, 0]) {
+                    if i == 0 && !bypass_settled(bat.current_ua, &[c, 0]) && !mixed_settled(bat.current_ua, c) {
                         break;
                     }
                 }
                 std::thread::sleep(Duration::from_millis(1_000));
+            }
+            if mixed_streak(bat.current_ua, &seen) && !bypass_settled(bat.current_ua, &seen) {
+                progress(
+                    "charge",
+                    &format!("已停充 (混合供电: USB 供电不足, 电池同时在放电): {} {saved} → {want}", node.path),
+                );
+                return Ok(ChargeSuspend {
+                    path: node.path.to_string(),
+                    saved,
+                    state_path: state_path.to_path_buf(),
+                    restored: false,
+                    mode: SupplyMode::Mixed,
+                });
             }
             if bypass_settled(bat.current_ua, &seen) {
                 progress(
@@ -1671,6 +1711,29 @@ mod tests {
         // 一直没落到门限以下
         assert!(!bypass_settled(Some(1_000_000), &[600_000, 400_000, 200_000]));
         assert!(!bypass_settled(Some(1_000_000), &[]));
+    }
+
+    /// 审查 R1 #2: 混合供电现场 (Charging、−0.6 A) 的停充判据, 与 charge_suspend.sh 的 mixed_one 一致。
+    #[test]
+    fn mixed_supply_counts_as_suspended_when_battery_discharges_after_the_write() {
+        // 写前 +1.93 A 在充, 写后 −0.6 A 在放电: 降了远超三成
+        assert!(mixed_settled(Some(1_930_000), -600_000));
+        // 写后只是接近 0 (旁路的样子), 不是混合
+        assert!(!mixed_settled(Some(1_930_000), -20_000));
+        // 写后仍在充
+        assert!(!mixed_settled(Some(1_930_000), 1_500_000));
+        // 写前就在放电 −0.6 A: 要再降三成才算节点起了作用 (−0.9 A 算, −0.7 A 不算)
+        assert!(mixed_settled(Some(-600_000), -900_000));
+        assert!(!mixed_settled(Some(-600_000), -700_000));
+        // 写前 ≈ 0: 只要在放电
+        assert!(mixed_settled(Some(0), -100_000));
+        // 写前读不到: 判不了
+        assert!(!mixed_settled(None, -600_000));
+        // 要连续 MIXED_TRIES 次; 这两串都不是旁路
+        assert!(mixed_streak(Some(1_930_000), &[1_800_000, -500_000, -600_000, -620_000]));
+        assert!(!mixed_streak(Some(1_930_000), &[-600_000, -620_000]));
+        assert!(!mixed_streak(Some(1_930_000), &[-600_000, 100_000, -620_000, -600_000]));
+        assert!(!bypass_settled(Some(1_930_000), &[-500_000, -600_000, -620_000]));
     }
 
     #[test]

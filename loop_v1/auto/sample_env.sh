@@ -27,7 +27,11 @@ B=/sys/class/power_supply/battery
 U=/sys/class/power_supply/usb
 KGSL=/sys/class/kgsl/kgsl-3d0
 
-echo "#sample_env v2 dur=$DUR interval=$IVL power_interval=${PWR_IVL:-0.2} stop=${3:-none}"
+PWR_IVL="${PWR_IVL:-0.2}"
+# 审查 R1 #7: toybox/mksh 的 sleep 不保证支持小数秒。不支持时 sleep 立刻出错返回, 快循环会空转占满一核
+# (两臂功耗都抬高、每秒几千行), 所以先试一次, 不行就退回整秒; 头部记的是实际生效的间隔。
+sleep "$PWR_IVL" 2>/dev/null || PWR_IVL=1
+echo "#sample_env v2 dur=$DUR interval=$IVL power_interval=$PWR_IVL stop=${3:-none}"
 echo "#battery_status=$(cat $B/status 2>/dev/null)"
 echo "#battery_capacity=$(cat $B/capacity 2>/dev/null)"
 echo "#charge_suspended=$( [ -f /data/local/tmp/loop_v1_charge.state ] && echo yes || echo no)"
