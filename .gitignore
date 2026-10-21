@@ -34,3 +34,6 @@ loop_v1/runs_sysparam/**/*.png
 loop_v1/runs_sysparam/**/*.raw
 # selftest 实跑产物 (trace/spv/截图); 结论与判定输入另行挑选入库
 loop_v1/runs_selftest/
+
+# 节点服务在本仓库根跑任务时的输出目录 (node_service.py 写入)
+_jobs/

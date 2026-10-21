@@ -110,6 +110,13 @@ fn tools_list() -> Vec<Value> {
         tool("phonefarm_devices",
             "List connected devices: Android (adb) and OpenHarmony (hdc:<key>) targets. Read-only, free.",
             obj(json!({}), &[])),
+        tool("phonefarm_fleet",
+            "Read-only snapshot of every phone in the farm in one call: online state, model, OS, root, \
+             battery, thermals, fan, foreground app, keepalive policy, device lock, and — per device — \
+             which change surfaces (sysparam / gray / shader / measure) are declared usable and what \
+             blocks them right now. Use this to decide which device a job should target. \
+             Read-only, free; degrades to a sysfs-only pass while someone else holds the device lock.",
+            obj(json!({"serial": s("only this device (adb serial, or hdc:<key>)")}), &[])),
         tool("phonefarm_tasks",
             "List traversal tasks with run counts, achieved counts and token totals. Read-only, free.",
             obj(json!({}), &[])),
@@ -287,6 +294,11 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
     let mut v = Vec::new();
     match name {
         "phonefarm_devices" => v.push("devices".into()),
+        "phonefarm_fleet" => {
+            v.push("fleet".into());
+            push_opt(&mut v, "--serial", arg_str(args, "serial"));
+            v.push("--json".into());
+        }
         "phonefarm_tasks" => v.extend(["tasks".into(), "--json".into()]),
         "phonefarm_runs" => {
             v.push("runs".into());
@@ -585,7 +597,7 @@ mod tests {
         let line = json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}).to_string();
         let resp: Value = serde_json::from_str(&handle_line(&line).unwrap()).unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 22, "工具面数量变了要有意为之(SPEC_EVOLUTION §9: +hyp/pred/caps/tools 只读; +collect 零 Token 采集)");
+        assert_eq!(tools.len(), 23, "工具面数量变了要有意为之(SPEC_EVOLUTION §9: +hyp/pred/caps/tools 只读; +collect 零 Token 采集; +fleet 设备/层声明只读)");
         for t in tools {
             assert!(t["name"].as_str().unwrap().starts_with("phonefarm_"));
             assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
@@ -623,8 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn build_argv_collect_is_bounded_and_json() {
-        let a = build_argv("phonefarm_collect", &json!({"query":"目标","max_swipes":5})).unwrap();
+    fn build_argv_collect_is_bounded_and_json() {        let a = build_argv("phonefarm_collect", &json!({"query":"目标","max_swipes":5})).unwrap();
         assert_eq!(a[0], "collect");
         assert!(a.contains(&"--json".to_string()), "serve 侧统一吃 JSON");
         assert!(a.windows(2).any(|w| w[0] == "--query" && w[1] == "目标"));
@@ -632,6 +643,20 @@ mod tests {
         // 参数都可选: 裸调用也能跑(列表采集模式)
         let b = build_argv("phonefarm_collect", &json!({})).unwrap();
         assert_eq!(b, vec!["collect".to_string(), "--json".to_string()]);
+    }
+
+    /// `phonefarm_fleet` 是同事问「有哪几台、每台能改哪层」的唯一入口。
+    /// 节点服务的只读白名单里早就写了这个名字, 但 serve 侧一直没有它 —— 调用会得到 unknown tool。
+    #[test]
+    fn build_argv_fleet_is_readonly_json_snapshot() {
+        let a = build_argv("phonefarm_fleet", &json!({})).unwrap();
+        assert_eq!(a, vec!["fleet".to_string(), "--json".to_string()]);
+        let b = build_argv("phonefarm_fleet", &json!({"serial":"hdc:abc"})).unwrap();
+        assert!(b.windows(2).any(|w| w[0] == "--serial" && w[1] == "hdc:abc"));
+        // 只读工具不得带任何写设备/起任务的参数
+        for bad in ["--lock-label", "--screenshot-dir", "--probe-while-locked"] {
+            assert!(!b.iter().any(|x| x == bad), "fleet 只读面不得带 {bad}");
+        }
     }
 
     #[test]

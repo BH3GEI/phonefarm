@@ -212,7 +212,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 **MCP 工具服务**
 
 ```bash
-./phonefarm serve [--root 目录]    # 22 个 phonefarm_* 工具（17 只读 + 5 执行），stdio JSON-RPC 2.0
+./phonefarm serve [--root 目录]    # 23 个 phonefarm_* 工具（18 只读 + 5 执行），stdio JSON-RPC 2.0
 ```
 
 ## 安全边界与执行规范
