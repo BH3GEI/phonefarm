@@ -763,6 +763,57 @@ pub fn power_group_ok<'a>(envs: impl IntoIterator<Item = &'a serde_json::Value>)
     true
 }
 
+/// 功耗进不了判定的原因 —— 直接写进回包, 不让人猜。
+///
+/// 两种情形要分开: 两臂轨道不一致 (无法相减) 与 两臂都没量到。
+pub fn power_group_note<'a>(envs: impl IntoIterator<Item = &'a serde_json::Value>) -> Option<String> {
+    let mut src: Option<String> = None;
+    let mut n = 0usize;
+    for e in envs {
+        n += 1;
+        let valid = e["power_valid"].as_bool().unwrap_or_else(|| e["on_battery"].as_bool().unwrap_or(false));
+        if !valid {
+            let why = e["power_usable_reason"].as_str().unwrap_or("功耗没量到");
+            return Some(format!("功耗不进判定: {why}"));
+        }
+        let s = e["power_source"].as_str().unwrap_or("battery").to_string();
+        match &src {
+            None => src = Some(s),
+            Some(x) if *x != s => {
+                return Some(format!("功耗不进判定: 两臂轨道不一致 ({x} vs {s}), 不能相减"));
+            }
+            _ => {}
+        }
+    }
+    if n == 0 {
+        return Some("功耗不进判定: 这一轮没有采到环境数据".into());
+    }
+    None
+}
+
+/// 这组数据能不能跨任务比功耗。只有全程电池放电态可以。
+///
+/// USB 旁路 (停充后拿 USB 轨 |V x I|) 含充电器转换损耗, 它的绝对值不和电池轨同口径;
+/// 同一轮的两臂在同一个轨上相减仍然成立, 但拿它去和别的任务的数比就会把损耗算进效果里。
+pub fn power_cross_run_comparable<'a>(envs: impl IntoIterator<Item = &'a serde_json::Value>) -> bool {
+    let mut any = false;
+    for e in envs {
+        any = true;
+        let ok = match e["power_cross_run_comparable"].as_bool() {
+            Some(v) => v,
+            // 旧证据没有这个字段: 退回「放电态且量到了」这个同口径判据
+            None => {
+                e["on_battery"].as_bool() == Some(true)
+                    && e["power_w_mean"].as_f64().is_some()
+            }
+        };
+        if !ok {
+            return false;
+        }
+    }
+    any
+}
+
 pub fn env_stats(text: &str) -> PyVal {
     let (mut vi_watts, mut now_watts, mut usb_watts) = (vec![], vec![], vec![]);
     let (mut currents, mut voltages): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
@@ -939,8 +990,14 @@ pub fn env_stats(text: &str) -> PyVal {
         "bypass" => bypass,
         "power_valid" => (on_battery || bypass) && !matches!(power_w_mean, PyVal::Null),
         "power_source" => if on_battery { "battery" } else if bypass { "usb_bypass" } else { "usb" },
+        // 这条数到底走的哪根轨: 电池放电 (|V x I|) / USB 旁路 (|V x I| of usb rail) / 都不是。
+        // 以前这里恒写 "battery", 旁路供电的功耗数也带着 "battery" 标签 —— 两个轨的数
+        // 被同一个名字装着, 跨任务一比就把充电器转换损耗算进了优化效果里。
+        "power_rail" => if on_battery { "battery" } else if bypass { "usb_bypass" } else { "usb" },
+        // 能不能跨任务/跨轮比: 只有电池放电态的数才有同一个口径。旁路数只能跟旁路数比,
+        // 而且含充电器转换损耗。
+        "power_cross_run_comparable" => on_battery && !matches!(power_w_mean, PyVal::Null),
         "fan_state" => fan_state,
-        "power_rail" => "battery",
         "current_now_ua_mean" => cur_mean,
         "voltage_now_uv_mean" => avg(&voltages),
         "power_now_w_mean" => now_mean,
@@ -1533,9 +1590,52 @@ ENV 1.0 4400000 -900000 NA 0 0 cpu-0-0-1 42000\n");
         assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(true)));
     }
 
+    /// 轨道标签必须写实际走的那根: 以前旁路数也标成 "battery",
+    /// 两个轨的数被同一个名字装着, 跨任务一比就把充电器损耗算进了优化效果。
     #[test]
-    fn mixing_battery_and_bypass_power_in_one_group_invalidates_power() {
+    fn power_rail_names_the_rail_actually_used() {
         use serde_json::json;
+        let battery = env_stats(
+            "#battery_status=Discharging\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n",
+        );
+        assert_eq!(battery.get("power_rail"), Some(&PyVal::Str("battery".into())));
+        assert_eq!(battery.get("power_cross_run_comparable"), Some(&PyVal::Bool(true)));
+
+        let bypass = env_stats(
+            "#battery_status=Full\n#battery_capacity=100\n#charge_suspended=yes\n#charge_mode=bypass\n\
+ENV 1.0 4412000 -2000 NA 4920000 806000 cpu-0-4-1 44900\n",
+        );
+        assert_eq!(bypass.get("power_source"), Some(&PyVal::Str("usb_bypass".into())));
+        assert_eq!(bypass.get("power_rail"), Some(&PyVal::Str("usb_bypass".into())));
+        assert_eq!(bypass.get("power_valid"), Some(&PyVal::Bool(true)), "本轮两臂同轨相减仍成立");
+        assert_eq!(
+            bypass.get("power_cross_run_comparable"),
+            Some(&PyVal::Bool(false)),
+            "旁路轨含充电器损耗, 不能拿去跟电池轨的数比"
+        );
+
+        let charging = env_stats(
+            "#battery_status=Charging\nENV 1.0 4000000 1000000 NA 5000000 2000000 cpu-1-0 40000\n",
+        );
+        assert_eq!(charging.get("power_rail"), Some(&PyVal::Str("usb".into())));
+        assert_eq!(charging.get("power_cross_run_comparable"), Some(&PyVal::Bool(false)));
+
+        // 排除原因要能直接进回包
+        let byp_env = json!({"on_battery": false, "power_valid": true, "power_source": "usb_bypass"});
+        assert!(!power_cross_run_comparable([&byp_env]), "旁路轨不能跨任务比");
+        assert!(power_group_note([&byp_env]).is_none(), "但本轮同轨相减仍成立");
+        let bat = json!({"on_battery": true, "power_valid": true, "power_source": "battery",
+                         "power_w_mean": 3.84, "power_cross_run_comparable": true});
+        assert!(power_cross_run_comparable([&bat]));
+        let note = power_group_note([&bat, &byp_env]).unwrap();
+        assert!(note.contains("轨道不一致"), "{note}");
+        let dead = json!({"on_battery": false, "power_valid": false, "power_source": "usb",
+                          "power_usable_reason": "非放电态"});
+        assert!(power_group_note([&dead]).unwrap().contains("非放电态"));
+    }
+
+    #[test]
+    fn mixing_battery_and_bypass_power_in_one_group_invalidates_power() {        use serde_json::json;
         let bat = json!({"on_battery": true, "power_valid": true, "power_source": "battery"});
         let byp = json!({"on_battery": false, "power_valid": true, "power_source": "usb_bypass"});
         let usb = json!({"on_battery": false, "power_valid": false, "power_source": "usb"});

@@ -196,14 +196,29 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                 image["psnr_knob_vs_ctrl"] = json!(knob_vs_ctrl);
                 image["psnr_ctrl_vs_ctrl"] = json!(ctrl_vs_ctrl);
                 image["psnr_within_1s"] = json!(within);
+                // 噪声底 = 同设置重拍能到多少 (对照对对照 + 同臂相隔 1 秒重复拍)
+                let floor = crate::eval::noise_floor_db(
+                    std::iter::once(ctrl_vs_ctrl).chain(within.iter().copied()),
+                );
+                let gate = crate::eval::ImageGate::new(min_psnr, floor);
+                // 判定用**最好**的那一次; 记录仍用最差的那一次 (口径与之前一致, 不改历史数据含义)
                 let worst = knob_vs_ctrl.iter().flatten().cloned().reduce(f64::min);
+                let best = crate::eval::noise_floor_db(knob_vs_ctrl.iter().copied());
                 report["metrics"]["psnr_db"] = json!(worst);
-                match worst {
-                    None => image_fail = Some("截图尺寸不一致, 比不了".into()),
-                    Some(w) if w < min_psnr && !measure_only => {
-                        image_fail = Some(format!("改写臂对对照臂 PSNR {w:.2} dB 低于门槛 {min_psnr} dB (对照对对照 {ctrl_vs_ctrl:?})"))
+                image["noise_floor_db"] = json!(floor);
+                image["psnr_db_used"] = json!(best);
+                match crate::eval::judge_image(&gate, best) {
+                    crate::eval::ImageRuling::Pass(by) => {
+                        image["gate"] = gate.gate(by);
                     }
-                    _ => {}
+                    crate::eval::ImageRuling::Fail(_reason) if measure_only => {
+                        // 只量上限的旋钮本来就会改画面, 不按画面判; 噪声底照样记下来
+                        image["gate"] = gate.gate("skipped_measure_only");
+                    }
+                    crate::eval::ImageRuling::Fail(reason) => {
+                        image["gate"] = gate.gate("failed");
+                        image_fail = Some(reason);
+                    }
                 }
             }
             (a, b, c) => {
@@ -345,6 +360,13 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         "power_usable_reason": env["power_usable_reason"],
         "fan_state": env["fan_state"],
         "charging_suspended_via": suspended_via,
+        // 跨任务可比性: 旁路轨的绝对值含充电器转换损耗, 只能同轨比
+        "cross_run_comparable": crate::sysparam::power_cross_run_comparable(
+            knob_runs.iter().chain(ctrl_runs.iter()).filter_map(|r| r.get("env")),
+        ),
+        "excluded_reason": crate::sysparam::power_group_note(
+            knob_runs.iter().chain(ctrl_runs.iter()).filter_map(|r| r.get("env")),
+        ),
     });
     if measure_only {
         let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();

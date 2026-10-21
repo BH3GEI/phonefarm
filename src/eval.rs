@@ -1585,6 +1585,13 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         "on_battery": env["on_battery"],
         "source": env["power_source"],
         "charging_suspended_via": suspended_via.clone(),
+        // 这两个数决定「这轮功耗能不能拿去跟别的任务比」, 不靠看图猜
+        "cross_run_comparable": sysparam::power_cross_run_comparable(
+            knob_runs.iter().chain(ctrl_runs.iter()).filter_map(|r| r.get("env")),
+        ),
+        "excluded_reason": sysparam::power_group_note(
+            knob_runs.iter().chain(ctrl_runs.iter()).filter_map(|r| r.get("env")),
+        ),
     });
 
     report["status"] = json!(if keep { "PASS" } else { "REJECT" });
@@ -1683,7 +1690,9 @@ pub(crate) fn aux_compare(a_runs: &[Run], b_runs: &[Run]) -> Value {
 pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, rounds: u32) -> (Value, bool, bool) {
     let primary = "frame_p95";
     let (a_runs, b_runs) = (eval_runs(ctrl_runs), eval_runs(knob_runs));
-    // 与 autoloop 一致的判定指标表: 功耗只在两臂都处于放电态时才进判定
+    // 与 autoloop 一致的判定指标表: 功耗只在两臂轨道一致且都量到时才进判定。
+    // 一致 ≠ 一定是放电态: 停充后拿 USB 旁路轨的两臂相减也成立 (同一轨、同一套损耗),
+    // 但那个绝对值不能跨任务比, 回包里用 power.rail / cross_run_comparable 标清楚。
     let on_battery_all = all_on_battery(knob_runs, ctrl_runs);
     let mut metrics_list: Vec<(String, &str)> =
         vec![("frame_p95".into(), "lower"), ("fps_mean".into(), "higher")];
@@ -1833,6 +1842,95 @@ pub(crate) fn parse_gray_rewrites(payload: &Value) -> Result<GrayKnobs, String> 
 
 /// 画面比对缺省门槛: 改写臂与对照臂同位置截图的 PSNR 低于它就判画面出错。
 pub(crate) const GRAY_MIN_PSNR_DB: f64 = 30.0;
+
+/// 画面判据允许比「同设置重拍」差多少 dB。
+///
+/// 1.0 dB 的依据: 实测同一场景两次重拍能差 1.5-2 dB (Megacity city_static 实测 26.41-28.06),
+/// 而真正改了画面的改写差 2 dB 以上 (同次实测 knob 29.71 dB)。留 1 dB 给噪声, 剩下留给真实的画面变化。
+pub(crate) const IMAGE_GATE_MARGIN_DB: f64 = 1.0;
+/// 噪声底低于这个值 = 这个场景自身不稳定, 画面判据没有分辨力, 必须拒绝判定而不是猜。
+pub(crate) const IMAGE_GATE_MIN_USABLE_DB: f64 = 20.0;
+
+/// 画面判据的输入: 配置阈值 + 这个场景实测的噪声底。
+///
+/// 固定阈值的毛病是它不知道场景有多稳。Megacity city_static 实测同一臂相隔 1 秒重拍只有
+/// 26.41 / 27.90 dB, 对照对对照 28.06 dB —— 固定 30 dB 的阈值比噪声底还高, 任何候选
+/// (包括什么都没改的) 都会被判「画面出错」。所以判定要拿噪声底比。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImageGate {
+    /// 配置的绝对阈值 ([`GRAY_MIN_PSNR_DB`] 或请求里的 `image_check.min_psnr_db`)。
+    pub configured_db: f64,
+    /// 同设置重拍能达到的相似度 (取观测到的最大值)。`None` = 没有重拍可用。
+    pub noise_floor_db: Option<f64>,
+    pub margin_db: f64,
+    pub min_usable_db: f64,
+}
+
+impl ImageGate {
+    pub(crate) fn new(configured_db: f64, noise_floor_db: Option<f64>) -> Self {
+        ImageGate {
+            configured_db,
+            noise_floor_db,
+            margin_db: IMAGE_GATE_MARGIN_DB,
+            min_usable_db: IMAGE_GATE_MIN_USABLE_DB,
+        }
+    }
+
+    /// 这一关按什么过的: `absolute` / `noise_floor`。
+    pub(crate) fn gate(&self, passed_by: &str) -> serde_json::Value {
+        serde_json::json!({
+            "passed_by": passed_by,
+            "configured_db": self.configured_db,
+            "noise_floor_db": self.noise_floor_db,
+            "margin_db": self.margin_db,
+            "min_usable_db": self.min_usable_db,
+        })
+    }
+}
+
+/// 画面判定结果。
+pub(crate) enum ImageRuling {
+    Pass(&'static str),
+    Fail(String),
+}
+
+/// 同设置重拍能达到的相似度: 取观测到的**最大值**。
+///
+/// 用最大值而不是最小值: 场景里有一点动画时, 两次重拍的差距本身就是噪声,
+/// 取最大的那一次才是这套采集能在同一内容上达到的上限。
+pub(crate) fn noise_floor_db(values: impl IntoIterator<Item = Option<f64>>) -> Option<f64> {
+    values.into_iter().flatten().reduce(f64::max)
+}
+
+/// 判定「改写臂的画面是不是比同设置重拍还差」。
+///
+/// `best_knob_vs_ctrl_db` 取改写臂对多个对照帧里**最好**的那一次
+/// (场景有动画时, 最差的那次只是撞上了动画帧, 它的含义不是「画面被改坏了」)。
+pub(crate) fn judge_image(gate: &ImageGate, best_knob_vs_ctrl_db: Option<f64>) -> ImageRuling {
+    let Some(w) = best_knob_vs_ctrl_db else {
+        return ImageRuling::Fail("截图尺寸不一致, 比不了".into());
+    };
+    if w >= gate.configured_db {
+        return ImageRuling::Pass("absolute");
+    }
+    match gate.noise_floor_db {
+        Some(n) if n < gate.min_usable_db => ImageRuling::Fail(format!(
+            "同设置重拍只有 {n:.2} dB (低于可用下限 {:.0} dB): 这个场景自身不稳定, \
+画面判据在它上面没有分辨力 —— 换静态场景或改用孪生 pass 现场开关, 不要拿这个数判画面",
+            gate.min_usable_db
+        )),
+        Some(n) if w >= n - gate.margin_db => ImageRuling::Pass("noise_floor"),
+        Some(n) => ImageRuling::Fail(format!(
+            "改写臂只有 {w:.2} dB, 低于配置阈值 {:.2} dB, 也低于同设置重拍噪声底 {n:.2} dB 减 {:.1} dB",
+            gate.configured_db, gate.margin_db
+        )),
+        None => ImageRuling::Fail(format!(
+            "改写臂 {w:.2} dB 低于配置阈值 {:.2} dB, 且没有同设置重拍可作噪声底: 判不了 \
+(至少跑 2 轮, 或让采集侧多拍一张同设置对照)",
+            gate.configured_db
+        )),
+    }
+}
 /// 挂层重启、进到场景之后先等画面稳下来再截图 (流式加载、过场淡入)。
 const GRAY_SHOT_SETTLE_S: u64 = 8;
 /// 两张图逐像素相同时 PSNR 是无穷大; JSON 放不下, 按这个值记。
@@ -1991,6 +2089,8 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     // 对照臂相邻两轮之间也算一个, 当作"什么都没改时画面自己会差多少"的参照, 一起落进报告。
     let mut psnr_knob_vs_ctrl: Vec<f64> = Vec::new();
     let mut psnr_ctrl_vs_ctrl: Vec<f64> = Vec::new();
+    // 同设置重拍 (对照臂隔一段再拍一张): 单轮评测唯一的噪声底来源
+    let mut noise_within_round: Vec<f64> = Vec::new();
     let mut prev_ctrl: Option<(u32, u32, Vec<u8>)> = None;
     let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
     let mut cool_log: Vec<Value> = Vec::new();
@@ -2057,14 +2157,24 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
             std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
             match grab_rgba(serial) {
                 Ok(shot) => {
-                    if i == 1 {
-                        save_png(&evidence.join(format!("shot_{arm}{i}.png")), &shot);
-                    }
+                    save_png(&evidence.join(format!("shot_{arm}{i}.png")), &shot);
                     shots.insert(arm, shot);
                 }
                 Err(e) => {
                     abort_reason = Some(format!("{arm}{i} 截图失败, 画面比对做不了: {e}"));
                     break 'rounds;
+                }
+            }
+            // 对照臂多拍一张 (同样的等待再拍): 这一对就是本轮场景的噪声底。
+            // 只有轮数 ≥ 2 才拿得到跨轮对照对对照, 单轮评测以前没有任何噪声底可依 ——
+            // 固定 30 dB 阈值在会动的场景里比噪声底还高, 候选会被误判成「画面出错」。
+            if arm == "ctrl" {
+                std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
+                if let Ok(again) = grab_rgba(serial) {
+                    save_png(&evidence.join(format!("shot_ctrl{i}_repeat.png")), &again);
+                    if let Some(q) = psnr_rgba(&shots["ctrl"].2, &again.2) {
+                        noise_within_round.push(q);
+                    }
                 }
             }
             let res = run_one_with(
@@ -2114,19 +2224,28 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                 psnr_ctrl_vs_ctrl.push(q);
             }
         }
-        if p < min_psnr {
-            save_png(&evidence.join(format!("shot_knob{i}_bad.png")), k);
-            save_png(&evidence.join(format!("shot_ctrl{i}_bad.png")), c);
-            abort_reason = Some(format!(
-                "画面出错: 第 {i} 轮改写臂与对照臂同位置截图 PSNR {p:.2} dB, 低于门槛 {min_psnr} dB (截图见 evidence_dir)"
-            ));
-            break;
-        }
+        // 画面判定不在这里做: 噪声底要等所有轮拍完才知道 (单轮时靠对照臂的重复拍)。
+        // 先看就是拿一个还不知道噪声底多少的固定阈值去判, 会把候选误判成画面出错。
         prev_ctrl = shots.remove("ctrl");
     }
     // 还原
     let restore_log = gl.off();
     std::fs::write(evidence.join("restore.log"), &restore_log).ok();
+
+    // 画面判定: 拿同设置重拍的噪声底比, 而不是拿一个固定阈值硬卡。
+    let noise_floor = noise_floor_db(
+        noise_within_round
+            .iter()
+            .chain(psnr_ctrl_vs_ctrl.iter())
+            .map(|v| Some(*v)),
+    );
+    let image_gate = ImageGate::new(min_psnr, noise_floor);
+    let best_knob = noise_floor_db(psnr_knob_vs_ctrl.iter().map(|v| Some(*v)));
+    let image_ruling = if launch.is_some() {
+        None // 自驱动负载已用 storeop-check 判过画面
+    } else {
+        Some(judge_image(&image_gate, best_knob))
+    };
 
     // 各 knob 臂采到的命中取最大 (require_hit 判的是"改写到底有没有真生效过一次")
     let hits = knob_runs
@@ -2152,10 +2271,24 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                 "min_psnr_db": min_psnr,
                 "psnr_knob_vs_ctrl_db": psnr_knob_vs_ctrl,
                 "psnr_ctrl_vs_ctrl_db": psnr_ctrl_vs_ctrl,
+                "noise_within_round_db": noise_within_round,
+                "noise_floor_db": noise_floor,
+                "psnr_db_used": best_knob,
+                "gate": image_ruling.as_ref().map(|r| match r {
+                    ImageRuling::Pass(by) => image_gate.gate(by),
+                    ImageRuling::Fail(_) => image_gate.gate("failed"),
+                }),
             }),
         },
     });
     report["evidence_dir"] = json!(evidence.display().to_string());
+
+    // 画面没通过就作废这一轮: 先于其它检查报出来, 因为它影响的是后面所有数据的意义。
+    if let Some(ImageRuling::Fail(reason)) = &image_ruling {
+        if abort_reason.is_none() {
+            abort_reason = Some(format!("画面出错: {reason} (截图见 evidence_dir)"));
+        }
+    }
 
     if let Some(reason) = abort_reason {
         report["verdict"]["reason"] = json!(reason);
@@ -2628,6 +2761,50 @@ mod path_tests {
         let c = b.replace("governor=walt", "governor=performance");
         let (_, o) = split_snapshot_diff(a, &c);
         assert_eq!(o, vec!["cpu.policy6.governor: walt → performance".to_string()]);
+    }
+
+    /// 画面判定要拿「同设置重拍」的噪声底比, 而不是拿固定阈值硬卡。
+    ///
+    /// 真实数据 (Megacity city_static, 2026-10-19): 同臂相隔 1 秒重拍 26.41 / 27.90 dB,
+    /// 对照对对照 28.06 dB。固定 30 dB 的阈值比噪声底还高 —— 什么都没改的候选也会判画面出错。
+    #[test]
+    fn image_gate_judges_against_the_scene_noise_floor() {
+        // 画面完全没变: 高于配置阈值 → 直接按绝对阈值过
+        let g = ImageGate::new(30.0, Some(28.06));
+        assert!(matches!(judge_image(&g, Some(42.0)), ImageRuling::Pass("absolute")));
+
+        // 场景在动, 噪声底 28.06, 候选 29.71 → 高于噪声底, 按噪声底过
+        let g = ImageGate::new(30.0, Some(28.06));
+        assert!(matches!(judge_image(&g, Some(29.71)), ImageRuling::Pass("noise_floor")));
+
+        // 明显改坏了画面 (比噪声底还差很多) → 判画面出错
+        let g = ImageGate::new(30.0, Some(28.06));
+        match judge_image(&g, Some(21.0)) {
+            ImageRuling::Fail(r) => assert!(r.contains("低于同设置重拍噪声底"), "{r}"),
+            _ => panic!("应该失败"),
+        }
+
+        // 场景自己就不稳定 (噪声底 12 dB): 拒绝判定, 不猜
+        let g = ImageGate::new(30.0, Some(12.0));
+        match judge_image(&g, Some(28.0)) {
+            ImageRuling::Fail(r) => assert!(r.contains("自身不稳定"), "{r}"),
+            _ => panic!("噪声底过低时必须拒绝判定"),
+        }
+
+        // 没有重拍可作噪声底: 同样拒绝判定
+        let g = ImageGate::new(30.0, None);
+        match judge_image(&g, Some(29.0)) {
+            ImageRuling::Fail(r) => assert!(r.contains("没有同设置重拍"), "{r}"),
+            _ => panic!("没有噪声底时必须拒绝判定"),
+        }
+
+        // 尺寸不一致
+        let g = ImageGate::new(30.0, Some(28.06));
+        assert!(matches!(judge_image(&g, None), ImageRuling::Fail(_)));
+
+        // 噪声底取观测到的最大值
+        assert_eq!(noise_floor_db([Some(26.41), Some(27.9), None]), Some(27.9));
+        assert_eq!(noise_floor_db([None, None]), None);
     }
 
     #[test]

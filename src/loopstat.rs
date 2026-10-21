@@ -305,6 +305,24 @@ fn for_each_combination(n: usize, k: usize, mut f: impl FnMut(&[usize])) {
     }
 }
 
+/// n 对 n 的精确双侧置换检验里可能达到的**最小** p 值: 2 / C(2n, n)。
+///
+/// 用途是结构性防护: p 值不可能比这个更小, 所以当它已经不满足 alpha 时,
+/// 这个样本量下任何效应量都判不出「显著」。2026-10-21 实测到的一次事故就是
+/// 3v3 (min p = 0.1) 去判 alpha_win = 0.025, 一道预期 −14.7% 的考题被判成「无变化」。
+pub fn min_two_sided_p(n_per_arm: usize) -> f64 {
+    if n_per_arm == 0 {
+        return 1.0;
+    }
+    // C(2n, n) 用 f64 连乘, n 很大时自然很大 —— 这里只用于几十以内, 精度够
+    let n2 = 2 * n_per_arm;
+    let mut c = 1.0_f64;
+    for i in 0..n_per_arm {
+        c = c * (n2 - i) as f64 / (i + 1) as f64;
+    }
+    (2.0 / c).min(1.0)
+}
+
 /// 均值差的精确双侧置换 p 值。
 ///
 /// 把 a+b 合并后穷举所有"取 len(a) 个作为 A 组"的分法, 统计 |均值差| 不小于
@@ -847,7 +865,19 @@ mod tests {
         xs.iter().map(|x| Num::Float(*x)).collect()
     }
 
-    /// 5v5 精确置换检验就是 C(10,5)=252 种分法, 一种不多一种不少。
+    /// 5v5 精确置换检验就是 C(10,5)=252 种分法, 一种不多一种不少。    /// 样本量能判到什么: 3v3 的最小 p 是 0.1, 对 alpha_win=0.025 根本不够。
+    #[test]
+    fn min_two_sided_p_gates_the_sample_size() {
+        assert!((min_two_sided_p(3) - 0.1).abs() < 1e-12, "{}", min_two_sided_p(3));
+        assert!((min_two_sided_p(5) - 2.0 / 252.0).abs() < 1e-12);
+        assert!(min_two_sided_p(5) < 0.025);
+        assert!(min_two_sided_p(4) > 0.025, "4v4 的最小 p = 2/70 = 0.0286, 仍不够");
+        assert_eq!(min_two_sided_p(0), 1.0);
+        // 单调下降
+        assert!(min_two_sided_p(10) < min_two_sided_p(8));
+    }
+
+
     #[test]
     fn permutation_enumerates_every_split() {
         let (p, total) = perm_p_two_sided(&n(&[1.0, 2.0, 3.0, 4.0, 5.0]), &n(&[6.0, 7.0, 8.0, 9.0, 10.0]));
