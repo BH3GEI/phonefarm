@@ -77,8 +77,9 @@ fi
 TOUCHED_RRM=0; TOUCHED_AOSP=0; TOUCHED_1035=0; TOUCHED_GAME=0
 restore_all() {
   local rc=$?
-  trap - EXIT INT TERM
-  log "还原..."
+  trap '' INT TERM   # 还原期间第二次 Ctrl-C 不许打断 (R2 审查 #16)
+  trap - EXIT
+  log "还原 (Ctrl-C 已屏蔽到还原结束)..."
   {
     if [ "$TOUCHED_1035" = 1 ]; then
       echo "sf1035 撤销: $(dev sf1035 -1)"

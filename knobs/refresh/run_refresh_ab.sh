@@ -8,10 +8,12 @@
 # 可选: g60a:60:auto:60 (出厂 auto 档 vs 60 Hz), g30b:30:120:60。
 #
 # 一组的流程:
-#   1. 停游戏, 改游戏内帧率档位 (genshin_fpscap.sh, 只改偏好设置里一个数字)
-#   2. 冷启动原神, `phonefarm onboard --enter-only --no-guest --no-consent` 带进大世界 (要人登录就停, 绝不登录),
+#   1. 冷启动原神, `phonefarm onboard --enter-only --no-guest --no-consent` 带进大世界 (要人登录就停, 绝不登录),
 #      截图存证
-#   3. 设对照刷新率, 读**实际活动模式**核对; 再试一下改写刷新率也能切过去, 切回对照
+#   2. 在游戏界面里改帧率档位 (genshin_fpscap.sh, 缺省 FPSCAP_METHOD=ui: 派蒙→设置→图像→帧率, OCR 核对后点;
+#      R2 审查 #10)。FPSCAP_METHOD=file 是旧办法 (停游戏改偏好设置文件里一个数字), 需用户批准, 顺序变成先改后启动
+#   3. 设对照刷新率, 读**实际活动模式**核对; 再试一下改写刷新率也能切过去, 切回对照;
+#      两档都在**滑动中**再读一次 (R2 审查 #7): 触屏把面板抬上去的话, 测量窗口里的触控负载会让该臂全部无效, 本组停
 #   4. 用游戏图层的上屏帧间隔核对游戏帧率上限真的是 30/60 (对不上 = 档位映射不对, 停)
 #   5. 设备端起 watch (每秒记游戏图层逐帧上屏时刻, 每 5 秒记实际活动模式/亮度/亮屏)
 #   6. `phonefarm eval` kind=sysparam: 改写臂 = refresh_rate_mode 改写档, 对照臂 = 对照档;
@@ -27,6 +29,7 @@
 #   SERIAL PAIRS(8) SECONDS_PER_ARM(30) O1_GROUPS("g60:60:120:60 g30:30:max:60") ORDER_SEED(随机)
 #   PF_BIN(integration 的 release 二进制) PF_ROOT(integration worktree) OUT
 #   BRIGHTNESS(缺省 = 当前亮度值, 模式改手动) COOL_C(42) TEMP_CAP_C(70) IQ(1) CURTAIL(0)
+#   FPSCAP_METHOD(ui|file, 缺省 ui)
 #   MODES_JSON (probe_refresh.sh 的产出; 缺省用本机 2026-10 探测记录: 0=auto 1=60 2=90 3=120 4=144)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -43,6 +46,7 @@ TEMP_CAP_C="${TEMP_CAP_C:-70}"
 IQ="${IQ:-1}"
 CURTAIL="${CURTAIL:-0}"
 SETTLE_S="${SETTLE_S:-3}"
+export FPSCAP_METHOD="${FPSCAP_METHOD:-ui}"
 OUT="${OUT:-/Users/yao/Desktop/code/agent/hgamey/_tmp/opt/O1/runs/ab_${O1_TS}$([ "$DRY_RUN" = 1 ] && echo _dryrun)}"
 WORKLOAD="$PF_ROOT/loop_v1/scripts/workload_spin_touch_v1.json"
 
@@ -126,17 +130,30 @@ fi
 BRIGHTNESS="${BRIGHTNESS:-$O_BVAL}"
 
 TOUCHED=0
+restore_fpscap() {   # 界面办法要游戏在大世界: 进程没了就先启动 + onboard 再改回; 都不行就报 FPSCAP_RESTORE_FAIL (不自动改文件)
+  if [ "$FPSCAP_METHOD" = ui ] && [ -e "$OUT/prefs/fpscap_ui_orig.txt" ] && [ "$DRY_RUN" != 1 ]; then
+    if [ -z "$(dsh "pidof $PKG")" ]; then
+      echo "fpscap 还原: 游戏进程不在, 先启动并 onboard 进大世界"
+      dsh "monkey -p $PKG -c android.intent.category.LAUNCHER 1" >/dev/null; sleep 20
+      "$PF_BIN" onboard --package "$PKG" --serial "$SERIAL" --enter-only --no-guest --no-consent --out "$OUT/onboard_restore" \
+        > "$OUT/onboard_restore.log" 2>&1 || echo "fpscap 还原: onboard 退出码 $? (见 $OUT/onboard_restore.log)"
+      sleep 10
+    fi
+  fi
+  bash "$HERE/genshin_fpscap.sh" restore "$OUT/prefs"
+}
 restore_all() {
   local rc=$?
-  trap - EXIT INT TERM
+  trap '' INT TERM   # 还原期间第二次 Ctrl-C 不许打断 (R2 审查 #16)
+  trap - EXIT
   [ "$TOUCHED" = 1 ] || exit $rc
-  log "还原到原值..."
+  log "还原到原值 (Ctrl-C 已屏蔽到还原结束)..."
   {
     # 中途被打断时 eval 可能没来得及自己还原: 调测量链自带的还原 (没施加过就是空操作)
     dsu "[ -f $DEV_TMP/knob_sysparam.sh ] && sh $DEV_TMP/knob_sysparam.sh restore"
     dsu "[ -f $DEV_TMP/charge_suspend.sh ] && sh $DEV_TMP/charge_suspend.sh restore"
     [ -n "${WATCH_STOP:-}" ] && dsu "touch $WATCH_STOP"
-    bash "$HERE/genshin_fpscap.sh" restore "$OUT/prefs"
+    restore_fpscap
     sput system refresh_rate_mode "$O_RRM"
     sput system screen_brightness "$O_BVAL"
     sput system screen_brightness_mode "$O_BMODE"
@@ -157,6 +174,7 @@ restore_all() {
     done
     grep -q 'FPSCAP_RESTORE_FAIL' "$OUT/restore_check.txt" && bad=1
     [ "$bad" = 0 ] && log "RESTORE_OK 全部写回原值" || log "RESTORE_FAIL —— 看 $OUT/restore_check.txt, 人工处理"
+    [ -e "$OUT/prefs/FILE_EDIT_USED.txt" ] && log "注意: 本次用了偏好设置文件单值改写 (FPSCAP_METHOD=file), 见 $OUT/prefs/FILE_EDIT_USED.txt, 报告里要单独列出"
   fi
   exit $rc
 }
@@ -178,8 +196,10 @@ run_group() { # <name:cap:ctrl:knob> <组序号>
   log "══ 组 $name: 游戏 $cap 帧, 对照 $c_spec (档 $c_mode, ${c_hz:-自适应} Hz) vs 改写 $k_spec (档 $k_mode, $k_hz Hz) ══"
   [ -n "$c_mode" ] && [ -n "$k_mode" ] && [ -n "$k_hz" ] || { log "组 $name: 档位表里找不到对应档, 跳过"; return 1; }
 
-  # 1-2. 帧率档位 + 进大世界
-  bash "$HERE/genshin_fpscap.sh" set "$cap" "$OUT/prefs" || { log "组 $name: 改帧率档位失败"; return 1; }
+  # 1-2. 进大世界 + 帧率档位 (file 办法要先停游戏改文件再启动; ui 办法进大世界后在界面里改)
+  if [ "$FPSCAP_METHOD" = file ]; then
+    bash "$HERE/genshin_fpscap.sh" set "$cap" "$OUT/prefs" || { log "组 $name: 改帧率档位失败"; return 1; }
+  fi
   dsh "monkey -p $PKG -c android.intent.category.LAUNCHER 1" >/dev/null
   sleep 20
   if [ "$DRY_RUN" = 1 ]; then
@@ -194,6 +214,10 @@ run_group() { # <name:cap:ctrl:knob> <组序号>
     esac
     sleep 15
     "$ADB" -s "$SERIAL" exec-out screencap -p > "$G/in_world.png" </dev/null
+  fi
+  if [ "$FPSCAP_METHOD" = ui ]; then
+    bash "$HERE/genshin_fpscap.sh" set "$cap" "$OUT/prefs" || { log "组 $name: 界面里改帧率档位失败 (截图在 $OUT/prefs/ui_*/), 本组停"; return 1; }
+    sleep 5
   fi
 
   # 3a. 出厂档 (原值, 一般是 auto) 在游戏里实际跑多少 Hz —— 历史探测里原神场景 auto 读到过 60 Hz,
@@ -223,6 +247,25 @@ run_group() { # <name:cap:ctrl:knob> <组序号>
     echo "对照 $c_spec 在游戏里实际 $c_hz Hz = 改写 $k_hz Hz" > "$G/SKIPPED_same_hz.txt"; return 0
   fi
   log "  刷新率核对通过: 对照 $c_hz Hz / 改写 $k_hz Hz"
+
+  # 3b. 滑动中两档守不守得住 (R2 审查 #7): 负载是触控脚本, 触屏抬频的话测量窗口里的读数会让该臂全部无效
+  local pt
+  for arm_spec in "knob:$k_mode:$k_hz" "ctrl:$c_mode:$c_hz"; do
+    IFS=: read -r an am ah <<< "$arm_spec"
+    [ "$an" = ctrl ] && [ "$c_spec" = auto ] && continue   # auto 档不预设 Hz, 只记录
+    sput system refresh_rate_mode "$am" >/dev/null; sleep "$SETTLE_S"
+    dsh "input swipe 900 400 2000 400 2500" >/dev/null &
+    sleep 1; a=$(active_json); wait
+    echo "${an}_touch_check $a" >> "$G/mode_checks.txt"
+    pt=$(json_get "$a" panel_hz)
+    if [ "$DRY_RUN" != 1 ] && ! { [ -n "$pt" ] && hz_near "$pt" "$ah"; }; then
+      sput system refresh_rate_mode "$c_mode" >/dev/null
+      log "组 $name: ${an} 档 $am 静止时 $ah Hz, 滑动中面板读到 ${pt:-?} Hz (触屏抬频) —— 触控负载下这一臂守不住设定刷新率, 本组停"
+      echo "$an 档 $am 滑动中 ${pt:-?} Hz ≠ $ah Hz" > "$G/STOPPED_touch_boost.txt"; return 1
+    fi
+  done
+  sput system refresh_rate_mode "$c_mode" >/dev/null; sleep "$SETTLE_S"
+  log "  滑动中刷新率核对通过 (改写 $k_hz Hz / 对照 ${c_hz} Hz 都守住)"
 
   # 4. 游戏帧率上限核对 (上屏帧间隔中位数)
   local pj p50

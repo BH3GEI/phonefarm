@@ -30,8 +30,17 @@ import re
 import statistics
 import sys
 
-HOLD_MIN = 0.9          # 一臂里实测面板刷新率等于该臂设定值的读数比例下限
+HOLD_MIN = 0.9          # 一臂里实测面板刷新率等于该臂设定值的读数比例下限 (读数多时); 读数少时按个数放宽, 见 hold_min_for
 HZ_TOL = 0.03           # 刷新率「相等」的相对容差
+
+
+def hold_min_for(n):
+    """panel_hold 的门槛按读数个数定 (R2 审查 #7): 每臂 30 s 只有约 6 个读数, 固定 0.9 等于「一个都不许错」;
+    改成最多允许 max(1, ceil(10% n)) 个读数不等于设定值, 下限 0.5。n ≥ 10 时回到 0.9。"""
+    if n <= 0:
+        return 1.0
+    allow = max(1, math.ceil(0.1 * n))
+    return max(0.5, round(1.0 - allow / n, 3))
 CAP_TOL = 0.05          # 上屏帧率离游戏上限的相对容差 (超出 = 游戏上限没钉住, 这一组不成立)
 JANK_PP_MAX = 0.5       # 卡顿比例允许的平均增加 (百分点)
 ALPHA = 0.05
@@ -257,6 +266,8 @@ def arm_view(adir, watch, cap, want_hz):
     v["render_samples"] = [h["render_hz"] for h in hs if h.get("render_hz")]
     v["panel_hold"] = (round(sum(1 for x in pan if abs(x - want_hz) <= HZ_TOL * want_hz) / len(pan), 3)
                        if pan and want_hz and want_hz > 0 else None)
+    v["panel_n"] = len(pan)
+    v["hold_min"] = hold_min_for(len(pan))
     v["wake"] = sorted({h.get("wake") for h in hs if h.get("wake")})
     v["brightness"] = sorted({h.get("brightness") for h in hs if h.get("brightness")})
     # SF --latency 第一行的周期, 每秒一个
@@ -328,10 +339,10 @@ def analyze(eval_dir, watch_path, cap, ctrl_hz, knob_hz, report_path=None, iq_js
             elif a.get("panel_hold") is None:
                 ok = False
                 why.append(f"{name}{i} 窗口内没有面板刷新率读数")
-            elif a["panel_hold"] < HOLD_MIN:
+            elif a["panel_hold"] < a["hold_min"]:
                 ok = False
                 why.append(f"{name}{i} 实测面板刷新率只有 {a['panel_hold']:.0%} 的读数等于设定 {a['want_hz']} Hz "
-                           f"(读到 {sorted(set(a['panel_samples']))})")
+                           f"(门槛 {a['hold_min']:.0%}, 共 {a['panel_n']} 个读数, 读到 {sorted(set(a['panel_samples']))})")
             p = a.get("present")
             if not p or not p.get("present_fps"):
                 ok = False
@@ -435,6 +446,9 @@ UP 1234.5"""
     assert st2["jank_pct"] > 0.9, st2
     assert sign_flip_p([1, 1, 1, 1, 1]) == 2 / 32
     assert sign_flip_p([1, -1]) == 1.0
+    # 门槛按读数个数: 6 个读数允许错 1 个 (0.833), 20 个允许错 2 个 (0.9), 2 个允许错 1 个 (0.5), 0 个 = 1.0
+    assert hold_min_for(6) == 0.833 and hold_min_for(20) == 0.9 and hold_min_for(2) == 0.5 and hold_min_for(0) == 1.0
+    assert hold_min_for(10) == 0.9 and hold_min_for(1) == 0.5 and hold_min_for(100) == 0.9
     # 端到端: 合成一组 eval 证据 + watch 日志
     import tempfile
     d = tempfile.mkdtemp(prefix="o1_selftest_")
@@ -486,6 +500,23 @@ UP 1234.5"""
     assert r2["n_pairs_valid"] == 0 and r2["conclusion"].startswith("无效"), r2["conclusion"]
     r3 = analyze(ev, wp, 60, 0.0, 60.0, rp, None, 0)
     assert r3["n_pairs_valid"] == 5, r3["pairs"]
+    # 每臂窗口 [t+5, t+35] 里 7 个读数 (每 5 s 一个): 错 1 个 (hold 0.857) 固定 0.9 会判无效, 按个数的门槛 (0.857) 放过;
+    # 错 2 个 (0.714) 仍判无效。knob1 的窗口是 1065..1095, DM 行紧跟在 UPH 行后面
+    k1 = r["arms"]["knob1"]
+    assert k1["panel_n"] == 7 and k1["hold_min"] == 0.857, (k1["panel_n"], k1["hold_min"])
+    lines_ = open(wp, encoding="utf-8").read().splitlines()
+    for uph in ("UPH 1065.0", "UPH 1070.0"):
+        j = next(j for j, l in enumerate(lines_) if l.startswith(uph)) + 1
+        assert lines_[j].startswith("DM "), lines_[j]
+        lines_[j] = "DM mActiveSfDisplayMode=DisplayMode{id=1, refreshRate=120.0, vsyncRate=120.0}"
+        bad = wp + "." + uph.split()[1]
+        open(bad, "w", encoding="utf-8").write("\n".join(lines_) + "\n")
+        rb = analyze(ev, bad, 60, 120.0, 60.0, rp, None, 0)
+        hold, nv = rb["arms"]["knob1"]["panel_hold"], rb["n_pairs_valid"]
+        if uph == "UPH 1065.0":
+            assert hold == 0.857 and nv == 5, (hold, rb["pairs"])
+        else:
+            assert hold == 0.714 and nv == 4, (hold, rb["pairs"])
     print("selftest ok")
     return 0
 
