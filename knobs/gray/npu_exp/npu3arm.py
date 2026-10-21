@@ -41,8 +41,8 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 DEF_PF = os.environ.get("PF", f"{HG}/_wt/integration/src/target/release/phonefarm")
 DEF_CHAIN = os.environ.get("CHAIN", f"{HG}/_wt/integration/loop_v1")
 AGENT = "/Users/yao/Desktop/code/agent"
-# N1 交付 (npu/n1-pipeline 9905d3d) 的构建产物
-DEF_SO = os.environ.get("LAYER_SO", f"{HG}/_tmp/npu/N1/bin/{LAYER_SO}")
+# N1 交付的构建产物 (R2F 修订版, 本地文件名带版本号; 推到手机上固定叫 LAYER_SO)
+DEF_SO = os.environ.get("LAYER_SO", f"{HG}/_tmp/npu/N1/bin/libVkLayer_refknobs-r2f-20261021.so")
 
 
 def default_model():
@@ -98,8 +98,13 @@ def check_tools(a, need_layer, out, log):
             errs.append(f"{p} 不是修过的版本 (找不到 {key})")
     if not os.path.exists(a.layer_so):
         (errs if need_layer else warns).append(f"层 .so 不存在: {a.layer_so} (N1 还没出构建产物?)")
-    elif b"debug.knobs.npuop" not in open(a.layer_so, "rb").read():
-        (errs if need_layer else warns).append(f"{a.layer_so} 里没有 debug.knobs.npuop (不是 N1 带 npuop 的版本)")
+    else:
+        blob = open(a.layer_so, "rb").read()
+        if b"debug.knobs.npuop" not in blob:
+            (errs if need_layer else warns).append(f"{a.layer_so} 里没有 debug.knobs.npuop (不是 N1 带 npuop 的版本)")
+        elif b"debug.knobs.npuop_wait_ms" not in blob:
+            (errs if need_layer else warns).append(f"{a.layer_so} 里没有 debug.knobs.npuop_wait_ms (不是 R2 审查后 R2F 修过的版本: "
+                                                   "栅栏超时不计回退、槽位冲突恒真)")
     if a.model and not os.path.exists(a.model):
         warns.append(f"模型文件不存在: {a.model}")
     if not shutil.which("adb"):
@@ -292,13 +297,14 @@ class Exp:
         try:
             if not p.launch():
                 raise Abort("解析不到原神启动 activity")
-            m, waited = None, 0
+            m, waited, stale = None, 0, None
             while waited < t["marker_wait_s"]:
                 p.sleep(3)
                 waited += 3
                 m = p.marker()
-                if m:
+                if m and p.marker_is_new(m):   # 旧标记原地不动 (R2 审查 #1/#10): 内容不同 + 帧数从小开始才算本进程写的
                     break
+                stale, m = m, None
                 if waited > 20 and not p.pidof():
                     raise Abort("原神启动后进程没了 (崩溃或被拦)")
         finally:
@@ -306,7 +312,12 @@ class Exp:
             self.state["layer_prop_set"] = False
             self.save()
         if not m:
-            raise Abort(f"等了 {t['marker_wait_s']}s 层没加载 (没有 knobs_layer_out.json)")
+            raise Abort(f"等了 {t['marker_wait_s']}s 层没加载 (" + ("只看到启动前就有的旧 knobs_layer_out.json, frames="
+                        f"{(stale.get('readonly_stats') or {}).get('frames')}" if stale else "没有 knobs_layer_out.json") + ")")
+        pid = p.pidof().split()[0] if p.pidof() else ""
+        nmap = p.out(f"grep -c libVkLayer_refknobs /proc/{pid}/maps", True) if pid else "0"
+        if not p.dry and not (nmap.isdigit() and int(nmap) > 0):
+            raise Abort(f"/proc/{pid}/maps 里没有层的映射段 (层没被加载进游戏进程, 标记是别的进程写的?)")
         if not self.ui.pass_gate(t["gate_wait_s"]):
             raise Abort(f"等了 {t['gate_wait_s']}s 没看到「点击进入」, 原神不在可玩状态 (截图在 ui/)。脚本不登录, 已停止")
         if not self.in_world(t["world_wait_s"]):
@@ -707,10 +718,11 @@ def make_phone(a, cfg, out, dry):
 def cmd_run(a, cfg, dry=False):
     mode = "perf-first" if a.perf_first else "full"
     out = new_out(a, ("dry_" if dry else "") + mode)
-    # stat-guards: 精确置换 + Bonferroni/3 下判得出显著的最少块数, 用同一个 compare 算 (不另写公式)
-    min_pairs = next(n for n in range(2, 65) if n3_judge.min_reachable_p(a.pf, n) < 0.05 / 3) if os.path.exists(a.pf) else 5
+    # stat-guards: 精确置换 + Bonferroni/K 下判得出显著的最少块数, 用同一个 compare 算 (不另写公式)。
+    # K 按 fix-G 口径: 锁帧负载 (本实验游戏内帧率 30) fps_mean 只守退化不占预算, 表里最多 frame_p95 + power_w_mean, K=2
+    min_pairs = next(n for n in range(2, 65) if n3_judge.min_reachable_p(a.pf, n) < 0.05 / n3_judge.K_MAX) if os.path.exists(a.pf) else 5
     if a.blocks < min_pairs:
-        sys.exit(f"--blocks {a.blocks} 判不出显著 (精确置换 + Bonferroni/3 至少要 {min_pairs} 块)")
+        sys.exit(f"--blocks {a.blocks} 判不出显著 (精确置换 + Bonferroni/{n3_judge.K_MAX} 至少要 {min_pairs} 块)")
     errs, warns = check_tools(a, need_layer=not dry, out=out, log=print)
     for w in warns:
         print("警告:", w)

@@ -5,7 +5,12 @@
 # 统计口径与 phonefarm eval 的 judge_runs 相同 (不另造一套):
 #   - 每个指标用 `phonefarm loopstat` 的 compare (精确置换, 双侧 p, 置换反演 95% CI);
 #   - 判定指标表 = frame_p95 (小好)、fps_mean (大好)、功耗进得了表时加 power_w_mean (小好);
-#     改善门槛 alpha_win = 0.05 / 表长 (Bonferroni), 变差门槛 alpha = 0.05;
+#     改善门槛 alpha_win = 0.05 / K (Bonferroni), 变差门槛 alpha = 0.05。
+#     K 按 fix-G 口径: 负载锁帧 (配置 frame.fps_cap, 每臂 fps_mean 已核对贴着它) 时 fps_mean 只守退化、不占预算,
+#     所以 K = frame_p95 (+ power_w_mean 进表时) = 最多 2 (K_MAX)。
+#   - 与 judge_runs 不同的两处 (R2 审查 #6, 必须明示; 原样写进 verdict.json.frame_rule):
+#       (1) frame_p95 显著变长但改写臂均值 ≤ frame.miss_ms 不算退化 (judge_runs 里显著变长就是退化);
+#       (2) 另加 missed_frac (帧间隔 > miss_ms 的占比) 只守退化, 不占改善预算。
 #   - 样本量防护 (stat-guards): 每个指标的 n 在精确置换下最小可达 p 必须 < alpha_win, 否则这个指标记「判不出」。
 #     最小可达 p 不在这里算公式, 而是把 n 对 n 完全分开的数据交给同一个 compare 算出来 (= 2/C(2n,n))。
 #   - 功耗只认电池轨 (supply_mode = battery, 停充放电态), 一臂不合格只剔除那一对 (fix-D 的按对剔除)。
@@ -20,7 +25,15 @@ import subprocess
 import sys
 
 ALPHA = 0.05
+K_MAX = 2   # 锁帧负载下改善表最长 = frame_p95 + power_w_mean (fix-G: fps_mean 只守退化)
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def frame_rule_text(miss_ms, fps_cap):
+    return (f"负载锁帧 (游戏内帧率 {fps_cap}, 每臂 fps_mean 已核对): fps_mean 只守退化不占预算 (fix-G 口径), "
+            f"改善表 = frame_p95 + power_w_mean (进表时), alpha_win = 0.05/K, K ≤ {K_MAX}。"
+            f"与 eval::judge_runs 的差异: (1) frame_p95 显著变长但改写臂均值 ≤ {miss_ms} ms (帧预算) 不算退化; "
+            f"(2) 另加 missed_frac (帧间隔 > {miss_ms} ms 的占比) 只守退化。其余 (精确置换、按块配对剔除、功耗只认电池轨) 相同")
 
 
 def run_pf(pf, args, stdin=None, timeout=600):
@@ -140,6 +153,7 @@ def analyze_arm(pf, d, cfg):
 # ───────────────────────── 两臂比较 (与 eval::judge_runs 同规则) ─────────────────────────
 
 _MISS_MS = [40.0]
+_FPS_CAP = [30]
 
 
 def budget_ms(_pairs):
@@ -169,12 +183,15 @@ def judge_pair(pf, arms, x, ref):
             power_pairs.append((blk, a, b))
         else:
             dropped.append({"block": blk, "why": "功耗不进判定: " + (a.get("power_problem") or b.get("power_problem") or "")})
-    # 判定表 (占 Bonferroni 预算的): 同 judge_runs = frame_p95、fps_mean、(功耗进得了表时) power_w_mean。
+    # 判定表: frame_p95、fps_mean、(功耗进得了表时) power_w_mean。负载锁帧 (fix-G 口径): fps_mean 只守退化
+    # (guard_only), 不占 Bonferroni 预算, 所以 K = 表里非 guard_only 的个数 (最多 2)。
     # 另加一项只守退化的 missed_frac (超时帧占比), 门槛 alpha, 不占改善预算。
     metrics = [("frame_p95", "lower", frame_pairs), ("fps_mean", "higher", frame_pairs)]
     if len(power_pairs) >= 2:
         metrics.append(("power_w_mean", "lower", power_pairs))
-    alpha_win = ALPHA / len(metrics)
+    guard_only = {"fps_mean"}
+    K = len([m for m, _, _ in metrics if m not in guard_only])
+    alpha_win = ALPHA / K
     metrics.append(("missed_frac", "lower", frame_pairs))
     miss_ms = None
     per, wins, regs = {}, [], []
@@ -206,14 +223,16 @@ def judge_pair(pf, arms, x, ref):
             wins.append(m)
         else:
             status = "无显著变化"
-        per[m] = {"status": status, "n": n, "min_reachable_p": pmin, "a_mean": c.get("a_mean"),
+        per[m] = {"status": status, "n": n, "role": "guard_only" if m in guard_only or not can_win else "win_or_guard",
+                  "min_reachable_p": pmin, "a_mean": c.get("a_mean"),
                   "b_mean": c.get("b_mean"), "diff_mean": d, "diff_pct": c.get("diff_pct"), "p": p,
                   "ci95": c.get("ci95"), "hodges_lehmann": c.get("hodges_lehmann"),
                   "a_values": c.get("a_values"), "b_values": c.get("b_values")}
     # 帧率被锁在 30, fps_mean 只当退化守门, 不算「改善」(审计 #8); 但它仍占一份 Bonferroni 预算 (保守)
     gain_wins = wins
     return {"x": x, "ref": ref, "stat": "exact_permutation (phonefarm loopstat compare)",
-            "alpha_win": alpha_win, "alpha_regression": ALPHA, "metrics_in_table": [m for m, _, _ in metrics],
+            "alpha_win": alpha_win, "K": K, "alpha_regression": ALPHA, "metrics_in_table": [m for m, _, _ in metrics],
+            "guard_only": sorted(guard_only), "fps_locked_cap": _FPS_CAP[0],
             "n_frame_pairs": len(frame_pairs), "n_power_pairs": len(power_pairs),
             "wins": gain_wins, "regressions": regs, "per_metric": per, "dropped": dropped}
 
@@ -294,6 +313,7 @@ def main():
     perf_first = plan.get("mode") == "perf-first" if a.perf_first is None else a.perf_first
 
     _MISS_MS[0] = cfg["frame"].get("miss_ms", 40.0)
+    _FPS_CAP[0] = cfg["frame"].get("fps_cap")
     arms = [analyze_arm(pf, d, cfg) for d in sorted(glob.glob(os.path.join(out, "arms", "*"))) if os.path.isdir(d)]
     json.dump(arms, open(os.path.join(out, "arms_analysis.json"), "w"), ensure_ascii=False, indent=1)
     bc = judge_pair(pf, arms, "B", "C")
@@ -301,7 +321,7 @@ def main():
     ac = judge_pair(pf, arms, "A", "C")
     img = judge_images(pf, out, cfg)
 
-    need = next(n for n in range(2, 65) if min_reachable_p(pf, n) < ALPHA / 3)
+    need = next(n for n in range(2, 65) if min_reachable_p(pf, n) < ALPHA / K_MAX)
     reasons = [f"运行中途停止: {plan['stopped']}"] if plan.get("stopped") else []
     not_applied = [r["label"] for r in arms if r.get("not_applied")]
     if not_applied:
@@ -330,13 +350,13 @@ def main():
         gain = "增益成立" if (perf_gain and image_ok) else "增益不成立"
     verdict = {"mode": "perf-first" if perf_first else "full", "gain": gain, "not_applied_arms": not_applied,
                "image_policy": {"B": "report" if perf_first else "gate"},
-               "frame_rule": f"帧率守在上限 (fps_mean 不显著下降)、超时帧 (> {_MISS_MS[0]} ms) 占比不显著上升; 预算内 p95 变长不算退化", "perf_gain": perf_gain,
+               "frame_rule": frame_rule_text(_MISS_MS[0], _FPS_CAP[0]), "K_max": K_MAX, "perf_gain": perf_gain,
                "image_ok": image_ok, "reasons": reasons, "min_pairs": need,
                "B_vs_C": bc, "B_vs_A": ba, "A_vs_C": ac, "image": img,
                "n_arms": len(arms), "n_arms_valid": sum(r["valid"] for r in arms)}
     json.dump(verdict, open(os.path.join(out, "verdict.json"), "w"), ensure_ascii=False, indent=1)
 
-    L = [f"# 三臂实验判定 ({verdict['mode']})", "", f"**结论：{gain}**", ""]
+    L = [f"# 三臂实验判定 ({verdict['mode']})", "", f"**结论：{gain}**", "", f"帧时规则：{verdict['frame_rule']}", ""]
     if reasons:
         L += ["未成立/保留的原因：", ""] + [f"- {r}" for r in reasons] + [""]
     for name, j in (("B(低+NPU) 对 C(原生)", bc), ("B(低+NPU) 对 A(低+游戏放大)", ba), ("A(低+游戏放大) 对 C(原生)", ac)):

@@ -129,13 +129,14 @@
     "fps_cap": 30,
     "fps_tol_frac": 0.1,
     "miss_ms": 40.0,
-    "_说明": "帧时按帧预算判 (N1/主控 10-21): 帧率守在上限、超时帧 (帧间隔 > miss_ms, 约 30 帧预算 33.3 ms + 一个 120 Hz vsync) 不增加; 预算内 p95 变长不算退化"
+    "_说明": "帧时按帧预算判 (N1/主控 10-21; R2 审查 #6 要求明示): 与 eval::judge_runs 的差异有两处 —— (1) frame_p95 显著变长但改写臂均值 ≤ miss_ms 不算退化 (judge_runs 里显著变长就是退化); (2) 另加 missed_frac (帧间隔 > miss_ms 的占比) 只守退化。相同处: fps_mean 按 fix-G 锁帧口径只守退化不占预算, 改善表 = frame_p95 + power_w_mean (K=2), alpha_win = 0.05/K。verdict.json.frame_rule 原样写出"
   },
   "npu": {
-    "_说明": "N1 (npu/n1-pipeline 9905d3d) 的上机做法: 拼接库目录 + bind mount, 清单同 _tmp/npu/N1/ondevice.sh。require_npu_frac: 测量窗口内 NPU 处理的帧占比下限, 达不到 = 未按设计施加",
+    "_说明": "N1 (npu/n1-pipeline, R2F 修订版) 的上机做法: 拼接库目录 + bind mount, 清单同 _tmp/npu/N1/ondevice.sh。require_npu_frac: 测量窗口内 NPU 处理的帧占比下限, 达不到 = 未按设计施加。npuop_wait_ms: 栅栏等待预算 (与推理预算 budget_ms 分开, 等不到就跳过该帧)",
     "require_npu_frac": 0.95,
     "props": {
       "debug.knobs.npuop_lag": "2",
+      "debug.knobs.npuop_wait_ms": "2",
       "debug.knobs.npuop_budget_ms": "12",
       "debug.knobs.npuop_budget_frames": "30",
       "debug.knobs.npuop_init_frame": "300",

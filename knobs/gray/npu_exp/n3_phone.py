@@ -1,9 +1,10 @@
 # n3_phone.py — 三臂实验的设备操作层 (真机 Phone + 无设备模拟 DryPhone)
 #
 # 规矩 (BRIEF / ruler CONTEXT 硬规则):
-#   - 手机和电脑上不删除、不覆盖任何数据。本模块里没有 rm。
-#     要「挪走」的东西 (标记文件、我们放进游戏库目录的 .so) 一律 mv 到本次运行的设备目录
-#     /data/local/tmp/n3/<run_id>/ 下面, 新文件名, 不覆盖已有文件。
+#   - 手机和电脑上不删除、不覆盖任何数据。本模块里没有 rm, 也没有 mv (R2 审查 #10)。
+#     旧标记文件原地不动, 只 cp -p 一份留底到本次运行的设备目录 /data/local/tmp/n3/<run_id>/parked/ (新文件名);
+#     「新标记」靠内容与留底不同 + 帧数从小开始来认 (marker_is_new), 不靠文件消失。
+#     游戏库目录靠 bind mount 盖住, 不往里放文件。
 #   - 不登录: 本模块不点任何东西, 点击由 n3_ui.py 做, 并且只点 OCR 核对过的目标。
 #   - 只读的操作 (cat、ls、dumpsys、getprop、logcat -d) 随便用; 写操作只有:
 #     setprop debug.*、往游戏库目录 cp 层 .so、fan_enable、亮度模式、停充 (走 charge_suspend.sh)。
@@ -30,8 +31,9 @@ KNOB_PROPS = ["debug.knobs.loadop", "debug.knobs.passdump", "debug.knobs.copypro
               "debug.knobs.upop", "debug.knobs.npuop", "debug.knobs.npuprobe",
               "debug.knobs.storeop", "debug.knobs.frameaudit", "debug.knobs.frameaudit_ts"]
 # N1 npuop 的调参属性 (取值见配置 npu.props)。三臂都写同样的值, 只有 npuop 开关不同。
-NPU_TUNE_PROPS = ["debug.knobs.npuop_lag", "debug.knobs.npuop_budget_ms", "debug.knobs.npuop_budget_frames",
-                  "debug.knobs.npuop_init_frame", "debug.knobs.npuop_zc", "debug.knobs.npuop_ts"]
+NPU_TUNE_PROPS = ["debug.knobs.npuop_lag", "debug.knobs.npuop_wait_ms", "debug.knobs.npuop_budget_ms",
+                  "debug.knobs.npuop_budget_frames", "debug.knobs.npuop_init_frame", "debug.knobs.npuop_zc",
+                  "debug.knobs.npuop_ts"]
 ALL_PROPS = KNOB_PROPS + NPU_TUNE_PROPS + ["debug.vulkan.layers"]
 SELINUX_RULE = "allow appdomain vendor_qdsp_device chr_file { open read ioctl getattr map }"
 
@@ -171,15 +173,37 @@ class Phone:
     def pidof(self):
         return self.out(f"pidof {self.pkg}")
 
-    def marker(self):
+    def marker_text(self):
+        """第一个存在的标记文件的原文 (没有就空串)。"""
         for p in MARKER_DIRS:
             o = self.out(f"cat {p.format(pkg=self.pkg)} 2>/dev/null", True)
             if o.startswith("{"):
-                try:
-                    return json.loads(o.splitlines()[0])
-                except ValueError:
-                    pass
+                return o
+        return ""
+
+    def marker(self):
+        o = self.marker_text()
+        if o:
+            try:
+                return json.loads(o.splitlines()[0])
+            except ValueError:
+                pass
         return None
+
+    def marker_is_new(self, m):
+        """m 是不是本次启动的游戏进程写的 (R2 审查 #1/#10): 旧标记原地不动, 所以要靠内容认。
+        新 = 与挂层前留底 (archive_marker 记的 prev_marker) 内容不同, 且 readonly_stats.frames 从小开始
+        (小于旧标记的帧数, 或 ≤ 900; 层每 300 帧写一次)。没有旧标记时任何标记都算新。"""
+        prev = getattr(self, "prev_marker", None)
+        if not prev or not m:
+            return bool(m)
+        if m == prev.get("json"):
+            return False
+        f = (m.get("readonly_stats") or {}).get("frames")
+        pf = prev.get("frames")
+        if not isinstance(f, int):
+            return False
+        return pf is None or f < pf or f <= 900
 
     def libdir_listing(self, libdir):
         """{文件名: md5}。用来在 restore 时找出「本次运行放进去的文件」并核对原有文件没被改。"""
@@ -252,12 +276,17 @@ class Phone:
         st, push = f"{self.devdir}/libdir", f"{self.devdir}/push"
         self.su(f"mkdir -p {push} {st} && chmod 777 {push}")
         pre = self.out(f"ls {q(libdir)}", True).split()
-        names = [os.path.basename(f) for f in local_files] + ["libnpusr_model.so"] + vendor_libs
+        # 层的本地文件名带版本号 (_tmp/npu/N1/bin/libVkLayer_refknobs-<版本>.so), 手机上固定叫 LAYER_SO
+        remote = {f: (LAYER_SO if os.path.basename(f).startswith("libVkLayer_refknobs") else os.path.basename(f))
+                  for f in local_files}
+        names = list(remote.values()) + ["libnpusr_model.so"] + vendor_libs
+        if len(set(names)) != len(names):
+            return False, f"要放进去的文件重名: {names}"
         clash = [n for n in names if n in pre]
         if clash:
             return False, f"游戏库目录里已有同名文件 {clash}, 不覆盖"
         for f in local_files:
-            if not self.push(f, f"{push}/{os.path.basename(f)}"):
+            if not self.push(f, f"{push}/{remote[f]}"):
                 return False, f"push 失败 {f}"
         if not self.push(model, f"{push}/libnpusr_model.so"):
             return False, "push 模型失败"
@@ -267,10 +296,20 @@ class Phone:
             if len(line.split()) >= 2:
                 lab_file = line.split()[0]
                 break
-        self.su(f"cp -a {q(libdir)}/. {st}/ && cp {push}/*.so {st}/", 300)
+        # cp -a 的返回值要看, 文件数要对 (R2 审查 #5): 拼一半就 bind mount, 原神启动即崩
+        if self.out(f"cp -a {q(libdir)}/. {st}/ && echo ok", True, 300) != "ok":
+            return False, "cp -a 复制游戏库目录失败"
+        n_copy = len(self.out(f"ls {st}", True).split())
+        if n_copy != len(pre):
+            return False, f"库目录副本文件数 {n_copy} ≠ 原目录 {len(pre)}, 复制不完整"
+        if self.out(f"cp {push}/*.so {st}/ && echo ok", True, 120) != "ok":
+            return False, "复制层/运行库到副本目录失败"
         for n in vendor_libs:
             if self.out(f"cp /vendor/lib64/{n} {st}/{n} && echo ok", True) != "ok":
                 return False, f"复制 /vendor/lib64/{n} 失败"
+        n_all = len(self.out(f"ls {st}", True).split())
+        if n_all != len(pre) + len(names):
+            return False, f"拼好的目录文件数 {n_all} ≠ 原目录 {len(pre)} + 我们的 {len(names)}"
         self.su(f"chown -R system:system {st} && chmod 755 {st} && chmod 755 {st}/* && chcon {lab_dir} {st} && chcon {lab_file} {st}/*")
         self.su(f"magiskpolicy --live {q(SELINUX_RULE)}")
         self.su(f"mount --bind {st} {q(libdir)}", mm=True)
@@ -280,18 +319,26 @@ class Phone:
         return True, ""
 
     def umount_libdir(self, libdir):
-        for _ in range(3):
+        # force-stop 后进程要一会儿才真退, 立刻 umount 会 EBUSY (R2 审查 #15): 先等 pidof 为空, 失败 sleep 1 再试
+        for _ in range(15):
+            if not self.pidof():
+                break
+            self.sleep(1)
+        for _ in range(6):
             if not self.is_mountpoint(libdir):
                 break
-            self.su(f"umount {q(libdir)}", mm=True)
+            if self.out(f"umount {q(libdir)} && echo ok", True, mm=True) != "ok":
+                self.sleep(1)
         return not self.is_mountpoint(libdir)
 
     def park(self, path, tag):
-        """把一个文件挪到本次运行的设备目录 (mv, 不删)。目标名带时间戳, 不覆盖。"""
+        """把一个文件 cp -p 一份到本次运行的设备目录留底 (原文件原地不动, R2 审查 #10)。目标名带时间戳, 不覆盖。"""
         self.mkdevdir("parked")
         base = os.path.basename(path)
         dst = f"{self.devdir}/parked/{tag}_{int(time.time()*1000)}_{base}"
-        self.su(f"mv {q(path)} {q(dst)}")
+        if self.out(f"test -e {q(dst)} && echo yes", True) == "yes":
+            return None
+        self.su(f"cp -p {q(path)} {q(dst)}")
         return dst if self.out(f"test -e {q(dst)} && echo yes", True) == "yes" else None
 
     def npu_csv(self):
@@ -299,8 +346,17 @@ class Phone:
         return self.out(f"cat /storage/emulated/0/Android/data/{self.pkg}/files/knobs_npuop_frames.csv 2>/dev/null", True, 120)
 
     def archive_marker(self, tag):
-        """挂层前把上一个标记挪走 (否则分不清新旧); 挪到 parked, 不删。"""
+        """挂层启动前: 旧标记留底一份 (cp -p 到 parked, 原文件不动), 并记下它的内容/帧数, 之后 marker_is_new 用来分新旧。"""
         got = []
+        txt = self.marker_text()
+        prev = {"text": txt, "json": None, "frames": None}
+        if txt:
+            try:
+                prev["json"] = json.loads(txt.splitlines()[0])
+                prev["frames"] = (prev["json"].get("readonly_stats") or {}).get("frames")
+            except (ValueError, AttributeError):
+                pass
+        self.prev_marker = prev
         for p in MARKER_DIRS:
             p = p.format(pkg=self.pkg)
             if self.out(f"test -e {q(p)} && echo yes", True) == "yes":
@@ -533,12 +589,15 @@ class DryPhone(Phone):
         return "# pid,frame,pack_gpu_ms,wait_cpu_ms,npu_cpu_ms,unpack_gpu_ms\n12345,900,0.6,0.1,2.8,1.2\n" if self.npu_active else ""
 
     def park(self, path, tag):
-        name = os.path.basename(path)
-        self.libdir_files.pop(name, None)
-        return f"{self.devdir}/parked/{tag}_{name}"
+        return f"{self.devdir}/parked/{tag}_{os.path.basename(path)}"   # 只留底, 原文件不动
 
     def archive_marker(self, tag):
+        self.prev_marker = None   # 模拟设备的标记随进程消失, 没有旧标记
         return []
+
+    def marker_text(self):
+        m = self.marker()
+        return json.dumps(m) if m else ""
 
     def launch(self):
         self.running = True
