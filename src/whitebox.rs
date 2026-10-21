@@ -16,7 +16,7 @@
 //!    结果里标 `measure_only`, 状态不会是 PASS —— 它们回答的是「这块浪费值多少」, 不是可采纳的优化。
 
 use crate::eval::{
-    adb, arm_fan_off, fan_mismatch, fan_still_on, aggregate_metrics, arm_cool_timeout, arm_wait_cool, base_report, cool_summary, judge_runs, push_tools,
+    adb, append_dropped_reason, arm_fan_off, consistency_note, fan_mismatch, fan_still_on, settle_pair, wait_charge_settled, aggregate_metrics, arm_cool_timeout, arm_wait_cool, base_report, cool_summary, judge_runs, push_tools,
     run_one_launch, run_soc_temp_max, start_with_extras, su, unavailable, wait_launch_window, launch_spec,
     psnr_rgba, adb_ok, GRAY_MIN_PSNR_DB, DEV_TMP,
 };
@@ -246,6 +246,8 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                 .or_else(|| Some("charge_suspend.sh".into()));
         }
     }
+    // 停充成功后等电池停止吸电再开第一臂 (审计 #13)
+    let charge_settle = suspended_via.as_ref().map(|_| wait_charge_settled(serial));
     let restore_charge = |serial: &str| {
         if suspended_via.is_some() {
             let cr = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
@@ -261,8 +263,12 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     let empty = BTreeMap::new();
     let (mut knob_runs, mut ctrl_runs, mut cool_log, mut checks) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut abort: Option<String> = None;
+    // 臂序随机 (审计 #13), 种子进报告; 环境不一致的对单独剔除 (审计 #9 #11)
+    let order_seed = crate::curtail::order_seed(req["protocol"]["order_seed"].as_u64());
+    let knob_first = crate::curtail::knob_first_order(rounds as usize, order_seed);
+    let mut dropped: Vec<Value> = Vec::new();
     'pairs: for i in 1..=rounds {
-        for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
+        for arm in if knob_first[i as usize - 1] { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             let tag = format!("{arm}{i}");
             let fan = arm_fan_off(serial);
             let mut c = arm_wait_cool(serial, cool_c, &tag, arm_cool_timeout(&cool_log));
@@ -306,14 +312,17 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                 break 'pairs;
             }
             match res {
-                Ok(m) => {
+                Ok(mut m) => {
                     if let (Some(t), Some(cap)) = (run_soc_temp_max(&m), req["conditions"]["temp_cap_c"].as_f64()) {
                         if t > cap {
                             abort = Some(format!("{tag} SoC 结温 {t}C 超过上限 {cap}C"));
                             break 'pairs;
                         }
                     }
+                    m["round"] = json!(i);
                     if arm == "knob" { knob_runs.push(m) } else { ctrl_runs.push(m) }
+                    // 白盒旋钮不动 GPU 档位, 档位分布照比
+                    settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true);
                 }
                 Err(e) => {
                     abort = Some(e);
@@ -328,6 +337,10 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         "cool_c_target": cool_c, "cool_reached_c": cool_reached, "cool_timeout": cool_timeout,
         "cool_per_arm": cool_log, "temp_cap_c": req["conditions"]["temp_cap_c"],
         "knob_extras": kx, "knob_checks": checks,
+        "arm_order": crate::curtail::order_note(order_seed, rounds as usize),
+        "charge_settle": charge_settle,
+        "env_consistency": consistency_note(&dropped, true),
+        "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
     });
     report["evidence_dir"] = json!(evidence.display().to_string());
     if let Some(r) = abort {
@@ -336,12 +349,16 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     }
 
     // ── 判定 ──
-    if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
-        report["verdict"]["reason"] = json!(e);
+    if knob_runs.is_empty() && !dropped.is_empty() {
+        report["verdict"]["reason"] = json!(format!(
+            "{} 对两臂测量环境都不一致 (风扇或 GPU 档位), 全部剔除, 没有可比的数据 (见 conditions_observed.env_consistency)",
+            dropped.len()
+        ));
         return done(&report);
     }
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
     report["verdict"] = verdict;
+    append_dropped_reason(&mut report, &dropped);
     let mut m = report["metrics"].take();
     let psnr = m["psnr_db"].clone();
     let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);

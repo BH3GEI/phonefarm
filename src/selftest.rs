@@ -374,6 +374,35 @@ pub fn arms_prefix(case_dir: &Path, n: usize) -> Result<(Vec<ArmRec>, Vec<ArmRec
     Ok((a, b))
 }
 
+/// 一臂的负载是否真的生效 (算子装上、干净跑完)。有逐项 checks 时按 checks 算 ——
+/// 2026-10-21 之前的 arm.json 把 capture_ok 并进了 apply_ok, 这样旧证据也能分开重判。
+pub fn arm_apply_ok(m: &Value) -> bool {
+    match m["arm"]["checks"].as_object().filter(|o| !o.is_empty()) {
+        Some(o) => o.values().all(|v| v == &json!(true)),
+        None => m["arm"]["apply_ok"].as_bool() == Some(true),
+    }
+}
+
+/// 一臂的采集窗够不够 (没记这一项的旧证据算够)。
+pub fn arm_capture_ok(m: &Value) -> bool {
+    m["arm"]["capture_ok"].as_bool() != Some(false)
+}
+
+/// 剔除采集失败的那几对 (两臂同轮, 按 arms_prefix 的顺序一一对应)。回 (A, B, 被剔除的对的标签)。
+/// 只剔这一对, 不让一臂采集失败把整道题作废 (审计 #16)。
+pub fn drop_capture_failed(a: &[ArmRec], b: &[ArmRec]) -> (Vec<ArmRec>, Vec<ArmRec>, Vec<String>) {
+    let (mut ka, mut kb, mut dropped) = (Vec::new(), Vec::new(), Vec::new());
+    for (x, y) in a.iter().zip(b.iter()) {
+        if arm_capture_ok(&x.1) && arm_capture_ok(&y.1) {
+            ka.push(x.clone());
+            kb.push(y.clone());
+        } else {
+            dropped.push(format!("{}+{}", y.0, x.0));
+        }
+    }
+    (ka, kb, dropped)
+}
+
 /// 走现有判定链: loopstat::compare + sysparam::decide。
 ///
 /// `scale`: 只给注入法用 —— 把 B 臂帧时乘上 (1+δ)、帧率除以 (1+δ), 模拟一个
@@ -421,7 +450,7 @@ pub fn judge_arms(
     let power_available = !all.is_empty()
         && all.iter().all(|(_, m)| m["env"]["power_w_mean"].as_f64().is_some())
         && sysparam::power_group_ok(all.iter().map(|(_, m)| &m["env"]));
-    let apply_ok = all.iter().all(|(_, m)| m["arm"]["apply_ok"].as_bool() == Some(true));
+    let apply_ok = all.iter().all(|(_, m)| arm_apply_ok(m));
     let temp_max = all
         .iter()
         .filter_map(|(_, m)| m["env"]["soc_temp_max_c"].as_f64())
@@ -474,10 +503,20 @@ pub fn judge_case(case_dir: &Path, n: usize, temp_cap_c: f64) -> Value {
             })
         }
     };
+    let (a, b, capture_dropped) = drop_capture_failed(&a, &b);
+    if a.is_empty() {
+        return json!({
+            "n": n, "verdict": "ABORT", "outcome": "abort",
+            "reason": format!("前 {n} 轮每一对都有一臂采集失败 (capture_ok=false), 全部剔除"),
+            "capture_dropped_pairs": capture_dropped,
+        });
+    }
     let (snap_ok, _) = snapshot_check(case_dir);
     let d = pv(&judge_arms(&a, &b, temp_cap_c, snap_ok, None));
     let mut out = d.clone();
     out["n"] = json!(n);
+    // 采集失败只剔除那一对, 剔了哪几对如实列出 (n_pairs 是剔除后实际进判定的对数)
+    out["capture_dropped_pairs"] = json!(capture_dropped);
     out["outcome"] = json!(classify(&case.kind, &d));
     // 只标出来、不改判定: GPU 档位在采集窗里被改过的臂 (见 read_pwr)
     let changed: Vec<String> = a
@@ -550,7 +589,10 @@ pub fn injection_curve(aa_dirs: &[PathBuf], n: usize, temp_cap_c: f64) -> Value 
         let Ok((a_all, b_all)) = arms_prefix(dir, p) else { continue };
         let (snap_ok, _) = snapshot_check(dir);
         for s in 0..=(p - n) {
-            windows.push((a_all[s..s + n].to_vec(), b_all[s..s + n].to_vec(), snap_ok));
+            let (a, b, _) = drop_capture_failed(&a_all[s..s + n], &b_all[s..s + n]);
+            if !a.is_empty() {
+                windows.push((a, b, snap_ok));
+            }
         }
     }
     if windows.is_empty() {
@@ -624,6 +666,7 @@ pub fn report(root: &Path, ns: &[usize]) -> Value {
                     "verdict": j["verdict"], "outcome": j["outcome"], "reason": j["reason"],
                     "wins": j["wins"], "regressions": j["regressions"],
                     "power_in_verdict": j["power_in_verdict"], "temp_max_c": j["temp_max_c"],
+                    "capture_dropped_pairs": j["capture_dropped_pairs"], "n_pairs": j["n_pairs"],
                     "frame_p95": metric_brief(&j, "frame_p95"),
                     "fps_mean": metric_brief(&j, "fps_mean"),
                     "power_w_mean": metric_brief(&j, "power_w_mean"),
@@ -1234,7 +1277,10 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
         "started_at": started_at, "cool": cool, "cool_s": py_round(cool_s, 1),
         "checks": checks, "capture_ok": capture_ok, "span_s": span,
         "expected_s": py_round(expected_s, 2),
-        "apply_ok": apply_ok && capture_ok,
+        // 审计 #16: 两件事分开记 —— apply_ok 只看负载自报 (算子装上、干净跑完),
+        // capture_ok 是采集窗够不够。以前合成一个 apply_ok, 采集失败被记成「旋钮未全部生效」,
+        // 一臂失败整题作废; 现在采集失败只剔除那一对 (见 drop_capture_failed)
+        "apply_ok": apply_ok,
         "seconds_total": py_round(t0.elapsed().as_secs_f64(), 1),
         "lock_freq": c.lock_freq,
         "pwr": { "start": pwr_start, "end": pwr_end, "changed": pwr_changed(&pwr_start, &pwr_end) },
@@ -1542,14 +1588,15 @@ fn cmd_calibrate(mut a: Args) -> Result<(), String> {
             let label = format!("cal_wg{}_{r}", l.heavy_wg);
             match run_arm_retry(&s, &c, &label, &out.join(&label), l, remote) {
                 Ok(v) => {
-                    if v["arm"]["apply_ok"] == json!(true) {
+                    if v["arm"]["apply_ok"] == json!(true) && v["arm"]["capture_ok"] != json!(false) {
                         if let Some(p50) = v["summary"]["frame_p50"].as_f64() {
                             points.push((l.heavy_wg, p50));
                         }
                     }
                     runs.push(json!({ "label": label, "heavy_wg": l.heavy_wg, "frame_p50": v["summary"]["frame_p50"],
                         "frame_p95": v["summary"]["frame_p95"], "fps_mean": v["summary"]["fps_mean"],
-                        "power_w_mean": v["env"]["power_w_mean"], "seconds_total": v["arm"]["seconds_total"], "apply_ok": v["arm"]["apply_ok"] }));
+                        "power_w_mean": v["env"]["power_w_mean"], "seconds_total": v["arm"]["seconds_total"], "apply_ok": v["arm"]["apply_ok"],
+                        "capture_ok": v["arm"]["capture_ok"] }));
                 }
                 Err(e) => runs.push(json!({ "label": label, "error": e })),
             }
@@ -1926,6 +1973,32 @@ mod tests {
         b[2].1["arm"]["apply_ok"] = json!(false);
         assert_eq!(pv(&judge_arms(&a, &b, 70.0, true, None))["verdict"], "ABORT");
         assert_eq!(classify("better", &json!({"verdict": "ABORT"})), "abort");
+    }
+
+    /// 审计 #16: 采集失败不再记成「旋钮未全部生效」, 也不再整题作废, 只剔除那一对。
+    #[test]
+    fn capture_failure_drops_only_its_pair_and_is_not_an_apply_failure() {
+        let (a, mut b) = arms(10.0, -0.05);
+        b[2].1["arm"]["capture_ok"] = json!(false);
+        assert!(arm_apply_ok(&b[2].1));
+        let (ka, kb, dropped) = drop_capture_failed(&a, &b);
+        assert_eq!((ka.len(), kb.len()), (4, 4));
+        assert_eq!(dropped, vec!["knob3+ctrl3".to_string()]);
+        assert!(ka.iter().all(|r| r.0 != "ctrl3") && kb.iter().all(|r| r.0 != "knob3"));
+        let d = pv(&judge_arms(&ka, &kb, 70.0, true, None));
+        assert_ne!(d["verdict"], "ABORT", "{d}");
+        assert_eq!(d["n_pairs"], 4);
+        // 旧证据: apply_ok 是合成的 false, 但逐项 checks 全真 → 负载其实生效了
+        let old = json!({"arm": {"apply_ok": false, "capture_ok": false,
+            "checks": {"clean_exit": true, "postfx_active": true}}});
+        assert!(arm_apply_ok(&old));
+        assert!(!arm_capture_ok(&old));
+        // checks 里真有一项假: 才是负载没生效
+        let bad = json!({"arm": {"apply_ok": false, "capture_ok": true,
+            "checks": {"clean_exit": true, "postfx_active": false}}});
+        assert!(!arm_apply_ok(&bad));
+        // 没记 capture_ok 的更旧证据: 算采集够
+        assert!(arm_capture_ok(&json!({"arm": {"apply_ok": true}})));
     }
 
     #[test]
