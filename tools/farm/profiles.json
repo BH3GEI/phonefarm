@@ -1,0 +1,37 @@
+{
+ "_说明": "farm job begin 开工前快照的键。common.<adb|hdc> 每台都快照; devices.<serial> 追加本机的键, root=true 时 sysfs/ls 走 su。守卫还会在第一次改到某个键时自动补快照, 这里列的是「没经过守卫也要核对」的。volatile = 厂商服务自己会动的键, 只记录漂移不判失败。",
+ "common": {
+  "adb": [
+   "setting:system:screen_brightness",
+   "setting:system:screen_brightness_mode",
+   "setting:system:screen_off_timeout",
+   "setting:global:stay_on_while_plugged_in",
+   "setting:system:peak_refresh_rate",
+   "setting:system:min_refresh_rate",
+   "setting:global:enable_gpu_debug_layers",
+   "setting:global:gpu_debug_app",
+   "setting:global:gpu_debug_layers",
+   "setting:global:gpu_debug_layer_app",
+   "prop:debug.vulkan.layers",
+   "prop:debug.knobs.loadop"
+  ],
+  "hdc": []
+ },
+ "devices": {
+  "91253241019A": {
+   "name": "红魔 NX809J",
+   "root": true,
+   "keys": [
+    "setting:system:refresh_rate_mode",
+    "sysfs:/sys/class/qcom-battery/charging_enabled",
+    "sysfs:/sys/class/qcom-battery/battery_charging_enabled",
+    "sysfs:/sys/class/power_supply/battery/charging_enabled",
+    "sysfs:/sys/module/zte_misc/parameters/policy_enable",
+    "ls:/data/app/*/com.miHoYo.Yuanshen*/lib/arm64"
+   ],
+   "volatile": []
+  },
+  "AVXB6R5C19000481": {"name": "荣耀 AAP-AN00", "root": false, "keys": [], "volatile": []},
+  "hdc:88X9K26901026869": {"name": "华为 EMA-AL00U", "root": false, "keys": [], "volatile": []}
+ }
+}
