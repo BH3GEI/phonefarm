@@ -1,25 +1,44 @@
 #version 450
-// npuop: NPU 输出 (uint8 RGB, 行优先) -> 放大后的图 (rgba8 storage image), 反量化 v = (q - zp) * scale
-// 每个线程 4 个像素; 要求 w*h 是 4 的倍数
-layout(local_size_x = 64) in;
+// npuop 解包: NPU 输出张量 (NHWC, 每通道 1 字节) -> 送显分辨率的 rgba8 storage image (即 upop 的 dst)。
+// 约定 (N1<->N2): 输出 4 通道 RGBA uint8, 每像素正好一个 uint, 一次读取; 3 通道也兼容 (逐字节取)。
+// 反量化 v = (q - zp) * dq, dq 已含「模型的浮点量程是 0..1 还是 0..255」; alpha 不用, 写 1。
+// 张量尺寸 (tw,th) 与送显尺寸 (dw,dh) 不同 (2268x1028 -> 2141x969 等) 时在这里做最后一次
+// 双线性重采样, 半像素对齐, 与 upop.comp 同一公式; 尺寸相同时退化为逐像素直取。
+layout(local_size_x = 16, local_size_y = 16) in;
 layout(std430, binding = 0) readonly buffer In { uint d[]; };
 layout(binding = 1, rgba8) uniform writeonly image2D dst;
-layout(push_constant) uniform P { int w; int h; float scale; float zp; } pc;
+layout(push_constant) uniform P { int tw; int th; int tc; int sgn; int dw; int dh; float dq; float zp; } pc;
+
+float qbyte(uint b) {
+    uint v = (d[b >> 2] >> ((b & 3u) * 8u)) & 0xFFu;
+    float q = float(v);
+    if (pc.sgn != 0 && v >= 128u) q -= 256.0;
+    return q;
+}
+
+vec3 tap(ivec2 p) {
+    p = clamp(p, ivec2(0), ivec2(pc.tw - 1, pc.th - 1));
+    uint i = uint(p.y * pc.tw + p.x);
+    vec3 q;
+    if (pc.tc == 4) {
+        uint u = d[i];
+        uvec3 b = uvec3(u, u >> 8, u >> 16) & 0xFFu;
+        q = vec3(b);
+        if (pc.sgn != 0) q -= vec3(greaterThanEqual(b, uvec3(128u))) * 256.0;
+    } else {
+        uint b0 = i * uint(pc.tc);
+        q = vec3(qbyte(b0), qbyte(b0 + 1u), qbyte(b0 + 2u));
+    }
+    return (q - pc.zp) * pc.dq;
+}
 
 void main() {
-    uint g = gl_GlobalInvocationID.x;
-    uint n = uint(pc.w * pc.h);
-    uint p0 = g * 4u;
-    if (p0 >= n) return;
-    uint w3[3] = uint[3](d[g * 3u], d[g * 3u + 1u], d[g * 3u + 2u]);
-    for (uint k = 0u; k < 4u; k++) {
-        vec3 c;
-        for (uint ch = 0u; ch < 3u; ch++) {
-            uint byte_i = k * 3u + ch;
-            float q = float((w3[byte_i / 4u] >> ((byte_i % 4u) * 8u)) & 0xFFu);
-            c[ch] = clamp((q - pc.zp) * pc.scale, 0.0, 1.0);
-        }
-        uint p = p0 + k;
-        imageStore(dst, ivec2(int(p % uint(pc.w)), int(p / uint(pc.w))), vec4(c, 1.0));
-    }
+    ivec2 o = ivec2(gl_GlobalInvocationID.xy);
+    if (o.x >= pc.dw || o.y >= pc.dh) return;
+    vec2 uv = (vec2(o) + 0.5) * vec2(pc.tw, pc.th) / vec2(pc.dw, pc.dh) - 0.5;
+    ivec2 b = ivec2(floor(uv));
+    vec2 f = uv - vec2(b);
+    vec3 c = mix(mix(tap(b), tap(b + ivec2(1, 0)), f.x),
+                 mix(tap(b + ivec2(0, 1)), tap(b + ivec2(1, 1)), f.x), f.y);
+    imageStore(dst, o, vec4(clamp(c, 0.0, 1.0), 1.0));
 }

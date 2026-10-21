@@ -24,6 +24,10 @@
 #include <vector>
 #include <sys/system_properties.h>
 #include <unistd.h>
+#include <algorithm>
+#include <cmath>
+#include <time.h>
+#include "npu_rt.h"
 #if __has_include("copy_spv.h")
 #include "copy_spv.h"
 #else
@@ -31,6 +35,10 @@ static const unsigned char kCopySpv[] = {0};
 static const unsigned int kCopySpvLen = 0;
 static const unsigned char kUpopSpv[] = {0};
 static const unsigned int kUpopSpvLen = 0;
+static const unsigned char kNpuPackSpv[] = {0};
+static const unsigned int kNpuPackSpvLen = 0;
+static const unsigned char kNpuUnpackSpv[] = {0};
+static const unsigned int kNpuUnpackSpvLen = 0;
 #endif
 
 // ── layer 协商接口 (来自 vk_layer.h, ABI 稳定) ──
@@ -205,6 +213,9 @@ static std::atomic<uint64_t> g_rp{0};
 static bool g_rewrite_loadop = false;
 static bool g_copyprobe = false;   // debug.knobs.copyprobe=1: 1:1 拷贝探针 (是改写, 非只读)
 static bool g_upop = false;        // debug.knobs.upop=1: 真超分算子 (gen1_loc3), dst 是送显分辨率
+// debug.knobs.npuop=1: 用 NPU 超分替换原神自己的放大 (隐含 upop: upop 的双线性就是它的回退路径)。
+// 其余参数 (debug.knobs.npuop_*) 见 npuop 一节。npuop=0 时下面所有 npuop 代码都不走。
+static bool g_npuop = false;
 // debug.knobs.frameaudit=1: 只读的「一帧步骤清单」(每个 pass 的附件/尺寸/格式/loadOp/storeOp、
 // pass 之外的拷贝/清屏/blit/resolve/dispatch、draw 数、描述符引用了哪些图), 隐含 passdump 溯源。
 // 不改任何渲染; 带 debug.knobs.frameaudit_ts=1 时另在 pass 前后插 GPU 时间戳 (只多写查询, 不碰画面)。
@@ -375,6 +386,9 @@ static std::map<VkCommandBuffer, VkRenderPass> g_cb_prev_rp;  // src 图 finalLa
 
 static void copyprobe_dispatch(VkCommandBuffer, const DevDisp&, VkRenderPass, const std::vector<VkImageView>&);
 static VkDescriptorSet copyprobe_clone(VkCommandBuffer, const DevDisp&, VkDescriptorSet);
+static std::string npuop_json();   // npuop 一节; 调用方持 g_mtx
+static std::string npuop_take_csv();   // 同上
+static void npuop_append_csv(const std::string& pkg, const std::string& csv);
 
 // ── 描述符溯源: 回答"送显那一笔 draw 到底采的是哪张图" ──
 // 纯观测, 不改任何渲染。链路是:
@@ -711,6 +725,15 @@ static void write_marker() {
                      g_cp.w, g_cp.h, g_cp.fmt, g_cp.disabled ? "true" : "false");
             json += b;
         }
+        if (g_npuop) {
+            std::string csv;
+            {
+                std::lock_guard<std::mutex> lk(g_mtx);
+                json += ",\"npuop\":" + npuop_json();
+                csv = npuop_take_csv();
+            }
+            if (!csv.empty()) npuop_append_csv(pkg, csv);
+        }
     }
     json += "}";
 
@@ -801,10 +824,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     g_upop = read_bool_prop("debug.knobs.upop");
     g_frameaudit = read_bool_prop("debug.knobs.frameaudit");
     g_frameaudit_ts = g_frameaudit && read_bool_prop("debug.knobs.frameaudit_ts");
+    g_npuop = read_bool_prop("debug.knobs.npuop");
+    if (g_npuop) g_upop = true;   // npuop 建立在 upop 的定位与 dst 上, 失败时就退回 upop 的双线性
     if (g_copyprobe || g_upop || g_frameaudit) g_dump_passes = true;   // 探针/算子/步骤清单全部建立在溯源表上
     RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d upop=%d frameaudit=%d ts=%d",
            self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe, (int)g_upop,
            (int)g_frameaudit, (int)g_frameaudit_ts);
+    if (g_npuop) RK_LOG("npuop=1 (隐含 upop=1 passdump=1)");
     auto* link = reinterpret_cast<RkInstCreateInfo*>(const_cast<void*>(ci->pNext));
     while (link && !(link->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
                      link->function == RK_LAYER_LINK_INFO))
@@ -967,6 +993,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     return r;
 }
 
+static void npuop_destroy(VkDevice dev, const DevDisp& d);   // npuop 一节
 static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocationCallbacks* a) {
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return; d = it->second; g_dev.erase(it); }
@@ -977,6 +1004,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocat
             d.DestroyQueryPool(dev, g_fa.pool, nullptr); g_fa.pool = VK_NULL_HANDLE;
         }
     }
+    if (g_npuop) npuop_destroy(dev, d);
     if (g_cp.dev == dev) {   // copyprobe 自建对象随 device 一起收
         if (g_cp.dst) { d.DestroyImageView(dev, g_cp.dst_view, nullptr); d.DestroyImage(dev, g_cp.dst, nullptr); d.FreeMemory(dev, g_cp.mem, nullptr); }
         if (g_cp.pipe) { d.DestroyPipeline(dev, g_cp.pipe, nullptr); d.DestroyPipelineLayout(dev, g_cp.pl, nullptr);
@@ -1684,6 +1712,53 @@ static bool copyprobe_ensure(VkDevice dev, const DevDisp& d, uint32_t w, uint32_
     return true;
 }
 
+// upop / copy 的注入本体 (从 copyprobe_dispatch 原样拆出, npuop 回退到双线性时也用它)。调用方必须持 g_mtx。
+static void upop_record(VkCommandBuffer cb, const DevDisp& d, VkImage src, VkImageView src_view, VkSampler src_samp,
+                        uint32_t src_layout) {
+    VkDescriptorImageInfo dii[2]{};
+    dii[0] = {src_samp, src_view, (VkImageLayout)src_layout};
+    dii[1] = {VK_NULL_HANDLE, g_cp.dst_view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet wr[2]{};
+    for (int i = 0; i < 2; i++) {
+        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = g_cp.cset;
+        wr[i].dstBinding = (uint32_t)i; wr[i].descriptorCount = 1;
+        wr[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                      : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        wr[i].pImageInfo = &dii[i];
+    }
+    d.UpdateDescriptorSets(d.dev, 2, wr, 0, nullptr);
+
+    // 注入: 三条命令全走下层直调, 不再回本层钩子 (避免递归/重复计数)
+    VkImageMemoryBarrier b[2]{};
+    b[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b[0].oldLayout = (VkImageLayout)src_layout; b[0].newLayout = (VkImageLayout)src_layout;
+    b[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b[0].image = src; b[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b[1].srcAccessMask = 0; b[1].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    b[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b[1].image = g_cp.dst; b[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
+    d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pipe);
+    d.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pl, 0, 1, &g_cp.cset, 0, nullptr);
+    d.CmdDispatch(cb, (g_cp.w + 15) / 16, (g_cp.h + 15) / 16, 1);
+    VkImageMemoryBarrier b2{};
+    b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b2.oldLayout = VK_IMAGE_LAYOUT_GENERAL; b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b2.image = g_cp.dst; b2.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b2);
+}
+
+static bool npuop_record(VkCommandBuffer cb, const DevDisp& d, VkImage src, VkImageView src_view,
+                         VkSampler src_samp, uint32_t sw, uint32_t sh);   // npuop 一节
+
 // 合成 pass 开始时 (转发 BeginRenderPass 之前) 注入拷贝。调用方必须持 g_mtx。
 static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPass prev_rp,
                                const std::vector<VkImageView>& prev_att) {
@@ -1724,45 +1799,13 @@ static void copyprobe_dispatch(VkCommandBuffer cb, const DevDisp& d, VkRenderPas
     }
     if (!src_samp) return;   // 游戏还没写过引用 src 的描述符, 本帧跳过 (首帧常见)
 
-    VkDescriptorImageInfo dii[2]{};
-    dii[0] = {src_samp, src_view, (VkImageLayout)src_layout};
-    dii[1] = {VK_NULL_HANDLE, g_cp.dst_view, VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet wr[2]{};
-    for (int i = 0; i < 2; i++) {
-        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = g_cp.cset;
-        wr[i].dstBinding = (uint32_t)i; wr[i].descriptorCount = 1;
-        wr[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-                                      : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        wr[i].pImageInfo = &dii[i];
+    // npuop: NPU 就绪时由它写 dst (NPU 结果或双线性) 并打包下一帧的输入; 没就绪返回 false, 走原 upop
+    if (g_npuop && npuop_record(cb, d, src, src_view, src_samp, im.w, im.h)) {
+        g_cp.src_img = src;
+        g_cp.copies++;
+        return;
     }
-    d.UpdateDescriptorSets(d.dev, 2, wr, 0, nullptr);
-
-    // 注入: 三条命令全走下层直调, 不再回本层钩子 (避免递归/重复计数)
-    VkImageMemoryBarrier b[2]{};
-    b[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-    b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    b[0].oldLayout = (VkImageLayout)src_layout; b[0].newLayout = (VkImageLayout)src_layout;
-    b[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b[0].image = src; b[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    b[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b[1].srcAccessMask = 0; b[1].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    b[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    b[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b[1].image = g_cp.dst; b[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
-    d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pipe);
-    d.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cp.pl, 0, 1, &g_cp.cset, 0, nullptr);
-    d.CmdDispatch(cb, (g_cp.w + 15) / 16, (g_cp.h + 15) / 16, 1);
-    VkImageMemoryBarrier b2{};
-    b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    b2.oldLayout = VK_IMAGE_LAYOUT_GENERAL; b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b2.image = g_cp.dst; b2.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b2);
+    upop_record(cb, d, src, src_view, src_samp, src_layout);
     g_cp.src_img = src;
     g_cp.copies++;
 }
@@ -1826,6 +1869,746 @@ static VkDescriptorSet copyprobe_clone(VkCommandBuffer, const DevDisp& d, VkDesc
     }
     g_cp.subs++;
     return ci->second.first;
+}
+
+// ══ npuop: 用 NPU 超分替换原神自己的放大 (debug.knobs.npuop=1, 隐含 upop + passdump) ══
+//
+// 数据流 (全部在游戏自己的线程里做, 不开线程 —— 原神会杀掉层自建的线程, 2026-10-20 实测):
+//   录制 (合成 pass 的 vkCmdBeginRenderPass, 即 upop 的注入点, 同一条命令缓冲, 不另提交):
+//     [解包] 上一次 NPU 结果 out[o] -> dst (送显分辨率, 顺带双线性重采样); 没有新结果就跑 upop 双线性
+//     [打包] 本帧低分辨率画面 src -> in[k] (模型输入形状, uint8/int8 NHWC), 之后一道 GPU->HOST 屏障
+//     游戏随后的合成 draw 经 upop 的描述符克隆采样 dst —— 和 upop 完全同一条路。
+//   提交 (vkQueueSubmit 钩子): 含打包的命令缓冲交出去之后, 紧跟一次 0 批次提交挂上我们自己的栅栏
+//     (规范: 0 批次 + 栅栏 = 此前提交到该队列的全部工作完成时置位), 不碰游戏自己的栅栏。
+//   送显 (vkQueuePresentKHR 钩子, 转发之前): 等某一帧的栅栏 -> NPU 推理 in[k] -> out[o'] (同步做完)
+//   下一帧录制时解包 out[o']。
+// 同步点只有一个: present 里的那次栅栏等待 (CPU 等 GPU)。GPU 读 NPU 结果不用另加同步 ——
+//   NPU 在 present 里同步跑完才返回, 游戏之后才提交下一帧, 而 vkQueueSubmit 自带「此前的主机写对 GPU 可见」。
+// debug.knobs.npuop_lag:
+//   1 = present 时等本帧的打包, 结果给下一帧 (画面晚 1 帧; 要等 GPU 把本帧画完, CPU 与 GPU 串行)
+//   2 = present 时等上一帧的打包 (一般早就完成, 等待≈0), 结果给下一帧 (画面晚 2 帧; NPU 与本帧 GPU 并行)。缺省 2。
+// 缓冲: 全部主机可见 + 一致 (HOST_VISIBLE|HOST_COHERENT), 建好就映射, 之后不再 map/unmap/flush。
+//   in[2]  GPU 写, NPU 侧 (CPU) 读: 优先 HOST_CACHED, CPU 读快
+//   out[2] NPU 侧 (CPU) 写, GPU 读: 优先不带 CACHED (写合并)
+//   两组各两份, 是因为 lag=2 时 NPU 读写的槽位与 GPU 正在跑的那一帧用的槽位必须错开。
+//   零拷贝 (debug.knobs.npuop_zc=1, 缺省): TFLite 的输入/输出张量直接指向这两组映射内存
+//   (TfLiteInterpreterSetCustomAllocationForTensor), CPU 不打包、不解包、不 memcpy;
+//   剩下的拷贝只在 QNN 代理内部 (张量 <-> 它自己的 rpcmem)。初始化时自检一次「换槽位真的生效」,
+//   不生效就整体回退 (宁可回退也不出错画面)。npuop_zc=0 走 TfLiteTensorCopyFrom/ToBuffer 拷贝。
+// 回退 (都回到 upop 双线性; 每种原因只记一次日志, 并写进 marker 的 npuop.notes / reason):
+//   初始化失败 / 模型形状或类型不支持 / 零拷贝自检失败       -> 永久回退
+//   某帧推理失败                                             -> 下一帧双线性; 连续 3 帧失败 -> 永久回退
+//   某帧栅栏等到预算 (npuop_budget_ms) 还没完成              -> 本帧不推理, 下一帧双线性
+//   等待+推理 > npuop_budget_ms (缺省 12) 连续 npuop_budget_frames (缺省 30) 帧 -> 永久回退
+//     单帧超预算的结果照用: 时间已经花掉了, 丢掉只会更差; 持续超才说明这条路在拖慢游戏。
+// 计时: pack / unpack 是 GPU 时间戳 (debug.knobs.npuop_ts=1 缺省开), wait / npu 是 CPU 时钟。
+//   marker 的 npuop 段给统计和最近 300 帧; 每一帧另追加到 knobs_npuop_frames.csv (只追加不覆盖)。
+// 初始化在第 debug.knobs.npuop_init_frame (缺省 300) 帧之后的 present 里做一次 (实测卡约 360 ms)。
+
+static double np_now_ms() {
+    timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+static double read_num_prop(const char* name, double dflt) {
+    char v[PROP_VALUE_MAX] = {0};
+    if (__system_property_get(name, v) <= 0 || !v[0]) return dflt;
+    char* end = nullptr;
+    double x = strtod(v, &end);
+    return end == v ? dflt : x;
+}
+
+enum { NP_WAIT_INIT = 0, NP_READY = 1, NP_DISABLED = 2 };
+struct NpTicket {                 // 一条带打包的命令缓冲
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    int k = 0;                    // 打包写进 in[k]; 时间戳用查询 4k..4k+3
+    int o = -1;                   // 解包读的 out[o]; -1 = 这一帧用的是双线性
+    uint64_t rec_frame = 0;       // 录制时的 g_frames
+    uint64_t seq = 0;             // 提交序号 (同一次 vkQueueSubmit 里的共用一个)
+    int fi = -1;                  // 挂上的栅栏下标, -1 = 没挂上
+};
+struct NpFence { VkFence f = VK_NULL_HANDLE; bool pending = false; bool waiting = false; uint64_t seq = 0; };   // waiting: present 正在等它, 不许复用
+struct NpTime { uint64_t frame; float pack, wait, npu, unpack; };   // ms, <0 = 没有
+static const size_t NP_RING = 8192;
+
+struct NpState {
+    int phase = NP_WAIT_INIT;
+    std::string reason;
+    bool cfg_read = false;
+    int lag = 2; double budget_ms = 12; int budget_frames = 30; uint64_t init_frame = 300; bool zc = true; bool ts = true;
+    NpuIo io;
+    int iw = 0, ih = 0, ic = 0, ow = 0, oh = 0, oc = 0;
+    bool isgn = false, osgn = false;
+    float qmul = 0, qzp = 0, dq = 0, dzp = 0;
+    VkDevice dev = VK_NULL_HANDLE;
+    VkBuffer in_buf[2]{}, out_buf[2]{};
+    VkDeviceMemory in_mem[2]{}, out_mem[2]{};
+    void* in_map[2]{}; void* out_map[2]{};
+    VkDeviceSize in_size = 0, out_size = 0;
+    bool in_cached = false, out_cached = false;
+    NpFence fences[4];
+    VkQueryPool qp = VK_NULL_HANDLE;
+    VkShaderModule sm[2]{}; VkDescriptorSetLayout dsl[2]{}; VkPipelineLayout pl[2]{}; VkPipeline pipe[2]{};   // 0 打包 1 解包
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet set_pack[2]{}, set_unpack[2]{};
+    VkImageView pack_view[2]{}; VkSampler pack_samp[2]{}; VkImageView unpack_dst[2]{};
+    PFN_vkCreateBuffer CreateBuffer = nullptr; PFN_vkDestroyBuffer DestroyBuffer = nullptr;
+    PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements = nullptr;
+    PFN_vkBindBufferMemory BindBufferMemory = nullptr; PFN_vkMapMemory MapMemory = nullptr;
+    PFN_vkCreateFence CreateFence = nullptr; PFN_vkDestroyFence DestroyFence = nullptr;
+    PFN_vkWaitForFences WaitForFences = nullptr; PFN_vkResetFences ResetFences = nullptr;
+    PFN_vkGetFenceStatus GetFenceStatus = nullptr; PFN_vkCmdPushConstants CmdPushConstants = nullptr;
+    int next_k = 0, latest_out = -1;
+    bool latest_valid = false;
+    uint64_t out_reader_seq[2] = {0, 0};
+    uint64_t submit_seq = 0, done_seq = 0;
+    std::map<VkCommandBuffer, NpTicket> recorded;   // 录了还没提交
+    std::vector<NpTicket> submitted;                // 提交了还没处理, 按提交顺序
+    VkQueue queue_seen = VK_NULL_HANDLE;
+    uint32_t src_w = 0, src_h = 0;
+    bool src_seen = false;
+    uint64_t n_pack = 0, n_unpack = 0, n_bilinear = 0, n_npu = 0, n_fail = 0, n_over = 0;
+    uint64_t skip_no_ticket = 0, skip_no_fence = 0, skip_timeout = 0, skip_busy = 0;
+    int fail_streak = 0, over_streak = 0;
+    double init_ms = 0, selftest_ms = 0;
+    uint64_t init_at = 0;
+    std::vector<NpTime> ring;
+    uint64_t ring_total = 0, ring_flushed = 0;
+    std::vector<std::string> notes;
+};
+static NpState g_np;
+
+// 只记一次的事件 (调用方持 g_mtx)
+static void np_note(const std::string& s) {
+    for (auto& n : g_np.notes) if (n == s) return;
+    if (g_np.notes.size() < 32) g_np.notes.push_back(s);
+    RK_LOG("npuop: %s", s.c_str());
+}
+static void np_disable(const std::string& why) {   // 调用方持 g_mtx
+    if (g_np.phase == NP_DISABLED) return;
+    g_np.phase = NP_DISABLED;
+    g_np.reason = why;
+    g_np.latest_valid = false;
+    RK_LOG("npuop 回退到 upop 双线性 (永久): %s", why.c_str());
+}
+
+static uint32_t np_memtype(const DevDisp& d, uint32_t bits, VkMemoryPropertyFlags need,
+                           VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid, bool* cached) {
+    VkPhysicalDeviceMemoryProperties mp{};
+    d.GetPhysMemProps(d.phys, &mp);
+    for (int pass = 0; pass < 4; pass++) {
+        VkMemoryPropertyFlags req = need | (pass < 2 ? want : 0);
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+            VkMemoryPropertyFlags fl = mp.memoryTypes[i].propertyFlags;
+            if (!(bits & (1u << i)) || (fl & req) != req) continue;
+            if ((pass == 0 || pass == 2) && (fl & avoid)) continue;
+            *cached = (fl & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0;
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+static bool np_buffer(const DevDisp& d, VkDeviceSize size, bool want_cached, VkBuffer* b, VkDeviceMemory* m,
+                      void** map, bool* cached, std::string* err) {
+    VkBufferCreateInfo bc{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bc.size = size; bc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT; bc.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkResult r = g_np.CreateBuffer(d.dev, &bc, nullptr, b);
+    if (r != VK_SUCCESS) { *err = "CreateBuffer " + std::to_string(r); return false; }
+    VkMemoryRequirements mr{};
+    g_np.GetBufferMemoryRequirements(d.dev, *b, &mr);
+    const VkMemoryPropertyFlags need = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    uint32_t mt = want_cached ? np_memtype(d, mr.memoryTypeBits, need, VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0, cached)
+                              : np_memtype(d, mr.memoryTypeBits, need, 0, VK_MEMORY_PROPERTY_HOST_CACHED_BIT, cached);
+    if (mt == UINT32_MAX) { *err = "没有 HOST_VISIBLE|HOST_COHERENT 显存类型"; return false; }
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = mr.size; ai.memoryTypeIndex = mt;
+    r = d.AllocateMemory(d.dev, &ai, nullptr, m);
+    if (r != VK_SUCCESS) { *err = "AllocateMemory " + std::to_string(r); return false; }
+    r = g_np.BindBufferMemory(d.dev, *b, *m, 0);
+    if (r != VK_SUCCESS) { *err = "BindBufferMemory " + std::to_string(r); return false; }
+    r = g_np.MapMemory(d.dev, *m, 0, VK_WHOLE_SIZE, 0, map);
+    if (r != VK_SUCCESS || !*map) { *err = "MapMemory " + std::to_string(r); return false; }
+    if (((uintptr_t)*map) % 64) { *err = "映射地址不是 64 字节对齐, TFLite 不收"; return false; }
+    return true;
+}
+
+static bool np_pipeline(const DevDisp& d, int idx, const unsigned char* spv, unsigned int len,
+                        VkDescriptorType t0, VkDescriptorType t1, std::string* err) {
+    if (len == 0) { *err = "内嵌 SPV 为空 (构建没编 npu shader?)"; return false; }
+    VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    smci.codeSize = len; smci.pCode = (const uint32_t*)spv;
+    VkResult r = d.CreateShaderModule(d.dev, &smci, nullptr, &g_np.sm[idx]);
+    if (r != VK_SUCCESS) { *err = "CreateShaderModule " + std::to_string(r); return false; }
+    VkDescriptorSetLayoutBinding lb[2]{};
+    lb[0].binding = 0; lb[0].descriptorType = t0; lb[0].descriptorCount = 1; lb[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    lb[1].binding = 1; lb[1].descriptorType = t1; lb[1].descriptorCount = 1; lb[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo dlci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dlci.bindingCount = 2; dlci.pBindings = lb;
+    r = d.CreateDescriptorSetLayout(d.dev, &dlci, nullptr, &g_np.dsl[idx]);
+    if (r != VK_SUCCESS) { *err = "CreateDescriptorSetLayout " + std::to_string(r); return false; }
+    VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 1; plci.pSetLayouts = &g_np.dsl[idx];
+    plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
+    r = d.CreatePipelineLayout(d.dev, &plci, nullptr, &g_np.pl[idx]);
+    if (r != VK_SUCCESS) { *err = "CreatePipelineLayout " + std::to_string(r); return false; }
+    VkComputePipelineCreateInfo cpci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpci.stage.module = g_np.sm[idx]; cpci.stage.pName = "main";
+    cpci.layout = g_np.pl[idx];
+    r = d.CreateComputePipelines(d.dev, VK_NULL_HANDLE, 1, &cpci, nullptr, &g_np.pipe[idx]);
+    if (r != VK_SUCCESS) { *err = "CreateComputePipelines " + std::to_string(r); return false; }
+    return true;
+}
+
+// 一张 NHWC 张量的形状/类型检查 (batch=1, 通道 3 或 4, 每元素 1 字节)
+static bool np_shape(const int* dims, int nd, int type, size_t bytes, int* w, int* h, int* c, bool* sgn,
+                     const char* which, std::string* err) {
+    char b[200];
+    if (nd != 4 || dims[0] != 1 || (dims[3] != 3 && dims[3] != 4)) {
+        snprintf(b, sizeof b, "%s 形状 [%d,%d,%d,%d] (nd=%d) 不是 [1,H,W,3|4]", which, dims[0], dims[1], dims[2], dims[3], nd);
+        *err = b; return false;
+    }
+    if (type != 3 && type != 9) {
+        snprintf(b, sizeof b, "%s 类型 %d 不是 uint8(3)/int8(9)", which, type);
+        *err = b; return false;
+    }
+    *h = dims[1]; *w = dims[2]; *c = dims[3]; *sgn = type == 9;
+    if ((size_t)(*w) * (*h) * (*c) != bytes) {
+        snprintf(b, sizeof b, "%s 字节数 %zu 与形状不符", which, bytes);
+        *err = b; return false;
+    }
+    return true;
+}
+
+// 读一对时间戳 (ms); 没有就返回 -1
+static float np_ts_pair(const DevDisp& d, uint32_t first) {
+    if (!g_np.qp || !d.GetQueryPoolResults) return -1.f;
+    uint64_t v[2] = {0, 0};
+    VkResult r = d.GetQueryPoolResults(d.dev, g_np.qp, first, 2, sizeof v, v, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (r != VK_SUCCESS || v[1] < v[0]) return -1.f;
+    return (float)((double)(v[1] - v[0]) * d.ts_period_ns / 1e6);
+}
+
+// 已完成的栅栏 -> done_seq 前移 (调用方持 g_mtx)
+static void np_poll() {
+    for (auto& f : g_np.fences)
+        if (f.pending && g_np.GetFenceStatus(g_np.dev, f.f) == VK_SUCCESS) {
+            f.pending = false;
+            if (f.seq > g_np.done_seq) g_np.done_seq = f.seq;
+        }
+}
+
+// 初始化 (present 里, 游戏线程, 同步)。成功则 phase=READY。
+static void npuop_init(const DevDisp& d, uint64_t f) {
+    double t0 = np_now_ms();
+    std::string err;
+    auto fail = [&](const std::string& why) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        np_disable("初始化失败: " + why);
+    };
+    g_np.init_at = f;
+    NpuIo io;
+    if (!npu_rt_init(&io)) { fail("NPU 运行时 (TFLite/QNN/模型) 加载失败, 详见 npuprobe.txt"); return; }
+    g_np.io = io;
+    g_np.init_ms = np_now_ms() - t0;
+    if (!np_shape(io.in_dims, io.in_ndims, io.in_type, io.in_bytes, &g_np.iw, &g_np.ih, &g_np.ic, &g_np.isgn, "输入", &err) ||
+        !np_shape(io.out_dims, io.out_ndims, io.out_type, io.out_bytes, &g_np.ow, &g_np.oh, &g_np.oc, &g_np.osgn, "输出", &err)) {
+        fail(err); return;
+    }
+    // 量化: 模型的浮点量程可能是 0..1 (scale≈1/255) 或 0..255 (scale≈1), 看 scale 的量级判断。
+    // 没有量化参数 (scale=0) 就当原始像素值。
+    {
+        float s = io.in_scale;
+        if (s <= 0) { g_np.qmul = 255.f; g_np.qzp = g_np.isgn ? -128.f : 0.f; }
+        else { g_np.qmul = (s > 0.1f ? 255.f : 1.f) / s; g_np.qzp = (float)io.in_zp; }
+        s = io.out_scale;
+        if (s <= 0) { g_np.dq = 1.f / 255.f; g_np.dzp = g_np.osgn ? -128.f : 0.f; }
+        else { g_np.dq = s / (s > 0.1f ? 255.f : 1.f); g_np.dzp = (float)io.out_zp; }
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        char b[256];
+        if (g_np.ow != 2 * g_np.iw || g_np.oh != 2 * g_np.ih) {
+            snprintf(b, sizeof b, "模型输出 %dx%d 不是输入 %dx%d 的 2 倍 (照常用, 解包重采样到送显尺寸)", g_np.ow, g_np.oh, g_np.iw, g_np.ih);
+            np_note(b);
+        }
+        if (g_np.oc != 4) np_note("模型输出是 3 通道, 解包逐字节取 (接口约定是 4 通道 RGBA)");
+        if (g_np.src_w != (uint32_t)g_np.iw || g_np.src_h != (uint32_t)g_np.ih) {
+            snprintf(b, sizeof b, "游戏画面 %ux%u 与模型输入 %dx%d 不同, 打包时双线性重采样", g_np.src_w, g_np.src_h, g_np.iw, g_np.ih);
+            np_note(b);
+        }
+    }
+    // 下层函数
+#define NP_FN(field, T, name) g_np.field = (T)d.gdpa(d.dev, name); if (!g_np.field) { fail(std::string("拿不到 ") + name); return; }
+    NP_FN(CreateBuffer, PFN_vkCreateBuffer, "vkCreateBuffer");
+    NP_FN(DestroyBuffer, PFN_vkDestroyBuffer, "vkDestroyBuffer");
+    NP_FN(GetBufferMemoryRequirements, PFN_vkGetBufferMemoryRequirements, "vkGetBufferMemoryRequirements");
+    NP_FN(BindBufferMemory, PFN_vkBindBufferMemory, "vkBindBufferMemory");
+    NP_FN(MapMemory, PFN_vkMapMemory, "vkMapMemory");
+    NP_FN(CreateFence, PFN_vkCreateFence, "vkCreateFence");
+    NP_FN(DestroyFence, PFN_vkDestroyFence, "vkDestroyFence");
+    NP_FN(WaitForFences, PFN_vkWaitForFences, "vkWaitForFences");
+    NP_FN(ResetFences, PFN_vkResetFences, "vkResetFences");
+    NP_FN(GetFenceStatus, PFN_vkGetFenceStatus, "vkGetFenceStatus");
+    NP_FN(CmdPushConstants, PFN_vkCmdPushConstants, "vkCmdPushConstants");
+#undef NP_FN
+    if (!d.GetPhysMemProps) { fail("拿不到 vkGetPhysicalDeviceMemoryProperties"); return; }
+    g_np.dev = d.dev;
+    g_np.in_size = (io.in_bytes + 3) & ~(size_t)3;
+    g_np.out_size = (io.out_bytes + 3) & ~(size_t)3;
+    for (int i = 0; i < 2; i++) {
+        if (!np_buffer(d, g_np.in_size, true, &g_np.in_buf[i], &g_np.in_mem[i], &g_np.in_map[i], &g_np.in_cached, &err) ||
+            !np_buffer(d, g_np.out_size, false, &g_np.out_buf[i], &g_np.out_mem[i], &g_np.out_map[i], &g_np.out_cached, &err)) {
+            fail("缓冲: " + err); return;
+        }
+    }
+    for (auto& fe : g_np.fences) {
+        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (g_np.CreateFence(d.dev, &fci, nullptr, &fe.f) != VK_SUCCESS) { fail("CreateFence"); return; }
+    }
+    if (g_np.ts && d.CreateQueryPool && d.CmdResetQueryPool && d.CmdWriteTimestamp && d.ts_period_ns > 0) {
+        VkQueryPoolCreateInfo qci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qci.queryType = VK_QUERY_TYPE_TIMESTAMP; qci.queryCount = 8;
+        if (d.CreateQueryPool(d.dev, &qci, nullptr, &g_np.qp) != VK_SUCCESS) g_np.qp = VK_NULL_HANDLE;
+    }
+    if (!np_pipeline(d, 0, kNpuPackSpv, kNpuPackSpvLen, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &err) ||
+        !np_pipeline(d, 1, kNpuUnpackSpv, kNpuUnpackSpvLen, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &err)) {
+        fail("管线: " + err); return;
+    }
+    {
+        VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2},
+                                      {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2}};
+        VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        dpci.maxSets = 4; dpci.poolSizeCount = 3; dpci.pPoolSizes = ps;
+        if (d.CreateDescriptorPool(d.dev, &dpci, nullptr, &g_np.pool) != VK_SUCCESS) { fail("CreateDescriptorPool"); return; }
+        VkDescriptorSetLayout ls[4] = {g_np.dsl[0], g_np.dsl[0], g_np.dsl[1], g_np.dsl[1]};
+        VkDescriptorSet sets[4]{};
+        VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dsai.descriptorPool = g_np.pool; dsai.descriptorSetCount = 4; dsai.pSetLayouts = ls;
+        if (d.AllocateDescriptorSets(d.dev, &dsai, sets) != VK_SUCCESS) { fail("AllocateDescriptorSets"); return; }
+        g_np.set_pack[0] = sets[0]; g_np.set_pack[1] = sets[1];
+        g_np.set_unpack[0] = sets[2]; g_np.set_unpack[1] = sets[3];
+        // 固定不变的那一半: 打包写 in[k], 解包读 out[o]
+        VkDescriptorBufferInfo bi[4] = {{g_np.in_buf[0], 0, VK_WHOLE_SIZE}, {g_np.in_buf[1], 0, VK_WHOLE_SIZE},
+                                        {g_np.out_buf[0], 0, VK_WHOLE_SIZE}, {g_np.out_buf[1], 0, VK_WHOLE_SIZE}};
+        VkWriteDescriptorSet w[4]{};
+        for (int i = 0; i < 4; i++) {
+            w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = sets[i];
+            w[i].dstBinding = i < 2 ? 1 : 0; w[i].descriptorCount = 1;
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
+        }
+        d.UpdateDescriptorSets(d.dev, 4, w, 0, nullptr);
+    }
+    // 零拷贝自检: 两个槽位各灌一种常数输入、各推一次, 两份输出都必须被写过且互不相同。
+    // 防的是 QNN 代理缓存了第一次的张量地址 —— 那样换槽位后读写的还是旧内存, 画面会错而不报错。
+    if (g_np.zc) {
+        double s0 = np_now_ms();
+        if (!io.can_bind) { fail("TFLite 没有 SetCustomAllocationForTensor, 可设 debug.knobs.npuop_zc=0 走拷贝"); return; }
+        const float qlo = g_np.isgn ? -128.f : 0.f;   // 量化后的取值下限 (int8 / uint8)
+        auto qbyte = [&](float v) {                      // 像素值 v∈[0,1] -> 张量里的那个字节
+            float q = std::min(qlo + 255.f, std::max(qlo, std::round(v * g_np.qmul + g_np.qzp)));
+            return (int)(uint8_t)(int)q;                 // int8 取补码低 8 位
+        };
+        memset(g_np.in_map[0], qbyte(0.f), g_np.in_size);
+        memset(g_np.in_map[1], qbyte(0.8f), g_np.in_size);
+        memset(g_np.out_map[0], 0x5A, g_np.out_size);
+        memset(g_np.out_map[1], 0x5A, g_np.out_size);
+        bool ok = npu_rt_bind(g_np.in_map[0], g_np.in_size, g_np.out_map[0], g_np.out_size) && npu_rt_invoke() &&
+                  npu_rt_bind(g_np.in_map[1], g_np.in_size, g_np.out_map[1], g_np.out_size) && npu_rt_invoke();
+        if (!ok) { fail("零拷贝绑定或推理失败, 可设 debug.knobs.npuop_zc=0 走拷贝"); return; }
+        size_t n = std::min<size_t>(g_np.out_size, 1u << 20);
+        const uint8_t* a = (const uint8_t*)g_np.out_map[0];
+        const uint8_t* b = (const uint8_t*)g_np.out_map[1];
+        bool w0 = false, w1 = false;
+        for (size_t i = 0; i < n && !(w0 && w1); i++) { w0 |= a[i] != 0x5A; w1 |= b[i] != 0x5A; }
+        if (!w0 || !w1 || memcmp(a, b, n) == 0) {
+            fail("零拷贝自检失败 (换槽位不生效), 可设 debug.knobs.npuop_zc=0 走拷贝"); return;
+        }
+        g_np.selftest_ms = np_now_ms() - s0;
+    }
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_np.phase = NP_READY;
+    g_np.ring.reserve(NP_RING);
+    RK_LOG("npuop 就绪 (第 %llu 帧): 模型 %dx%dx%d -> %dx%dx%d, 画面 %ux%u, 送显 %ux%u, lag=%d zc=%d ts=%d, "
+           "in %s / out %s, 初始化 %.0f ms 自检 %.0f ms", (unsigned long long)f, g_np.iw, g_np.ih, g_np.ic,
+           g_np.ow, g_np.oh, g_np.oc, g_np.src_w, g_np.src_h, g_cp.w, g_cp.h, g_np.lag, (int)g_np.zc, g_np.qp ? 1 : 0,
+           g_np.in_cached ? "cached" : "uncached", g_np.out_cached ? "cached" : "uncached", g_np.init_ms, g_np.selftest_ms);
+}
+
+// 录制: 合成 pass 开始前 (调用方持 g_mtx)。返回 true = dst 已由这里写好 (NPU 结果或双线性)。
+static bool npuop_record(VkCommandBuffer cb, const DevDisp& d, VkImage src, VkImageView src_view,
+                         VkSampler src_samp, uint32_t sw, uint32_t sh) {
+    g_np.src_w = sw; g_np.src_h = sh; g_np.src_seen = true;
+    if (g_np.phase != NP_READY) return false;
+    uint64_t rf = g_frames.load();
+    {   // 同一条命令缓冲、同一帧里第二个送显尺寸 pass: dst 已经写好, 不重复做
+        auto it = g_np.recorded.find(cb);
+        if (it != g_np.recorded.end() && it->second.rec_frame == rf) return true;
+    }
+    const VkImageLayout SRL = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const int k = g_np.next_k;
+    g_np.next_k ^= 1;
+    const int o = g_np.latest_valid ? g_np.latest_out : -1;
+    const bool ts = g_np.qp != VK_NULL_HANDLE;
+    if (ts) d.CmdResetQueryPool(cb, g_np.qp, 4 * k, 4);
+
+    // ── 1. dst: NPU 结果解包, 或双线性 ──
+    if (o >= 0) {
+        if (g_np.unpack_dst[o] != g_cp.dst_view) {   // dst 重建过 (swapchain 尺寸变了) 才重写
+            VkDescriptorImageInfo ii{VK_NULL_HANDLE, g_cp.dst_view, VK_IMAGE_LAYOUT_GENERAL};
+            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = g_np.set_unpack[o]; w.dstBinding = 1; w.descriptorCount = 1;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w.pImageInfo = &ii;
+            d.UpdateDescriptorSets(d.dev, 1, &w, 0, nullptr);
+            g_np.unpack_dst[o] = g_cp.dst_view;
+        }
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.srcAccessMask = 0; b.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = g_cp.dst; b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        if (ts) d.CmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_np.qp, 4 * k + 2);
+        struct { int32_t tw, th, tc, sgn, dw, dh; float dq, zp; } pc{g_np.ow, g_np.oh, g_np.oc, g_np.osgn ? 1 : 0,
+                                                                      (int32_t)g_cp.w, (int32_t)g_cp.h, g_np.dq, g_np.dzp};
+        d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_np.pipe[1]);
+        d.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_np.pl[1], 0, 1, &g_np.set_unpack[o], 0, nullptr);
+        g_np.CmdPushConstants(cb, g_np.pl[1], VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+        d.CmdDispatch(cb, (g_cp.w + 15) / 16, (g_cp.h + 15) / 16, 1);
+        if (ts) d.CmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_np.qp, 4 * k + 3);
+        VkImageMemoryBarrier b2{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b2.oldLayout = VK_IMAGE_LAYOUT_GENERAL; b2.newLayout = SRL;
+        b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b2.image = g_cp.dst; b2.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b2);
+        g_np.n_unpack++;
+    } else {
+        upop_record(cb, d, src, src_view, src_samp, SRL);
+        g_np.n_bilinear++;
+    }
+
+    // ── 2. 打包本帧画面 -> in[k] (排在 dst 屏障之后, 可以和游戏的合成 pass 重叠) ──
+    if (g_np.pack_view[k] != src_view || g_np.pack_samp[k] != src_samp) {
+        VkDescriptorImageInfo ii{src_samp, src_view, SRL};
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = g_np.set_pack[k]; w.dstBinding = 0; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.pImageInfo = &ii;
+        d.UpdateDescriptorSets(d.dev, 1, &w, 0, nullptr);
+        g_np.pack_view[k] = src_view; g_np.pack_samp[k] = src_samp;
+    }
+    VkImageMemoryBarrier sb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    sb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    sb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    sb.oldLayout = SRL; sb.newLayout = SRL;   // 布局论证同 copyprobe_dispatch: 游戏此时已把 src 转成可采样
+    sb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; sb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    sb.image = src; sb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &sb);
+    if (ts) d.CmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_np.qp, 4 * k + 0);
+    struct { int32_t sw, sh, w, h, c, sgn; float qmul, zp; } pc{(int32_t)sw, (int32_t)sh, g_np.iw, g_np.ih, g_np.ic,
+                                                                g_np.isgn ? 1 : 0, g_np.qmul, g_np.qzp};
+    d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_np.pipe[0]);
+    d.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_np.pl[0], 0, 1, &g_np.set_pack[k], 0, nullptr);
+    g_np.CmdPushConstants(cb, g_np.pl[0], VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    uint32_t words = (uint32_t)(g_np.in_size / 4);
+    d.CmdDispatch(cb, (words + 63) / 64, 1, 1);
+    if (ts) d.CmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_np.qp, 4 * k + 1);
+    VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    hb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT; hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    hb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hb.buffer = g_np.in_buf[k]; hb.offset = 0; hb.size = VK_WHOLE_SIZE;
+    d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 0, nullptr, 1, &hb, 0, nullptr);
+    NpTicket t;
+    t.cb = cb; t.k = k; t.o = o; t.rec_frame = rf;
+    g_np.recorded[cb] = t;
+    g_np.n_pack++;
+    return true;
+}
+
+// 提交之后 (vkQueueSubmit / vkQueueSubmit2 钩子, 游戏的提交已成功)
+static void npuop_after_submit(VkQueue q, const DevDisp& d, const std::vector<VkCommandBuffer>& cbs) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_np.phase != NP_READY || g_np.recorded.empty()) return;
+    std::vector<NpTicket> got;
+    for (VkCommandBuffer cb : cbs) {
+        auto it = g_np.recorded.find(cb);
+        if (it == g_np.recorded.end()) continue;
+        got.push_back(it->second);
+        g_np.recorded.erase(it);
+    }
+    if (got.empty()) return;
+    np_poll();
+    uint64_t seq = ++g_np.submit_seq;
+    int fi = -1;
+    for (int i = 0; i < 4; i++) if (!g_np.fences[i].pending && !g_np.fences[i].waiting) { fi = i; break; }
+    if (fi >= 0) {
+        NpFence& fe = g_np.fences[fi];
+        VkResult r = g_np.ResetFences(g_np.dev, 1, &fe.f);
+        if (r == VK_SUCCESS) r = d.QueueSubmit(q, 0, nullptr, fe.f);   // 0 批次: 只为挂栅栏
+        if (r == VK_SUCCESS) { fe.pending = true; fe.seq = seq; }
+        else { fi = -1; np_note("挂栅栏的 0 批次提交失败 r=" + std::to_string(r)); }
+    } else np_note("4 个栅栏都还没完成 (GPU 落后 4 帧以上), 这一帧不挂栅栏, 不推理");
+    if (g_np.queue_seen && g_np.queue_seen != q) np_note("游戏在多个队列上提交合成 pass (按单队列假设, 结果仍可用但未验证)");
+    g_np.queue_seen = q;
+    for (auto& t : got) {
+        t.seq = seq; t.fi = fi;
+        if (t.o >= 0 && seq > g_np.out_reader_seq[t.o]) g_np.out_reader_seq[t.o] = seq;
+        g_np.submitted.push_back(t);
+    }
+    while (g_np.submitted.size() > 8) g_np.submitted.erase(g_np.submitted.begin());
+}
+
+// 送显 (转发之前, 游戏线程): 初始化 / 等栅栏 + NPU 推理
+static void npuop_on_present(const DevDisp& d, uint64_t f) {
+    if (!g_np.cfg_read) {
+        g_np.cfg_read = true;
+        g_np.lag = (int)read_num_prop("debug.knobs.npuop_lag", 2) == 1 ? 1 : 2;
+        g_np.budget_ms = read_num_prop("debug.knobs.npuop_budget_ms", 12);
+        g_np.budget_frames = std::max(1, (int)read_num_prop("debug.knobs.npuop_budget_frames", 30));
+        g_np.init_frame = (uint64_t)std::max(1.0, read_num_prop("debug.knobs.npuop_init_frame", 300));
+        g_np.zc = read_num_prop("debug.knobs.npuop_zc", 1) != 0;
+        g_np.ts = read_num_prop("debug.knobs.npuop_ts", 1) != 0;
+        RK_LOG("npuop 配置: lag=%d budget=%.1fms x%d帧 init_frame=%llu zc=%d ts=%d", g_np.lag, g_np.budget_ms,
+               g_np.budget_frames, (unsigned long long)g_np.init_frame, (int)g_np.zc, (int)g_np.ts);
+    }
+    if (g_np.phase == NP_DISABLED) return;
+    if (g_np.phase == NP_WAIT_INIT) {
+        bool go = false;
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            if (g_cp.disabled) { np_disable("upop 通道已停用, npuop 依赖它的定位与 dst"); return; }
+            go = f >= g_np.init_frame && g_np.src_seen && g_cp.dst != VK_NULL_HANDLE && g_cp.dev == d.dev;
+        }
+        if (go) npuop_init(d, f);
+        return;
+    }
+
+    // ── 选这次要推理的那一帧 ──
+    NpTicket t;
+    int o = 0;
+    VkFence fence = VK_NULL_HANDLE;
+    bool need_wait = false;
+    struct Unwait {   // 不管从哪条路返回, 都把 waiting 标记撤掉
+        int fi = -1;
+        ~Unwait() { if (fi >= 0) { std::lock_guard<std::mutex> lk(g_mtx); g_np.fences[fi].waiting = false; } }
+    } unwait;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (g_np.phase != NP_READY) return;
+        np_poll();
+        int idx = -1;
+        for (int i = (int)g_np.submitted.size() - 1; i >= 0; i--) {
+            // lag 1: 最新提交的那条; lag 2: 上一次 present 之前录的最新一条 (本帧 GPU 还在跑的那条留到下次)
+            if (g_np.lag == 1 || g_np.submitted[i].rec_frame + 1 < f) { idx = i; break; }
+        }
+        if (idx < 0) { g_np.skip_no_ticket++; g_np.latest_valid = false; return; }
+        t = g_np.submitted[idx];
+        g_np.submitted.erase(g_np.submitted.begin(), g_np.submitted.begin() + idx + 1);   // 它和更旧的都不再要
+        if (t.fi < 0) { g_np.skip_no_fence++; g_np.latest_valid = false; return; }
+        // 还有更新的一帧要往同一个 in[k] 写: GPU 可能正写着, 不能读
+        bool clash = false;
+        for (auto& s : g_np.submitted) if (s.k == t.k) clash = true;
+        for (auto& kv : g_np.recorded) if (kv.second.k == t.k && kv.second.rec_frame >= t.rec_frame) clash = true;
+        if (clash) { g_np.skip_busy++; g_np.latest_valid = false; np_note("输入槽位冲突 (一帧录了多条合成 pass?), 跳过"); return; }
+        o = g_np.latest_out >= 0 ? 1 - g_np.latest_out : 0;
+        need_wait = g_np.done_seq < t.seq;
+        fence = g_np.fences[t.fi].f;   // 若已被后来的提交复用, 那条更晚, 等它也覆盖 t (同一队列按序完成)
+        if (need_wait) { g_np.fences[t.fi].waiting = true; unwait.fi = t.fi; }
+    }
+
+    // ── 等 GPU 把这一帧的打包做完 ──
+    double t0 = np_now_ms();
+    if (need_wait) {
+        uint64_t ns = (uint64_t)(g_np.budget_ms * 1e6);
+        VkResult r = g_np.WaitForFences(g_np.dev, 1, &fence, VK_TRUE, ns);
+        if (r == VK_TIMEOUT) {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            g_np.skip_timeout++; g_np.latest_valid = false;
+            np_note("栅栏等到预算还没完成, 该帧不推理 (下一帧用双线性)");
+            return;
+        }
+        if (r != VK_SUCCESS) {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            np_disable("WaitForFences 出错 r=" + std::to_string(r));
+            return;
+        }
+    }
+    double t1 = np_now_ms();
+    float pack_ms = -1, unpack_ms = -1;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        np_poll();
+        if (g_np.done_seq < t.seq) g_np.done_seq = t.seq;   // 刚等到的就是覆盖 t 的栅栏
+        if (g_np.out_reader_seq[o] > g_np.done_seq) {       // 还有在跑的帧读着 out[o]
+            g_np.skip_busy++; g_np.latest_valid = false;
+            np_note("输出槽位仍被 GPU 读, 跳过这一帧");
+            return;
+        }
+        pack_ms = np_ts_pair(d, 4 * t.k);
+        if (t.o >= 0) unpack_ms = np_ts_pair(d, 4 * t.k + 2);
+    }
+
+    // ── NPU 推理 (同步) ──
+    bool ok;
+    if (g_np.zc) ok = npu_rt_bind(g_np.in_map[t.k], g_np.in_size, g_np.out_map[o], g_np.out_size) && npu_rt_invoke();
+    else ok = npu_rt_run(g_np.in_map[t.k], g_np.io.in_bytes, g_np.out_map[o], g_np.io.out_bytes);
+    double t2 = np_now_ms();
+
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_np.phase != NP_READY) return;
+    if (!ok) {
+        g_np.n_fail++; g_np.latest_valid = false;
+        np_note("某帧推理失败 (下一帧用双线性)");
+        if (++g_np.fail_streak >= 3) np_disable("连续 3 帧推理失败");
+        return;
+    }
+    g_np.fail_streak = 0;
+    g_np.latest_out = o;
+    g_np.latest_valid = true;
+    g_np.n_npu++;
+    double spent = t2 - t0;
+    if (spent > g_np.budget_ms) {
+        g_np.n_over++;
+        char b[160];
+        snprintf(b, sizeof b, "首次超预算: 等待 %.2f + 推理 %.2f ms > %.1f ms (结果照用)", t1 - t0, t2 - t1, g_np.budget_ms);
+        np_note(b);
+        if (++g_np.over_streak >= g_np.budget_frames) {
+            snprintf(b, sizeof b, "连续 %d 帧 等待+推理 超过 %.1f ms", g_np.over_streak, g_np.budget_ms);
+            np_disable(b);
+        }
+    } else g_np.over_streak = 0;
+    NpTime rec{f, pack_ms, (float)(t1 - t0), (float)(t2 - t1), unpack_ms};
+    if (g_np.ring.size() < NP_RING) g_np.ring.push_back(rec);
+    else g_np.ring[g_np.ring_total % NP_RING] = rec;
+    g_np.ring_total++;
+}
+
+static std::string np_esc(const std::string& s) {
+    std::string o;
+    for (char c : s) { if (c == '"' || c == '\\') o += '\\'; o += c; }
+    return o;
+}
+
+// marker 的 npuop 段 (调用方持 g_mtx)
+static std::string npuop_json() {
+    const char* ph = g_np.phase == NP_READY ? "ready" : g_np.phase == NP_DISABLED ? "disabled" : "wait_init";
+    char b[1024];
+    std::string j = std::string("{\"phase\":\"") + ph + "\",\"reason\":" +
+                    (g_np.reason.empty() ? std::string("null") : "\"" + np_esc(g_np.reason) + "\"");
+    snprintf(b, sizeof b,
+             ",\"cfg\":{\"lag\":%d,\"budget_ms\":%.2f,\"budget_frames\":%d,\"init_frame\":%llu,\"zc\":%s,\"ts\":%s}"
+             ",\"model\":{\"in\":[%d,%d,%d,%d],\"in_type\":%d,\"in_scale\":%.8f,\"in_zp\":%d,\"in_bytes\":%zu"
+             ",\"out\":[%d,%d,%d,%d],\"out_type\":%d,\"out_scale\":%.8f,\"out_zp\":%d,\"out_bytes\":%zu}"
+             ",\"src\":[%u,%u],\"dst\":[%u,%u],\"mem\":{\"in_cached\":%s,\"out_cached\":%s}"
+             ",\"init_at_frame\":%llu,\"init_ms\":%.1f,\"selftest_ms\":%.1f",
+             g_np.lag, g_np.budget_ms, g_np.budget_frames, (unsigned long long)g_np.init_frame,
+             g_np.zc ? "true" : "false", g_np.ts ? "true" : "false",
+             g_np.io.in_dims[0], g_np.io.in_dims[1], g_np.io.in_dims[2], g_np.io.in_dims[3], g_np.io.in_type,
+             g_np.io.in_scale, g_np.io.in_zp, g_np.io.in_bytes,
+             g_np.io.out_dims[0], g_np.io.out_dims[1], g_np.io.out_dims[2], g_np.io.out_dims[3], g_np.io.out_type,
+             g_np.io.out_scale, g_np.io.out_zp, g_np.io.out_bytes,
+             g_np.src_w, g_np.src_h, g_cp.w, g_cp.h, g_np.in_cached ? "true" : "false", g_np.out_cached ? "true" : "false",
+             (unsigned long long)g_np.init_at, g_np.init_ms, g_np.selftest_ms);
+    j += b;
+    snprintf(b, sizeof b,
+             ",\"counts\":{\"pack\":%llu,\"unpack\":%llu,\"bilinear\":%llu,\"npu_ok\":%llu,\"npu_fail\":%llu,"
+             "\"over_budget\":%llu,\"skip_no_ticket\":%llu,\"skip_no_fence\":%llu,\"skip_fence_timeout\":%llu,\"skip_busy\":%llu}",
+             (unsigned long long)g_np.n_pack, (unsigned long long)g_np.n_unpack, (unsigned long long)g_np.n_bilinear,
+             (unsigned long long)g_np.n_npu, (unsigned long long)g_np.n_fail, (unsigned long long)g_np.n_over,
+             (unsigned long long)g_np.skip_no_ticket, (unsigned long long)g_np.skip_no_fence,
+             (unsigned long long)g_np.skip_timeout, (unsigned long long)g_np.skip_busy);
+    j += b;
+    // 统计: 环里最近 NP_RING 帧
+    auto stat = [&](const char* name, float NpTime::*m) {
+        std::vector<float> v;
+        for (auto& r : g_np.ring) if (r.*m >= 0) v.push_back(r.*m);
+        char s[200];
+        if (v.empty()) { snprintf(s, sizeof s, "\"%s\":null", name); return std::string(s); }
+        std::sort(v.begin(), v.end());
+        double sum = 0; for (float x : v) sum += x;
+        snprintf(s, sizeof s, "\"%s\":{\"n\":%zu,\"mean\":%.3f,\"p50\":%.3f,\"p95\":%.3f,\"max\":%.3f}", name, v.size(),
+                 sum / v.size(), v[v.size() / 2], v[std::min(v.size() - 1, v.size() * 95 / 100)], v.back());
+        return std::string(s);
+    };
+    j += ",\"timing_ms\":{" + stat("pack_gpu", &NpTime::pack) + "," + stat("wait_cpu", &NpTime::wait) + "," +
+         stat("npu_cpu", &NpTime::npu) + "," + stat("unpack_gpu", &NpTime::unpack) + "}";
+    // 最近 300 帧原始值: [present 帧号, pack, wait, npu, unpack], -1 = 没有
+    j += ",\"per_frame_cols\":[\"frame\",\"pack_gpu_ms\",\"wait_cpu_ms\",\"npu_cpu_ms\",\"unpack_gpu_ms\"],\"per_frame_tail\":[";
+    uint64_t n = std::min<uint64_t>(g_np.ring_total, 300);
+    for (uint64_t i = 0; i < n; i++) {
+        const NpTime& r = g_np.ring[(g_np.ring_total - n + i) % NP_RING];
+        snprintf(b, sizeof b, "%s[%llu,%.3f,%.3f,%.3f,%.3f]", i ? "," : "", (unsigned long long)r.frame, r.pack, r.wait, r.npu, r.unpack);
+        j += b;
+    }
+    j += "],\"notes\":[";
+    for (size_t i = 0; i < g_np.notes.size(); i++) j += std::string(i ? "," : "") + "\"" + np_esc(g_np.notes[i]) + "\"";
+    j += "]}";
+    return j;
+}
+
+// 每帧计时追加到 knobs_npuop_frames.csv (只追加, 从上次落盘处接着写)。调用方持 g_mtx, 返回要写的文本。
+static std::string npuop_take_csv() {
+    std::string out;
+    if (g_np.ring_flushed + NP_RING < g_np.ring_total) g_np.ring_flushed = g_np.ring_total - NP_RING;   // 环已覆盖的丢掉
+    if (g_np.ring_flushed == 0 && g_np.ring_total > 0) out += "# pid,frame,pack_gpu_ms,wait_cpu_ms,npu_cpu_ms,unpack_gpu_ms\n";
+    char b[160];
+    for (uint64_t i = g_np.ring_flushed; i < g_np.ring_total; i++) {
+        const NpTime& r = g_np.ring[i % NP_RING];
+        snprintf(b, sizeof b, "%d,%llu,%.3f,%.3f,%.3f,%.3f\n", (int)getpid(), (unsigned long long)r.frame, r.pack, r.wait, r.npu, r.unpack);
+        out += b;
+    }
+    g_np.ring_flushed = g_np.ring_total;
+    return out;
+}
+
+static void npuop_destroy(VkDevice dev, const DevDisp& d) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_np.dev != dev) return;
+    for (int i = 0; i < 2; i++) {
+        if (g_np.pipe[i]) d.DestroyPipeline(dev, g_np.pipe[i], nullptr);
+        if (g_np.pl[i]) d.DestroyPipelineLayout(dev, g_np.pl[i], nullptr);
+        if (g_np.dsl[i]) d.DestroyDescriptorSetLayout(dev, g_np.dsl[i], nullptr);
+        if (g_np.sm[i]) d.DestroyShaderModule(dev, g_np.sm[i], nullptr);
+        if (g_np.in_buf[i]) g_np.DestroyBuffer(dev, g_np.in_buf[i], nullptr);
+        if (g_np.out_buf[i]) g_np.DestroyBuffer(dev, g_np.out_buf[i], nullptr);
+        if (g_np.in_mem[i]) d.FreeMemory(dev, g_np.in_mem[i], nullptr);
+        if (g_np.out_mem[i]) d.FreeMemory(dev, g_np.out_mem[i], nullptr);
+        g_np.pipe[i] = VK_NULL_HANDLE; g_np.pl[i] = VK_NULL_HANDLE; g_np.dsl[i] = VK_NULL_HANDLE; g_np.sm[i] = VK_NULL_HANDLE;
+        g_np.in_buf[i] = g_np.out_buf[i] = VK_NULL_HANDLE; g_np.in_mem[i] = g_np.out_mem[i] = VK_NULL_HANDLE;
+        g_np.in_map[i] = g_np.out_map[i] = nullptr;
+    }
+    if (g_np.pool) d.DestroyDescriptorPool(dev, g_np.pool, nullptr);
+    g_np.pool = VK_NULL_HANDLE;
+    for (auto& fe : g_np.fences) { if (fe.f) g_np.DestroyFence(dev, fe.f, nullptr); fe = NpFence{}; }
+    if (g_np.qp && d.DestroyQueryPool) d.DestroyQueryPool(dev, g_np.qp, nullptr);
+    g_np.qp = VK_NULL_HANDLE;
+    g_np.recorded.clear(); g_np.submitted.clear();
+    g_np.dev = VK_NULL_HANDLE;
+    // 计数和计时留着 (marker 收尾还要用); NPU 运行时不释放 (退出时析构会 abort, 见 npuprobe.cpp)
+    np_disable("设备已销毁");
+}
+
+static void npuop_append_csv(const std::string& pkg, const std::string& csv) {
+    const std::string cands[] = {
+        "/storage/emulated/0/Android/data/" + pkg + "/files/knobs_npuop_frames.csv",
+        "/data/data/" + pkg + "/knobs_npuop_frames.csv",
+    };
+    for (const auto& path : cands) {
+        FILE* o = fopen(path.c_str(), "a");   // 只追加
+        if (!o) continue;
+        fwrite(csv.data(), 1, csv.size(), o);
+        fclose(o);
+        return;
+    }
 }
 
 // 把 (render pass 形状) 与 (framebuffer 宽高) 关联起来, 按 (pass, 宽, 高) 聚合计数,
@@ -1937,6 +2720,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_BeginCommandBuffer(VkCommandBuffer cb, 
         std::lock_guard<std::mutex> lk(g_mtx);
         g_cb_cur.erase(cb); g_cb_sets.erase(cb); g_cb_draw_idx.erase(cb);
         g_cb_prev_att.erase(cb); g_cb_cur_is_swap.erase(cb); g_cb_passes.erase(cb);
+        if (g_npuop) g_np.recorded.erase(cb);   // 重录 = 之前录的打包作废
         if (g_frameaudit) {
             FaCb& c = g_facb[cb];
             c = FaCb{};
@@ -2572,6 +3356,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueueSubmit2(VkQueue q, uint32_t n, con
                 fa_capture_submit(key(q), (uint32_t)cbs.size(), cbs.data());
             }
     }
+    if (g_npuop) {
+        VkResult r = d.QueueSubmit2(q, n, si, fence);
+        if (r == VK_SUCCESS && si) {
+            std::vector<VkCommandBuffer> cbs;
+            for (uint32_t i = 0; i < n; i++)
+                for (uint32_t j = 0; j < si[i].commandBufferInfoCount; j++) cbs.push_back(si[i].pCommandBufferInfos[j].commandBuffer);
+            npuop_after_submit(q, d, cbs);
+        }
+        return r;
+    }
     return d.QueueSubmit2(q, n, si, fence);
 }
 static VKAPI_ATTR VkResult VKAPI_CALL rk_GetSwapchainImagesKHR(VkDevice dev, VkSwapchainKHR sc, uint32_t* pn, VkImage* imgs) {
@@ -2607,6 +3401,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueueSubmit(VkQueue q, uint32_t n, cons
         if (g_frameaudit && g_fa.capturing)
             for (uint32_t i = 0; i < n; i++) fa_capture_submit(key(q), si[i].commandBufferCount, si[i].pCommandBuffers);
     }
+    if (g_npuop) {   // 游戏的提交成功后, 给带打包的那条命令缓冲挂我们自己的栅栏
+        VkResult r = d.QueueSubmit(q, n, si, fence);
+        if (r == VK_SUCCESS && si) {
+            std::vector<VkCommandBuffer> cbs;
+            for (uint32_t i = 0; i < n; i++)
+                for (uint32_t j = 0; j < si[i].commandBufferCount; j++) cbs.push_back(si[i].pCommandBuffers[j]);
+            npuop_after_submit(q, d, cbs);
+        }
+        return r;
+    }
     return d.QueueSubmit(q, n, si, fence);
 }
 
@@ -2620,6 +3424,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_FreeCommandBuffers(VkDevice dev, VkCommandP
             g_cb_cur.erase(cbs[i]); g_cb_sets.erase(cbs[i]); g_cb_draw_idx.erase(cbs[i]);
             g_cb_prev_att.erase(cbs[i]); g_cb_cur_is_swap.erase(cbs[i]); g_cb_passes.erase(cbs[i]);
             g_facb.erase(cbs[i]);
+            if (g_npuop) g_np.recorded.erase(cbs[i]);
         }
     }
     d.FreeCommandBuffers(dev, pool, n, cbs);
@@ -2663,6 +3468,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
     }
     if (g_frameaudit) fa_on_present(d, f, pi);
     npuprobe_on_present(f);
+    if (g_npuop) npuop_on_present(d, f);
     if (g_dump_passes) {
         {
             // 本帧提交执行了哪些 pass -> frames_seen。录制数 (begins) 代替不了它:
@@ -2854,6 +3660,10 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
         RK_OPT("vkCmdPushDescriptorSetKHR", CmdPushDescriptorSetKHR, rk_CmdPushDescriptorSetKHR);
         RK_OPT("vkCmdPushDescriptorSetWithTemplateKHR", CmdPushDescriptorSetWithTemplateKHR, rk_CmdPushDescriptorSetWithTemplateKHR);
 #undef RK_OPT
+    }
+    if (g_npuop) {   // npuop 要看见每一次提交 (vkQueueSubmit 已在 passdump 里挂了), 底层有 Submit2 才挂
+        if (!strcmp(name, "vkQueueSubmit2") || !strcmp(name, "vkQueueSubmit2KHR"))
+            return d.QueueSubmit2 ? reinterpret_cast<PFN_vkVoidFunction>(rk_QueueSubmit2) : (d.gdpa ? d.gdpa(dev, name) : nullptr);
     }
     return d.gdpa ? d.gdpa(dev, name) : nullptr;
 }
