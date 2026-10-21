@@ -1143,14 +1143,17 @@ pub(crate) fn run_one_launch(
     wait_launch_window(serial, pkg, label, launch.marker.as_deref())?;
     // 功耗采样与 ftrace 并行, 覆盖整个采集窗
     let env_path = outdir.join("env.txt");
-    let dur = seconds + 4;
+    // 上限放宽: 正常由停止标志结束, 上限只防标志一直不出现 (ftrace 起得慢时也不会先于采集结束)
+    let dur = seconds + 20;
+    let tr = format!("{DEV_TMP}/lw_{label}.txt");
+    // 第三个参数是停止标志: ftrace_capture.sh 采完才写 trace 输出文件, 一出现采样就停 (审计 #3)。
+    // dur 只是上限。
     let sampler = Command::new(adb_path())
         .args(["-s", serial, "shell"])
-        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2'"))
+        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2 {tr}'"))
         .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
         .stderr(std::process::Stdio::null())
         .spawn();
-    let tr = format!("{DEV_TMP}/lw_{label}.txt");
     let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {seconds} {tr} {pkg}"), seconds + 120);
     std::fs::write(outdir.join("capture.log"), &cap).ok();
     let _ = adb(serial, &["pull", &tr, &outdir.join("trace.txt").to_string_lossy()], 120);
@@ -1182,7 +1185,9 @@ pub(crate) fn run_one_launch(
     let mut m = json!({ "label": label, "run_once_rc": 0, "launch": true });
     m["summary"] = serde_json::from_str(&summary).map_err(|e| format!("{label}: summary 解析失败 {e}"))?;
     if let Ok(t) = std::fs::read_to_string(&env_path) {
-        m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats(&t))).unwrap_or(Value::Null);
+        // 功耗只取 trace 采集窗内的样本 (审计 #3)
+        let w = sysparam::capture_window_from_trace(&String::from_utf8_lossy(&trace));
+        m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats_window(&t, w))).unwrap_or(Value::Null);
     }
     Ok(m)
 }
@@ -1245,11 +1250,14 @@ pub(crate) fn run_one_with(
 ) -> Result<Value, String> {
     std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
     let root = repo_root();
-    let dur = seconds + 6 + 4;
+    // LEAD 6 秒 + 采集 seconds 秒; 余量 20 秒只是上限, 正常由停止标志结束
+    let dur = seconds + 6 + 20;
     let env_path = outdir.join("env.txt");
+    // 停止标志 = run_once.sh 让 ftrace_capture.sh 写的 trace 输出文件 (采完才写), 见 sample_env.sh。
+    // dur 只是上限。
     let sampler = Command::new(adb_path())
         .args(["-s", serial, "shell"])
-        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2'"))
+        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2 {DEV_TMP}/loop_v1_{label}.txt'"))
         .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -1318,8 +1326,11 @@ pub(crate) fn run_one_with(
         None => return Err(format!("{label}: 没拿到可用 summary.json (负载或采集失败, rc={rc})")),
     }
     if let Ok(t) = std::fs::read_to_string(&env_path) {
-        // 功耗温度解析在 src/sysparam.rs (与 autoloop 同一份口径)
-        m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats(&t)))
+        // 功耗温度解析在 src/sysparam.rs (与 autoloop 同一份口径); 功耗只取 trace 采集窗内 (审计 #3)
+        let w = std::fs::read(outdir.join("trace.txt"))
+            .ok()
+            .and_then(|b| sysparam::capture_window_from_trace(&String::from_utf8_lossy(&b[..b.len().min(64 * 1024)])));
+        m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats_window(&t, w)))
             .unwrap_or(Value::Null);
     }
     Ok(m)

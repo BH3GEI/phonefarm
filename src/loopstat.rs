@@ -820,6 +820,9 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
             req.get("power_available").and_then(|v| v.as_bool()).unwrap_or(false),
             &s("power_note")),
         "env_stats" => sysparam::env_stats(&s("text")),
+        // 取窗口径: trace 只需给头部 (#loop_v1_meta 行), 用来离线重算已存的臂
+        "env_stats_window" => sysparam::env_stats_window(
+            &s("text"), sysparam::capture_window_from_trace(&s("trace_head"))),
         // ── 模型侧 (src/llm.rs) ──
         "load_keys" => {
             match llm::load_keys(&arr("paths").iter().map(|p| p.py_str()).collect::<Vec<_>>()) {
