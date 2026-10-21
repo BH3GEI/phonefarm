@@ -1278,7 +1278,7 @@ fn discover_render(dev: &Dev, pkg: &str, g: SwipeGeom, w: u32, h: u32, out: &Pat
     let (x0, x1, y) = px(g, w, h);
     let child = dev.swipe_bg(x0, y, x1, y, 6000);
     let path = format!("{DEV_TMP}/onboard_comm.txt");
-    dev.su(&format!("sh {DEV_TMP}/ftrace_capture.sh 4 {path}"), 60);
+    dev.su(&format!("sh {DEV_TMP}/ftrace_capture.sh 4 {path} {pkg}"), 60);
     wait_child(child, 20);
     dev.swipe(x1, y, x0, y, 6000);
     let local = out.join("comm_trace.txt");

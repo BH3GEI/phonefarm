@@ -1155,7 +1155,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
         .spawn();
     let raw = format!("{REMOTE_DIR}/trace_raw.txt");
     let flt = format!("{REMOTE_DIR}/trace_kgsl.txt");
-    let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {} {raw}", c.capdur_s), c.capdur_s + 90);
+    let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {} {raw} {}", c.capdur_s, rb::PACKAGE), c.capdur_s + 90);
     std::fs::write(dir.join("capture.log"), &cap).ok();
     let pwr_end = read_pwr(serial);
     // 只留解析器会读的行 (与 looptrace::parse 的预筛同一条件), 30 MB → 几百 KB

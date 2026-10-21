@@ -1,5 +1,9 @@
 #!/bin/sh
-# ftrace_capture.sh <duration_s> <out_path> — 设备端执行, 需 root
+# ftrace_capture.sh <duration_s> <out_path> [包名] — 设备端执行, 需 root
+#
+# 给了包名时, 在采集开始和结束各记一次该进程的 pid 与全部线程号 (取并集), 写进
+# `#loop_v1_meta target_pid=... target_tids=...`。线程名不认进程 (两个 Unity 应用的渲染线程
+# 同名, 截断的 `<...>` 谁都可能), 解析器靠这份线程号只收目标应用自己的提交。
 #
 # 采一段 ftrace 文本, 同时拿到:
 #   帧节奏  : adreno_cmdbatch_submitted/retired (游戏渲染线程的 GPU 提交与退役)
@@ -19,6 +23,11 @@ set -u
 
 DUR="${1:-10}"
 OUT="${2:-/data/local/tmp/loop_v1_trace.txt}"
+PKG="${3:-}"
+
+# 目标进程的 pid 与线程号 (逗号分隔)。没给包名或进程不在时为空。
+target_pid() { [ -n "$PKG" ] && pidof "$PKG" 2>/dev/null | cut -d' ' -f1; }
+target_tids() { [ -n "$1" ] && ls "/proc/$1/task" 2>/dev/null; }
 ROOT=/sys/kernel/tracing
 INST=$ROOT/instances/phonefarm_kgsl
 if [ -d "$INST" ] || mkdir "$INST" 2>/dev/null; then
@@ -80,15 +89,21 @@ for e in $EVENTS; do
 done
 
 # ── 采集 ──
+PID0=$(target_pid); TIDS0=$(target_tids "$PID0")
 echo 1 > "$T/tracing_on"
 MARK_START=$(cat /proc/uptime | cut -d' ' -f1)
 sleep "$DUR"
 echo 0 > "$T/tracing_on"
 MARK_END=$(cat /proc/uptime | cut -d' ' -f1)
+PID1=$(target_pid); TIDS1=$(target_tids "$PID1")
+TIDS=$(printf '%s\n%s\n' "$TIDS0" "$TIDS1" | grep -E '^[0-9]+$' | sort -un | tr '\n' ',' | sed 's/,$//')
 
 # ── 落盘 (带元信息头, 供离线回放自证) ──
 {
   echo "#loop_v1_meta capture_start_uptime=$MARK_START capture_end_uptime=$MARK_END duration_req=$DUR"
+  if [ -n "$PKG" ]; then
+    echo "#loop_v1_meta target_pkg=$PKG target_pid=$PID1 target_pid_start=$PID0 target_tids=$TIDS"
+  fi
   echo "#loop_v1_meta gpu_model=$(cat /sys/class/kgsl/kgsl-3d0/gpu_model 2>/dev/null)"
   echo "#loop_v1_meta ddr_cur_khz=$(cat /sys/devices/system/cpu/bus_dcvs/DDR/cur_freq 2>/dev/null) ddr_max_khz=$(cat /sys/devices/system/cpu/bus_dcvs/DDR/hw_max_freq 2>/dev/null)"
   echo "#loop_v1_meta ddr_boost_khz=$(cat /sys/devices/system/cpu/bus_dcvs/DDR/boost_freq 2>/dev/null) llcc_boost_khz=$(cat /sys/devices/system/cpu/bus_dcvs/LLCC/boost_freq 2>/dev/null)"
