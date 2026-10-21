@@ -54,7 +54,7 @@ echo "shader: copy=$(wc -c < "$OUT/copyprobe_copy.spv" | tr -d ' ')B upop=$(wc -
 "$CXX" -O2 -Wall -fPIC -std=c++17 -fno-exceptions -fno-rtti \
     -static-libstdc++ -Wl,--exclude-libs,ALL \
     -I"$OUT" -I"$ROOT/layer" \
-    -shared -o "$OUT/libVkLayer_refknobs.so" "$ROOT/layer/vk_layer_refknobs.cpp" "$ROOT/layer/npuprobe.cpp" \
+    -shared -o "$OUT/libVkLayer_refknobs.so" "$ROOT/layer/vk_layer_refknobs.cpp" "$ROOT/layer/npuprobe.cpp" "$ROOT/layer/framedump.cpp" \
     -llog -ldl
 cp "$ROOT/layer/VkLayer_refknobs.json" "$OUT/"
 echo "layer: $OUT/libVkLayer_refknobs.so ($(wc -c < "$OUT/libVkLayer_refknobs.so" | tr -d ' ') B)"
