@@ -1149,7 +1149,8 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     let env_path = dir.join("env.txt");
     let sampler = Command::new(adb_path())
         .args(["-s", serial, "shell"])
-        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {} 1'", c.capdur_s))
+        // 第三个参数: ftrace_capture.sh 采完才写 trace_raw.txt, 一出现采样就停 (审计 #3); 时长只是上限
+        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {} 1 {REMOTE_DIR}/trace_raw.txt'", c.capdur_s + 20))
         .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
         .stderr(std::process::Stdio::null())
         .spawn();
@@ -1206,7 +1207,11 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     let text = std::fs::read(&local_trace).map_err(|e| e.to_string())?;
     let summary = looptrace::parse_with_spf(&String::from_utf8_lossy(&text), rb::SUBMIT_COMM, Some(1)).summarize();
     std::fs::write(dir.join("summary.json"), dumps(&summary)).map_err(|e| e.to_string())?;
-    let env = sysparam::env_stats(&std::fs::read_to_string(&env_path).unwrap_or_default());
+    // 功耗只取 trace 采集窗内的样本, 丢第一个点 (审计 #3)
+    let env = sysparam::env_stats_window(
+        &std::fs::read_to_string(&env_path).unwrap_or_default(),
+        sysparam::capture_window_from_trace(&String::from_utf8_lossy(&text)),
+    );
     std::fs::write(dir.join("env.json"), dumps(&env)).map_err(|e| e.to_string())?;
     gzip_replace(&local_trace)?;
 

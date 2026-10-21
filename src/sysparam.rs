@@ -815,6 +815,57 @@ pub fn power_cross_run_comparable<'a>(envs: impl IntoIterator<Item = &'a serde_j
 }
 
 pub fn env_stats(text: &str) -> PyVal {
+    env_stats_impl(text, None)
+}
+
+/// [`env_stats`] 的取窗版 (审计 #3): 功耗样本 (ENV/PWR 行) 只取落在 trace 采集窗
+/// `[capture_start_uptime, capture_end_uptime]` 里的, 并且整段的第一个功耗样本一律丢掉
+/// (采样器刚起、`su` + shell 启动本身在耗电, 实测每臂第一个点都偏高, msaa1 是 7.18–7.20 W)。
+/// GPU 行同样截窗 (它是功耗的辅助证据, 空闲段的低频会把均值拉低)。
+/// 结温不截窗: 它是作废线 (超温上限), 整段都要看。
+///
+/// `window` 为 None (trace 里没有 capture 时间) 时只丢第一个点, 并在 `power_window` 里写明没截窗。
+/// 输出比 [`env_stats`] 多几个键, 都追加在末尾: `power_window`、`n_power_samples_total`、
+/// `n_power_samples_used`、`power_sample_hz`。
+pub fn env_stats_window(text: &str, window: Option<(f64, f64)>) -> PyVal {
+    env_stats_impl(text, Some(window))
+}
+
+/// 从 trace 文本头部的 `#loop_v1_meta capture_start_uptime=… capture_end_uptime=…` 取采集窗。
+/// 这一行由 ftrace_capture.sh 写在文件最前面, 所以读到第一行非 `#` 就停, 不扫整个 trace。
+pub fn capture_window_from_trace(trace: &str) -> Option<(f64, f64)> {
+    let (mut a, mut b) = (None, None);
+    for line in trace.lines() {
+        if !line.starts_with('#') {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("#loop_v1_meta") {
+            for tok in rest.split_whitespace() {
+                match tok.split_once('=') {
+                    Some(("capture_start_uptime", v)) => a = v.parse::<f64>().ok(),
+                    Some(("capture_end_uptime", v)) => b = v.parse::<f64>().ok(),
+                    _ => {}
+                }
+            }
+        }
+    }
+    match (a, b) {
+        (Some(a), Some(b)) if b > a => Some((a, b)),
+        _ => None,
+    }
+}
+
+/// `clip`: None = 旧口径 (全部样本, 不丢第一个点, 输出与以前逐字节相同);
+/// Some(w) = 取窗口径 (见 [`env_stats_window`])。
+fn env_stats_impl(text: &str, clip: Option<Option<(f64, f64)>>) -> PyVal {
+    let in_window = |up: Option<f64>| -> bool {
+        match clip {
+            Some(Some((a, b))) => up.is_some_and(|u| a <= u && u <= b),
+            _ => true,
+        }
+    };
+    let mut first_power_seen = false;
+    let (mut n_power_total, mut n_power_used) = (0usize, 0usize);
     let (mut vi_watts, mut now_watts, mut usb_watts) = (vec![], vec![], vec![]);
     let (mut currents, mut voltages): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
     let mut temps: Vec<f64> = vec![];
@@ -856,6 +907,9 @@ pub fn env_stats(text: &str) -> PyVal {
         }
         if let Some(rest) = line.strip_prefix("GPU ") {
             let p: Vec<&str> = rest.split_whitespace().collect();
+            if clip.is_some() && !in_window(p.first().and_then(|x| x.parse::<f64>().ok())) {
+                continue;
+            }
             if let (Some(Ok(l)), Some(Ok(hz))) =
                 (p.get(1).map(|x| x.parse::<i64>()), p.get(2).map(|x| x.parse::<i64>()))
             {
@@ -868,16 +922,36 @@ pub fn env_stats(text: &str) -> PyVal {
             }
             continue;
         }
-        if !line.starts_with("ENV ") {
+        // PWR 行 (sample_env v2 的快循环): 只有功耗字段, 没有结温
+        let is_env = line.starts_with("ENV ");
+        if !is_env && !line.starts_with("PWR ") {
             continue;
         }
         // ENV <uptime> <batt_uv> <batt_ua> <batt_uw|NA> <usb_uv> <usb_ua> <热区> <毫摄氏度>
+        // PWR <uptime> <batt_uv> <batt_ua> <batt_uw|NA> <usb_uv> <usb_ua>
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 9 {
+        if parts.len() < if is_env { 9 } else { 7 } {
             continue;
         }
-        // 计数在解析之前 —— 解析失败的样本照样算采到过 (与旧版一致)
-        n += 1;
+        if is_env {
+            // 计数在解析之前 —— 解析失败的样本照样算采到过 (与旧版一致)
+            n += 1;
+            // 结温不截窗, 整段都看 (超温是作废线)
+            if let Ok(t) = parts[8].parse::<i64>() {
+                if 0 < t && t < 100_000 && clip.is_some() {
+                    temps.push(t as f64 / 1000.0);
+                }
+            }
+        }
+        // 取窗口径: 丢掉整段第一个功耗样本, 窗外的不进功耗
+        if clip.is_some() {
+            n_power_total += 1;
+            let first = !first_power_seen;
+            first_power_seen = true;
+            if first || !in_window(parts[1].parse::<f64>().ok()) {
+                continue;
+            }
+        }
         let (Ok(bv), Ok(bi)) = (parts[2].parse::<i64>(), parts[3].parse::<i64>()) else {
             continue;
         };
@@ -892,9 +966,18 @@ pub fn env_stats(text: &str) -> PyVal {
         let (Ok(uv), Ok(ui)) = (parts[5].parse::<i64>(), parts[6].parse::<i64>()) else {
             continue;
         };
-        let Ok(t) = parts[8].parse::<i64>() else {
-            continue;
+        // 旧口径: 结温在功耗字段之后解析, 解析不了整行作废 (与以前一致)
+        let t = if clip.is_none() && is_env {
+            let Ok(t) = parts[8].parse::<i64>() else {
+                continue;
+            };
+            Some(t)
+        } else {
+            None
         };
+        if clip.is_some() {
+            n_power_used += 1;
+        }
 
         if bv != 0 {
             voltages.push(bv as f64);
@@ -913,8 +996,10 @@ pub fn env_stats(text: &str) -> PyVal {
         if uv != 0 && ui != 0 {
             usb_watts.push((uv as f64 / 1e6 * ui as f64 / 1e6).abs());
         }
-        if 0 < t && t < 100_000 {
-            temps.push(t as f64 / 1000.0);
+        if let Some(t) = t {
+            if 0 < t && t < 100_000 {
+                temps.push(t as f64 / 1000.0);
+            }
         }
     }
 
@@ -1022,6 +1107,31 @@ pub fn env_stats(text: &str) -> PyVal {
         kvs.push((
             "gpu_clk_mhz_max".into(),
             PyVal::from(gpu_mhz.iter().copied().reduce(f64::max).map(|v| py_round(v, 1))),
+        ));
+    }
+    // 取窗口径的记录 (旧口径不加, 输出不变)
+    if let (PyVal::Obj(kvs), Some(w)) = (&mut out, clip) {
+        kvs.push((
+            "power_window".into(),
+            match w {
+                Some((a, b)) => pyobj! {
+                    "start_uptime" => a,
+                    "end_uptime" => b,
+                    "first_sample_dropped" => true,
+                },
+                None => pyobj! {
+                    "start_uptime" => PyVal::Null,
+                    "end_uptime" => PyVal::Null,
+                    "first_sample_dropped" => true,
+                    "note" => "trace 里没有 capture_start/end_uptime, 没截窗, 只丢了第一个点",
+                },
+            },
+        ));
+        kvs.push(("n_power_samples_total".into(), PyVal::from(n_power_total)));
+        kvs.push(("n_power_samples_used".into(), PyVal::from(n_power_used)));
+        kvs.push((
+            "power_sample_hz".into(),
+            PyVal::from(w.filter(|(a, b)| b > a).map(|(a, b)| py_round(n_power_used as f64 / (b - a), 2))),
         ));
     }
     out
@@ -1875,5 +1985,81 @@ GPU 5.0 17 bad\n",
         let old = env_stats("#battery_status=Discharging\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n");
         assert!(old.get("gpu_max_pwrlevel_seen").is_none());
         assert!(old.get("gpu_clk_mhz_mean").is_none());
+    }
+
+    /// 审计 #3: trace 头部的采集窗取得到; 没有就 None; 不往 trace 正文里扫。
+    #[test]
+    fn capture_window_from_trace_reads_header_only() {
+        let t = "#loop_v1_meta capture_start_uptime=100.50 capture_end_uptime=110.52 duration_req=10\n\
+#loop_v1_meta gpu_model=Adreno840v2\n\
+ <...>-1 [000] 1.0: kgsl_x: a=1\n\
+#loop_v1_meta capture_start_uptime=1 capture_end_uptime=2\n";
+        assert_eq!(capture_window_from_trace(t), Some((100.5, 110.52)));
+        assert_eq!(capture_window_from_trace("#loop_v1_meta gpu_model=x\nbody\n"), None);
+        // 起止颠倒或解析不了 = 没有窗口
+        assert_eq!(
+            capture_window_from_trace("#loop_v1_meta capture_start_uptime=5 capture_end_uptime=4\n"),
+            None
+        );
+    }
+
+    const V2_TEXT: &str = "#sample_env v2 dur=14 interval=2 power_interval=0.2 stop=/x\n\
+#battery_status=Discharging\n\
+ENV 99.00 4000000 -3000000 NA 0 0 cpu-1-0 45000\n\
+GPU 99.00 3 900000000\n\
+PWR 99.80 4000000 -9000000 NA 0 0\n\
+PWR 100.20 4000000 -1000000 NA 0 0\n\
+ENV 100.40 4000000 -1000000 NA 0 0 cpu-1-0 50000\n\
+GPU 100.40 3 600000000\n\
+PWR 100.60 4000000 -1500000 NA 0 0\n\
+PWR 101.00 4000000 -500000 NA 0 0\n\
+ENV 101.50 4000000 -100000 NA 0 0 cpu-1-0 48000\n\
+GPU 101.50 3 160000000\n\
+#sample_env done\n";
+
+    /// 审计 #3 #4: 功耗只取窗内样本 (含 PWR 快循环行), 第一个点不要, 结温整段看, GPU 截窗。
+    #[test]
+    fn env_stats_window_clips_power_to_capture_window() {
+        let s = env_stats_window(V2_TEXT, Some((100.0, 101.0)));
+        // 99.00 是第一个点 (丢), 99.80 与 101.50 在窗外;
+        // 窗内 100.20 (4 W)、100.40 (4 W)、100.60 (6 W)、101.00 (2 W) → 均值 4 W
+        assert_eq!(s.get("n_power_samples_total").and_then(|v| v.as_i64()), Some(7));
+        assert_eq!(s.get("n_power_samples_used").and_then(|v| v.as_i64()), Some(4));
+        assert_eq!(s.get("power_w_mean").and_then(|v| v.as_f64()), Some(4.0));
+        assert_eq!(s.get("power_sample_hz").and_then(|v| v.as_f64()), Some(4.0));
+        // 结温不截窗: 最高 50 °C, 均值按三条 ENV 行
+        assert_eq!(s.get("soc_temp_max_c").and_then(|v| v.as_f64()), Some(50.0));
+        assert_eq!(s.get("soc_temp_mean_c").and_then(|v| v.as_f64()), Some(47.667));
+        // GPU 截窗: 只剩 100.40 那一行
+        assert_eq!(s.get("gpu_clk_mhz_mean").and_then(|v| v.as_f64()), Some(600.0));
+        assert_eq!(s.get("n_samples").and_then(|v| v.as_i64()), Some(3));
+        let w = s.get("power_window").unwrap();
+        assert_eq!(w.get("start_uptime").and_then(|v| v.as_f64()), Some(100.0));
+        assert_eq!(w.get("first_sample_dropped"), Some(&PyVal::Bool(true)));
+    }
+
+    /// 没有采集窗时只丢第一个点, 并写明没截窗; 第一个点即使在窗内也丢。
+    #[test]
+    fn env_stats_window_drops_first_sample() {
+        let s = env_stats_window(V2_TEXT, None);
+        // 7 个功耗样本去掉第一个 (12 W) → 剩 6 个: 36+4+4+6+2+0.4 = 52.4 → 均值 8.7333
+        assert_eq!(s.get("n_power_samples_used").and_then(|v| v.as_i64()), Some(6));
+        assert_eq!(s.get("power_w_mean").and_then(|v| v.as_f64()), Some(8.7333));
+        assert!(s.get("power_window").unwrap().get("note").is_some());
+        assert_eq!(s.get("power_sample_hz"), Some(&PyVal::Null));
+        let early = env_stats_window(V2_TEXT, Some((99.0, 102.0)));
+        assert_eq!(early.get("n_power_samples_used").and_then(|v| v.as_i64()), Some(6));
+    }
+
+    /// 旧口径 (env_stats) 对没有 PWR 行的旧证据不变: 不截窗、不丢点、不加新键。
+    #[test]
+    fn env_stats_legacy_unchanged_and_has_no_window_keys() {
+        let t = "#battery_status=Discharging\n\
+ENV 1.0 4000000 -3000000 NA 0 0 cpu-1-0 41000\n\
+ENV 3.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n";
+        let s = env_stats(t);
+        assert_eq!(s.get("power_w_mean").and_then(|v| v.as_f64()), Some(8.0));
+        assert!(s.get("power_window").is_none());
+        assert!(s.get("n_power_samples_used").is_none());
     }
 }
