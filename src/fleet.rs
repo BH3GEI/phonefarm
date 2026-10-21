@@ -601,7 +601,9 @@ pub fn card_from_android(serial: &str, state: &str, raw: &str, probe_ms: u64, de
 
     // 轻量档没探 root —— 那要 `su -c`, 会在别人正跑测试的机器上多拉一个进程。
     // 没探就是 None, 不能默认成 false: "没 root" 与 "没查" 是两回事。
-    let root = sec(&ss, "root").map(parse_root);
+    // 段在就是探过了: `su` 不存在时脚本里 `2>/dev/null` 吃掉报错, 段是空的, 这也是「没 root」。
+    // 不能用 `sec` (它把空段当成没有), 否则没 root 的机器会被记成「没查」, 层声明照旧显示可用。
+    let root = ss.iter().find(|(k, _)| k == "root").map(|(_, v)| parse_root(v));
 
     let mut battery = Battery::default();
     if let Some(b) = sec(&ss, "sysbat") {
@@ -1474,6 +1476,9 @@ mod tests {
         assert_eq!(full.root, Some(true));
         let no_su = card_from_android("SER", "device", "-----PF:root-----\nsu: not found\n", 0, "full");
         assert_eq!(no_su.root, Some(false));
+        // 荣耀 AAP-AN00 实测: su 不存在, 报错被 2>/dev/null 吃掉, root 段是空的
+        let silent = card_from_android("SER", "device", "-----PF:root-----\n-----PF:uptime-----\n1.0 1.0\n", 0, "full");
+        assert_eq!(silent.root, Some(false));
     }
 
     #[test]
