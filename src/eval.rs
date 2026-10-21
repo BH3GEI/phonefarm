@@ -167,7 +167,7 @@ pub fn run_eval(args: &[String]) -> i32 {
         .or_else(|| req["serial"].as_str().map(String::from));
     let report = match kind {
         "shader" => return eval_shader_v2(&req, &a),
-        "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail),
+        "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail && !is_screen(&req)),
         "gray" => gray_eval(&req, serial.as_deref(), Path::new(&evidence)),
         "whitebox" => crate::whitebox::whitebox_eval(&req, serial.as_deref(), Path::new(&evidence)),
         other => {
@@ -321,6 +321,13 @@ fn gpuop_passthrough(args: &[String]) -> i32 {
 
 // ══════════════ 请求校验 ══════════════
 
+/// 两级测量的第一级 (game_opt_loop 的初筛): 只看方向与幅度, 不判显著。
+/// 收端对它不做分辨率防护, 也不做确定性截断 —— 截断针对的是 KEEP 可不可达,
+/// 而初筛的轮数本来就判不出 KEEP, 开着截断会在第一臂之后就停, 初筛拿不到任何对照数据。
+pub(crate) fn is_screen(req: &Value) -> bool {
+    req["protocol"]["stage"].as_str() == Some("screen")
+}
+
 fn validate_v2(req: &Value) -> Result<(), String> {
     for k in ["kind", "candidate_id", "package", "workload", "conditions", "protocol", "payload"] {
         if req.get(k).is_none() {
@@ -340,9 +347,24 @@ fn validate_v2(req: &Value) -> Result<(), String> {
         return Err("protocol.alternating 缺失或不是布尔".into());
     }
     let pt = p.get("p_threshold").and_then(|v| v.as_f64());
-    match pt {
-        Some(x) if x > 0.0 && x <= 1.0 => {}
+    let alpha = match pt {
+        Some(x) if x > 0.0 && x <= 1.0 => x,
         _ => return Err("protocol.p_threshold 必须 (0, 1]".into()),
+    };
+    match p.get("stage").map(|v| v.as_str()) {
+        None | Some(Some("full")) | Some(Some("screen")) => {}
+        _ => return Err("protocol.stage 只认 \"full\" / \"screen\" (省略 = full)".into()),
+    }
+    // 结构性防护: sysparam / gray / whitebox 走精确置换检验 (judge_runs), 改善一侧用 alpha/K。
+    // rounds 太少时最小可达 p 就够不着 alpha/K, 这个请求在数学上判不出任何改善 —— 收端
+    // 拒收, 不碰设备。功耗进不进表要等数据, 按最严的 K=3 算。
+    // 初筛 (stage=screen) 只看方向与幅度、不判显著, 不受这条限制。
+    // shader 走 gpu-op 的 Welch t 检验, 没有这种离散的分辨率下限, 不在此列。
+    if matches!(kind, "sysparam" | "gray" | "whitebox") && !is_screen(req) {
+        let rounds = p.get("rounds").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+        loopstat::ensure_resolvable(rounds, alpha / loopstat::MAX_WIN_METRICS as f64, "protocol.rounds").map_err(|e| {
+            format!("{e}。(初筛快测请在 protocol.stage 写 \"screen\": 那一级只看方向和幅度, 不判显著)")
+        })?;
     }
     match kind {
         "shader" => {
@@ -1606,17 +1628,7 @@ fn wl_pyval(wl: &sysparam::Whitelist) -> Value {
 
 /// n v n 精确置换检验的最小双侧 p = 2/C(2n,n); 够不着 alpha_win 就是 false。
 fn reachable(n: u32, alpha_win: f64) -> bool {
-    if n < 2 {
-        return false;
-    }
-    let mut c = 1.0f64;
-    for i in 1..=n {
-        c *= (n + i) as f64 / i as f64;
-        if !c.is_finite() {
-            return false;
-        }
-    }
-    2.0 / c < alpha_win
+    n >= 2 && loopstat::ensure_resolvable(n as usize, alpha_win, "").is_ok()
 }
 
 /// 风扇开关节点 (红魔 NX809J)。owner 规矩: 风扇默认必须关 (噪音)。
@@ -1753,6 +1765,9 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
         "alpha_regression": alpha,
         // 轮数下界: alpha_win 是否够得着 (2/C(2n,n) < alpha_win)
         "reachable": reachable(rounds, alpha_win),
+        // 这个轮数下精确置换检验最小能出多小的 p。调用方 (如 game_opt_loop 的初筛) 拿它
+        // 定「最极端排列」的门槛, 不必自己再算一遍 2/C(2n,n)
+        "min_reachable_p": loopstat::min_two_sided_p(rounds as usize),
         "wins": wins,
         "regressions": regressions,
         "per_metric": Value::Object(per_metric.into_iter().collect()),
@@ -2421,6 +2436,56 @@ mod tests {
         assert!(validate_err(&r).contains("p_threshold"));
         r["protocol"]["alternating"] = json!("yes");
         assert!(validate_err(&r).contains("alternating"));
+    }
+
+    /// 精确置换检验的三条路: rounds 够不着 alpha/3 就拒收并给出最少轮数;
+    /// 初筛 (stage=screen) 不判显著, 放行; shader 走 Welch, 不在此列。
+    #[test]
+    fn rounds_that_cannot_reach_significance_are_refused() {
+        for (kind, payload) in [
+            ("sysparam", json!({"params": {}})),
+            ("gray", json!({"rewrites": [{"knob": GRAY_SUPPORTED_KNOBS[0], "args": {}}]})),
+        ] {
+            let mut r = v2_req(kind, payload);
+            for n in [2, 3, 4] {
+                r["protocol"]["rounds"] = json!(n);
+                let e = validate_err(&r);
+                assert!(e.contains(&format!("{n}v{n}")) && e.contains("protocol.rounds 至少给 5"), "{kind} {n}: {e}");
+                r["protocol"]["stage"] = json!("screen");
+                assert!(validate_ok(&r), "{kind} 初筛 {n} 轮应放行: {:?}", validate_v2(&r));
+                r["protocol"].as_object_mut().unwrap().remove("stage");
+            }
+            r["protocol"]["rounds"] = json!(5);
+            assert!(validate_ok(&r));
+            r["protocol"]["stage"] = json!("full");
+            assert!(validate_ok(&r));
+            // 门槛收紧到 0.01 时 5 轮也不够 (2/252 = 0.0079 > 0.0033), 要 6 轮
+            r["protocol"]["p_threshold"] = json!(0.01);
+            assert!(validate_err(&r).contains("protocol.rounds 至少给 6"));
+            r["protocol"]["stage"] = json!("quick");
+            assert!(validate_err(&r).contains("protocol.stage"));
+        }
+        let mut sh = v2_req("shader", json!({"track": "sr", "shader_path": "a", "spirv_path": "b", "budget_ms": 1.0}));
+        sh["protocol"]["rounds"] = json!(2);
+        assert!(validate_ok(&sh), "shader 不走置换检验: {:?}", validate_v2(&sh));
+    }
+
+    #[test]
+    fn screen_stage_turns_off_curtailment() {
+        let mut r = v2_req("sysparam", json!({"params": {}}));
+        assert!(!is_screen(&r));
+        r["protocol"]["stage"] = json!("screen");
+        assert!(is_screen(&r));
+    }
+
+    #[test]
+    fn verdict_reports_the_resolution_floor() {
+        let (v, _, _) = judge_runs(&[], &[], 0.05, 2);
+        assert!((v["min_reachable_p"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-12);
+        assert_eq!(v["reachable"], false);
+        let (v, _, _) = judge_runs(&[], &[], 0.05, 5);
+        assert!((v["min_reachable_p"].as_f64().unwrap() - 2.0 / 252.0).abs() < 1e-12);
+        assert_eq!(v["reachable"], true);
     }
 
     #[test]

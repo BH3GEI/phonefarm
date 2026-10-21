@@ -319,8 +319,43 @@ pub fn min_two_sided_p(n_per_arm: usize) -> f64 {
     let mut c = 1.0_f64;
     for i in 0..n_per_arm {
         c = c * (n2 - i) as f64 / (i + 1) as f64;
+        if !c.is_finite() {
+            // C(2n,n) 超出 double (n 约 >= 515): 真值小到 0 附近, 提前返回别把进程卡在大循环里
+            return 0.0;
+        }
     }
     (2.0 / c).min(1.0)
+}
+
+/// 「改善」一侧最严会收紧到几个指标: 帧时 p95、平均帧率, 再加上可能进判定的整机功耗。
+/// 功耗进不进判定要等数据出来 (两臂是否全程放电态) 才知道, 开跑前的防护只能按最严的算。
+pub const MAX_WIN_METRICS: usize = 3;
+
+/// n v n 精确置换检验要判得出 p < `alpha_win`, 每臂至少要几轮。
+/// 64 以内找不到就返回 None (alpha_win 小得离谱, 不是这里该猜的)。
+pub fn min_pairs_for(alpha_win: f64) -> Option<usize> {
+    (2..=64).find(|n| min_two_sided_p(*n) < alpha_win)
+}
+
+/// 结构性防护: n v n 的样本量在数学上判不出 p < `alpha_win` 时拒绝开跑。
+///
+/// `what` 是给人看的出处 (如 `autoloop --pairs`), 报错里会告诉调用方最少要给几轮。
+/// selftest / eval / autoloop 都走这一个函数, 不各自再算一遍 2/C(2n,n)。
+pub fn ensure_resolvable(n_per_arm: usize, alpha_win: f64, what: &str) -> Result<(), String> {
+    let p_min = min_two_sided_p(n_per_arm);
+    if p_min < alpha_win {
+        return Ok(());
+    }
+    let need = match min_pairs_for(alpha_win) {
+        Some(k) => format!("{what} 至少给 {k}"),
+        None => format!("alpha_win={alpha_win} 太小, 64 轮以内都够不着, 先检查显著性门槛"),
+    };
+    Err(format!(
+        "{n_per_arm}v{n_per_arm} 的样本量判不出显著改善: 精确置换检验的最小双侧 p = 2/C({},{}) = {p_min:.4}, \
+而显著改善要求 p < {alpha_win:.4}。{need}, 否则这次的结论只能是「没有显著变化」, 跑多久都一样",
+        2 * n_per_arm,
+        n_per_arm,
+    ))
 }
 
 /// 均值差的精确双侧置换 p 值。
@@ -875,6 +910,24 @@ mod tests {
         assert_eq!(min_two_sided_p(0), 1.0);
         // 单调下降
         assert!(min_two_sided_p(10) < min_two_sided_p(8));
+    }
+
+    /// 防护函数: 给出最少轮数, 而且对 alpha/2 与 alpha/3 两种 Bonferroni 口径都是 5。
+    #[test]
+    fn ensure_resolvable_names_the_minimum_pairs() {
+        assert_eq!(min_pairs_for(0.05 / 2.0), Some(5));
+        assert_eq!(min_pairs_for(0.05 / 3.0), Some(5));
+        // p_threshold=0.01 时 (gpu-op 的生产口径) 要 6 轮: 2/C(12,6) = 0.00216 < 0.0033
+        assert_eq!(min_pairs_for(0.01 / 3.0), Some(6));
+        assert!(ensure_resolvable(5, 0.05 / 3.0, "--pairs").is_ok());
+        let e = ensure_resolvable(3, 0.05 / 3.0, "--pairs").unwrap_err();
+        assert!(e.contains("3v3") && e.contains("0.1000") && e.contains("--pairs 至少给 5"), "{e}");
+        let e = ensure_resolvable(4, 0.025, "protocol.rounds").unwrap_err();
+        assert!(e.contains("protocol.rounds 至少给 5"), "{e}");
+        assert!(ensure_resolvable(2, 1e-60, "x").unwrap_err().contains("太小"));
+        // 0 轮/1 轮也拒
+        assert!(ensure_resolvable(0, 0.5, "x").is_err());
+        assert!(ensure_resolvable(1, 0.5, "x").is_err());
     }
 
 

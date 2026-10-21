@@ -91,6 +91,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     if !matches!(power_in_verdict.as_str(), "auto" | "on" | "off") {
         return Err(format!("--power-in-verdict 只认 auto|on|off, got {power_in_verdict}"));
     }
+    // 结构性防护: 每组候选 pairs v pairs, 判定用 alpha/K (K = 帧时、帧率, 再加可能进表的功耗)。
+    // 样本量够不着 alpha/K 时任何候选都不可能判 KEEP, 整场 autoloop 只是在烧真机时间。
+    // 2026-09 的 runs_sysparam/genshin1 就是 --pairs 3 跑的 (rule.json 里 reachable=false)。
+    // 功耗进不进表要看基线轮, 这里还不知道: off 时按 2 个指标, 其余按最严的 3 个。
+    let k_max = if power_in_verdict == "off" { 2 } else { loopstat::MAX_WIN_METRICS };
+    loopstat::ensure_resolvable(pairs as usize, sysparam::ALPHA / k_max as f64, "--pairs")?;
     Ok(Args {
         out: out.ok_or(format!("缺少 --out\n\n{USAGE}"))?,
         generations,
@@ -1042,7 +1048,13 @@ pub fn run_autoloop(args: &[String]) -> i32 {
         rget("reachable").map(|v| v.py_str()).unwrap_or_default(),
     ));
     if !matches!(rget("reachable"), Some(PyVal::Bool(true))) {
-        log("警告: 轮数不足以达到 Bonferroni 收紧后的显著性门槛, 本次任何候选都不可能判保留");
+        // parse_args 已按最严口径拦过, 走到这里说明判定表和开跑前的估计对不上: 不跑, 别白烧
+        log(&format!(
+            "拒跑: {}v{} 够不着 Bonferroni 收紧后的显著性门槛 alpha_win={}, 本次任何候选都不可能判保留",
+            a.pairs, a.pairs,
+            rget("alpha_win_bonferroni").map(|v| v.py_str()).unwrap_or_default(),
+        ));
+        return 2;
     }
     let rule_metrics: Vec<String> = rget("metrics")
         .and_then(|v| match v {
@@ -1340,6 +1352,19 @@ mod tests {
 
     fn args(xs: &[&str]) -> Result<Args, String> {
         parse_args(&xs.iter().map(|x| x.to_string()).collect::<Vec<_>>())
+    }
+
+    /// --pairs 太小时开跑前就拒, 报错里给出最少对数; off 时按 2 个指标算, 最少也是 5。
+    #[test]
+    fn pairs_too_small_to_reach_significance_is_refused() {
+        for p in ["2", "3", "4"] {
+            let e = args(&["--out", "x", "--pairs", p]).err().expect(p);
+            assert!(e.contains("--pairs 至少给 5"), "{e}");
+            let e = args(&["--out", "x", "--pairs", p, "--power-in-verdict", "off"]).err().expect(p);
+            assert!(e.contains("--pairs 至少给 5"), "{e}");
+        }
+        assert!(args(&["--out", "x", "--pairs", "5"]).is_ok());
+        assert!(args(&["--out", "x"]).is_ok(), "缺省 5 对必须够得着");
     }
 
     /// 提速开关的缺省值必须是旧行为 (每组等冷); 截断缺省开。

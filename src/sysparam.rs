@@ -672,14 +672,8 @@ fn min_reachable_p(pairs: i64) -> Option<f64> {
     if pairs < 2 {
         return None;
     }
-    let mut c: f64 = 1.0;
-    for i in 1..=pairs {
-        c = c * (pairs + i) as f64 / i as f64;
-        if !c.is_finite() {
-            return None;
-        }
-    }
-    Some(2.0 / c)
+    // 公式只在 loopstat 一处; 溢出时它返回 0.0, 这里换成 None
+    Some(crate::loopstat::min_two_sided_p(pairs as usize)).filter(|p| *p > 0.0)
 }
 
 /// 判定指标的方向: `Some(true)` = 越小越好。不在判定表里的指标返回 `None`。
