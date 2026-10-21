@@ -39,7 +39,36 @@
         60,
         100000
       ],
-      "note": "被测窗口的帧数。相机路线按帧序号推进, 所以 frames 变了路线采样密度就变了 —— 跨轮比较必须锁死同一个 frames。"
+      "note": "pace=frame 时: 被测窗口的帧数, 相机按帧序号推进, 跨轮比较必须锁死同一个 frames。pace=time (缺省) 时: 只用来给出 route_seconds 的缺省值 frames/30, 窗口长度由 route_seconds 决定。"
+    },
+    "pace": {
+      "required": false,
+      "default": "time",
+      "enum": [
+        "time",
+        "frame"
+      ],
+      "note": "路线推进方式 (审计 #8, harness 0.3.0)。time: 相机位置 = 窗口内已过真实时间 / route_seconds, 帧率不锁时两臂同一时刻在同一位置, phonefarm 按 marker 之后固定秒数采集, 两臂覆盖同一段路线。frame: 旧行为, 位姿只由帧序号决定; 帧率不锁时固定秒数的采集窗在两臂覆盖不同长度的路线, 只用于复现旧数据。"
+    },
+    "route_seconds": {
+      "required": false,
+      "default": "frames/30",
+      "parsed_as": "float",
+      "range": [
+        1,
+        100000
+      ],
+      "note": "pace=time 时整条路线飞完的秒数, 也是被测窗口长度。缺省 frames/30 与旧版在 30 fps 下的飞行速度相同, 旧 extras (frames=3600) 等于 120 秒; phonefarm 只采前 seconds 秒 (game_opt_loop 里 30 秒), 即路线前 1/4。"
+    },
+    "fps_cap": {
+      "required": false,
+      "default": "1000",
+      "parsed_as": "int",
+      "range": [
+        1,
+        1000
+      ],
+      "note": "vsync=off 时 Application.targetFrameRate 的值 (QualitySettings.vSyncCount=0)。旧版写 -1, 在 Android 上就是 30 fps。实际上限由屏幕刷新率 / 系统帧调度决定, 回读写进输出 json 的 frame_pacing。"
     },
     "route": {
       "required": false,
@@ -180,5 +209,6 @@
     "record_audio": "首次安装后 Vivox 会弹录音权限框, 框一出应用被挂起、协程停摆。harness 现在会切单机模式(上游只在非单机时实例化 Vivox)绕开它; run 脚本仍会 pm grant android.permission.RECORD_AUDIO 作双保险, 这步是幂等的。"
   },
   "knobs_note": "白盒旋钮 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MEGACITY_WHITEBOX_KNOBS.md)。全部可选, 不给就不碰。城市装完、预热前一次性生效; 每条的想要值/改法(prop|field|none|failed:..)/回读实际值写进输出 json 的 knobs。改法不是 prop/field 的那一臂作废, 不能当对照。",
-  "launch_template_knobs": " --es msaa {msaa} --es store_opt {store_opt} --es feat_off {feat_off} --es fog_event {fog_event} --es ssao_src {ssao_src} --es ssao_after_opaque {ssao_after_opaque} --es shadowres {shadowres} --es depth_priming {depth_priming}"
+  "launch_template_knobs": " --es msaa {msaa} --es store_opt {store_opt} --es feat_off {feat_off} --es fog_event {fog_event} --es ssao_src {ssao_src} --es ssao_after_opaque {ssao_after_opaque} --es shadowres {shadowres} --es depth_priming {depth_priming}",
+  "launch_template_pacing": " --es pace {pace} --es route_seconds {route_seconds} --es fps_cap {fps_cap}"
 }
