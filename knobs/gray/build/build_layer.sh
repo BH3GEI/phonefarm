@@ -6,6 +6,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # gray/
 SDK="${ANDROID_SDK_ROOT:-/opt/homebrew/share/android-commandlinetools}"
 NDK="${REFBENCH_NDK:-$SDK/ndk/28.2.13676358}"
+# 默认位置没有时依次找: ANDROID_NDK_HOME, Android Studio 的 SDK, 仓库外的 tools/ndk (都要求 r28c = 28.2.13676358)
+if [ ! -d "$NDK" ]; then
+    for c in "${ANDROID_NDK_HOME:-}" "$HOME/Library/Android/sdk/ndk/28.2.13676358" \
+             "$ROOT/../../../../tools/ndk/android-ndk-r28c" "$ROOT/../../../../../tools/ndk/android-ndk-r28c"; do
+        [ -n "$c" ] && [ -d "$c" ] && { NDK="$(cd "$c" && pwd)"; break; }
+    done
+fi
 HOST_TAG=darwin-x86_64
 [ -d "$NDK/toolchains/llvm/prebuilt/$HOST_TAG" ] || HOST_TAG=linux-x86_64
 CXX="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android30-clang++"
@@ -24,7 +31,10 @@ GLSLC="$NDK/shader-tools/$HOST_TAG/glslc"
 [ -x "$GLSLC" ] || { echo "缺 glslc: $GLSLC" >&2; exit 1; }
 "$GLSLC" -O "$ROOT/layer/copyprobe_copy.comp" -o "$OUT/copyprobe_copy.spv"
 "$GLSLC" -O "$ROOT/layer/upop.comp" -o "$OUT/upop.spv"
-python3 - "$OUT/copyprobe_copy.spv" "$OUT/upop.spv" > "$OUT/copy_spv.h" <<'PYEOF'
+# npuop: 画面 -> NPU 输入张量 / NPU 输出张量 -> 送显分辨率 dst
+"$GLSLC" -O "$ROOT/layer/npu_pack.comp" -o "$OUT/npu_pack.spv"
+"$GLSLC" -O "$ROOT/layer/npu_unpack.comp" -o "$OUT/npu_unpack.spv"
+python3 - "$OUT/copyprobe_copy.spv" "$OUT/upop.spv" "$OUT/npu_pack.spv" "$OUT/npu_unpack.spv" > "$OUT/copy_spv.h" <<'PYEOF'
 import sys
 def emit(name, path):
     d = open(path, "rb").read()
@@ -35,13 +45,16 @@ def emit(name, path):
     print(f"static const unsigned int {name}Len = {len(d)};")
 emit("kCopySpv", sys.argv[1])
 emit("kUpopSpv", sys.argv[2])
+emit("kNpuPackSpv", sys.argv[3])
+emit("kNpuUnpackSpv", sys.argv[4])
 PYEOF
-echo "shader: copy=$(wc -c < "$OUT/copyprobe_copy.spv" | tr -d ' ')B upop=$(wc -c < "$OUT/upop.spv" | tr -d ' ')B -> copy_spv.h"
+echo "shader: copy=$(wc -c < "$OUT/copyprobe_copy.spv" | tr -d ' ')B upop=$(wc -c < "$OUT/upop.spv" | tr -d ' ')B" \
+     "npu_pack=$(wc -c < "$OUT/npu_pack.spv" | tr -d ' ')B npu_unpack=$(wc -c < "$OUT/npu_unpack.spv" | tr -d ' ')B -> copy_spv.h"
 
 "$CXX" -O2 -Wall -fPIC -std=c++17 -fno-exceptions -fno-rtti \
     -static-libstdc++ -Wl,--exclude-libs,ALL \
-    -I"$OUT" \
-    -shared -o "$OUT/libVkLayer_refknobs.so" "$ROOT/layer/vk_layer_refknobs.cpp" "$ROOT/layer/npuprobe.cpp" \
+    -I"$OUT" -I"$ROOT/layer" \
+    -shared -o "$OUT/libVkLayer_refknobs.so" "$ROOT/layer/vk_layer_refknobs.cpp" "$ROOT/layer/npuprobe.cpp" "$ROOT/layer/framedump.cpp" \
     -llog -ldl
 cp "$ROOT/layer/VkLayer_refknobs.json" "$OUT/"
 echo "layer: $OUT/libVkLayer_refknobs.so ($(wc -c < "$OUT/libVkLayer_refknobs.so" | tr -d ' ') B)"

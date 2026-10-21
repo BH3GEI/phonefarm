@@ -1,0 +1,212 @@
+{
+  "_说明": "原神 CN + 红魔 NX809J 三臂实验配置。坐标为 adb screencap 像素 (= input tap 坐标)。null 的坐标由 ui-probe 标定后填; 能用 OCR 找到的不需要坐标。",
+  "serial": "91253241019A",
+  "pkg": "com.miHoYo.Yuanshen",
+  "arms": {
+    "C": {
+      "setting": "native",
+      "npuop": "0",
+      "desc": "原生 (渲染精度原始档, 应为极高), 游戏自己的路径"
+    },
+    "A": {
+      "setting": "low",
+      "npuop": "0",
+      "desc": "渲染精度低 + 游戏自带放大"
+    },
+    "B": {
+      "setting": "low",
+      "npuop": "1",
+      "desc": "渲染精度低 + 我们的层 debug.knobs.npuop=1 (N1)"
+    }
+  },
+  "setting": {
+    "render_row_text": "渲染精度",
+    "fps_row_text": "帧率",
+    "labels": {
+      "native": "极高",
+      "low": "低"
+    },
+    "fps_label": "30",
+    "prefs_render_entry": 2,
+    "prefs_fps_entry": 1,
+    "prefs_expected_index": {
+      "native": 4,
+      "low": 1
+    },
+    "low_wh": [
+      1134,
+      514
+    ],
+    "native_min_frac_of_swapchain": 0.95,
+    "fps_orig_label_fallback": "60"
+  },
+  "ui": {
+    "gate_text": [
+      "点击进入"
+    ],
+    "forbidden_text": [
+      "登录",
+      "密码",
+      "验证码",
+      "手机号",
+      "注册",
+      "实名",
+      "支付",
+      "充值",
+      "下载资源",
+      "正在下载"
+    ],
+    "popup_close_text": [
+      "点击空白处关闭",
+      "点击空白区域关闭",
+      "点击任意位置关闭",
+      "点击屏幕继续"
+    ],
+    "paimon_xy": [
+      190,
+      90
+    ],
+    "paimon_menu_text": [
+      "冒险等阶",
+      "世界等级",
+      "编辑资料"
+    ],
+    "settings_xy": null,
+    "settings_text": [
+      "设置"
+    ],
+    "settings_page_text": [
+      "图像",
+      "音频",
+      "控制"
+    ],
+    "graphics_tab_text": "图像",
+    "scroll_swipe": [
+      1700,
+      900,
+      1700,
+      450,
+      500
+    ],
+    "scroll_max": 4,
+    "close_xy": null,
+    "exit_xy": null,
+    "quit_dialog_text": [
+      "退出游戏",
+      "是否退出"
+    ],
+    "confirm_text": [
+      "确认",
+      "确定"
+    ]
+  },
+  "timing": {
+    "marker_wait_s": 90,
+    "gate_wait_s": 150,
+    "world_wait_s": 240,
+    "warmup_s": 45,
+    "measure_s": 60,
+    "settle_after_ui_s": 20,
+    "arm_retries": 1
+  },
+  "thermal": {
+    "batt_start_c": 33.0,
+    "soc_start_c": 45.0,
+    "tol_c": 1.0,
+    "poll_s": 15,
+    "max_wait_s": 1200
+  },
+  "power": {
+    "min_start_capacity": 65,
+    "abort_capacity": 35,
+    "max_start_capacity": 98,
+    "drain_target": 97,
+    "drain_max_s": 2400,
+    "min_samples": 150
+  },
+  "frame": {
+    "render_comm": "UnityGfxDeviceW",
+    "fps_cap": 30,
+    "fps_tol_frac": 0.1,
+    "miss_ms": 40.0,
+    "_说明": "帧时按帧预算判 (N1/主控 10-21; R2 审查 #6 要求明示): 与 eval::judge_runs 的差异有两处 —— (1) frame_p95 显著变长但改写臂均值 ≤ miss_ms 不算退化 (judge_runs 里显著变长就是退化); (2) 另加 missed_frac (帧间隔 > miss_ms 的占比) 只守退化。相同处: fps_mean 按 fix-G 锁帧口径只守退化不占预算, 改善表 = frame_p95 + power_w_mean (K=2), alpha_win = 0.05/K。verdict.json.frame_rule 原样写出"
+  },
+  "npu": {
+    "_说明": "N1 (npu/n1-pipeline, R2F 修订版) 的上机做法: 拼接库目录 + bind mount, 清单同 _tmp/npu/N1/ondevice.sh。require_npu_frac: 测量窗口内 NPU 处理的帧占比下限, 达不到 = 未按设计施加。npuop_wait_ms: 栅栏等待预算 (与推理预算 budget_ms 分开, 等不到就跳过该帧)",
+    "require_npu_frac": 0.95,
+    "props": {
+      "debug.knobs.npuop_lag": "2",
+      "debug.knobs.npuop_wait_ms": "2",
+      "debug.knobs.npuop_budget_ms": "12",
+      "debug.knobs.npuop_budget_frames": "30",
+      "debug.knobs.npuop_init_frame": "300",
+      "debug.knobs.npuop_zc": "1",
+      "debug.knobs.npuop_ts": "1"
+    },
+    "local_files": [
+      "{AGENT}/tools/npu-handoff/lib/libtensorflowlite_jni.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnTFLiteDelegate.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnHtp.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnHtpV81Stub.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnSystem.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnHtpPrepare.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/hexagon-v81/unsigned/libQnnHtpV81Skel.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/hexagon-v81/unsigned/libQnnHtpV81.so",
+      "{AGENT}/tools/npu-handoff/stub/libvndksupport.so"
+    ],
+    "vendor_libs": [
+      "libcdsprpc.so",
+      "libc++.so",
+      "libvmmem.so",
+      "libbase.so",
+      "libdmabufheap.so",
+      "libcutils.so",
+      "vendor.qti.hardware.dsp-V1-ndk.so",
+      "android.hardware.common-V2-ndk.so",
+      "vendor.qti.hardware.dsp@1.0.so",
+      "libutils.so",
+      "libhidlbase.so",
+      "libhardware.so"
+    ]
+  },
+  "iq": {
+    "n_ctrl": 4,
+    "shot_gap_s": 0,
+    "exclude_frac": [
+      [
+        0.0,
+        0.0,
+        0.22,
+        0.3
+      ],
+      [
+        0.55,
+        0.0,
+        1.0,
+        0.13
+      ],
+      [
+        0.8,
+        0.18,
+        1.0,
+        0.62
+      ],
+      [
+        0.68,
+        0.58,
+        1.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.8,
+        0.14,
+        1.0
+      ]
+    ],
+    "_exclude_说明": "小地图+派蒙 / 右上图标 / 右侧队伍栏 / 右下技能键与 UID / 左下聊天。比例坐标 [x0,y0,x1,y1], 按截图尺寸换算成像素。第一次真机运行后看 iq_exclude_preview.png 核对。"
+  },
+  "disk": {
+    "min_free_mb": 4000
+  }
+}

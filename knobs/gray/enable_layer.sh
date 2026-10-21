@@ -6,6 +6,8 @@
 #   passdump [pkg]   只读 + 导出 render pass 形状表: 每个 pass 的宽高/格式/次序/draw 数,
 #                    外加 swapchain 尺寸与一帧的有序 pass 序列。用来定位"低分辨率->放大"那一步。
 #   target <pkg>     对目标游戏挂空层并启动, 看能否正常进游戏 (问题 2 反作弊)
+#   framedump [pkg]  逐帧读回送显图 (插帧/超分数据, layer/framedump.cpp)。挂上后不抓, 由
+#                    genshin_vfi_capture.sh 改 debug.knobs.framedump_go 开段
 #   --keep-prop      挂完保留全局属性 (默认是层一加载就清掉, 见下面的误伤警告)
 #   status           只读打印当前挂载状态
 #   off              摘层并删掉推进去的 .so, 还原
@@ -50,6 +52,7 @@ LOADOP_PROP="debug.knobs.loadop"          # 1 = 层把 loadOp LOAD 改写成 DON
 DUMP_PROP="debug.knobs.passdump"          # 1 = 层导出 render pass 形状表 (找放大那一步)
 CP_PROP="debug.knobs.copyprobe"           # 1 = 1:1 拷贝探针 (改写! 探反作弊用, 隐含 passdump 追踪)
 UPOP_PROP="debug.knobs.upop"              # 1 = 真超分算子 (gen1_loc3), dst=送显分辨率
+FD_PROP="debug.knobs.framedump"           # 1 = present 处逐帧读回落盘 (只多一次拷贝, 不改画面)
 SO="libVkLayer_refknobs.so"
 STATE="/data/local/tmp/knobs_layer_state"       # 存"把 .so 推进了哪个包", 供 off 精确回滚
 OUT="$(cd "$(dirname "$0")" && pwd)/build/out"
@@ -161,10 +164,10 @@ done
 set -- ${ARGS[@]+"${ARGS[@]}"}
 
 case "${1:-}" in
-  probe)   ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0'"; mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
+  probe)   ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0; setprop $FD_PROP 0'"; mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
   # 观测档: 只读 + 导出 pass 形状表 (尺寸/格式/次序/draw 数), 用来定位"低分辨率->放大"那一步
   passdump)
-    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 0; setprop $UPOP_PROP 0'"
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 0; setprop $UPOP_PROP 0; setprop $FD_PROP 0'"
     [ "$(ashell "getprop $DUMP_PROP" | tr -d '\r')" = "1" ] \
       || { echo "setprop $DUMP_PROP 没生效" >&2; exit 1; }
     mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
@@ -172,7 +175,7 @@ case "${1:-}" in
   loadop)
     # 必须显式把 passdump 关掉: 上一轮 passdump 留下的 1 会让 A/B 两臂都挂上观测钩子,
     # 等于给对照组凭空加开销, 而自报里看不出来
-    ashell "su -c 'setprop $LOADOP_PROP 1; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0'"
+    ashell "su -c 'setprop $LOADOP_PROP 1; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0; setprop $FD_PROP 0'"
     # 回读: 写不进就静默退化成只读档, 而自报里 knob 会变成 gray_readonly_probe、
     # unavailable_reason 还是 null, harness 根本看不出这一轮没开改写
     [ "$(ashell "getprop $LOADOP_PROP" | tr -d '\r')" = "1" ] \
@@ -180,19 +183,26 @@ case "${1:-}" in
     mount_layer "${2:-io.github.hgamey.refbench}" "$KEEP" ;;
   target)
     [ -n "${2:-}" ] || { echo "target 要给包名" >&2; exit 2; }
-    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0'"; mount_layer "$2" "$KEEP" ;;
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0; setprop $FD_PROP 0'"; mount_layer "$2" "$KEEP" ;;
   # 拷贝探针档: 1:1 拷贝算子把"建 pipeline/建 image/换描述符"全走一遍, 画面应逐像素不变。
   # 是**改写**, 不是只读 —— 探的就是反作弊对这种侵入放不放行。
   copyprobe)
-    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 1; setprop $UPOP_PROP 0'"
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 1; setprop $UPOP_PROP 0; setprop $FD_PROP 0'"
     [ "$(ashell "getprop $CP_PROP" | tr -d '\r')" = "1" ] \
       || { echo "setprop $CP_PROP 没生效, 拒绝按探针档继续" >&2; exit 1; }
     mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
   # 真超分算子档: gen1_loc3 (2x2 bilinear), dst=送显分辨率
   upop)
-    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 0; setprop $UPOP_PROP 1'"
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 0; setprop $UPOP_PROP 1; setprop $FD_PROP 0'"
     [ "$(ashell "getprop $UPOP_PROP" | tr -d '\r')" = "1" ] \
       || { echo "setprop $UPOP_PROP 没生效, 拒绝按算子档继续" >&2; exit 1; }
+    mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
+  # 逐帧读回档: 其它改写/观测全关, 只开 framedump; go 先置 0, 免得上一轮的标签一挂上就触发
+  framedump)
+    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0; \
+            setprop $FD_PROP 1; setprop debug.knobs.framedump_go 0'"
+    [ "$(ashell "getprop $FD_PROP" | tr -d '\r')" = "1" ] \
+      || { echo "setprop $FD_PROP 没生效, 拒绝按读回档继续" >&2; exit 1; }
     mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
   status)
     echo "debug.vulkan.layers = [$(ashell 'getprop debug.vulkan.layers' | tr -d '\r')]"
@@ -200,6 +210,7 @@ case "${1:-}" in
     echo "$DUMP_PROP  = [$(ashell "getprop $DUMP_PROP" | tr -d '\r')]"
     echo "$CP_PROP = [$(ashell "getprop $CP_PROP" | tr -d '\r')]"
     echo "$UPOP_PROP = [$(ashell "getprop $UPOP_PROP" | tr -d '\r')]"
+    echo "$FD_PROP = [$(ashell "getprop $FD_PROP" | tr -d '\r')]  go=[$(ashell "getprop debug.knobs.framedump_go" | tr -d '\r')]"
     st=$(ashell "su -c 'cat $STATE 2>/dev/null'" | tr -d '\r')
     if [ -n "$st" ]; then
       echo "state = $st  (处于施加态)"
@@ -208,7 +219,8 @@ case "${1:-}" in
       echo "state = <无>  (未施加)"
     fi ;;
   off)
-    ashell "su -c 'setprop debug.vulkan.layers \"\"; setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0'"
+    # framedump 抓到的帧 (<应用数据目录>/files/i3dump) 不在这里动, 只关开关
+    ashell "su -c 'setprop debug.vulkan.layers \"\"; setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0; setprop $FD_PROP 0; setprop debug.knobs.framedump_go 0'"
     st=$(ashell "su -c 'cat $STATE 2>/dev/null'" | tr -d '\r')
     if [ -n "$st" ]; then
       dir="${st#*|}"; pkg="${st%%|*}"
@@ -240,6 +252,6 @@ case "${1:-}" in
       printf '  %-20s = %s\n' "$K" "$(ashell "settings get global $K" | tr -d '\r')"
     done ;;
   *)
-    echo "用法: enable_layer.sh {probe|loadop [pkg]|passdump [pkg]|target <pkg>|status|off} [--keep-prop]" >&2
+    echo "用法: enable_layer.sh {probe|loadop [pkg]|passdump [pkg]|framedump [pkg]|target <pkg>|status|off} [--keep-prop]" >&2
     exit 2 ;;
 esac

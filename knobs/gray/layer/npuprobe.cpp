@@ -1,7 +1,8 @@
 // npuprobe: 游戏进程 (普通应用, 无 root) 里的 NPU (HTP) 运行时。两个用户:
 //   - debug.knobs.npuprobe=1: 只验证能不能跑 —— 第 INIT_FRAME 帧初始化, 之后 RUN_FRAMES 帧每帧推理一次并计时。
 //     =2 只开设备写日志, 不加载任何库; =3 只写日志 (排查游戏为什么退出)。
-//   - npuop (vk_layer_refknobs.cpp): 用 npu_rt_init / npu_rt_run 真正替换游戏的放大。
+//   - npuop (vk_layer_refknobs.cpp): 用 npu_rt_init / npu_rt_bind / npu_rt_invoke (零拷贝)
+//     或 npu_rt_run (拷贝) 真正替换游戏的放大。
 // 不开线程: 原神会杀掉层自己创建的线程 (2026-10-20 实测, 只开线程写日志也会 SIGSEGV)。
 // 所以全部工作在游戏线程的 vkQueuePresentKHR 里同步做。
 //
@@ -28,12 +29,7 @@
 #include <string>
 
 // 与 vk_layer_refknobs.cpp 共用的接口
-struct NpuIo {
-    size_t in_bytes = 0, out_bytes = 0;
-    float in_scale = 0, out_scale = 0;
-    int in_zp = 0, out_zp = 0;
-};
-void npu_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+#include "npu_rt.h"
 
 namespace {
 
@@ -81,6 +77,16 @@ size_t (*g_bytes)(const void*) = nullptr;
 int (*g_copy_from)(void*, const void*, size_t) = nullptr;
 int (*g_copy_to)(const void*, void*, size_t) = nullptr;
 QuantParams (*g_qparams)(const void*) = nullptr;
+int (*g_alloc)(void*) = nullptr;
+int (*g_ndims)(const void*) = nullptr;
+int (*g_dim)(const void*, int) = nullptr;
+int (*g_type)(const void*) = nullptr;
+int (*g_in_index)(const void*, int) = nullptr;
+int (*g_out_index)(const void*, int) = nullptr;
+struct CustomAlloc { void* data; size_t bytes; };   // = TfLiteCustomAllocation
+int (*g_set_custom)(void*, int, const CustomAlloc*, int64_t) = nullptr;
+void* g_bound_in = nullptr;
+void* g_bound_out = nullptr;
 
 // 加载运行库, 建好解释器 (HTP 平衡档)。成功后 g_it 非空。
 bool rt_load() {
@@ -121,8 +127,17 @@ bool rt_load() {
         !sym(tfl, "TfLiteTensorByteSize", g_bytes) ||
         !sym(tfl, "TfLiteTensorCopyFromBuffer", g_copy_from) ||
         !sym(tfl, "TfLiteTensorCopyToBuffer", g_copy_to) ||
-        !sym(tfl, "TfLiteTensorQuantizationParams", g_qparams))
+        !sym(tfl, "TfLiteTensorQuantizationParams", g_qparams) ||
+        !sym(tfl, "TfLiteTensorNumDims", g_ndims) ||
+        !sym(tfl, "TfLiteTensorDim", g_dim) ||
+        !sym(tfl, "TfLiteTensorType", g_type))
         return false;
+    g_alloc = alloc;
+    // 零拷贝要的三个是可选的: 缺了只是 npuop 退回拷贝模式
+    g_in_index = reinterpret_cast<int (*)(const void*, int)>(dlsym(tfl, "TfLiteInterpreterGetInputTensorIndex"));
+    g_out_index = reinterpret_cast<int (*)(const void*, int)>(dlsym(tfl, "TfLiteInterpreterGetOutputTensorIndex"));
+    g_set_custom = reinterpret_cast<int (*)(void*, int, const CustomAlloc*, int64_t)>(
+        dlsym(tfl, "TfLiteInterpreterSetCustomAllocationForTensor"));
 
     std::string lib = dir + "/libQnnHtp.so";
     const char* keys[] = {"backend_type", "library_path", "skel_library_dir", "htp_performance_mode"};
@@ -173,12 +188,39 @@ bool npu_rt_init(NpuIo* io) {
     io->in_bytes = g_bytes(ti); io->out_bytes = g_bytes(to);
     io->in_scale = qi.scale; io->in_zp = qi.zero_point;
     io->out_scale = qo.scale; io->out_zp = qo.zero_point;
-    NLOG("模型: 输入 %zu B (scale %.6f zp %d), 输出 %zu B (scale %.6f zp %d)",
-         io->in_bytes, io->in_scale, io->in_zp, io->out_bytes, io->out_scale, io->out_zp);
+    io->in_ndims = g_ndims(ti); io->out_ndims = g_ndims(to);
+    for (int i = 0; i < 4; i++) {
+        io->in_dims[i] = i < io->in_ndims ? g_dim(ti, i) : 0;
+        io->out_dims[i] = i < io->out_ndims ? g_dim(to, i) : 0;
+    }
+    io->in_type = g_type(ti); io->out_type = g_type(to);
+    io->can_bind = g_set_custom && g_in_index && g_out_index;
+    NLOG("模型: 输入 [%d,%d,%d,%d] type %d %zu B (scale %.6f zp %d), 输出 [%d,%d,%d,%d] type %d %zu B (scale %.6f zp %d), 零拷贝接口 %s",
+         io->in_dims[0], io->in_dims[1], io->in_dims[2], io->in_dims[3], io->in_type,
+         io->in_bytes, io->in_scale, io->in_zp,
+         io->out_dims[0], io->out_dims[1], io->out_dims[2], io->out_dims[3], io->out_type,
+         io->out_bytes, io->out_scale, io->out_zp, io->can_bind ? "有" : "无");
     return true;
 }
 
-// npuop 用: 一次推理, in/out 为打包好的 uint8 RGB
+// npuop 零拷贝: 输入/输出张量改用调用方的内存。AllocateTensors 在已分配过的图上直接返回,
+// 只是让 TFLite 校验新指针 (官方要求 SetCustomAllocation 之后调一次)。
+bool npu_rt_bind(void* in, size_t in_cap, void* out, size_t out_cap) {
+    if (!g_it || !g_set_custom || !g_in_index || !g_out_index) return false;
+    if (in == g_bound_in && out == g_bound_out) return true;
+    CustomAlloc ai{in, in_cap}, ao{out, out_cap};
+    if (g_set_custom(g_it, g_in_index(g_it, 0), &ai, 0) != 0) return false;
+    if (g_set_custom(g_it, g_out_index(g_it, 0), &ao, 0) != 0) return false;
+    if (g_alloc(g_it) != 0) return false;
+    g_bound_in = in; g_bound_out = out;
+    return true;
+}
+
+bool npu_rt_invoke() {
+    return g_it && g_bound_in && g_invoke(g_it) == 0;
+}
+
+// npuop 拷贝模式: 一次推理, in/out 为打包好的 NHWC 张量字节 (通道数按模型)
 bool npu_rt_run(const void* in, size_t in_bytes, void* out, size_t out_bytes) {
     if (!g_it) return false;
     if (g_copy_from(g_get_in(g_it, 0), in, in_bytes) != 0) return false;

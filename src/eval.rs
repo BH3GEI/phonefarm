@@ -51,7 +51,8 @@ const DEFAULT_DENY_KEYWORDS: [&str; 7] = [
 /// 现在校验直接走 `parse_gray_rewrites`, 这张表只用于报错文字, 两者由单测锁在一起。
 pub(crate) const GRAY_SUPPORTED_KNOBS: [&str; 2] = ["loadop_dont_care", "storeop_dont_care"];
 
-const USAGE: &str = "用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--lock-gpu-level N] [--json]
+const USAGE: &str = "用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--lock-gpu-level N] [--json] [--validate-only]
+  --validate-only: 只做收端校验 (validate_v2 + gray 改写解析 + 负载脚本/层 .so 是否找得到), 不碰设备; 退出码 0 = 收, 2 = 拒
   --lock-gpu-level N  评测期间把 kgsl min/max_pwrlevel 都钉在 N 档 (审计 #9: 档位不受控时同一配置帧率跳台阶),
                       结束时还原, 回包 conditions_observed.gpu_level_lock; 候选本身改 GPU 档位的 sysparam 不能同时用";
 
@@ -96,6 +97,8 @@ struct EvalArgs {
     curtail: bool,
     /// 审计 #9: 评测期间把 GPU 档位钉在这一档 (kgsl min/max_pwrlevel), 见 [`GpuLevelLock`]。
     lock_gpu_level: Option<u32>,
+    /// 只校验不上机 (离线 dry-run)
+    validate_only: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
@@ -103,6 +106,7 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
     let (mut request, mut serial, mut power_rail, mut out) = (None, None, None, None);
     let mut curtail = true;
     let mut lock_gpu_level = None;
+    let mut validate_only = false;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--request" => request = it.next().cloned(),
@@ -114,6 +118,7 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
                 let v = it.next().and_then(|v| v.parse::<u32>().ok());
                 lock_gpu_level = Some(v.ok_or(format!("--lock-gpu-level 要一个非负整数档位号\n{USAGE}"))?);
             }
+            "--validate-only" => validate_only = true,
             "--json" => {} // eval 的回包恒为 JSON, 收下这个旗子仅为兼容接口形状
             other => return Err(format!("不认识的参数 {other}\n{USAGE}")),
         }
@@ -125,6 +130,7 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
         out,
         curtail,
         lock_gpu_level,
+        validate_only,
     })
 }
 
@@ -168,6 +174,18 @@ pub fn run_eval(args: &[String]) -> i32 {
     if let Err(e) = validate_v2(&req) {
         eprintln!("eval_request v2 校验失败: {e}");
         return 2;
+    }
+    if a.validate_only {
+        return match offline_check(&req) {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                0
+            }
+            Err(e) => {
+                eprintln!("离线校验不通过: {e}");
+                2
+            }
+        };
     }
     let evidence = a
         .out
@@ -3403,7 +3421,123 @@ pub(crate) fn save_png(path: &Path, shot: &(u32, u32, Vec<u8>)) {
     }
 }
 
+/// 原神包名。灰档评测对它缺省走「点门进大世界」(见 [`genshin_gate_entry`])。
+pub(crate) const GENSHIN_PKG: &str = "com.miHoYo.Yuanshen";
+
+/// 灰档每臂挂层重启原神之后要不要点门进大世界: 包是原神、没有自驱动启动参数、
+/// 也没指定别的进门方式 (`workload.enter`) 时要。以前不点, 两臂量的都是登录页。
+pub(crate) fn genshin_gate_entry(req: &Value) -> bool {
+    req["package"].as_str() == Some(GENSHIN_PKG)
+        && launch_spec(req).is_none()
+        && req["workload"]["enter"].as_str().is_none()
+}
+
+/// 灰档评测外壳: 设备端脚本先推最新版 (采样器版本要和主机端解析一致), 按请求停充,
+/// 跑完 (含任何中途退出) 一定恢复充电, 并把停充经过记进回包。测量本身在 [`gray_eval_arms`]。
 fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
+    let Some(serial) = serial else {
+        return Err("kind=gray 需要真机: 请加 --serial".into());
+    };
+    let _ = std::fs::create_dir_all(evidence);
+    // 以前灰档不推脚本, 用的是设备上残留的旧版 sample_env.sh (可能还是 1 Hz、旧供电口径)
+    push_tools(serial)?;
+    let want_suspend = req["conditions"]["charging_suspend"]["enabled"].as_bool().unwrap_or(false);
+    let mut suspended_via: Option<String> = None;
+    let mut usb_supply_note: Option<String> = None;
+    let mut charge_settle: Option<Value> = None;
+    if want_suspend {
+        let out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
+        std::fs::write(evidence.join("charge_suspend.log"), &out).map_err(|e| e.to_string())?;
+        usb_supply_note = sysparam::usb_supply_note(&out);
+        if adb_ok(&out) && out.contains("CHARGE_SUSPENDED") {
+            suspended_via = out
+                .lines()
+                .find(|l| l.contains("node="))
+                .map(|l| l.trim().to_string())
+                .or_else(|| Some("/sys/class/qcom-battery/charging_enabled".into()));
+            charge_settle = Some(wait_charge_settled(serial));
+        }
+    }
+    let res = gray_eval_arms(req, Some(serial), evidence);
+    let mut charge_restored: Option<bool> = None;
+    if suspended_via.is_some() {
+        let cr = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
+        std::fs::write(evidence.join("charge_restore.log"), &cr).ok();
+        charge_restored = Some(adb_ok(&cr));
+    }
+    let text = res?;
+    let Ok(mut report) = serde_json::from_str::<Value>(&text) else {
+        return Ok(text);
+    };
+    if !report["conditions_observed"].is_object() {
+        report["conditions_observed"] = json!({});
+    }
+    report["conditions_observed"]["charging_suspend_requested"] = json!(want_suspend);
+    report["conditions_observed"]["charging_suspended_via"] = json!(suspended_via);
+    report["conditions_observed"]["charge_settle"] = json!(charge_settle);
+    report["conditions_observed"]["usb_supply_note"] = json!(usb_supply_note);
+    report["conditions_observed"]["charge_restored"] = json!(charge_restored);
+    report["conditions_observed"]["world_entry"] = json!(if genshin_gate_entry(req) {
+        "genshin_gate"
+    } else {
+        req["workload"]["enter"].as_str().unwrap_or("none")
+    });
+    if charge_restored == Some(false) {
+        report["conditions_observed"]["restored"] = json!(false);
+        report["status"] = json!("ABORT");
+        report["verdict"]["reason"] = json!(format!(
+            "恢复充电失败 (见 charge_restore.log), 设备没还原; 原判定: {}",
+            report["verdict"]["reason"].as_str().unwrap_or("")
+        ));
+    }
+    Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
+}
+
+/// 离线校验 (`eval --validate-only`): validate_v2 之外, 把上机时才会查的东西先查一遍 ——
+/// gray 改写解析成的层属性串、负载脚本、层 .so 是否带 storeop 开关、轮数够不够判显著。不碰设备。
+pub(crate) fn offline_check(req: &Value) -> Result<Value, String> {
+    let kind = req["kind"].as_str().unwrap_or("");
+    let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(0).max(0) as usize;
+    let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
+    let mut out = json!({
+        "ok": true,
+        "kind": kind,
+        "candidate_id": req["candidate_id"],
+        "package": req["package"],
+        "rounds": rounds,
+        "min_reachable_p": loopstat::min_two_sided_p(rounds),
+        "alpha_win_strictest": alpha / loopstat::MAX_WIN_METRICS as f64,
+    });
+    if kind != "gray" {
+        return Ok(out);
+    }
+    let knobs = parse_gray_rewrites(&req["payload"])?;
+    out["debug.knobs.loadop"] = json!(if knobs.loadop { "1" } else { "0" });
+    out["debug.knobs.storeop"] = json!(knobs.storeop);
+    out["require_hit"] = json!(req["payload"]["require_hit"].as_bool().unwrap_or(true));
+    out["world_entry"] = json!(if genshin_gate_entry(req) {
+        "genshin_gate"
+    } else {
+        req["workload"]["enter"].as_str().unwrap_or("none")
+    });
+    if launch_spec(req).is_none() {
+        let wl = req["workload"]["script"].as_str().unwrap_or("loop_v1/scripts/workload_spin_touch_v1.json");
+        let p = resolve_path(wl).ok_or_else(|| format!("负载脚本不在: {wl} (按 cwd 与仓库根都找不到)"))?;
+        let txt = std::fs::read_to_string(&p).map_err(|e| format!("读不了负载脚本 {}: {e}", p.display()))?;
+        serde_json::from_str::<Value>(&txt).map_err(|e| format!("负载脚本 {} 不是合法 JSON: {e}", p.display()))?;
+        out["workload_script"] = json!(p.display().to_string());
+    }
+    let so = crate::graylayer::layer_so_path();
+    let so_path = resolve_path(&so).ok_or_else(|| format!("层 .so 不在: {so} (先跑 knobs/gray/build/build_layer.sh)"))?;
+    let bytes = std::fs::read(&so_path).map_err(|e| format!("读不了层 .so {}: {e}", so_path.display()))?;
+    if knobs.storeop != "0" && !bytes.windows(crate::graylayer::STOREOP_PROP.len()).any(|w| w == crate::graylayer::STOREOP_PROP.as_bytes()) {
+        return Err(format!("层 .so {} 里没有 {} 开关 (旧版层), 上机会成 A/A", so_path.display(), crate::graylayer::STOREOP_PROP));
+    }
+    out["layer_so"] = json!(so_path.display().to_string());
+    Ok(out)
+}
+
+fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
     let kind = "gray";
     let mut report = base_report(req, kind);
     let Some(serial) = serial else {
@@ -3573,6 +3707,13 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
             if req["workload"]["enter"].as_str() == Some("onboard") {
                 if let Err(e) = crate::onboard::enter_scene(serial, &pkg, &evidence.join(format!("{arm}{i}_enter"))) {
                     abort_reason = Some(format!("{arm}{i} 重启后没回到游戏场景: {e}"));
+                    break 'rounds;
+                }
+            } else if genshin_gate_entry(req) {
+                // 原神重启后停在登录页的门上: 不点门, 两臂量的都是登录页, 改写的 pass 根本不出现
+                // (require_hit 会把整次判作废)。走 gray-ab 验过的流程: 等门出现 → 点门 → 按每帧 pass 数判大世界
+                if let Err(e) = crate::grayab::launch_to_world_layered(serial) {
+                    abort_reason = Some(format!("{arm}{i} 重启后没进大世界: {e}"));
                     break 'rounds;
                 }
             }
@@ -4256,6 +4397,52 @@ mod tests {
         assert!(validate_err(&r).contains("scope"));
         r["payload"]["rewrites"] = json!([{"knob": "storeop_dont_care", "scope": "15a5:2"}]);
         assert!(!validate_ok(&r));
+    }
+
+    /// 原神灰档缺省点门进大世界; 别的包、自驱动启动、显式 enter 都不点。
+    #[test]
+    fn genshin_gate_entry_only_for_plain_genshin_requests() {
+        let mut r = v2_req("gray", json!({"rewrites": [{"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"}]}));
+        assert!(!genshin_gate_entry(&r), "别的包不点门");
+        r["package"] = json!(GENSHIN_PKG);
+        assert!(genshin_gate_entry(&r));
+        r["workload"]["enter"] = json!("onboard");
+        assert!(!genshin_gate_entry(&r), "显式 onboard 优先");
+        r["workload"]["enter"] = Value::Null;
+        r["workload"]["launch"] = json!({"extras": "--es scene x"});
+        assert!(!genshin_gate_entry(&r), "自驱动启动不点门");
+    }
+
+    /// 离线校验: 三处写回合成一条层属性串 (排序去重), 与 11_storeop_check 机制验证用的串一字不差;
+    /// 负载脚本找不到时在碰设备前就拒。
+    #[test]
+    fn offline_check_builds_the_verified_storeop_rule() {
+        let mut r = v2_req("gray", json!({"rewrites": [
+            {"knob": "storeop_dont_care", "scope": "9d0b4db80bf552b8:1"},
+            {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"},
+            {"knob": "storeop_dont_care", "scope": "9d0b4db80bf552b8:0"},
+        ]}));
+        r["package"] = json!(GENSHIN_PKG);
+        r["workload"]["script"] = json!("knobs/gray/workload_spin_touch_v1.json");
+        match offline_check(&r) {
+            Ok(v) => {
+                assert_eq!(v["debug.knobs.storeop"], "15a51a879df99c32:2,9d0b4db80bf552b8:0,9d0b4db80bf552b8:1");
+                assert_eq!(v["world_entry"], "genshin_gate");
+                assert_eq!(v["min_reachable_p"].as_f64().unwrap(), loopstat::min_two_sided_p(5));
+            }
+            // 没构建层 .so 的检出 (worktree) 只允许在最后一步 .so 检查上失败
+            Err(e) => assert!(e.contains("层 .so"), "{e}"),
+        }
+        r["workload"]["script"] = json!("knobs/gray/no_such_workload.json");
+        assert!(offline_check(&r).unwrap_err().contains("负载脚本不在"));
+    }
+
+    #[test]
+    fn validate_only_flag_parses() {
+        let a = parse_args(&["--request".into(), "x.json".into(), "--validate-only".into()]).unwrap();
+        assert!(a.validate_only);
+        let a = parse_args(&["--request".into(), "x.json".into()]).unwrap();
+        assert!(!a.validate_only);
     }
 
     /// 校验用的名单和施加用的解析不能再各说各话: 名单里每个开关都要被解析认, 解析不认的不能在名单里。

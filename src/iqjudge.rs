@@ -89,14 +89,14 @@ impl IqConfig {
 
 /// 一张截图预处理后的数据: 亮度 + 高斯局部均值 / 局部二阶矩 (SSIM 用) + 每块细节能量。
 pub(crate) struct Shot {
-    w: usize,
-    h: usize,
-    y: Vec<f32>,
+    pub(crate) w: usize,
+    pub(crate) h: usize,
+    pub(crate) y: Vec<f32>,
     mu: Vec<f32>,
     yy: Vec<f32>,
     /// 每块拉普拉斯平方和 (行优先, tw × th)
-    hf: Vec<f64>,
-    tile: usize,
+    pub(crate) hf: Vec<f64>,
+    pub(crate) tile: usize,
 }
 
 /// SSIM 用的高斯窗 σ = 1.5, 半径 4 (与 Wang 2004 的 11×11/σ1.5 同一量级)。
@@ -159,6 +159,14 @@ impl Shot {
             .chunks_exact(ch)
             .map(|p| (299.0 * p[0] as f32 + 587.0 * p[1] as f32 + 114.0 * p[2] as f32) / 1000.0)
             .collect();
+        Self::from_luma(w, h, y, tile)
+    }
+
+    /// 直接给亮度 (插帧判据算「复制前帧 / 前后平均」这类基线时用)。
+    pub(crate) fn from_luma(w: usize, h: usize, y: Vec<f32>, tile: usize) -> Option<Shot> {
+        if w < tile || h < tile || tile == 0 || y.len() != w * h {
+            return None;
+        }
         let sq: Vec<f32> = y.iter().map(|v| v * v).collect();
         let mu = blur(&y, w, h);
         let yy = blur(&sq, w, h);
@@ -180,18 +188,18 @@ impl Shot {
         Some(Shot { w, h, y, mu, yy, hf, tile })
     }
 
-    fn tiles(&self) -> (usize, usize) {
+    pub(crate) fn tiles(&self) -> (usize, usize) {
         (self.w / self.tile, self.h / self.tile)
     }
 }
 
 /// 一对截图的逐块数据: 块 MSE 与块平均 SSIM。
-struct PairTiles {
-    mse: Vec<f64>,
-    ssim: Vec<f64>,
+pub(crate) struct PairTiles {
+    pub(crate) mse: Vec<f64>,
+    pub(crate) ssim: Vec<f64>,
 }
 
-fn pair_tiles(a: &Shot, b: &Shot) -> PairTiles {
+pub(crate) fn pair_tiles(a: &Shot, b: &Shot) -> PairTiles {
     let (w, h, t) = (a.w, a.h, a.tile);
     let (tw, th) = a.tiles();
     let xy: Vec<f32> = a.y.iter().zip(&b.y).map(|(p, q)| p * q).collect();
@@ -219,7 +227,7 @@ fn pair_tiles(a: &Shot, b: &Shot) -> PairTiles {
     PairTiles { mse, ssim }
 }
 
-fn psnr_of_mse(mse: f64) -> f64 {
+pub(crate) fn psnr_of_mse(mse: f64) -> f64 {
     if mse <= 1e-10 {
         99.0
     } else {
@@ -227,7 +235,7 @@ fn psnr_of_mse(mse: f64) -> f64 {
     }
 }
 
-fn median(mut v: Vec<f64>) -> f64 {
+pub(crate) fn median(mut v: Vec<f64>) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = v.len();
     if n == 0 {
@@ -240,7 +248,7 @@ fn median(mut v: Vec<f64>) -> f64 {
 }
 
 /// 细节能量比 log2(a / b), 只算 `use_tile` 为真的块。
-fn detail_log2(a: &Shot, b: &Shot, use_tile: &[bool]) -> f64 {
+pub(crate) fn detail_log2(a: &Shot, b: &Shot, use_tile: &[bool]) -> f64 {
     let sa: f64 = a.hf.iter().zip(use_tile).filter(|(_, u)| **u).map(|(v, _)| *v).sum();
     let sb: f64 = b.hf.iter().zip(use_tile).filter(|(_, u)| **u).map(|(v, _)| *v).sum();
     if sa <= 0.0 && sb <= 0.0 {
@@ -251,7 +259,7 @@ fn detail_log2(a: &Shot, b: &Shot, use_tile: &[bool]) -> f64 {
 }
 
 /// 稳定块上的 (PSNR, 1-SSIM)。
-fn on_mask(p: &PairTiles, mask: &[bool]) -> (f64, f64) {
+pub(crate) fn on_mask(p: &PairTiles, mask: &[bool]) -> (f64, f64) {
     let n = mask.iter().filter(|m| **m).count().max(1) as f64;
     let mse: f64 = p.mse.iter().zip(mask).filter(|(_, m)| **m).map(|(v, _)| *v).sum::<f64>() / n;
     let ss: f64 = p.ssim.iter().zip(mask).filter(|(_, m)| **m).map(|(v, _)| *v).sum::<f64>() / n;
@@ -276,7 +284,7 @@ impl IqVerdict {
     }
 }
 
-fn r4(x: f64) -> f64 {
+pub(crate) fn r4(x: f64) -> f64 {
     (x * 10000.0).round() / 10000.0
 }
 
@@ -417,7 +425,7 @@ pub(crate) fn judge(ctrls: &[Shot], knobs: &[Shot], cfg: &IqConfig) -> (IqVerdic
 }
 
 /// 读一张截图: PNG/JPEG 走 image 库, 其余按 screencap 裸帧。
-fn load(path: &str, tile: usize) -> Result<Shot, String> {
+pub(crate) fn load(path: &str, tile: usize) -> Result<Shot, String> {
     let d = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     if let Ok(img) = image::load_from_memory(&d) {
         let rgb = img.to_rgb8();
