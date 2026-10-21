@@ -2538,6 +2538,9 @@ pub(crate) fn judge_image(gate: &ImageGate, best_knob_vs_ctrl_db: Option<f64>) -
         )),
     }
 }
+/// 画质判据最多留几张原始截图 (每张 2400×1080 RGBA 约 10 MB)。
+const IQ_MAX_CTRL_SHOTS: usize = 6;
+const IQ_MAX_KNOB_SHOTS: usize = 3;
 /// 挂层重启、进到场景之后先等画面稳下来再截图 (流式加载、过场淡入)。
 const GRAY_SHOT_SETTLE_S: u64 = 8;
 /// 两张图逐像素相同时 PSNR 是无穷大; JSON 放不下, 按这个值记。
@@ -2574,7 +2577,7 @@ fn grab_rgba(serial: &str) -> Result<(u32, u32, Vec<u8>), String> {
     Ok((w, h, px.to_vec()))
 }
 
-fn save_png(path: &Path, shot: &(u32, u32, Vec<u8>)) {
+pub(crate) fn save_png(path: &Path, shot: &(u32, u32, Vec<u8>)) {
     if let Some(img) = image::RgbaImage::from_raw(shot.0, shot.1, shot.2.clone()) {
         let _ = img.save(path);
     }
@@ -2702,6 +2705,8 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     // 改写臂同样重拍一张 (审计 #14: 以前只有对照臂多等 8 秒、多拍一张, 晚约 10 秒开测,
     // ABBA 抵消不了)。两臂等待与截图次数对齐; 这一组只记录, 不进噪声底 (画面门槛口径不变)
     let mut knob_within_round: Vec<f64> = Vec::new();
+    // 画质判据 (iqjudge) 的原始截图: 对照臂每轮 2 张 (含重拍), 改写臂每轮 1 张。限量, 免得多轮时占内存太多。
+    let (mut iq_ctrl_raw, mut iq_knob_raw): (Vec<(u32, u32, Vec<u8>)>, Vec<(u32, u32, Vec<u8>)>) = (Vec::new(), Vec::new());
     let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
     let mut cool_log: Vec<Value> = Vec::new();
     // 臂序随机 (审计 #13), 种子进报告; 环境不一致的对单独剔除 (审计 #9 #11)
@@ -2784,6 +2789,11 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
             match grab_rgba(serial) {
                 Ok(shot) => {
                     save_png(&evidence.join(format!("shot_{arm}{i}.png")), &shot);
+                    if arm == "ctrl" && iq_ctrl_raw.len() < IQ_MAX_CTRL_SHOTS {
+                        iq_ctrl_raw.push(shot.clone());
+                    } else if arm == "knob" && iq_knob_raw.len() < IQ_MAX_KNOB_SHOTS {
+                        iq_knob_raw.push(shot.clone());
+                    }
                     shots.insert(arm, shot);
                 }
                 Err(e) => {
@@ -2801,6 +2811,10 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                 if let Some(q) = psnr_rgba(&shots[arm].2, &again.2) {
                     if arm == "ctrl" {
                         noise_within_round.push(q);
+                        // 只有对照臂的重拍进画质判据的对照组 (原生自噪声); 改写臂的重拍不能混进对照组
+                        if iq_ctrl_raw.len() < IQ_MAX_CTRL_SHOTS {
+                            iq_ctrl_raw.push(again);
+                        }
                     } else {
                         knob_within_round.push(q);
                     }
@@ -2877,6 +2891,17 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     } else {
         Some(judge_image(&image_gate, best_knob))
     };
+    // 画质判据: 全帧 PSNR 门槛之外再看稳定块 PSNR/SSIM + 细节能量 (都对原生自噪声)
+    let iq = if launch.is_some() {
+        None
+    } else {
+        let cfg = crate::iqjudge::IqConfig::from_request(&req["payload"]["image_check"]);
+        let conv = |v: &[(u32, u32, Vec<u8>)]| -> Vec<crate::iqjudge::Shot> {
+            v.iter().filter_map(|s| crate::iqjudge::Shot::from_rgba(s.0 as usize, s.1 as usize, &s.2, cfg.tile)).collect()
+        };
+        Some(crate::iqjudge::judge(&conv(&iq_ctrl_raw), &conv(&iq_knob_raw), &cfg))
+    };
+    drop((iq_ctrl_raw, iq_knob_raw));
 
     // 各 knob 臂采到的命中取最大 (require_hit 判的是"改写到底有没有真生效过一次")
     // 环境不一致被剔除的那几对, 改写臂的命中照样算 (剔除只影响统计, 不影响「改写生效过没有」)
@@ -2915,6 +2940,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
                     ImageRuling::Pass(by) => image_gate.gate(by),
                     ImageRuling::Fail(_) => image_gate.gate("failed"),
                 }),
+                "iq": iq.as_ref().map(|(_, rep)| rep.clone()),
             }),
         },
     });
@@ -2925,6 +2951,14 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         if abort_reason.is_none() {
             abort_reason = Some(format!("画面出错: {reason} (截图见 evidence_dir)"));
         }
+    }
+    let mut image_unverified: Option<String> = None;
+    match iq.as_ref().map(|(v, _)| v) {
+        Some(crate::iqjudge::IqVerdict::Fail(reason)) if abort_reason.is_none() => {
+            abort_reason = Some(format!("画面出错 (画质判据): {reason} (截图见 evidence_dir)"));
+        }
+        Some(crate::iqjudge::IqVerdict::Inconclusive(r)) => image_unverified = Some(r.clone()),
+        _ => {}
     }
 
     if let Some(reason) = abort_reason {
@@ -2964,6 +2998,14 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     }
     report["metrics"] = m;
     report["status"] = json!(if keep { "PASS" } else { "REJECT" });
+    if let (true, Some(why)) = (keep, &image_unverified) {
+        // 性能过了, 画面没确认不变: 不算增益
+        report["status"] = json!("REJECT");
+        report["verdict"]["would_keep"] = json!(true);
+        report["verdict"]["image_unverified"] = json!(why);
+        let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
+        report["verdict"]["reason"] = json!(format!("性能统计通过, 但画面没能确认不变 ({why}), 不算增益 (统计结果: {r})"));
+    }
     Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
 }
 

@@ -42,6 +42,7 @@ mod preflight;
 mod grayab;
 mod graylayer;
 mod shotdiff;
+mod iqjudge;
 mod hypo;
 mod mtools;
 mod caps;
@@ -737,6 +738,10 @@ fn main() {
         Some("bench") => {
             // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
             std::process::exit(bench::run_bench(&args[1..]));
+        }
+        Some("iq-judge") => {
+            // 画质验收: 候选与「原生自己跟自己比」同一水平才算画面不变 (稳定块 PSNR/SSIM + 细节能量)
+            std::process::exit(iqjudge::run_iq_judge(&args[1..]));
         }
         Some("shot-diff") => {
             // copyprobe 验收 ②: 截帧逐像素比对 (控制对基线)
