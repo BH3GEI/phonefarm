@@ -49,7 +49,7 @@ const DEFAULT_DENY_KEYWORDS: [&str; 7] = [
 /// 以前这里只写了 loadop, 而上层 (game_opt_loop optimize/gray.rs) 唯一 Landed 的是 storeop ——
 /// 收端明明实现了 storeop 却在校验这一步拦掉, 每个灰档候选都退出码 2 (审计 #1)。
 /// 现在校验直接走 `parse_gray_rewrites`, 这张表只用于报错文字, 两者由单测锁在一起。
-pub(crate) const GRAY_SUPPORTED_KNOBS: [&str; 2] = ["loadop_dont_care", "storeop_dont_care"];
+pub(crate) const GRAY_SUPPORTED_KNOBS: [&str; 3] = ["loadop_dont_care", "storeop_dont_care", "npuop"];
 
 const USAGE: &str = "用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--json] [--validate-only]
   --validate-only: 只做收端校验 (validate_v2 + gray 改写解析 + 负载脚本/层 .so 是否找得到), 不碰设备; 退出码 0 = 收, 2 = 拒";
@@ -2741,6 +2741,99 @@ pub(crate) struct GrayKnobs {
     pub loadop: bool,
     /// 「去掉多余写回」指定串 ("0" = 关)。
     pub storeop: String,
+    /// NPU 超分 (npu/n1-pipeline 的层): 调参 + 本机文件 (层 .so / 模型 / 运行库目录)。None = 关。
+    pub npuop: Option<NpuopKnob>,
+}
+
+/// `npuop` 开关的 args: `{"lag":2,"wait_ms":2,"budget_ms":12,"budget_frames":30,"init_frame":300,"zc":1,"ts":1,
+/// "model":"<本机 .tflite>","layer_so":"<本机层 .so>","runtime_dir":"<放齐运行库的目录>"}`, 每项都可省。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NpuopKnob {
+    pub props: crate::graylayer::NpuopProps,
+    pub files: crate::npuop_device::NpuopFileArgs,
+}
+
+/// npuop 的 args 里认的键 (多出来的键一律拒收: 写错键名会静默按缺省跑)。
+pub(crate) const NPUOP_ARG_KEYS: [&str; 10] =
+    ["lag", "wait_ms", "budget_ms", "budget_frames", "init_frame", "zc", "ts", "model", "layer_so", "runtime_dir"];
+
+/// 解析 npuop 的 args 并核范围 (都在碰设备之前)。
+pub(crate) fn parse_npuop_args(args: &Value) -> Result<NpuopKnob, String> {
+    let mut props = crate::graylayer::NpuopProps::default();
+    let mut files = crate::npuop_device::NpuopFileArgs::default();
+    let Some(obj) = args.as_object() else {
+        if args.is_null() {
+            return Ok(NpuopKnob { props, files });
+        }
+        return Err(format!("npuop 的 args 要是对象, 收到 {args}"));
+    };
+    for k in obj.keys() {
+        if !NPUOP_ARG_KEYS.contains(&k.as_str()) {
+            return Err(format!("npuop 的 args 不认识 {k:?} (认: {})", NPUOP_ARG_KEYS.join(", ")));
+        }
+    }
+    let num = |k: &str, lo: f64, hi: f64| -> Result<Option<f64>, String> {
+        match obj.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => {
+                let x = v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())).ok_or_else(|| format!("npuop.{k} 要是数字, 收到 {v}"))?;
+                if !(lo..=hi).contains(&x) {
+                    return Err(format!("npuop.{k}={x} 超出 [{lo}, {hi}]"));
+                }
+                Ok(Some(x))
+            }
+        }
+    };
+    let flag = |k: &str| -> Result<Option<bool>, String> {
+        match obj.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(v) => match v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())) {
+                Some(x) if x == 0.0 || x == 1.0 => Ok(Some(x == 1.0)),
+                _ => Err(format!("npuop.{k} 要是 0/1 或 true/false, 收到 {v}")),
+            },
+        }
+    };
+    let text = |k: &str| -> Result<Option<String>, String> {
+        match obj.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(t)) if !t.trim().is_empty() => Ok(Some(t.trim().to_string())),
+            Some(v) => Err(format!("npuop.{k} 要是非空路径字符串, 收到 {v}")),
+        }
+    };
+    if let Some(x) = num("lag", 1.0, 2.0)? {
+        if x != 1.0 && x != 2.0 {
+            return Err(format!("npuop.lag 只认 1 / 2, 收到 {x}"));
+        }
+        props.lag = x as u8;
+    }
+    if let Some(x) = num("wait_ms", 0.0, 50.0)? {
+        props.wait_ms = x;
+    }
+    if let Some(x) = num("budget_ms", 0.5, 100.0)? {
+        props.budget_ms = x;
+    }
+    if let Some(x) = num("budget_frames", 1.0, 10000.0)? {
+        props.budget_frames = x as u32;
+    }
+    if let Some(x) = num("init_frame", 1.0, 100000.0)? {
+        props.init_frame = x as u64;
+    }
+    if let Some(b) = flag("zc")? {
+        props.zc = b;
+    }
+    if let Some(b) = flag("ts")? {
+        props.ts = b;
+    }
+    files.model = text("model")?;
+    if let Some(m) = &files.model {
+        if !m.ends_with(".tflite") {
+            return Err(format!("npuop.model 要是 .tflite, 收到 {m:?}"));
+        }
+    }
+    files.layer_so = text("layer_so")?;
+    files.runtime_dir = text("runtime_dir")?;
+    Ok(NpuopKnob { props, files })
 }
 
 /// 读 payload.rewrites。不认识的开关、缺范围的写回改写一律拒收 —— 在碰设备之前。
@@ -2755,11 +2848,18 @@ pub(crate) fn parse_gray_rewrites(payload: &Value) -> Result<GrayKnobs, String> 
         return Err("payload.rewrites 是空的: 没有要改写的".into());
     }
     let mut loadop = false;
+    let mut npuop: Option<NpuopKnob> = None;
     let mut items: Vec<(String, u32)> = Vec::new();
     for r in &arr {
         let knob = r["knob"].as_str().unwrap_or("");
         match knob {
             "loadop_dont_care" => loadop = true,
+            "npuop" => {
+                if npuop.is_some() {
+                    return Err("npuop 出现了两次".into());
+                }
+                npuop = Some(parse_npuop_args(&r["args"])?);
+            }
             "storeop_dont_care" => {
                 let scope = r["scope"].as_str().unwrap_or("");
                 let (sig, att) = scope.split_once(':').ok_or_else(|| {
@@ -2771,11 +2871,14 @@ pub(crate) fn parse_gray_rewrites(payload: &Value) -> Result<GrayKnobs, String> 
                     .map_err(|_| format!("storeop_dont_care 的附件下标看不懂: {scope:?}"))?;
                 items.push((sig.trim().to_string(), att));
             }
-            other => return Err(format!("接收端不认识改写开关 {other:?} (认: loadop_dont_care / storeop_dont_care)")),
+            other => return Err(format!("接收端不认识改写开关 {other:?} (认: loadop_dont_care / storeop_dont_care / npuop)")),
         }
     }
+    if npuop.is_some() && loadop {
+        return Err("npuop 不能与 loadop_dont_care 同组 (loadop 已撤回, 且会把超分算子的输入画错)".into());
+    }
     let storeop = crate::graylayer::storeop_spec(&items)?;
-    Ok(GrayKnobs { loadop, storeop })
+    Ok(GrayKnobs { loadop, storeop, npuop })
 }
 
 /// 画面比对缺省门槛: 改写臂与对照臂同位置截图的 PSNR 低于它就判画面出错。
@@ -3007,6 +3110,8 @@ pub(crate) fn offline_check(req: &Value) -> Result<Value, String> {
     let knobs = parse_gray_rewrites(&req["payload"])?;
     out["debug.knobs.loadop"] = json!(if knobs.loadop { "1" } else { "0" });
     out["debug.knobs.storeop"] = json!(knobs.storeop);
+    out["debug.knobs.npuop"] = json!(knobs.npuop.as_ref().map(|n| n.props.setprop_cmd(true)));
+    out["image_policy"] = json!(gray_image_policy(req, &knobs).map(|p| p.as_str()).unwrap_or("?"));
     out["require_hit"] = json!(req["payload"]["require_hit"].as_bool().unwrap_or(true));
     out["world_entry"] = json!(if genshin_gate_entry(req) {
         "genshin_gate"
@@ -3019,6 +3124,13 @@ pub(crate) fn offline_check(req: &Value) -> Result<Value, String> {
         let txt = std::fs::read_to_string(&p).map_err(|e| format!("读不了负载脚本 {}: {e}", p.display()))?;
         serde_json::from_str::<Value>(&txt).map_err(|e| format!("负载脚本 {} 不是合法 JSON: {e}", p.display()))?;
         out["workload_script"] = json!(p.display().to_string());
+    }
+    // npuop: 层 / 模型 / 运行库按 eval 上机时同一套规则定位并核验 (层必须带 npuop), 用的就是这一份层
+    if let Some(n) = &knobs.npuop {
+        let f = crate::npuop_device::NpuopFiles::locate(&n.files).map_err(|e| format!("npuop 本机文件: {e}"))?;
+        out["npuop_files"] = f.to_json();
+        out["layer_so"] = json!(f.layer_so.display().to_string());
+        return Ok(out);
     }
     let so = crate::graylayer::layer_so_path();
     let so_path = resolve_path(&so).ok_or_else(|| format!("层 .so 不在: {so} (先跑 knobs/gray/build/build_layer.sh)"))?;
@@ -3043,8 +3155,6 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
         .unwrap_or(GRAY_MIN_PSNR_DB);
     let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
     let temp_cap = req["conditions"]["temp_cap_c"].as_f64();
-    // 画质策略 (judge/v1-scorecard): report 下画面判据只记差距, 不否决性能判定
-    let policy = crate::scorecard::ImagePolicy::from_request(req).unwrap_or(crate::scorecard::ImagePolicy::Gate);
     // 候选臂旋钮自报按设计处理的帧低于这个比例 → 这一臂未按设计施加, 连同对照臂剔除
     let min_frac = crate::scorecard::min_applied_frac(req);
 
@@ -3056,6 +3166,20 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
             return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
         }
     };
+    // 画质策略 (judge/v1-scorecard): report 下画面判据只记差距, 不否决性能判定。
+    // npuop 是基于模型的候选, 请求没写时缺省就是 report (gate 会把每个超分候选都判成画面出错)。
+    let policy = gray_image_policy(req, &knobs).unwrap_or(crate::scorecard::ImagePolicy::Gate);
+    // npuop: 本机文件 (层 / 模型 / 运行库) 在碰设备之前定位并核验
+    let npu_files = match &knobs.npuop {
+        Some(n) => match crate::npuop_device::NpuopFiles::locate(&n.files) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                report["verdict"]["reason"] = json!(format!("npuop 本机文件没备齐, 不碰设备: {e}"));
+                return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+            }
+        },
+        None => None,
+    };
 
     // knobs/gray 的调用层: src/graylayer.rs (enable_layer.sh 的 Rust 移植)。
     // **两臂都挂层**, 唯一差别是改写属性 —— ctrl = 层+改写全关, knob = 层+这一组改写。
@@ -3066,15 +3190,25 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
         report["verdict"]["reason"] = json!("自驱动负载只支持 storeop_dont_care (画面比对走孪生 pass 现场切换, loadop 没有孪生)");
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
+    if launch.is_some() && knobs.npuop.is_some() {
+        report["verdict"]["reason"] = json!("npuop 只对原神类目标有效 (层靠 upop 定位原神自己的放大 pass), 自驱动负载 (白盒载体) 不支持");
+        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+    }
     let extras = launch.as_ref().map(|l| l.extras.clone());
-    let gl = crate::graylayer::GrayLayer::new(serial).with_launch_extras(extras.clone());
+    // npuop 时两臂用同一个 (带 npuop 的) 层 .so, 只切属性 —— 层本身的开销两臂一样
+    let so = npu_files.as_ref().map(|f| f.layer_so.to_string_lossy().into_owned());
+    let gl = crate::graylayer::GrayLayer::new(serial).with_so(so.clone()).with_launch_extras(extras.clone());
     let gl_knob = crate::graylayer::GrayLayer::new(serial)
+        .with_so(so)
         .with_launch_extras(extras)
-        .with_storeop((knobs.storeop != "0").then(|| knobs.storeop.clone()), false);
+        .with_storeop((knobs.storeop != "0").then(|| knobs.storeop.clone()), false)
+        .with_npuop(knobs.npuop.as_ref().map(|n| n.props.clone()));
     let mount = |arm: &str| -> Result<(), String> {
         if arm == "knob" {
-            gl_knob.mount_mode(if knobs.loadop { "loadop" } else { "probe" }, &pkg, false)?;
-            gl_knob.require_storeop()
+            let mode = if knobs.npuop.is_some() { "npuop" } else if knobs.loadop { "loadop" } else { "probe" };
+            gl_knob.mount_mode(mode, &pkg, false)?;
+            gl_knob.require_storeop()?;
+            gl_knob.require_npuop()
         } else {
             gl.mount_mode("probe", &pkg, false)
         }
@@ -3088,6 +3222,8 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
             "rewrites": req["payload"]["rewrites"],
             "debug.knobs.loadop": if knobs.loadop { "1" } else { "0" },
             "debug.knobs.storeop": knobs.storeop,
+            "npuop": knobs.npuop.as_ref().map(|n| json!({"setprop": n.props.setprop_cmd(true), "files": npu_files.as_ref().map(|f| f.to_json())})),
+            "image_policy": policy.as_str(),
             "image_check_min_psnr_db": min_psnr,
         }))
         .unwrap_or_default(),
@@ -3174,6 +3310,19 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
     // 审查 R1 #1: 以前只推 sample_hw.sh, 设备上留着旧的 ftrace_capture.sh / sample_env.sh 时
     // 灰档两臂按线程名认帧、不认停止标志, 而且不报错。全套都推 (push_tools 含 sample_hw.sh)。
     push_tools(serial)?;
+    // npuop: 研究机布置 (lib 目录副本 + 运行库 + 模型, bind mount; SELinux 放行) 整次评测只做一次,
+    // 两臂都在这个目录上跑 (对照臂 npuop=0, 运行库闲置); 结尾 umount 还原。
+    let npu_mount = match (&npu_files, &knobs.npuop) {
+        (Some(f), Some(_)) => match crate::npuop_device::NpuopMount::setup(serial, &pkg, f, evidence) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                report["verdict"]["reason"] = json!(format!("npuop 研究机布置失败, 没上 A/B: {e}"));
+                report["evidence_dir"] = json!(evidence.display().to_string());
+                return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+            }
+        },
+        _ => None,
+    };
     'rounds: for i in 1..=rounds {
         let mut shots: std::collections::BTreeMap<&str, (u32, u32, Vec<u8>)> = Default::default();
         for arm in if knob_first[i as usize - 1] { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
@@ -3242,6 +3391,7 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
                             m["layer_hits"] = json!(hits);
                             if let Some(mk) = &marker {
                                 m["knob_application"] = crate::scorecard::knob_application(mk, min_frac);
+                                m["npuop_frames"] = json!(npuop_frames(mk));
                             }
                             knob_runs.push(m);
                         } else {
@@ -3319,6 +3469,7 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
                         // 旋钮自报的施加程度 (npuop 回退双线性等): 同一份 marker, 同一时刻读
                         if let Some(mk) = &marker {
                             m["knob_application"] = crate::scorecard::knob_application(mk, min_frac);
+                            m["npuop_frames"] = json!(npuop_frames(mk));
                         }
                         knob_runs.push(m);
                     } else {
@@ -3352,8 +3503,12 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
         // 先看就是拿一个还不知道噪声底多少的固定阈值去判, 会把候选误判成画面出错。
         prev_ctrl = shots.remove("ctrl");
     }
-    // 还原
-    let restore_log = gl.off();
+    // 还原 (npuop 的 umount 在摘层之后: 摘层要先 force-stop, umount 要等进程退干净)
+    let mut restore_log = gl.off();
+    if let Some(m) = &npu_mount {
+        restore_log.push('\n');
+        restore_log.push_str(&m.restore());
+    }
     std::fs::write(evidence.join("restore.log"), &restore_log).ok();
 
     // 画面判定: 拿同设置重拍的噪声底比, 而不是拿一个固定阈值硬卡。
@@ -3392,6 +3547,13 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
         .max()
         .unwrap_or(0);
     let restore_clean = gl_off_clean(&restore_log);
+    // npuop: 用上 NPU 结果的帧 (marker npuop.counts.unpack), 各 knob 臂取最大
+    let npu_hits = knob_runs
+        .iter()
+        .chain(dropped.iter().map(|d| &d["knob"]))
+        .chain(unapplied.iter().map(|d| &d["knob"]))
+        .filter_map(|r| r["npuop_frames"].as_u64())
+        .max();
     let min_of = |v: &[f64]| v.iter().cloned().reduce(f64::min);
     let (cool_reached, cool_timeout) = cool_summary(&cool_log);
     report["conditions_observed"] = json!({
@@ -3405,6 +3567,11 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
         "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
         "hits": hits,
         "apply_ok": hits > 0,
+        "npuop": knobs.npuop.as_ref().map(|n| json!({
+            "props": n.props.prop_pairs(true).into_iter().map(|(k, v)| (k, Value::String(v))).collect::<serde_json::Map<String, Value>>(),
+            "npu_frames_max": npu_hits,
+            "mount": npu_mount.as_ref().map(|m| json!({"run_dir": m.run_dir, "libdir": m.libdir})),
+        })),
         "restored": restore_clean,
         "image_check": match &live_check {
             Some(v) => json!({"method": "storeop_check_live", "result": v}),
@@ -3481,6 +3648,15 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
             json!("require_hit=true 但改写一次都没命中 (层自报绑定计数为 0) —— 拿 A 去和 A 比, 整轮作废");
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
+    // npuop 的「命中」= 真用上了 NPU 结果的帧; 层挂上了但一帧都没走到 NPU (初始化失败、永久回退)
+    // 同样是拿 A 去和 A 比 (回退路径 = upop 双线性, 不是候选)
+    if require_hit && knobs.npuop.is_some() && npu_hits.unwrap_or(0) == 0 {
+        report["verdict"]["reason"] = json!(format!(
+            "require_hit=true 但 npuop 一帧都没用上 NPU 结果 (marker npuop.counts.unpack = {}) —— 候选臂跑的是回退路径, 整轮作废 (回退原因见 conditions_observed.knob_application)",
+            npu_hits.map(|x| x.to_string()).unwrap_or_else(|| "无 npuop 段".into())
+        ));
+        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+    }
 
     if knob_runs.is_empty() && !unapplied.is_empty() {
         report["verdict"]["reason"] = json!(format!(
@@ -3531,6 +3707,20 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
 /// 失败 (含回读命令本身失败) 一律写 OFF_FAIL_MARK, 这里不再猜退出码。
 fn gl_off_clean(restore_log: &str) -> bool {
     !restore_log.contains(crate::graylayer::OFF_FAIL_MARK)
+}
+
+/// gray 请求的画质策略: 显式写了就按写的; 没写时 npuop (基于模型的候选) 缺省 report, 其余缺省 gate。
+pub(crate) fn gray_image_policy(req: &Value, knobs: &GrayKnobs) -> Result<crate::scorecard::ImagePolicy, String> {
+    let explicit = req["protocol"].get("image_policy").filter(|v| !v.is_null()).is_some();
+    if !explicit && knobs.npuop.is_some() {
+        return Ok(crate::scorecard::ImagePolicy::Report);
+    }
+    crate::scorecard::ImagePolicy::from_request(req)
+}
+
+/// marker 的 npuop 段里「用上 NPU 结果」的帧数 (`counts.unpack`); 没有 npuop 段回 None。
+pub(crate) fn npuop_frames(marker: &Value) -> Option<u64> {
+    marker.get("npuop").filter(|v| v.is_object()).map(|np| np["counts"]["unpack"].as_u64().unwrap_or(0))
 }
 
 /// 层自报的改写命中数 (契约 verdict 口径: "改写被绑定的次数")。
@@ -3837,6 +4027,44 @@ mod tests {
 
     /// 离线校验: 三处写回合成一条层属性串 (排序去重), 与 11_storeop_check 机制验证用的串一字不差;
     /// 负载脚本找不到时在碰设备前就拒。
+    /// npu/n6 跨仓库夹具: game_opt_loop 的 tests/fixtures/phonefarm_request/gray_npuop.json 原样拷来
+    /// (那边的契约测试校验同一份: 合契约、Request 往返不变、过开关目录)。这边: 收端照收, image_policy=report,
+    /// 属性串就是 lag=1 + 其余缺省; 本机文件齐了就过 validate-only, 不齐只在 npuop 本机文件这一步拒。
+    #[test]
+    fn the_cross_repo_npuop_request_is_accepted() {
+        let r: Value = serde_json::from_str(include_str!("testdata/gray_npuop_request.json")).unwrap();
+        validate_v2(&r).unwrap();
+        let k = parse_gray_rewrites(&r["payload"]).unwrap();
+        assert_eq!(gray_image_policy(&r, &k).unwrap(), crate::scorecard::ImagePolicy::Report);
+        assert_eq!(crate::scorecard::min_applied_frac(&r), 0.95);
+        let want = "setprop debug.knobs.npuop 1; setprop debug.knobs.npuop_lag 1; setprop debug.knobs.npuop_wait_ms 2; setprop debug.knobs.npuop_budget_ms 12; setprop debug.knobs.npuop_budget_frames 30; setprop debug.knobs.npuop_init_frame 300; setprop debug.knobs.npuop_zc 1; setprop debug.knobs.npuop_ts 1";
+        assert_eq!(k.npuop.as_ref().unwrap().props.setprop_cmd(true), want);
+        match offline_check(&r) {
+            Ok(v) => assert_eq!(v["image_policy"], "report"),
+            Err(e) => assert!(e.contains("npuop 本机文件"), "{e}"),
+        }
+        // 本机文件给齐 (临时目录里的假层 / 假模型 / 9 个运行库) → validate-only 收
+        let dir = std::env::temp_dir().join(format!("npuop_offline_{}", std::process::id()));
+        let rt = dir.join("rt");
+        std::fs::create_dir_all(&rt).unwrap();
+        std::fs::write(dir.join("layer.so"), b"\x7fELF debug.knobs.npuop_wait_ms").unwrap();
+        std::fs::write(dir.join("m.tflite"), b"x").unwrap();
+        for n in crate::npuop_device::RUNTIME_LIBS {
+            std::fs::write(rt.join(n), b"so").unwrap();
+        }
+        let mut r2 = r.clone();
+        r2["payload"]["rewrites"][0]["args"]["layer_so"] = json!(dir.join("layer.so").display().to_string());
+        r2["payload"]["rewrites"][0]["args"]["model"] = json!(dir.join("m.tflite").display().to_string());
+        r2["payload"]["rewrites"][0]["args"]["runtime_dir"] = json!(rt.display().to_string());
+        let v = offline_check(&r2).unwrap();
+        assert_eq!(v["image_policy"], "report");
+        assert_eq!(v["world_entry"], "genshin_gate");
+        assert_eq!(v["debug.knobs.npuop"], want);
+        assert_eq!(v["npuop_files"]["runtime"].as_array().unwrap().len(), 9);
+        // 名单两边一致: game_opt_loop gray::NPUOP_ARG_KEYS 同这 10 个
+        assert_eq!(NPUOP_ARG_KEYS, ["lag", "wait_ms", "budget_ms", "budget_frames", "init_frame", "zc", "ts", "model", "layer_so", "runtime_dir"]);
+    }
+
     #[test]
     fn offline_check_builds_the_verified_storeop_rule() {
         let mut r = v2_req("gray", json!({"rewrites": [
@@ -3865,6 +4093,58 @@ mod tests {
         assert!(a.validate_only);
         let a = parse_args(&["--request".into(), "x.json".into()]).unwrap();
         assert!(!a.validate_only);
+    }
+
+    /// npuop: 请求没写 image_policy 时缺省 report (基于模型的候选, gate 会把每个超分候选判成画面出错);
+    /// 显式写了 gate 照 gate; 其它开关缺省仍是 gate。
+    #[test]
+    fn npuop_defaults_image_policy_to_report() {
+        use crate::scorecard::ImagePolicy;
+        let np = parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop"}]})).unwrap();
+        let so = parse_gray_rewrites(&json!({"rewrites": [{"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"}]})).unwrap();
+        let mut r = v2_req("gray", json!({"rewrites": [{"knob": "npuop"}]}));
+        assert_eq!(gray_image_policy(&r, &np).unwrap(), ImagePolicy::Report);
+        assert_eq!(gray_image_policy(&r, &so).unwrap(), ImagePolicy::Gate);
+        r["protocol"]["image_policy"] = json!("gate");
+        assert_eq!(gray_image_policy(&r, &np).unwrap(), ImagePolicy::Gate);
+        r["protocol"]["image_policy"] = json!(null);
+        assert_eq!(gray_image_policy(&r, &np).unwrap(), ImagePolicy::Report);
+        assert!(validate_ok(&v2_req("gray", json!({"rewrites": [{"knob": "npuop", "args": {"lag": 1, "budget_ms": 10}}]}))));
+    }
+
+    /// npuop 的 args: 范围核验、不认识的键拒收、不能与 loadop 同组 —— 都在碰设备之前。
+    #[test]
+    fn npuop_args_are_checked_before_touching_the_device() {
+        let n = parse_npuop_args(&json!({"lag": 1, "wait_ms": "2.5", "budget_ms": 10, "budget_frames": 20, "init_frame": 200, "zc": 0, "ts": true,
+            "model": "/m/genshin_sr_v2_a.tflite", "layer_so": "/l/libVkLayer_refknobs.so", "runtime_dir": "/rt"})).unwrap();
+        assert_eq!(n.props.lag, 1);
+        assert_eq!(n.props.wait_ms, 2.5);
+        assert_eq!(n.props.budget_frames, 20);
+        assert!(!n.props.zc && n.props.ts);
+        assert_eq!(n.files.model.as_deref(), Some("/m/genshin_sr_v2_a.tflite"));
+        assert_eq!(n.files.runtime_dir.as_deref(), Some("/rt"));
+        assert_eq!(parse_npuop_args(&Value::Null).unwrap().props, crate::graylayer::NpuopProps::default());
+        for (bad, why) in [
+            (json!({"lag": 3}), "lag"),
+            (json!({"budget_ms": 0}), "budget_ms"),
+            (json!({"zc": 2}), "zc"),
+            (json!({"model": "a.onnx"}), ".tflite"),
+            (json!({"modle": "a.tflite"}), "不认识"),
+            (json!(["lag"]), "对象"),
+        ] {
+            let e = parse_npuop_args(&bad).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        assert!(parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop"}, {"knob": "npuop"}]})).unwrap_err().contains("两次"));
+        assert!(parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop"}, {"knob": "loadop_dont_care"}]})).unwrap_err().contains("loadop"));
+        // storeop 可以与 npuop 同组 (属性互不相干)
+        let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop"}, {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"}]})).unwrap();
+        assert!(k.npuop.is_some());
+        assert_eq!(k.storeop, "15a51a879df99c32:2");
+        // marker 里的 NPU 帧数
+        assert_eq!(npuop_frames(&json!({"npuop": {"counts": {"unpack": 1234}}})), Some(1234));
+        assert_eq!(npuop_frames(&json!({"npuop": {"phase": "wait_init", "counts": {}}})), Some(0));
+        assert_eq!(npuop_frames(&json!({"effective": []})), None);
     }
 
     /// 校验用的名单和施加用的解析不能再各说各话: 名单里每个开关都要被解析认, 解析不认的不能在名单里。
@@ -4452,6 +4732,9 @@ mod path_tests {
         let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "loadop_dont_care"}]})).unwrap();
         assert!(k.loadop);
         assert_eq!(k.storeop, "0");
+        assert!(k.npuop.is_none());
+        let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop", "args": {"lag": 1}}]})).unwrap();
+        assert_eq!(k.npuop.unwrap().props.setprop_cmd(true), "setprop debug.knobs.npuop 1; setprop debug.knobs.npuop_lag 1; setprop debug.knobs.npuop_wait_ms 2; setprop debug.knobs.npuop_budget_ms 12; setprop debug.knobs.npuop_budget_frames 30; setprop debug.knobs.npuop_init_frame 300; setprop debug.knobs.npuop_zc 1; setprop debug.knobs.npuop_ts 1");
     }
 
     /// 不认识的开关、缺范围、范围写错, 都在碰设备之前拒收。

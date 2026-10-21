@@ -41,6 +41,7 @@ mod frameaudit;
 mod preflight;
 mod grayab;
 mod graylayer;
+mod npuop_device;
 mod shotdiff;
 mod iqjudge;
 mod interpjudge;

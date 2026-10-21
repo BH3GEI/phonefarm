@@ -30,10 +30,26 @@ pub(crate) const FA_GO_PROP: &str = "debug.knobs.frameaudit_go"; // 改成新编
 pub(crate) const STOREOP_PROP: &str = "debug.knobs.storeop"; // "<sig>:<i>,..." / "ds" / 0 (#91)
 pub(crate) const STOREOP_LIVE_PROP: &str = "debug.knobs.storeop_live"; // 1 = 孪生 pass 现场切换
 pub(crate) const STOREOP_ON_PROP: &str = "debug.knobs.storeop_on"; // 现场切换时的开/关
-const SO: &str = "libVkLayer_refknobs.so";
+/// 1 = NPU 超分替换原神自己的放大 (npu/n1-pipeline 的层; 隐含 upop, upop 双线性是它的回退)
+pub(crate) const NPUOP_PROP: &str = "debug.knobs.npuop";
+/// npuop 的调参属性 (层 `read_num_prop` 读; 每一臂都显式写一遍, 不留上一臂的残值)
+pub(crate) const NPUOP_TUNING_PROPS: [&str; 7] = [
+    "debug.knobs.npuop_lag",
+    "debug.knobs.npuop_wait_ms",
+    "debug.knobs.npuop_budget_ms",
+    "debug.knobs.npuop_budget_frames",
+    "debug.knobs.npuop_init_frame",
+    "debug.knobs.npuop_zc",
+    "debug.knobs.npuop_ts",
+];
+/// 层 .so 里有这个字符串 = 这个层带 npuop (R2F 之后的 n1-pipeline 构建)。
+pub(crate) const NPUOP_SO_SIGNATURE: &[u8] = b"debug.knobs.npuop_wait_ms";
+pub(crate) const SO: &str = "libVkLayer_refknobs.so";
+/// npuop 研究机布置的目录 (lib 目录副本留存不删): off 的残留清理不进这里。
+pub(crate) const NPUOP_DEV_BASE: &str = crate::npuop_device::DEV_BASE;
 const STATE: &str = "/data/local/tmp/knobs_layer_state"; // "把 .so 推进了哪个包"
 
-const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off} [--serial S] [--keep-prop] [--so 本机.so]";
+const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|npuop [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off|npuop-restore <run 目录> [pkg]} [--serial S] [--keep-prop] [--so 本机.so]\n  npuop 档只设属性 + 挂层 (缺省调参); 运行库 / 模型 / bind mount 由 eval 的 kind=gray npuop 走 npuop_device";
 
 /// 「去掉多余写回」的属性串: 每项 (pass 特征码前缀, 附件下标) → "<sig>:<i>,…"。
 ///
@@ -66,6 +82,74 @@ pub fn storeop_spec(items: &[(String, u32)]) -> Result<String, String> {
     Ok(s)
 }
 
+/// npuop 的调参 (对应 debug.knobs.npuop_*; 缺省值与层里 read_num_prop 的缺省一致)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NpuopProps {
+    /// 1 = 等本帧打包 (晚 1 帧, 串行); 2 = 等上一帧 (晚 2 帧, NPU 与 GPU 并行)
+    pub lag: u8,
+    /// 等栅栏的预算 (ms), 超了该帧不推理
+    pub wait_ms: f64,
+    /// 等待+推理预算 (ms); 连续 budget_frames 帧超预算 → 永久回退双线性
+    pub budget_ms: f64,
+    pub budget_frames: u32,
+    /// 第几帧之后做一次初始化 (约 360 ms 卡顿)
+    pub init_frame: u64,
+    /// 零拷贝 (张量直指映射内存)
+    pub zc: bool,
+    /// pack / unpack 写 GPU 时间戳
+    pub ts: bool,
+}
+
+impl Default for NpuopProps {
+    fn default() -> Self {
+        NpuopProps { lag: 2, wait_ms: 2.0, budget_ms: 12.0, budget_frames: 30, init_frame: 300, zc: true, ts: true }
+    }
+}
+
+impl NpuopProps {
+    /// 要写的属性 (名, 值), 顺序同 [`NPUOP_TUNING_PROPS`]。`on` = false 时 npuop=0 而调参仍写缺省值。
+    pub fn prop_pairs(&self, on: bool) -> Vec<(String, String)> {
+        let p = if on { self.clone() } else { NpuopProps::default() };
+        let b = |x: bool| if x { "1" } else { "0" };
+        let vals = [
+            p.lag.to_string(),
+            fmt_num(p.wait_ms),
+            fmt_num(p.budget_ms),
+            p.budget_frames.to_string(),
+            p.init_frame.to_string(),
+            b(p.zc).to_string(),
+            b(p.ts).to_string(),
+        ];
+        let mut out = vec![(NPUOP_PROP.to_string(), b(on).to_string())];
+        out.extend(NPUOP_TUNING_PROPS.iter().zip(vals).map(|(k, v)| (k.to_string(), v)));
+        out
+    }
+
+    /// `setprop a b; setprop c d; …`
+    pub fn setprop_cmd(&self, on: bool) -> String {
+        self.prop_pairs(on)
+            .into_iter()
+            .map(|(k, v)| format!("setprop {k} {v}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// 属性值里的数字: 整数不带小数点, 否则最多两位小数 (与层 read_num_prop 的 strtod 兼容)。
+fn fmt_num(x: f64) -> String {
+    if x.fract() == 0.0 {
+        format!("{}", x as i64)
+    } else {
+        let s = format!("{x:.2}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// 层 .so 带不带 npuop (按二进制里的属性名字符串判)。
+pub(crate) fn so_supports_npuop(bytes: &[u8]) -> bool {
+    bytes.windows(NPUOP_SO_SIGNATURE.len()).any(|w| w == NPUOP_SO_SIGNATURE)
+}
+
 pub struct GrayLayer {
     serial: String,
     /// 显式指定的层 .so (测未合并的层; 缺省用 knobs/gray/build/out/ 下的产物)
@@ -75,6 +159,8 @@ pub struct GrayLayer {
     /// 启动目标时附加的 intent extras (例: Megacity 的 `--es scene city_static ...`)。
     /// 层只在挂层后**第一次**启动时载入 (随后全局属性就清了), 所以 extras 必须在这次启动里带上。
     launch_extras: Option<String>,
+    /// npuop 档的调参; None = npuop 显式关 (调参写缺省值)
+    npuop: Option<NpuopProps>,
 }
 
 impl GrayLayer {
@@ -84,7 +170,13 @@ impl GrayLayer {
             so: None,
             storeop: None,
             launch_extras: None,
+            npuop: None,
         }
+    }
+
+    pub fn with_npuop(mut self, props: Option<NpuopProps>) -> Self {
+        self.npuop = props;
+        self
     }
 
     pub fn with_so(mut self, so: Option<String>) -> Self {
@@ -278,10 +370,20 @@ impl GrayLayer {
             Some((r, l)) => (r.as_str(), if *l { "1" } else { "0" }),
             None => ("0", "0"),
         };
+        let np = self.npuop.clone().unwrap_or_default().setprop_cmd(self.npuop.is_some());
         self.ashell(
-            &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}; setprop {FA_PROP} {fa}; setprop {FA_TS_PROP} {fa_ts}; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} \"{rule}\"; setprop {STOREOP_LIVE_PROP} {live}; setprop {STOREOP_ON_PROP} 0'"),
+            &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}; setprop {FA_PROP} {fa}; setprop {FA_TS_PROP} {fa_ts}; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} \"{rule}\"; setprop {STOREOP_LIVE_PROP} {live}; setprop {STOREOP_ON_PROP} 0; {np}'"),
             15,
         );
+    }
+
+    /// 挂层之后核对 npuop 与它的每个调参真的写进了属性 (写不进 = 层按缺省跑, 候选就不是请求里那个)。
+    pub fn require_npuop(&self) -> Result<(), String> {
+        let Some(p) = &self.npuop else { return Ok(()) };
+        for (k, v) in p.prop_pairs(true) {
+            self.require_prop(&k, &v, "NPU 超分")?;
+        }
+        Ok(())
     }
 
 
@@ -338,6 +440,16 @@ impl GrayLayer {
                 self.require_prop(UPOP_PROP, "1", "算子")?;
                 self.mount_layer(pkg, keep_prop)
             }
+            // NPU 超分档 (npu/n1-pipeline): 层自己隐含 upop + passdump, 这里与 N1 的 ondevice.sh
+            // 一样只开 npuop 一个; 调参由 with_npuop 带进来, 每个都回读核验
+            "npuop" => {
+                if self.npuop.is_none() {
+                    return Err("npuop 档要先 with_npuop(Some(..)) 给调参".into());
+                }
+                self.setprops("0", "0", "0", "0");
+                self.require_prop(NPUOP_PROP, "1", "NPU 超分")?;
+                self.mount_layer(pkg, keep_prop)
+            }
             // 一帧步骤清单 (只读): 层按提交顺序记 pass/拷贝/清屏/dispatch, 由
             // `debug.knobs.frameaudit_go` 触发抓帧; -ts 档另在 pass 前后写 GPU 时间戳
             "frameaudit" | "frameaudit-ts" => {
@@ -357,7 +469,10 @@ impl GrayLayer {
             "debug.vulkan.layers = [{}]",
             self.getprop("debug.vulkan.layers")
         ));
-        for p in [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, FA_PROP, FA_TS_PROP, FA_GO_PROP, STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP] {
+        for p in [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, FA_PROP, FA_TS_PROP, FA_GO_PROP, STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP, NPUOP_PROP] {
+            l.push(format!("{p}  = [{}]", self.getprop(p)));
+        }
+        for p in NPUOP_TUNING_PROPS {
             l.push(format!("{p}  = [{}]", self.getprop(p)));
         }
         let st = Self::adb_stdout(
@@ -379,9 +494,10 @@ impl GrayLayer {
     /// (state 只记得最后一次挂在哪, 手动推过/异常退出留下的副本它不知道; .so 文件名
     /// 是我们独有的, 按名字清不会误伤) → 清掉立项时那套本来就不生效的 settings。
     pub fn off(&self) -> String {
+        let np = NpuopProps::default().setprop_cmd(false);
         self.ashell(
             &format!(
-                "su -c 'setprop debug.vulkan.layers \"\"; setprop {LOADOP_PROP} 0; setprop {DUMP_PROP} 0; setprop {CP_PROP} 0; setprop {UPOP_PROP} 0; setprop {FA_PROP} 0; setprop {FA_TS_PROP} 0; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} 0; setprop {STOREOP_LIVE_PROP} 0; setprop {STOREOP_ON_PROP} 0'"
+                "su -c 'setprop debug.vulkan.layers \"\"; setprop {LOADOP_PROP} 0; setprop {DUMP_PROP} 0; setprop {CP_PROP} 0; setprop {UPOP_PROP} 0; setprop {FA_PROP} 0; setprop {FA_TS_PROP} 0; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} 0; setprop {STOREOP_LIVE_PROP} 0; setprop {STOREOP_ON_PROP} 0; {np}'"
             ),
             15,
         );
@@ -407,7 +523,7 @@ impl GrayLayer {
         }
         let stray = self
             .ashell(
-                &format!("su -c 'find /data/app /data/data /data/local/tmp -name \"{SO}\" 2>/dev/null'"),
+                &format!("su -c 'find /data/app /data/data /data/local/tmp -name \"{SO}\" -not -path \"{NPUOP_DEV_BASE}/*\" 2>/dev/null'"),
                 60,
             )
             .trim_end_matches("#adb_exit=0")
@@ -531,7 +647,7 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
         eprintln!("找不到 adb");
         return 2;
     }
-    let gl = GrayLayer::new(&serial).with_so(so);
+    let gl = GrayLayer::new(&serial).with_so(so).with_npuop((mode == "npuop").then(NpuopProps::default));
     match mode.as_str() {
         "status" => {
             println!("{}", gl.status());
@@ -541,7 +657,27 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
             println!("{}", gl.off());
             0
         }
-        "probe" | "loadop" | "passdump" | "copyprobe" | "upop" | "frameaudit" | "frameaudit-ts" | "target" => {
+        // eval 的 npuop 评测中途断掉 (进程被杀) 时手动还原: 摘层 + umount + 属性设回运行前
+        "npuop-restore" => {
+            let Some(run) = positional.get(1) else {
+                eprintln!("用法: phonefarm gray-layer npuop-restore /data/local/tmp/npuop/run_<时间> [pkg] [--serial S]");
+                return 2;
+            };
+            let pkg = positional.get(2).map(String::as_str).unwrap_or("com.miHoYo.Yuanshen");
+            println!("{}", gl.off());
+            match crate::npuop_device::NpuopMount::from_device(&serial, pkg, run) {
+                Ok(m) => {
+                    let log = m.restore();
+                    println!("{log}");
+                    if crate::npuop_device::restore_clean(&log) { 0 } else { 1 }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    2
+                }
+            }
+        }
+        "probe" | "loadop" | "passdump" | "copyprobe" | "upop" | "npuop" | "frameaudit" | "frameaudit-ts" | "target" => {
             let default_pkg = if mode == "probe" || mode == "loadop" {
                 "io.github.hgamey.refbench"
             } else {
@@ -605,6 +741,37 @@ mod storeop_tests {
         assert!(storeop_spec(&[("zzzzzzzz".into(), 0)]).is_err());
         let many: Vec<(String, u32)> = (0..6).map(|i| ("0123456789abcdef".to_string(), i)).collect();
         assert!(storeop_spec(&many).unwrap_err().contains("上限"));
+    }
+}
+
+#[cfg(test)]
+mod npuop_props_tests {
+    use super::{so_supports_npuop, NpuopProps, NPUOP_PROP, NPUOP_TUNING_PROPS};
+
+    /// 每一臂都显式写全部 8 个属性: 开的时候是请求的调参, 关的时候 npuop=0 且调参回缺省。
+    #[test]
+    fn every_npuop_prop_is_written_on_and_off() {
+        let p = NpuopProps { lag: 1, wait_ms: 2.5, budget_ms: 10.0, budget_frames: 20, init_frame: 200, zc: false, ts: true };
+        let on = p.prop_pairs(true);
+        assert_eq!(on.len(), 1 + NPUOP_TUNING_PROPS.len());
+        assert_eq!(on[0], (NPUOP_PROP.to_string(), "1".to_string()));
+        let get = |k: &str| on.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(get("debug.knobs.npuop_lag"), "1");
+        assert_eq!(get("debug.knobs.npuop_wait_ms"), "2.5");
+        assert_eq!(get("debug.knobs.npuop_budget_ms"), "10");
+        assert_eq!(get("debug.knobs.npuop_zc"), "0");
+        let off = p.prop_pairs(false);
+        assert_eq!(off[0].1, "0");
+        assert_eq!(off, NpuopProps::default().prop_pairs(false));
+        let cmd = p.setprop_cmd(true);
+        assert!(cmd.starts_with("setprop debug.knobs.npuop 1; setprop debug.knobs.npuop_lag 1"), "{cmd}");
+        assert!(!cmd.contains('\n'));
+    }
+
+    #[test]
+    fn layer_so_is_recognised_by_its_prop_string() {
+        assert!(so_supports_npuop(b"\x7fELF....debug.knobs.npuop_wait_ms\0..."));
+        assert!(!so_supports_npuop(b"\x7fELF....debug.knobs.upop\0..."));
     }
 }
 
