@@ -237,6 +237,10 @@ class Exp:
         for f in CHAIN_FILES:
             if not p.push(os.path.join(self.a.chain, f), f"{self.chain_dev}/{os.path.basename(f)}") and not p.dry:
                 raise Abort(f"推 {f} 失败")
+        # 自动亮度会让各臂屏幕亮度不同 (屏幕功耗混进差值): 改手动档, 原值已记在 state.orig, restore 改回
+        if p.brightness_mode() == "1":
+            p.brightness_mode_set("0")
+            self.log(f"  自动亮度 → 手动 (亮度值 {p.brightness()}), restore 时改回")
         st["layer_installed"] = "pending"
         self.save()
         ok, why = p.install_layer(self.a.layer_so, st["libdir"])
@@ -278,6 +282,7 @@ class Exp:
     def launch_to_world(self, npuop, tag):
         p, t = self.p, self.cfg["timing"]
         p.force_stop()
+        p.wake()
         p.archive_marker(tag)
         self.set_knobs(npuop)
         if not p.setprop("debug.vulkan.layers", LAYER_NAME):
@@ -433,6 +438,7 @@ class Exp:
             series.append([round(p.now() - t0), b["temp_c"], s, b["capacity"], b["current_ua"]])
             if b["temp_c"] is not None and b["temp_c"] <= th["batt_start_c"] and s is not None and s <= th["soc_start_c"]:
                 return {"reached": True, "waited_s": round(p.now() - t0), "batt_c": b["temp_c"], "soc_c": s, "series": series}
+            p.wake()
             if p.now() - t0 > th["max_wait_s"]:
                 return {"reached": False, "waited_s": round(p.now() - t0), "batt_c": b["temp_c"], "soc_c": s, "series": series}
             p.sleep(th["poll_s"])
@@ -500,6 +506,7 @@ class Exp:
             if p.screencap(os.path.join(d, "shot_pre.raw")):
                 rec["shots"].append("shot_pre.raw")
             rec["batt_start"] = p.batt()
+            rec["brightness"] = [p.brightness_mode(), p.brightness()]
             ok = p.measure(self.chain_dev, c["timing"]["measure_s"], d, label)
             rec["batt_end"] = p.batt()
             m1 = p.marker()

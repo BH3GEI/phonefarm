@@ -278,6 +278,13 @@ class Phone:
         self._log(f"screencap -> {host_path}")
         return p.returncode == 0 and raw_dims(open(host_path, "rb").read()) is not None
 
+    def wake(self):
+        """等冷时游戏是停着的, 屏幕可能超时灭掉: 亮屏 + 收起锁屏 (研究机没设锁屏密码; 有密码时这里不解锁, 后面进门会失败并停)。"""
+        self.sh("input keyevent 224; wm dismiss-keyguard")
+
+    def brightness(self):
+        return self.out("settings get system screen_brightness")
+
     def tap(self, x, y):
         self.sh(f"input tap {int(x)} {int(y)}")
 
@@ -447,6 +454,12 @@ class DryPhone(Phone):
 
     def brightness_mode_set(self, v):
         self.bmode = v
+
+    def wake(self):
+        pass
+
+    def brightness(self):
+        return "128"
 
     def logcat_dump(self, host_path, pattern):
         txt = "refknobs: npuop frame 900 pack 0.61 npu 2.79 unpack 1.18 ms\n" if self.npu_active else ""
