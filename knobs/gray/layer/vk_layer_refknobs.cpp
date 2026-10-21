@@ -24,6 +24,7 @@
 #include <vector>
 #include <sys/system_properties.h>
 #include <unistd.h>
+#include "framedump.h"
 #if __has_include("copy_spv.h")
 #include "copy_spv.h"
 #else
@@ -65,7 +66,7 @@ typedef struct {
     VkStructureType sType;
     const void* pNext;
     RkLayerFunction function;
-    union { RkDevLink* pLayerInfo; } u;
+    union { RkDevLink* pLayerInfo; PFN_rkSetDeviceLoaderData pfnSetDeviceLoaderData; } u;   // 后者: function=1 时
 } RkDevCreateInfo;
 
 typedef struct {
@@ -712,6 +713,7 @@ static void write_marker() {
             json += b;
         }
     }
+    if (fd_on()) json += ",\"framedump\":" + fd_json();   // 逐帧读回 (framedump.cpp)
     json += "}";
 
     // 通道 1: logcat (root 可读, 不受目标应用存储沙箱影响)。
@@ -802,6 +804,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     g_frameaudit = read_bool_prop("debug.knobs.frameaudit");
     g_frameaudit_ts = g_frameaudit && read_bool_prop("debug.knobs.frameaudit_ts");
     if (g_copyprobe || g_upop || g_frameaudit) g_dump_passes = true;   // 探针/算子/步骤清单全部建立在溯源表上
+    if (fd_init_from_props()) RK_LOG("framedump=1: present 处逐帧读回 (framedump.cpp)");
     RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d upop=%d frameaudit=%d ts=%d",
            self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe, (int)g_upop,
            (int)g_frameaudit, (int)g_frameaudit_ts);
@@ -850,6 +853,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
                      link->function == RK_LAYER_LINK_INFO))
         link = reinterpret_cast<RkDevCreateInfo*>(const_cast<void*>(link->pNext));
     if (!link) { RK_LOG("no LOADER_DEVICE_CREATE_INFO in pNext chain"); return VK_ERROR_INITIALIZATION_FAILED; }
+    // 加载器另给一条 function=VK_LOADER_DATA_CALLBACK(1) 的链节, 带 SetDeviceLoaderData:
+    // 层自己分配的命令缓冲等可分发对象要靠它补分发表 (framedump 用)。没有就留空, framedump 自己兜底。
+    PFN_rkSetDeviceLoaderData sdld = nullptr;
+    for (auto* p = reinterpret_cast<const RkDevCreateInfo*>(ci->pNext); p;
+         p = reinterpret_cast<const RkDevCreateInfo*>(p->pNext))
+        if (p->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO && (int)p->function == 1)
+            sdld = p->u.pfnSetDeviceLoaderData;
     PFN_vkGetInstanceProcAddr gipa = link->u.pLayerInfo->pfnNextGetInstanceProcAddr;
     PFN_vkGetDeviceProcAddr gdpa = link->u.pLayerInfo->pfnNextGetDeviceProcAddr;
     VkInstance inst = VK_NULL_HANDLE;
@@ -964,12 +974,18 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
         if (gpp) { VkPhysicalDeviceProperties pp{}; gpp(phys, &pp); d.ts_period_ns = pp.limits.timestampPeriod; }
     }
     { std::lock_guard<std::mutex> lk(g_mtx); g_dev[key(*pDev)] = d; }
+    if (fd_on()) {
+        uint32_t sole = ci->queueCreateInfoCount == 1 && ci->pQueueCreateInfos ? ci->pQueueCreateInfos[0].queueFamilyIndex
+                                                                               : UINT32_MAX;
+        fd_on_device(inst, phys, *pDev, gipa, gdpa, sdld, sole);
+    }
     return r;
 }
 
 static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocationCallbacks* a) {
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return; d = it->second; g_dev.erase(it); }
+    fd_on_destroy_device(dev);   // 先写完在途帧、收掉 framedump 自建对象 (没开时空操作)
     write_marker();  // 收尾再落一次最终计数
     {
         std::lock_guard<std::mutex> lk(g_mtx);
@@ -1432,7 +1448,23 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateSwapchainKHR(
     if (!dev_of(key(dev), &d) || !d.CreateSwapchainKHR) {
         RK_LOG_ONCE("CreateSwapchainKHR: 查不到下层函数"); return VK_ERROR_INITIALIZATION_FAILED;
     }
-    VkResult r = d.CreateSwapchainKHR(dev, ci, a, out);
+    // framedump: 读回要求送显图带 TRANSFER_SRC。加上后建不成就退回原参数 (画面照常, 只是不抓)。
+    VkSwapchainCreateInfoKHR fd_ci;
+    bool fd_usage = false;
+    VkResult r;
+    if (fd_on() && ci) {
+        fd_ci = *ci;
+        fd_usage = fd_patch_swapchain_ci(dev, &fd_ci);
+        r = d.CreateSwapchainKHR(dev, fd_usage ? &fd_ci : ci, a, out);
+        if (r != VK_SUCCESS && fd_usage) {
+            RK_LOG("framedump: 加 TRANSFER_SRC 后建 swapchain 失败 (%d), 退回原参数", (int)r);
+            fd_usage = false;
+            r = d.CreateSwapchainKHR(dev, ci, a, out);
+        }
+        if (r == VK_SUCCESS) fd_on_swapchain(dev, *out, ci, fd_usage);
+    } else {
+        r = d.CreateSwapchainKHR(dev, ci, a, out);
+    }
     if (r == VK_SUCCESS && ci) {
         {
             // 读方 (write_marker / note_pass) 都持 g_mtx, 写方也必须持 (评审 #11: 否则是 UB
@@ -2678,6 +2710,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
         else if (f == 1751 && !g_seq_done) { std::lock_guard<std::mutex> lk(g_mtx); g_sampling = false; g_seq_done = true; }
     }
     if ((f % 300) == 0) write_marker();  // 周期落盘, 无需等退出
+    VkPresentInfoKHR fd_pi;
+    if (fd_on()) pi = fd_on_present(q, pi, &fd_pi, f);   // 抓帧窗口内: 先拷贝, present 改等我们的信号量
     return d.QueuePresentKHR(q, pi);
 }
 
@@ -2686,6 +2720,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
 
 static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* name) {
     RK_HOOK("vkGetInstanceProcAddr", dispatch_instance);
+    if (PFN_vkVoidFunction p = fd_hook(name)) return p;   // framedump 没开时恒为空
     // 注意: vkEnumerateInstance{Layer,Extension}Properties 这里**不挂**。那两个导出符号
     // 只为加载器 dlsym 发现层而存在; 应用调的是加载器自己的全局版本, 挂上去只会把
     // "本层没有扩展" 当成 "整个实例没有扩展" 答回去。
@@ -2767,6 +2802,7 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
 
 static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     RK_HOOK("vkGetDeviceProcAddr", dispatch_device);
+    if (PFN_vkVoidFunction p = fd_hook(name)) return p;   // framedump 没开时恒为空
     RK_HOOK("vkDestroyDevice", rk_DestroyDevice);
     RK_HOOK("vkQueuePresentKHR", rk_QueuePresentKHR);
     RK_HOOK("vkCmdBeginRenderPass", rk_CmdBeginRenderPass);
