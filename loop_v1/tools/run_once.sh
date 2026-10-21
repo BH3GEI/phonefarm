@@ -45,7 +45,7 @@ WL_PID=$!
 # 2) 等负载进入稳态后开采
 sleep "$LEAD"
 echo "[$LABEL] 采集 ${CAPDUR}s ..."
-adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/ftrace_capture.sh $CAPDUR /data/local/tmp/loop_v1_$LABEL.txt'" \
+adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/ftrace_capture.sh $CAPDUR /data/local/tmp/loop_v1_$LABEL.txt $PKG'" \
     > "$OUTDIR/capture.log" 2>&1
 
 # 3) 等负载收尾

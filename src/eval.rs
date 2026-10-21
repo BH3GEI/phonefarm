@@ -918,7 +918,7 @@ pub(crate) fn run_one_launch(
         .stderr(std::process::Stdio::null())
         .spawn();
     let tr = format!("{DEV_TMP}/lw_{label}.txt");
-    let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {seconds} {tr}"), seconds + 120);
+    let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {seconds} {tr} {pkg}"), seconds + 120);
     std::fs::write(outdir.join("capture.log"), &cap).ok();
     let _ = adb(serial, &["pull", &tr, &outdir.join("trace.txt").to_string_lossy()], 120);
     let _ = adb(serial, &["shell", &format!("rm -f {tr}")], 15);
