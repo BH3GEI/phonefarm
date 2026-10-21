@@ -51,6 +51,26 @@ PYEOF
 echo "shader: copy=$(wc -c < "$OUT/copyprobe_copy.spv" | tr -d ' ')B upop=$(wc -c < "$OUT/upop.spv" | tr -d ' ')B" \
      "npu_pack=$(wc -c < "$OUT/npu_pack.spv" | tr -d ' ')B npu_unpack=$(wc -c < "$OUT/npu_unpack.spv" | tr -d ' ')B -> copy_spv.h"
 
+# 插帧 GPU 侧 (路线 A: 缩小+光流放大采样混合; 路线 B: 块匹配+平滑+预对齐+残差合成)。先编译并内嵌成
+# interp_spv.h 备用; 层代码还没调用它们 (接线是后续工作), 这里至少保证每次构建都能编过。
+INTERP_SHADERS="interp_a_down interp_a_blend interp_b_luma interp_b_bm interp_b_smooth interp_b_prealign interp_b_compose"
+for s in $INTERP_SHADERS; do
+    "$GLSLC" --target-env=vulkan1.1 -O -I"$ROOT/layer" "$ROOT/layer/$s.comp" -o "$OUT/$s.spv"
+done
+python3 - "$OUT" $INTERP_SHADERS > "$OUT/interp_spv.h" <<'PYEOF'
+import sys
+out = sys.argv[1]
+for n in sys.argv[2:]:
+    d = open(f"{out}/{n}.spv", "rb").read()
+    cname = "k" + "".join(p.capitalize() for p in n.split("_")) + "Spv"
+    print(f"static const unsigned char {cname}[] = {{")
+    for i in range(0, len(d), 16):
+        print("  " + ",".join(str(b) for b in d[i:i+16]) + ",")
+    print("};")
+    print(f"static const unsigned int {cname}Len = {len(d)};")
+PYEOF
+echo "interp shaders: $(for s in $INTERP_SHADERS; do printf '%s=%sB ' $s $(wc -c < "$OUT/$s.spv" | tr -d ' '); done)-> interp_spv.h"
+
 "$CXX" -O2 -Wall -fPIC -std=c++17 -fno-exceptions -fno-rtti \
     -static-libstdc++ -Wl,--exclude-libs,ALL \
     -I"$OUT" -I"$ROOT/layer" \
