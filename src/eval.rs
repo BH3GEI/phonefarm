@@ -43,9 +43,13 @@ const DEFAULT_DENY_KEYWORDS: [&str; 7] = [
     "throttl",
 ];
 
-/// gray 收端目前实现的受控开关。层的开关集合是有限且已实现的, 上层发明新开关
-/// 或请求收端没实现的开关, 整份拒绝。
-const GRAY_SUPPORTED_KNOBS: [&str; 1] = ["loadop_dont_care"];
+/// gray 收端目前实现的受控开关 (= `parse_gray_rewrites` 能认的那几个)。层的开关集合是有限且
+/// 已实现的, 上层发明新开关或请求收端没实现的开关, 整份拒绝。
+///
+/// 以前这里只写了 loadop, 而上层 (game_opt_loop optimize/gray.rs) 唯一 Landed 的是 storeop ——
+/// 收端明明实现了 storeop 却在校验这一步拦掉, 每个灰档候选都退出码 2 (审计 #1)。
+/// 现在校验直接走 `parse_gray_rewrites`, 这张表只用于报错文字, 两者由单测锁在一起。
+pub(crate) const GRAY_SUPPORTED_KNOBS: [&str; 2] = ["loadop_dont_care", "storeop_dont_care"];
 
 const USAGE: &str = "用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--json]";
 
@@ -371,6 +375,8 @@ fn validate_v2(req: &Value) -> Result<(), String> {
                     ));
                 }
             }
+            // 收端真正施加时用的就是这个解析; 校验阶段跑同一份, 缺 scope / scope 写错在碰设备前拒收
+            parse_gray_rewrites(&req["payload"])?;
         }
         "whitebox" => {
             crate::whitebox::knob_extras(&req["payload"])?;
@@ -2326,9 +2332,13 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
 }
 
-/// 摘层回包是否干净 (无 KNOB/RESTORE 失败标记, 无非零退出)。
+/// 摘层回包是否干净: 只认 `GrayLayer::off` 写出的明确失败标记。
+///
+/// 以前还看 `#adb_exit=1`: off() 先删 STATE 再 `cat` 它, cat 必然退出码 1, 于是每次
+/// 灰档评测都判「摘层没摘干净」ABORT (审计 #2)。现在 off() 自己判断每一步回读,
+/// 失败 (含回读命令本身失败) 一律写 OFF_FAIL_MARK, 这里不再猜退出码。
 fn gl_off_clean(restore_log: &str) -> bool {
-    !restore_log.contains("#adb_exit=1") && !restore_log.contains("警告")
+    !restore_log.contains(crate::graylayer::OFF_FAIL_MARK)
 }
 
 /// 层自报的改写命中数 (契约 verdict 口径: "改写被绑定的次数")。
@@ -2432,6 +2442,144 @@ mod tests {
         assert!(validate_ok(&r));
         r["payload"]["rewrites"] = json!([]);
         assert!(validate_err(&r).contains("至少 1 项"));
+    }
+
+    /// 审计 #1: 上层唯一 Landed 的 storeop 必须能过校验; 缺 scope / scope 写错在校验阶段就拒。
+    #[test]
+    fn gray_accepts_storeop_with_scope_and_rejects_bad_scope() {
+        let mut r = v2_req("gray", json!({"rewrites": [{"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"}]}));
+        assert!(validate_ok(&r), "{:?}", validate_v2(&r));
+        r["payload"]["rewrites"] = json!([
+            {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"},
+            {"knob": "storeop_dont_care", "scope": "9d0b4db80bf552b8:0"},
+        ]);
+        assert!(validate_ok(&r));
+        r["payload"]["rewrites"] = json!([{"knob": "storeop_dont_care"}]);
+        assert!(validate_err(&r).contains("scope"));
+        r["payload"]["rewrites"] = json!([{"knob": "storeop_dont_care", "scope": "15a5:2"}]);
+        assert!(!validate_ok(&r));
+    }
+
+    /// 校验用的名单和施加用的解析不能再各说各话: 名单里每个开关都要被解析认, 解析不认的不能在名单里。
+    #[test]
+    fn gray_supported_list_matches_parser() {
+        for k in GRAY_SUPPORTED_KNOBS {
+            let scope = if k == "storeop_dont_care" { json!("15a51a879df99c32:2") } else { Value::Null };
+            assert!(
+                parse_gray_rewrites(&json!({"rewrites": [{"knob": k, "scope": scope}]})).is_ok(),
+                "名单里的 {k} 解析不认"
+            );
+        }
+        assert!(parse_gray_rewrites(&json!({"rewrites": [{"knob": "render_scale"}]})).is_err());
+    }
+
+    /// 审计 #2: 正常摘层的回包 (STATE 已删) 必须判干净; 明确失败必须判不干净。
+    #[test]
+    fn gl_off_clean_uses_explicit_marks_only() {
+        use crate::graylayer::off_readback;
+        assert!(gl_off_clean(&off_readback("\n#adb_exit=0", "ABSENT\n#adb_exit=0")));
+        assert!(!gl_off_clean(&off_readback("\n#adb_exit=0", "PRESENT\npkg|/dir\n#adb_exit=0")));
+        assert!(!gl_off_clean(&off_readback("\n#adb_exit=0", "#adb_exit=1")));
+        assert!(!gl_off_clean(&off_readback("VK_LAYER_refknobs_readonly\n#adb_exit=0", "ABSENT\n#adb_exit=0")));
+        // .so 没删掉时 off() 打的也是这个标记
+        assert!(!gl_off_clean("警告: /data/app/x/libVkLayer_refknobs.so 没删掉"));
+    }
+
+    /// 跨仓库契约: game_opt_loop `src/optimize/gray.rs` 的 CATALOG 里每个 Landed 开关, 都必须能过
+    /// 收端 `validate_v2`; Declared 的必须被拒 (收端没实现)。
+    ///
+    /// 找 game_opt_loop: 环境变量 GAME_OPT_LOOP_DIR, 否则从本仓库往上逐级找 `game_opt_loop/`。
+    /// 找不到时跳过并打印原因; 设 HGAMEY_REQUIRE_CONTRACT=1 则找不到直接失败。
+    #[test]
+    fn gray_catalog_landed_knobs_pass_receiver_validation() {
+        let rel = "src/optimize/gray.rs";
+        let mut found = std::env::var("GAME_OPT_LOOP_DIR")
+            .ok()
+            .map(|d| Path::new(&d).join(rel))
+            .filter(|p| p.exists());
+        if found.is_none() {
+            let mut dir = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
+            while let Some(d) = dir {
+                let p = d.join("game_opt_loop").join(rel);
+                if p.exists() {
+                    found = Some(p);
+                    break;
+                }
+                dir = d.parent();
+            }
+        }
+        let Some(path) = found else {
+            assert!(
+                std::env::var("HGAMEY_REQUIRE_CONTRACT").ok().as_deref() != Some("1"),
+                "HGAMEY_REQUIRE_CONTRACT=1 但找不到 game_opt_loop/{rel}"
+            );
+            eprintln!("跳过跨仓库契约测试: 找不到 game_opt_loop/{rel} (可设 GAME_OPT_LOOP_DIR)");
+            return;
+        };
+        let src = std::fs::read_to_string(&path).unwrap();
+        let cat_start = src.find("pub const CATALOG").expect("gray.rs 里没有 CATALOG");
+        let cat_end = cat_start + src[cat_start..].find("\n];").expect("CATALOG 没有结尾");
+        let cat = &src[cat_start..cat_end];
+        let field = |block: &str, name: &str| -> Option<String> {
+            let i = block.find(&format!("{name}:"))? + name.len() + 1;
+            let rest = block[i..].trim_start();
+            let end = rest.find(|c: char| c == ',' || c == '\n').unwrap_or(rest.len());
+            Some(rest[..end].trim().trim_matches('"').to_string())
+        };
+        let mut landed = 0;
+        for block in cat.split("Knob {").skip(1) {
+            let id = field(block, "id").expect("Knob 缺 id");
+            let status = field(block, "status").expect("Knob 缺 status");
+            let needs_scope = field(block, "needs_scope").as_deref() == Some("true");
+            let mut rw = json!({"knob": id});
+            if needs_scope {
+                rw["scope"] = json!("15a51a879df99c32:2");
+            }
+            let r = v2_req("gray", json!({"rewrites": [rw]}));
+            match status.as_str() {
+                "KnobStatus::Landed" => {
+                    landed += 1;
+                    assert!(
+                        validate_ok(&r),
+                        "game_opt_loop 把 {id} 标成 Landed, 收端 validate_v2 却拒收: {:?} ({})",
+                        validate_v2(&r),
+                        path.display()
+                    );
+                }
+                "KnobStatus::Declared" => assert!(
+                    !validate_ok(&r),
+                    "game_opt_loop 把 {id} 标成 Declared (层里没实现), 收端却收了"
+                ),
+                "KnobStatus::Withdrawn" => {}
+                other => panic!("不认识的 KnobStatus {other:?} ({id})"),
+            }
+        }
+        assert!(landed >= 1, "{} 的 CATALOG 里一个 Landed 都没解析出来, 解析规则可能过时了", path.display());
+
+        // 再拿上层出主意器的真实产出回放一遍: tests/fixtures/proposer_golden/*/gray_*.json
+        // 是 game_opt_loop 按固定种子生成、真会发给收端的灰档请求, 每一份都必须过校验。
+        let gol = path.ancestors().nth(3).unwrap();
+        let golden = gol.join("tests/fixtures/proposer_golden");
+        let mut replayed = 0;
+        if let Ok(seeds) = std::fs::read_dir(&golden) {
+            for seed in seeds.flatten() {
+                for f in std::fs::read_dir(seed.path()).into_iter().flatten().flatten() {
+                    let name = f.file_name().to_string_lossy().into_owned();
+                    if !(name.starts_with("gray_") && name.ends_with(".json")) {
+                        continue;
+                    }
+                    let req: Value = serde_json::from_str(&std::fs::read_to_string(f.path()).unwrap()).unwrap();
+                    assert!(
+                        validate_ok(&req),
+                        "上层真实灰档请求 {} 被收端拒收: {:?}",
+                        f.path().display(),
+                        validate_v2(&req)
+                    );
+                    replayed += 1;
+                }
+            }
+        }
+        eprintln!("跨仓库契约: CATALOG Landed {landed} 个通过; 回放上层真实灰档请求 {replayed} 份全部通过");
     }
 
     #[test]
