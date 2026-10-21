@@ -30,8 +30,17 @@ pub struct Telemetry {
     #[serde(skip_serializing_if = "Option::is_none")] pub wifi_raw: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub net_conn: Option<i32>,
     // ── 渲染/帧率层 ──
+    /// **过渡字段, 将移除**: 与 `hwui_frames` (安卓) 或 `screen_frames` (鸿蒙) 同值, 只为老读者保留。
+    /// 两者口径完全不同 (应用 HWUI 界面帧 vs 整屏刷新计数), 新代码请读 [`Telemetry::frame_counter`]。
     #[serde(skip_serializing_if = "Option::is_none")] pub frames_total: Option<i64>,
+    /// 安卓 `dumpsys gfxinfo` 的 `Total frames rendered`: 目标应用 HWUI 画的**界面帧**累计数。
+    /// 走 SurfaceView 的游戏画面不经 HWUI, 这个数在游戏里基本不涨 —— 不是游戏帧。
+    #[serde(skip_serializing_if = "Option::is_none")] pub hwui_frames: Option<i64>,
+    /// 鸿蒙 `hidumper -s RenderService -a fpsCount` 的计数: **整屏**刷新帧累计数, 不归属任何应用。
+    #[serde(skip_serializing_if = "Option::is_none")] pub screen_frames: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")] pub fps: Option<f32>, // 运行时按两步差值算
+    /// `fps` 是按哪个计数器差出来的: `hwui` (安卓界面帧) / `screen` (鸿蒙整屏帧)。没有它 `fps` 不可解释。
+    #[serde(skip_serializing_if = "Option::is_none")] pub fps_source: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")] pub janky_pct: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")] pub frame_p50_ms: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")] pub frame_p90_ms: Option<f32>,
@@ -90,6 +99,21 @@ pub struct Telemetry {
     #[serde(skip_serializing_if = "Option::is_none")] pub ui_nodes: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")] pub ocr: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")] pub root: Option<bool>,
+}
+
+/// 帧计数器的口径标签。
+pub const FRAMES_HWUI: &str = "hwui";
+pub const FRAMES_SCREEN: &str = "screen";
+
+impl Telemetry {
+    /// 本步能用来差分算 fps 的帧计数器: `(累计帧数, 口径)`。
+    /// 口径是 [`FRAMES_HWUI`] (安卓应用界面帧) 或 [`FRAMES_SCREEN`] (鸿蒙整屏帧); 两者都不是游戏帧。
+    pub fn frame_counter(&self) -> Option<(i64, &'static str)> {
+        if let Some(n) = self.hwui_frames { return Some((n, FRAMES_HWUI)); }
+        if let Some(n) = self.screen_frames { return Some((n, FRAMES_SCREEN)); }
+        // 过渡: 老读者手工填的 frames_total (口径未知, 不标)
+        self.frames_total.map(|n| (n, "unknown"))
+    }
 }
 
 /// 哨兵行: 设备端脚本用 `-----PF:<key>-----` 分段,一趟 shell 带回全部数据源
@@ -446,7 +470,7 @@ pub fn from_android(raw: &str, pkg: &str) -> Telemetry {
     if let Some(s) = sec(&ss, "thermal") { t.cpu_temp = parse_thermal(s); }
     if let Some(s) = sec(&ss, "gfxinfo") {
         let (f, j, p, m) = parse_gfxinfo_a(s);
-        t.frames_total = f; t.janky_pct = j; t.missed_vsync = m;
+        t.hwui_frames = f; t.frames_total = f; t.janky_pct = j; t.missed_vsync = m;
         [t.frame_p50_ms, t.frame_p90_ms, t.frame_p95_ms, t.frame_p99_ms] = p;
     }
     if let Some(s) = sec(&ss, "topact") { t.top_activity = parse_topact_a(s); }
@@ -529,7 +553,7 @@ pub fn from_oh(raw: &str) -> Telemetry {
     if let Some(s) = sec(&ss, "thermal") { t.cpu_temp = parse_thermal(s); }
     if let Some(s) = sec(&ss, "fpscount") {
         let (hz, cnt) = parse_fpscount_oh(s);
-        (t.refresh_hz, t.frames_total) = (hz, cnt);
+        (t.refresh_hz, t.screen_frames, t.frames_total) = (hz, cnt, cnt);
     }
     if let Some(s) = sec(&ss, "status") {
         let (th, rss, hwm) = parse_status(s);
@@ -693,13 +717,21 @@ mod tests {
         let t = from_android(&raw, "com.ss.android.article.news");
         assert_eq!(t.pid, Some(1640));
         assert_eq!(t.batt_level, Some(100));
-        assert_eq!(t.frames_total, Some(284));
+        assert_eq!(t.hwui_frames, Some(284), "安卓 gfxinfo 是 HWUI 界面帧");
+        assert_eq!(t.screen_frames, None, "安卓没有整屏计数");
+        assert_eq!(t.frames_total, Some(284), "过渡字段与 hwui_frames 同值");
+        assert_eq!(t.frame_counter(), Some((284, FRAMES_HWUI)));
         assert!(t.mem_total_kb.is_none(), "没采的段留空");
         let empty = from_android("", "x");
         let j = serde_json::to_value(&empty).unwrap();
         assert_eq!(j.as_object().unwrap().len(), 0, "全None序列化为空对象,账本零负担");
         let t2 = from_oh(&format!("-----PF:fpscount-----\n{O_FPS}\n-----PF:faultcnt-----\n{O_FAULT}"));
-        assert_eq!(t2.frames_total, Some(3497));
+        assert_eq!(t2.screen_frames, Some(3497), "鸿蒙 fpsCount 是整屏刷新计数");
+        assert_eq!(t2.hwui_frames, None, "鸿蒙没有 HWUI 计数");
+        assert_eq!(t2.frames_total, Some(3497), "过渡字段与 screen_frames 同值");
+        assert_eq!(t2.frame_counter(), Some((3497, FRAMES_SCREEN)));
+        let j2 = serde_json::to_value(&t2).unwrap();
+        assert!(j2.get("screen_frames").is_some() && j2.get("hwui_frames").is_none(), "账本里两个口径分开落键");
         assert_eq!(t2.crash_count, Some(0));
         assert_eq!(t2.root, None, "原始输出不含权限信息,由设备层写入");
     }
