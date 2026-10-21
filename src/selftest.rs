@@ -928,6 +928,13 @@ pub struct Cond {
     pub lock_freq: bool,
     /// 锁频时钉在哪一档 (缺省: 锁频前的 max_pwrlevel)。档位号越大频率越低。
     pub lock_level: Option<u32>,
+    /// 等冷时还要等 GPU 热限档 (kgsl thermal_pwrlevel) 回到 <= 这一档。None = 不等。
+    ///
+    /// 2026-10-21 红魔实测: SoC 结温 2 秒内就回到 45C 以下, 但 thermal_pwrlevel 一组里从 0
+    /// 爬到 4、6、7 不回落, 同一负载帧率随之 347 → 306 → 258 台阶式下降; 一轮两臂落在不同档时
+    /// (ctrl 6 / knob 4) 方向直接判反。只看结温的等冷管不住这个。
+    /// 缺省 4: 空闲 60 秒后实测多停在 4–6, 等回 0 会每臂等到超时。
+    pub cool_tpl: Option<u32>,
 }
 
 impl Cond {
@@ -939,6 +946,7 @@ impl Cond {
             "temp_cap_c": self.temp_cap_c, "charge_suspend": self.charge_suspend,
             "fan": "off",
             "lock_freq": self.lock_freq, "lock_level": self.lock_level, "scene": rb::SCENE,
+            "cool_tpl": self.cool_tpl,
         })
     }
 }
@@ -1148,6 +1156,26 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
         Ok((z, t, w)) => json!({ "zone": z, "c": t, "waited_s": w, "timeout": false }),
         Err(e) => json!({ "error": e, "timeout": true, "waited_s": c.cool_timeout_s }),
     };
+    // 1b) 等 GPU 热限档回落 (见 Cond::cool_tpl)。超时同样不作废, 如实记录
+    let cool_tpl = match c.cool_tpl {
+        None => Value::Null,
+        Some(max) => {
+            let t1 = Instant::now();
+            let first = read_pwr(serial);
+            let mut last = first.clone();
+            let mut timeout = false;
+            while tpl_cool_enough(&last, max) == Some(false) {
+                if t1.elapsed().as_secs() >= c.cool_timeout_s {
+                    timeout = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(3));
+                last = read_pwr(serial);
+            }
+            json!({ "max": max, "tpl_before": first.get("thermal_pwrlevel"), "tpl_after": last.get("thermal_pwrlevel"),
+                    "waited_s": t1.elapsed().as_secs(), "timeout": timeout })
+        }
+    };
     let cool_s = t0.elapsed().as_secs_f64();
     let pwr_start = read_pwr(serial);
 
@@ -1279,7 +1307,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     );
     let arm = json!({
         "label": label, "load": load.to_json(), "remote_spv": remote_spv,
-        "started_at": started_at, "cool": cool, "cool_s": py_round(cool_s, 1),
+        "started_at": started_at, "cool": cool, "cool_tpl": cool_tpl, "cool_s": py_round(cool_s, 1),
         "checks": checks, "capture_ok": capture_ok, "span_s": span,
         "expected_s": py_round(expected_s, 2),
         // 审计 #16: 两件事分开记 —— apply_ok 只看负载自报 (算子装上、干净跑完),
@@ -1344,6 +1372,12 @@ pub fn parse_pwr(text: &str) -> Value {
     Value::Object(m)
 }
 
+/// GPU 热限档是否已回落到 <= `max`。读不到 / 不是数 = None (不知道, 调用方不等)。
+pub fn tpl_cool_enough(pwr: &Value, max: u32) -> Option<bool> {
+    let v = pwr.get("thermal_pwrlevel")?.as_str()?.trim().parse::<u32>().ok()?;
+    Some(v <= max)
+}
+
 /// 档位在这一臂里变没变 (只看档位, 当前频率本来就随负载变)。读不到算「不知道」, 不算变了。
 pub fn pwr_changed(start: &Value, end: &Value) -> Option<bool> {
     let keys = ["max_pwrlevel", "min_pwrlevel", "thermal_pwrlevel"];
@@ -1366,8 +1400,30 @@ fn gzip_replace(p: &Path) -> Result<(), String> {
     std::fs::remove_file(p).map_err(|e| e.to_string())
 }
 
+/// 这一臂是不是「没跑完 / 没采到」这类基础设施问题 (不是算子没生效)。
+///
+/// 2026-10-21 实测, 一组 8 道考题里两道各坏了 1 臂, 整道 16 臂判 ABORT:
+/// - worsewg800_1/knob8: 算子自报全部生效、跑完, trace 却只采到 0.03 秒 (8 帧), capture_ok=false;
+/// - betterwg300_1/knob8: refbench 跑到 2311/6200 帧被打断 (clean_exit=false)。
+/// 两种都与量到的数值无关, 与「没起跑 / 没拉回」一样重试一次, 不偏。
+/// 算子本身没装上 (postfx_active / shader_path / run_id 有 false) 不重试, 照旧交给判定链 ABORT。
+pub fn infra_failed(v: &Value) -> bool {
+    let arm = &v["arm"];
+    let ck = &arm["checks"];
+    let knob_applied = ["postfx_active", "shader_path", "run_id"].iter().all(|k| ck[*k] == json!(true));
+    let ran_through = ck["clean_exit"] == json!(true) && ck["frames_submitted"] == json!(true);
+    knob_applied && (!ran_through || arm["capture_ok"] == json!(false))
+}
+
 fn run_arm_retry(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote: &str) -> Result<Value, String> {
-    match run_arm(s, c, label, dir, load, remote) {
+    let first = match run_arm(s, c, label, dir, load, remote) {
+        Ok(v) if infra_failed(&v) => Err(format!(
+            "{label}: 没跑完或没采到 (checks={} capture_ok={} span_s={})",
+            v["arm"]["checks"], v["arm"]["capture_ok"], v["arm"]["span_s"]
+        )),
+        other => other,
+    };
+    match first {
         Ok(v) => Ok(v),
         Err(e) => {
             // 基础设施失败重试一次 (不看量到的数, 所以不偏): 旧目录挪开留证
@@ -1390,7 +1446,7 @@ const USAGE: &str = "用法:
 考题清单: aa*4,better:1*2,worse:2 (帧时幅度%, 需标定) 或 better-wg:50 (直接给工作组数差)
 条件: [--serial S] [--template ../refbench/selftest/load.spv] [--intensity 1] [--iters 64]
       [--base-wg 4000] [--frames N] [--warmup 2] [--capdur 10] [--cool-c 45] [--cool-timeout 240]
-      [--temp-cap 70] [--no-charge-suspend] [--lock-freq] [--lock-level N (隐含 --lock-freq)]
+      [--cool-tpl 4 | --no-cool-tpl] [--temp-cap 70] [--no-charge-suspend] [--lock-freq] [--lock-level N (隐含 --lock-freq)]
 
 判定一律走现有链 (loopstat::compare + sysparam::decide; 画面走 eval --request kind=shader),
 本命令不另写统计。证据与判定输入全部落盘, report 不碰设备、可离线重算。";
@@ -1453,6 +1509,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             charge_suspend: true,
             lock_freq: false,
             lock_level: None,
+            cool_tpl: Some(4),
         },
         frames_given: false,
     };
@@ -1486,6 +1543,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--capdur" => a.cond.capdur_s = num(it.next(), k)? as u64,
             "--cool-c" => a.cond.cool_c = num(it.next(), k)?,
             "--cool-timeout" => a.cond.cool_timeout_s = num(it.next(), k)? as u64,
+            "--cool-tpl" => a.cond.cool_tpl = Some(num(it.next(), k)? as u32),
+            "--no-cool-tpl" => a.cond.cool_tpl = None,
             "--temp-cap" => a.cond.temp_cap_c = num(it.next(), k)?,
             "--no-charge-suspend" => a.cond.charge_suspend = false,
             "--fan-on" => return Err("--fan-on 已取消: 风扇一律不开 (owner 规定), 需要降温靠等冷".into()),
@@ -2055,6 +2114,48 @@ mod tests {
         assert_eq!(r1["time_cost"]["per_n"][0]["minutes_per_experiment"], 5.0);
         assert!(render(&r1).contains("混淆矩阵"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_interrupted_or_uncaptured_arm_is_retried_but_an_unapplied_knob_is_not() {
+        let ok = json!(true);
+        let checks = json!({ "clean_exit": ok, "postfx_active": ok, "shader_path": ok, "run_id": ok, "frames_submitted": ok });
+        // 10-21 worsewg800_1/knob8: 算子全生效、跑完, trace 只有 0.03 秒
+        let lost = json!({ "arm": { "checks": checks, "capture_ok": false, "span_s": 0.0339, "apply_ok": false } });
+        assert!(infra_failed(&lost));
+        // 10-21 betterwg300_1/knob8: 跑到一半被打断
+        let mut cut = checks.clone();
+        cut["clean_exit"] = json!(false);
+        cut["frames_submitted"] = json!(false);
+        assert!(infra_failed(&json!({ "arm": { "checks": cut, "capture_ok": false, "apply_ok": false } })));
+        let good = json!({ "arm": { "checks": checks, "capture_ok": true, "apply_ok": true } });
+        assert!(!infra_failed(&good));
+        // 算子没装上: 不是基础设施问题, 不重试, 让判定链按 ABORT 处理
+        let mut bad = checks.clone();
+        bad["postfx_active"] = json!(false);
+        assert!(!infra_failed(&json!({ "arm": { "checks": bad, "capture_ok": true, "apply_ok": false } })));
+        assert!(!infra_failed(&json!({ "arm": {} })));
+    }
+
+    #[test]
+    fn cooling_waits_for_the_gpu_thermal_level_not_just_temperature() {
+        // 10-21 实测: 结温已在 45C 以下, thermal_pwrlevel 仍停在 6 —— 这时不算冷
+        let hot = parse_pwr("max_pwrlevel=0\nmin_pwrlevel=17\nthermal_pwrlevel=6\ngpuclk=578000000\n");
+        let back = parse_pwr("max_pwrlevel=0\nmin_pwrlevel=17\nthermal_pwrlevel=0\ngpuclk=160000000\n");
+        assert_eq!(tpl_cool_enough(&hot, 0), Some(false));
+        assert_eq!(tpl_cool_enough(&hot, 6), Some(true));
+        assert_eq!(tpl_cool_enough(&back, 0), Some(true));
+        // 读不到就是「不知道」, 不能无限等下去
+        assert_eq!(tpl_cool_enough(&parse_pwr("max_pwrlevel=0\n"), 0), None);
+        assert_eq!(tpl_cool_enough(&parse_pwr("thermal_pwrlevel=x\n"), 0), None);
+        // 缺省等回 4 档以内 (空闲 60 秒后实测多停在 4–6, 缺省 0 会每臂等到超时), 也能用参数关掉
+        let a = parse_args(&["run".to_string()]).unwrap();
+        assert_eq!(a.cond.cool_tpl, Some(4));
+        let a = parse_args(&["run".into(), "--no-cool-tpl".into()]).unwrap();
+        assert_eq!(a.cond.cool_tpl, None);
+        let a = parse_args(&["run".into(), "--cool-tpl".into(), "3".into()]).unwrap();
+        assert_eq!(a.cond.cool_tpl, Some(3));
+        assert_eq!(a.cond.to_json()["cool_tpl"], json!(3));
     }
 
     #[test]
