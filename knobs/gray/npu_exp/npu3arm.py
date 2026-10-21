@@ -32,7 +32,7 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from n3_phone import Phone, DryPhone, KNOB_PROPS, LAYER_NAME, LAYER_SO, raw_dims  # noqa: E402
+from n3_phone import Phone, DryPhone, KNOB_PROPS, NPU_TUNE_PROPS, ALL_PROPS, LAYER_NAME, LAYER_SO, raw_dims  # noqa: E402
 from n3_ui import Ui, UiStop  # noqa: E402
 import n3_judge  # noqa: E402
 
@@ -40,8 +40,16 @@ HG = "/Users/yao/Desktop/code/agent/hgamey"
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 DEF_PF = os.environ.get("PF", f"{HG}/_wt/integration/src/target/release/phonefarm")
 DEF_CHAIN = os.environ.get("CHAIN", f"{HG}/_wt/integration/loop_v1")
-DEF_SO = os.environ.get("LAYER_SO", f"{HG}/_wt/npu-n1/knobs/gray/build/out/{LAYER_SO}")
-DEF_MODEL = f"{HG}/internal/hgamey-runs/2026-10-20-npu-genshin-sr/genshin_sr_16_16_int8.tflite"
+AGENT = "/Users/yao/Desktop/code/agent"
+# N1 交付 (npu/n1-pipeline 9905d3d) 的构建产物
+DEF_SO = os.environ.get("LAYER_SO", f"{HG}/_tmp/npu/N1/bin/{LAYER_SO}")
+
+
+def default_model():
+    """与 N1 ondevice.sh 相同: tools/qairt/models 下最新的 genshin_sr_v2_*.tflite, 没有就用 10-20 的 16_16 int8。"""
+    import glob
+    v2 = sorted(glob.glob(f"{AGENT}/tools/qairt/models/genshin_sr_v2_*.tflite"), key=os.path.getmtime)
+    return v2[-1] if v2 else f"{HG}/internal/hgamey-runs/2026-10-20-npu-genshin-sr/genshin_sr_16_16_int8.tflite"
 CHAIN_FILES = {"auto/sample_env.sh": "PWR_IVL", "tools/ftrace_capture.sh": "target_tids",
                "auto/charge_suspend.sh": "usb_limit_check"}
 
@@ -99,12 +107,15 @@ def check_tools(a, need_layer, out, log):
     ocr = ocr_bin(out)
     if not ocr:
         errs.append("编不出 OCR 工具 (需要 swiftc 与仓库根 ocr.swift)")
-    if a.npu_deploy and not os.access(a.npu_deploy, os.X_OK):
-        errs.append(f"--npu-deploy 不可执行: {a.npu_deploy}")
-    if not a.npu_deploy:
-        warns.append("没给 --npu-deploy: 假定 NPU 依赖 (libcdsprpc 等、QNN 库、模型、SELinux 放行) 已由 N1 布好; "
-                     "B 臂的 npuop 自报会核对, 没在跑的臂判无效")
+    for f in npu_local_files(a):
+        if not os.path.exists(f):
+            (errs if need_layer else warns).append(f"NPU 运行库不存在: {f}")
     return errs, warns
+
+
+def npu_local_files(a):
+    """要放进拼接库目录的本地文件 (层 + TFLite/QNN 运行库 + libvndksupport 替身), 清单同 N1 ondevice.sh。"""
+    return [a.layer_so] + [f.replace("{AGENT}", AGENT) for f in a.cfg["npu"]["local_files"]]
 
 
 def ocr_bin(out):
@@ -185,7 +196,7 @@ class Exp:
             raise Abort("su 不可用 (这台机必须有 root)")
         info = p.info()
         pre = {"info": info, "batt": p.batt(), "soc_c": p.soc_max_c(), "df_mb": p.df_data_mb(),
-               "props": {k: p.getprop(k) for k in KNOB_PROPS + ["debug.vulkan.layers"]},
+               "props": {k: p.getprop(k) for k in ALL_PROPS},
                "fan": p.fan(), "brightness_mode": p.brightness_mode(), "prefs": p.prefs(),
                "charge_state_file": p.charge_state_file(), "pid": p.pidof()}
         self.wj("preflight.json", pre)
@@ -213,6 +224,8 @@ class Exp:
         lst = p.libdir_listing(info["libdir"]) if info["libdir"] else {}
         if LAYER_SO in lst:
             probs.append(f"游戏库目录里已有 {LAYER_SO} (上次没摘干净?), 先人工确认再跑")
+        if info["libdir"] and p.is_mountpoint(info["libdir"]) and not self.state.get("mounted"):
+            probs.append(f"{info['libdir']} 已经是挂载点 (N1 ondevice.sh 或上一次没还原?), 先还原")
         if probs:
             raise Abort("开跑前检查没过:\n  - " + "\n  - ".join(probs))
         st = self.state
@@ -241,43 +254,30 @@ class Exp:
         if p.brightness_mode() == "1":
             p.brightness_mode_set("0")
             self.log(f"  自动亮度 → 手动 (亮度值 {p.brightness()}), restore 时改回")
-        st["layer_installed"] = "pending"
-        self.save()
-        ok, why = p.install_layer(self.a.layer_so, st["libdir"])
-        if not ok:
-            raise Abort(f"装层失败: {why}")
-        st["layer_installed"] = True
-        self.save()
-        if self.a.npu_deploy and not st.get("npu_deployed"):
-            st["npu_deployed"] = "pending"
+        if not st.get("mounted"):
+            st["mounted"] = "pending"   # 先记再动设备: 中途断了 restore 也会去 umount
             self.save()
-            env = dict(os.environ, SERIAL=p.serial, PKG=p.pkg, LIBDIR=st["libdir"], DEVDIR=p.devdir,
-                       MODEL=self.a.model or "")
-            self.log(f"布置 NPU 依赖: {self.a.npu_deploy}")
-            if not p.dry:
-                r = subprocess.run([self.a.npu_deploy, "install"], env=env, capture_output=True, timeout=600)
-                open(os.path.join(self.out, "npu_deploy.log"), "wb").write(r.stdout + r.stderr)
-                if r.returncode != 0:
-                    raise Abort(f"NPU 依赖布置失败 (rc={r.returncode}), 见 npu_deploy.log")
-            st["npu_deployed"] = True
+            ok, why = p.stage_and_mount(st["libdir"], npu_local_files(self.a), self.a.model,
+                                        self.cfg["npu"]["vendor_libs"], self.log)
+            if not ok:
+                raise Abort(f"拼库目录 / bind mount 失败: {why}")
+            st["mounted"] = True
+            st["layer_installed"] = True
+            st["model"] = self.a.model
             self.save()
-        after = p.libdir_listing(st["libdir"])
-        changed = [k for k, v in st["orig"]["libdir_listing"].items() if after.get(k) != v]
-        if changed:
-            raise Abort(f"游戏库目录里原有文件被改动了: {changed} (不应发生; 先停下核查, restore 不会自动处理)")
-        st["libdir_added"] = sorted(set(after) - set(st["orig"]["libdir_listing"]))
-        self.save()
-        self.log(f"已装层 + 依赖, 库目录新增: {st['libdir_added']}")
+        self.log(f"已挂好: 层 {self.a.layer_so}, 模型 {self.a.model} (游戏库目录本身没动)")
 
     # ── 挂层启动 → 进大世界 ──
     def set_knobs(self, npuop):
+        """三臂: passdump=1; B 臂再加 npuop=1 (层里隐含 upop=1)。调参属性三臂写同样的值。"""
         p = self.p
         for k in KNOB_PROPS:
             p.setprop(k, "0")
+        bad = [k for k, v in self.cfg["npu"]["props"].items() if not p.setprop(k, str(v))]
         okp = p.setprop("debug.knobs.passdump", "1")
         okn = p.setprop("debug.knobs.npuop", npuop)
-        if not (okp and okn):
-            raise Abort("setprop debug.knobs.* 回读不对")
+        if bad or not (okp and okn):
+            raise Abort(f"setprop debug.knobs.* 回读不对 {bad}")
 
     def launch_to_world(self, npuop, tag):
         p, t = self.p, self.cfg["timing"]
@@ -354,31 +354,27 @@ class Exp:
             return "native", wh
         return f"other_{r['w']}x{r['h']}", wh
 
-    @staticmethod
-    def npu_section(m):
-        if not m:
-            return None
-        if isinstance(m.get("npuop"), dict):
-            return m["npuop"]
-        cp = m.get("copyprobe")
-        if isinstance(cp, dict) and "npu" in str(cp.get("mode", "")):
-            return cp
-        return None
-
     def npu_status(self, m0, m1):
-        """B 臂: 标记里的 npuop 段在窗口内确实在跑、没有回退。接口约定见 REPORT「N1 接口」。"""
-        n0, n1 = self.npu_section(m0) or {}, self.npu_section(m1)
-        if not n1:
-            return {"ok": False, "why": "标记里没有 npuop 段 (层没编进 npuop / 没打开 / 初始化失败)"}
-        runs = lambda n: n.get("runs", n.get("frames", n.get("copies", 0))) or 0
-        fb = lambda n: (1 if n.get("fallback") is True else 0) if isinstance(n.get("fallback"), bool) else (n.get("fallback") or n.get("fallbacks") or 0)
+        """B 臂是否「按设计施加」: N1 的层在初始化失败、零拷贝自检失败、推理连续失败 3 次、连续 30 帧超预算时
+        会悄悄回退到 upop 双线性 (marker 的 npuop.phase 变 disabled, reason/notes 写原因)。
+        按设计施加 = 窗口前后两次快照之间 counts.npu_ok 的增量 ≥ 95% × 帧数增量, 且窗口末 phase=ready、reason 为空。
+        达不到的臂记「未按设计施加」并剔除, 不能当成「NPU 没用」。"""
+        n0 = ((m0 or {}).get("npuop") or {})
+        n1 = (m1 or {}).get("npuop")
+        if not isinstance(n1, dict):
+            return {"ok": False, "applied": False, "why": "未按设计施加: 标记里没有 npuop 段 (层没打开 npuop / 不是 N1 的层)"}
+        c0, c1 = n0.get("counts") or {}, n1.get("counts") or {}
         f0 = (m0 or {}).get("readonly_stats", {}).get("frames", 0)
-        f1 = m1["readonly_stats"]["frames"]
-        dr, df, dfb = runs(n1) - runs(n0), f1 - f0, fb(n1) - fb(n0)
-        frac = self.cfg["npu"]["require_runs_frac"]
-        ok = not n1.get("disabled") and dfb == 0 and df > 0 and dr >= frac * df
-        why = "" if ok else f"npuop 跑了 {dr}/{df} 帧, 回退 {dfb}, disabled={n1.get('disabled')}"
-        return {"ok": ok, "why": why, "runs_delta": dr, "frames_delta": df, "fallback_delta": dfb, "section": n1}
+        f1 = (m1 or {}).get("readonly_stats", {}).get("frames", 0)
+        d_ok, df = (c1.get("npu_ok") or 0) - (c0.get("npu_ok") or 0), f1 - f0
+        d_bl = (c1.get("bilinear") or 0) - (c0.get("bilinear") or 0)
+        frac = self.cfg["npu"]["require_npu_frac"]
+        ok = n1.get("phase") == "ready" and not n1.get("reason") and df > 0 and d_ok >= frac * df
+        why = "" if ok else (f"未按设计施加: 窗口内 NPU 处理 {d_ok}/{df} 帧 (要 ≥ {frac:.0%}), 双线性 {d_bl} 帧, "
+                             f"phase={n1.get('phase')} reason={n1.get('reason')}")
+        return {"ok": ok, "applied": ok, "why": why, "npu_ok_delta": d_ok, "frames_delta": df, "bilinear_delta": d_bl,
+                "runs_delta": d_ok, "phase": n1.get("phase"), "reason": n1.get("reason"), "notes": n1.get("notes"),
+                "counts": c1, "timing_ms": n1.get("timing_ms"), "cfg": n1.get("cfg"), "model": n1.get("model")}
 
     # ── 设置切换 (只在需要时) ──
     def ensure_setting(self, level, why=""):
@@ -495,34 +491,37 @@ class Exp:
                 p.fan_set("0")
             rec["fan_after_world"]["after"] = p.fan()
             p.sleep(c["timing"]["warmup_s"])
-            m0 = p.marker()
+            rec["shots"] = []
+            if p.screencap(os.path.join(d, "shot_pre.raw")):
+                rec["shots"].append("shot_pre.raw")
+            m0 = p.marker()   # 紧挨着采集开始取, npuop 计数的增量才对得上测量窗口
             obs, wh = self.observe_setting(m0)
             rec["setting_expected"], rec["setting_observed"], rec["scene_pass"] = c["arms"][arm]["setting"], obs, wh
             if obs != c["arms"][arm]["setting"]:
                 rec["invalid_reason"].append(f"设置没生效: 要 {c['arms'][arm]['setting']}, pass 表是 {obs} {wh}")
                 self.state["setting_current"] = obs   # 下一臂会重新切
                 self.save()
-            rec["shots"] = []
-            if p.screencap(os.path.join(d, "shot_pre.raw")):
-                rec["shots"].append("shot_pre.raw")
             rec["batt_start"] = p.batt()
             rec["brightness"] = [p.brightness_mode(), p.brightness()]
             ok = p.measure(self.chain_dev, c["timing"]["measure_s"], d, label)
             rec["batt_end"] = p.batt()
-            m1 = p.marker()
+            m1 = p.marker()   # 采集一结束就取
             if p.screencap(os.path.join(d, "shot_post.raw")):
                 rec["shots"].append("shot_post.raw")
             json.dump({"before": m0, "after": m1}, open(os.path.join(d, "marker.json"), "w"), ensure_ascii=False)
             rec["fan_end"] = p.fan()
             if not p.pidof():
-                rec["invalid_reason"].append("采集结束时游戏进程不在 (崩溃?)")
+                rec["invalid_reason"].append("采集结束时游戏进程不在 (崩溃, 或反作弊因库目录 bind mount 退出? 见 logcat)")
+                rec["game_exited"] = True
             ns = self.npu_status(m0, m1)
             rec["npuop"] = ns
             if arm == "B" and not ns["ok"]:
-                rec["invalid_reason"].append("NPU 没在跑: " + ns["why"])
-            if arm != "B" and ns.get("runs_delta", 0) > 0:
+                rec["invalid_reason"].append(ns["why"])
+                rec["not_applied"] = True
+            if arm != "B" and (ns.get("npu_ok_delta") or 0) > 0:
                 rec["invalid_reason"].append("对照臂里 npuop 在跑")
-            p.logcat_dump(os.path.join(d, "logcat_refknobs.txt"), "refknobs|npu|qnn|Fatal signal|FATAL EXCEPTION")
+            open(os.path.join(d, "knobs_npuop_frames.csv"), "w").write(p.npu_csv() + "\n")
+            p.logcat_dump(os.path.join(d, "logcat_refknobs.txt"), "refknobs|npu|qnn|Fatal signal|FATAL EXCEPTION|mountinfo")
             if not ok:
                 rec["invalid_reason"].append("trace 没拉回")
             rec["collected"] = ok
@@ -533,6 +532,7 @@ class Exp:
             p.force_stop()
             rec["t_end"] = time.time()
             json.dump(rec, open(os.path.join(d, "arm.json"), "w"), ensure_ascii=False, indent=1)
+        self.last_not_applied = bool(rec.get("not_applied"))
         self.log(f"  [{label}] 完成: {'有效' if not rec['invalid_reason'] else '无效: ' + '; '.join(rec['invalid_reason'])}")
         return not rec["invalid_reason"]
 
@@ -569,7 +569,7 @@ class Exp:
                 good = ok and (live == "unknown" or live.get("live"))
                 if arm == k and k == "B" and ns.get("ok") is False:
                     good = False
-                if arm == "C" and ns.get("runs_delta", 0) > 0:
+                if arm == "C" and (ns.get("npu_ok_delta") or 0) > 0:
                     good = False   # 原生时 npuop 不应在跑
                 shots.append({"file": f, "arm": arm, "ok": bool(good), "observed": obs, "live": live,
                               "npu": {kk: ns.get(kk) for kk in ("ok", "runs_delta", "frames_delta")}})
@@ -624,7 +624,7 @@ class Exp:
             need_f = cur.get(s["prefs_fps_entry"]) != orig_fps
             if skip_settings and (need_r or need_f):
                 self.log("  --keep-setting: 渲染精度/帧率留在当前值, 不改回 (之后的 restore 会改回)")
-            elif (need_r or need_f) and st.get("layer_installed") is True:
+            elif (need_r or need_f) and st.get("mounted") is True:
                 self.log(f"  设置回原值: 渲染精度 index {cur.get(s['prefs_render_entry'])}→{orig_idx}, 帧率 index {cur.get(s['prefs_fps_entry'])}→{orig_fps}")
                 try:
                     self.launch_to_world("0", "restore")
@@ -653,19 +653,16 @@ class Exp:
         p.force_stop()
         # 属性回原值
         for k, v in st.get("orig", {}).get("props", {}).items():
-            p.setprop(k, v)
+            p.setprop(k, v)   # Android 属性删不掉; 原来为空就设空
         rep["props_after"] = {k: p.getprop(k) for k in st.get("orig", {}).get("props", {})}
-        # 库目录: 本次新增的文件挪到 parked (不删), 核对和原样一致
+        # 库目录: umount 拼接目录 (原目录自动回来), 核对清单 (文件名 + md5) 与开跑前一致。拼接副本留在设备上不删
+        if st.get("libdir") and st.get("mounted"):
+            rep["umount_ok"] = p.umount_libdir(st["libdir"])
+            if rep["umount_ok"]:
+                st["mounted"] = False
+                st["layer_installed"] = False
         if st.get("libdir"):
-            now = p.libdir_listing(st["libdir"])
-            orig = st["orig"]["libdir_listing"]
-            parked = []
-            for f in sorted(set(now) - set(orig)):
-                parked.append([f, p.park(f"{st['libdir']}/{f}", "libdir")])
-            after = p.libdir_listing(st["libdir"])
-            rep["libdir_parked"] = parked
-            rep["libdir_same_as_orig"] = after == orig
-            st["layer_installed"] = False
+            rep["libdir_same_as_orig"] = p.libdir_listing(st["libdir"]) == st["orig"]["libdir_listing"]
         # 充电
         if st.get("charge_suspended"):
             o = p.charge("restore", self.chain_dev)
@@ -687,7 +684,7 @@ class Exp:
                        f"设备上的 trace 与挪走的文件都留在 {st.get('devdir')}/ 下, 没删")
         self.save()
         self.wj(f"restore_{int(time.time())}.json", rep)
-        bad = [k for k in ("render_restored", "fps_restored", "libdir_same_as_orig") if rep.get(k) is False]
+        bad = [k for k in ("render_restored", "fps_restored", "umount_ok", "libdir_same_as_orig") if rep.get(k) is False]
         self.log("还原完成" + (f", 但这些没回到原样: {bad} (见 restore_*.json, 需要人工处理)" if bad else ", 全部回读一致"))
 
 
@@ -726,7 +723,9 @@ def cmd_run(a, cfg, dry=False):
     est, sw = estimate_s(order, cfg, mode)
     plan = {"mode": mode, "dry": dry, "seed": seed, "blocks": a.blocks, "order": ["".join(b) for b in order],
             "est_s": est, "ui_switches": sw, "min_pairs": min_pairs, "pf": a.pf, "chain": a.chain,
-            "layer_so": a.layer_so, "model": a.model, "npu_deploy": a.npu_deploy, "config": cfg,
+            "layer_so": a.layer_so, "model": a.model, "config": cfg,
+            # 画质政策: perf-first 时 B 臂画质只报告 (对齐 judge/v1-scorecard 的 protocol.image_policy="report")
+            "image_policy": {"B": "report" if a.perf_first else "gate"},
             "tool_errors": errs, "tool_warnings": warns, "created": time.strftime("%Y-%m-%d %H:%M:%S")}
     if not (a.resume and os.path.exists(os.path.join(out, "plan.json"))):
         json.dump(plan, open(os.path.join(out, "plan.json"), "w"), ensure_ascii=False, indent=1)
@@ -750,6 +749,7 @@ def cmd_run(a, cfg, dry=False):
                  if os.path.exists(os.path.join(dp, "arm.json")))
                 if not r["invalid_reason"]} if os.path.isdir(os.path.join(out, "arms")) else set()
         idx = len(os.listdir(os.path.join(out, "arms"))) if os.path.isdir(os.path.join(out, "arms")) else 0
+        b_fail = 0
         for blk, arms in enumerate(order, 1):
             for arm in arms:
                 if (blk, arm) in done:
@@ -757,7 +757,14 @@ def cmd_run(a, cfg, dry=False):
                 for attempt in range(cfg["timing"]["arm_retries"] + 1):
                     idx += 1
                     if x.run_arm(idx, blk, arm, attempt):
+                        if arm == "B":
+                            b_fail = 0
                         break
+                    if arm == "B" and x.last_not_applied:
+                        b_fail += 1
+                if b_fail >= 3:
+                    raise Abort("B 臂连续 3 次未按设计施加 (NPU 回退/没起来), 再跑也是白跑。先跑 smoke 查 npuop.reason, "
+                                "这不是「NPU 没用」的证据")
         x.write_exclude()
         if mode == "full":
             x.iq_session()
@@ -817,8 +824,12 @@ def cmd_smoke(a, cfg, dry=False):
                 p.sleep(3)
             m1 = p.marker()
             lc = p.logcat_dump(os.path.join(d, "logcat.txt"), "refknobs|npu|qnn|Fatal signal|FATAL EXCEPTION")
+            csv = p.npu_csv()
+            open(os.path.join(d, "knobs_npuop_frames.csv"), "w").write(csv + "\n")
             res[k] = {"checks": checks, "alive_end": bool(p.pidof()), "npu": x.npu_status(m0, m1),
                       "observed": x.observe_setting(m1)[0], "shots": shots,
+                      "npu_timing_ms": ((m1 or {}).get("npuop") or {}).get("timing_ms"),
+                      "npu_csv_rows": max(0, len(csv.splitlines()) - 1),
                       "npu_timing_lines": [l for l in lc.splitlines() if "npu" in l.lower()][-60:],
                       "fatal_in_logcat": [l for l in lc.splitlines() if "Fatal signal" in l or "FATAL EXCEPTION" in l]}
             json.dump({"before": m0, "after": m1}, open(os.path.join(d, "marker.json"), "w"), ensure_ascii=False)
@@ -948,8 +959,7 @@ def main():
     ap.add_argument("--pf", default=DEF_PF)
     ap.add_argument("--chain", default=DEF_CHAIN)
     ap.add_argument("--layer-so", default=DEF_SO)
-    ap.add_argument("--model", default=DEF_MODEL)
-    ap.add_argument("--npu-deploy", default=None, help="N1 的 NPU 依赖布置脚本, 以 `<脚本> install` 调用, 环境变量 SERIAL PKG LIBDIR DEVDIR MODEL")
+    ap.add_argument("--model", default=None, help="缺省同 N1 ondevice.sh: 最新的 genshin_sr_v2_*.tflite, 没有就用 10-20 的 16_16 int8")
     ap.add_argument("--blocks", type=int, default=6)
     ap.add_argument("--seed", type=int)
     ap.add_argument("--perf-first", action="store_true", help="画质只作参考, 不作为判定门槛")
@@ -960,6 +970,8 @@ def main():
     ap.add_argument("--keep-setting", action="store_true")
     a = ap.parse_args()
     cfg = json.load(open(a.config, encoding="utf-8"))
+    a.cfg = cfg
+    a.model = a.model or default_model()
     if a.cmd == "dry-run":
         return cmd_smoke(a, cfg, dry=True) if a.smoke else cmd_run(a, cfg, dry=True)
     if a.cmd == "run":

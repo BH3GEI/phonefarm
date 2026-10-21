@@ -28,7 +28,12 @@ FAN_NODE = "/sys/kernel/fan/fan_enable"
 # 层认的全部开关 (vk_layer_refknobs.cpp 读的属性)。每臂都显式写一遍, 不信上一个人留下的值。
 KNOB_PROPS = ["debug.knobs.loadop", "debug.knobs.passdump", "debug.knobs.copyprobe",
               "debug.knobs.upop", "debug.knobs.npuop", "debug.knobs.npuprobe",
-              "debug.knobs.storeop", "debug.knobs.frameaudit"]
+              "debug.knobs.storeop", "debug.knobs.frameaudit", "debug.knobs.frameaudit_ts"]
+# N1 npuop 的调参属性 (取值见配置 npu.props)。三臂都写同样的值, 只有 npuop 开关不同。
+NPU_TUNE_PROPS = ["debug.knobs.npuop_lag", "debug.knobs.npuop_budget_ms", "debug.knobs.npuop_budget_frames",
+                  "debug.knobs.npuop_init_frame", "debug.knobs.npuop_zc", "debug.knobs.npuop_ts"]
+ALL_PROPS = KNOB_PROPS + NPU_TUNE_PROPS + ["debug.vulkan.layers"]
+SELINUX_RULE = "allow appdomain vendor_qdsp_device chr_file { open read ioctl getattr map }"
 
 
 def q(s):
@@ -108,14 +113,12 @@ class Phone:
     def sh(self, cmd, timeout=60):
         return self.adb(["shell", cmd], timeout)
 
-    def su(self, cmd, timeout=60):
-        # 外层单引号: 本模块拼的命令里不出现单引号
+    def su(self, cmd, timeout=60, mm=False):
+        # 外层单引号: 本模块拼的命令里不出现单引号。mm = Magisk 全局挂载命名空间 (bind mount 要挂在这里,
+        # 之后 zygote 新起的游戏进程才看得见; 同 N1 ondevice.sh 的 asu_mm)
         assert "'" not in cmd, cmd
-        return self.adb(["shell", f"su -c '{cmd}'"], timeout)
+        return self.adb(["shell", f"su {'-mm ' if mm else ''}-c '{cmd}'"], timeout)
 
-    def out(self, cmd, root=False, timeout=60):
-        rc, o = (self.su if root else self.sh)(cmd, timeout)
-        return o.replace("\r", "").strip()
 
     def sleep(self, s):
         time.sleep(s)
@@ -228,26 +231,72 @@ class Phone:
         rc, _ = self.adb(["pull", remote, local], 300)
         return rc == 0 and os.path.exists(local)
 
-    def install_layer(self, so_local, libdir):
-        """层 .so 进游戏库目录 (目标文件此前不存在才放; 存在就拒绝, 不覆盖)。"""
-        dst = f"{libdir}/{LAYER_SO}"
-        if self.out(f"test -e {q(dst)} && echo yes", True) == "yes":
-            return False, f"{dst} 已存在, 不覆盖"
-        self.mkdevdir("so")
-        if not self.push(so_local, f"{self.devdir}/so/{LAYER_SO}"):
-            return False, "push 失败"
-        self.su(f"cp {self.devdir}/so/{LAYER_SO} {q(dst)} && chmod 755 {q(dst)} && chown system:system {q(dst)}"
-                f" && chcon u:object_r:apk_data_file:s0 {q(dst)}")
-        ok = self.out(f"test -f {q(dst)} && echo yes", True) == "yes"
-        return ok, "" if ok else "cp 后不存在"
+    # ── 层与 NPU 依赖: 照 N1 ondevice.sh 的做法, 游戏库目录一字不动 ──
+    # 在 <devdir>/libdir 拼「原库目录副本 + 层 + NPU 运行库 + 模型 + 从 /vendor 复制的 libcdsprpc 及依赖」,
+    # 再 bind mount 盖到游戏库目录上; 还原 = umount, 原目录自动回来。副本留在手机上不删。
+    def is_mountpoint(self, libdir):
+        return self.out(f"grep -q {q(' ' + libdir + ' ')} /proc/mounts && echo m", True, mm=True) == "m"
+
+    def out(self, cmd, root=False, timeout=60, mm=False):
+        rc, o = (self.su(cmd, timeout, mm) if root else self.sh(cmd, timeout))
+        return o.replace("\r", "").strip()
+
+    def stage_and_mount(self, libdir, local_files, model, vendor_libs, log):
+        """回 (ok, why)。任何一步失败都不挂载。"""
+        if self.is_mountpoint(libdir):
+            return False, f"{libdir} 已经是挂载点 (上一次没还原?)"
+        if self.out("command -v magiskpolicy", True) == "":
+            return False, "没有 magiskpolicy"
+        lib_kb = self.out(f"du -sk {q(libdir)} | cut -f1", True)
+        free_kb = (self.out("df -k /data | tail -1", True).split() + ["?"] * 4)[3]
+        st, push = f"{self.devdir}/libdir", f"{self.devdir}/push"
+        self.su(f"mkdir -p {push} {st} && chmod 777 {push}")
+        pre = self.out(f"ls {q(libdir)}", True).split()
+        names = [os.path.basename(f) for f in local_files] + ["libnpusr_model.so"] + vendor_libs
+        clash = [n for n in names if n in pre]
+        if clash:
+            return False, f"游戏库目录里已有同名文件 {clash}, 不覆盖"
+        for f in local_files:
+            if not self.push(f, f"{push}/{os.path.basename(f)}"):
+                return False, f"push 失败 {f}"
+        if not self.push(model, f"{push}/libnpusr_model.so"):
+            return False, "push 模型失败"
+        lab_dir = (self.out(f"ls -Zd {q(libdir)}", True).split() or [""])[0]
+        lab_file = ""
+        for line in self.out(f"ls -Z {q(libdir)}", True).splitlines():
+            if len(line.split()) >= 2:
+                lab_file = line.split()[0]
+                break
+        self.su(f"cp -a {q(libdir)}/. {st}/ && cp {push}/*.so {st}/", 300)
+        for n in vendor_libs:
+            if self.out(f"cp /vendor/lib64/{n} {st}/{n} && echo ok", True) != "ok":
+                return False, f"复制 /vendor/lib64/{n} 失败"
+        self.su(f"chown -R system:system {st} && chmod 755 {st} && chmod 755 {st}/* && chcon {lab_dir} {st} && chcon {lab_file} {st}/*")
+        self.su(f"magiskpolicy --live {q(SELINUX_RULE)}")
+        self.su(f"mount --bind {st} {q(libdir)}", mm=True)
+        if LAYER_SO not in self.out(f"ls {q(libdir)}", True).split():
+            return False, "bind mount 后库目录里看不到层"
+        log(f"  已 bind mount {st} → {libdir} (库目录 {lib_kb} KB, /data 剩 {free_kb} KB)")
+        return True, ""
+
+    def umount_libdir(self, libdir):
+        for _ in range(3):
+            if not self.is_mountpoint(libdir):
+                break
+            self.su(f"umount {q(libdir)}", mm=True)
+        return not self.is_mountpoint(libdir)
 
     def park(self, path, tag):
-        """把一个文件挪到本次运行的设备目录 (mv, 不删)。目标名带序号, 不覆盖。"""
+        """把一个文件挪到本次运行的设备目录 (mv, 不删)。目标名带时间戳, 不覆盖。"""
         self.mkdevdir("parked")
         base = os.path.basename(path)
         dst = f"{self.devdir}/parked/{tag}_{int(time.time()*1000)}_{base}"
         self.su(f"mv {q(path)} {q(dst)}")
         return dst if self.out(f"test -e {q(dst)} && echo yes", True) == "yes" else None
+
+    def npu_csv(self):
+        """knobs_npuop_frames.csv (层只追加写) 的当前全文, 只读。"""
+        return self.out(f"cat /storage/emulated/0/Android/data/{self.pkg}/files/knobs_npuop_frames.csv 2>/dev/null", True, 120)
 
     def archive_marker(self, tag):
         """挂层前把上一个标记挪走 (否则分不清新旧); 挪到 parked, 不删。"""
@@ -430,10 +479,12 @@ class DryPhone(Phone):
         m = {"knob": "gray_readonly_probe", "layer_loaded": True, "pkg": self.pkg,
              "readonly_stats": {"frames": self.frames, "render_pass_begins": self.frames * 40, "render_passes_created": 60},
              "swapchain": {"w": 2141, "h": 969, "fmt": 37}, "pass_table": tbl}
-        if self.npu_active:
-            m["npuop"] = {"mode": "npu", "runs": self.frames - 30, "fallback": 0, "disabled": False,
-                          "model": "genshin_sr_16_16_int8.tflite", "in": [1134, 514], "out": [2268, 1028],
-                          "ms": {"pack": 0.62, "npu": 2.8, "unpack": 1.2, "total": 4.6}}
+        if getattr(self, "npu_prop", False):
+            ok = self.frames - 300 if (self.npu_active and self.frames > 300) else 0
+            m["npuop"] = {"phase": "ready" if self.npu_active else "disabled", "reason": None if self.npu_active else "dry: 不是低档",
+                          "counts": {"npu_ok": ok, "bilinear": self.frames - ok, "npu_fail": 0, "over_budget": 0},
+                          "timing_ms": {"npu_cpu": {"p50": 2.8}, "pack_gpu": {"p50": 0.6}, "unpack_gpu": {"p50": 1.2}},
+                          "notes": []}
         return m
 
     def libdir_listing(self, libdir):
@@ -466,9 +517,20 @@ class DryPhone(Phone):
         open(host_path, "w").write(txt)
         return txt
 
-    def install_layer(self, so_local, libdir):
-        self.libdir_files[LAYER_SO] = "f" * 32
+    def stage_and_mount(self, libdir, local_files, model, vendor_libs, log):
+        self.mounted = True
+        log(f"  [dry] bind mount 拼好的库目录 → {libdir}")
         return True, ""
+
+    def umount_libdir(self, libdir):
+        self.mounted = False
+        return True
+
+    def is_mountpoint(self, libdir):
+        return getattr(self, "mounted", False)
+
+    def npu_csv(self):
+        return "# pid,frame,pack_gpu_ms,wait_cpu_ms,npu_cpu_ms,unpack_gpu_ms\n12345,900,0.6,0.1,2.8,1.2\n" if self.npu_active else ""
 
     def park(self, path, tag):
         name = os.path.basename(path)
@@ -484,7 +546,8 @@ class DryPhone(Phone):
         self.applied = dict(self.prefs_)
         self.layer_loaded = self.props.get("debug.vulkan.layers") == LAYER_NAME
         self.npu_prop = self.layer_loaded and self.props.get("debug.knobs.npuop") == "1"
-        self.npu_active = self.npu_prop and self._low()
+        # DRY_SCENARIO=fallback: 模拟层回退到双线性 (B 臂必须判「未按设计施加」, 不能判「NPU 没用」)
+        self.npu_active = self.npu_prop and self._low() and os.environ.get("DRY_SCENARIO") != "fallback"
         self.ui = "gate"
         return True
 

@@ -127,10 +127,46 @@
   "frame": {
     "render_comm": "UnityGfxDeviceW",
     "fps_cap": 30,
-    "fps_tol_frac": 0.1
+    "fps_tol_frac": 0.1,
+    "miss_ms": 40.0,
+    "_说明": "帧时按帧预算判 (N1/主控 10-21): 帧率守在上限、超时帧 (帧间隔 > miss_ms, 约 30 帧预算 33.3 ms + 一个 120 Hz vsync) 不增加; 预算内 p95 变长不算退化"
   },
   "npu": {
-    "require_runs_frac": 0.9
+    "_说明": "N1 (npu/n1-pipeline 9905d3d) 的上机做法: 拼接库目录 + bind mount, 清单同 _tmp/npu/N1/ondevice.sh。require_npu_frac: 测量窗口内 NPU 处理的帧占比下限, 达不到 = 未按设计施加",
+    "require_npu_frac": 0.95,
+    "props": {
+      "debug.knobs.npuop_lag": "2",
+      "debug.knobs.npuop_budget_ms": "12",
+      "debug.knobs.npuop_budget_frames": "30",
+      "debug.knobs.npuop_init_frame": "300",
+      "debug.knobs.npuop_zc": "1",
+      "debug.knobs.npuop_ts": "1"
+    },
+    "local_files": [
+      "{AGENT}/tools/npu-handoff/lib/libtensorflowlite_jni.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnTFLiteDelegate.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnHtp.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnHtpV81Stub.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnSystem.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/aarch64-android/libQnnHtpPrepare.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/hexagon-v81/unsigned/libQnnHtpV81Skel.so",
+      "{AGENT}/tools/qairt/sdk/qairt/2.42.0.251225/lib/hexagon-v81/unsigned/libQnnHtpV81.so",
+      "{AGENT}/tools/npu-handoff/stub/libvndksupport.so"
+    ],
+    "vendor_libs": [
+      "libcdsprpc.so",
+      "libc++.so",
+      "libvmmem.so",
+      "libbase.so",
+      "libdmabufheap.so",
+      "libcutils.so",
+      "vendor.qti.hardware.dsp-V1-ndk.so",
+      "android.hardware.common-V2-ndk.so",
+      "vendor.qti.hardware.dsp@1.0.so",
+      "libutils.so",
+      "libhidlbase.so",
+      "libhardware.so"
+    ]
   },
   "iq": {
     "n_ctrl": 4,

@@ -89,6 +89,13 @@ def analyze_arm(pf, d, cfg):
         res["frame_p50"] = summ.get("frame_p50")
         res["submits_per_frame"] = summ.get("submits_per_frame")
         res["gpu_active_mean"] = summ.get("gpu_active_mean")
+        # 超时帧占比: 帧间隔 > miss_ms (帧预算 33.3 ms + 一个 120 Hz vsync)。按帧预算判帧时用它, 不用 p95 的绝对变化
+        rc, o, e = run_pf(pf, ["parse-trace", tr, "--comm", cfg["frame"]["render_comm"], "--full"])
+        try:
+            fm = json.loads(o).get("frame_ms") or []
+        except ValueError:
+            fm = []
+        res["missed_frac"] = (sum(1 for x in fm if x > cfg["frame"]["miss_ms"]) / len(fm)) if fm else None
     envp = os.path.join(d, "env.txt")
     if os.path.exists(envp) and os.path.exists(tr):
         head = []
@@ -124,12 +131,24 @@ def analyze_arm(pf, d, cfg):
         res["problems"].append(f"起跑电池温度 {st.get('batt_c')} °C 高于 {th['batt_start_c']}+{th['tol_c']}")
     res["start_temp"] = st
     res["npuop"] = arm.get("npuop")
+    res["not_applied"] = bool(arm.get("not_applied"))
     res["setting_observed"] = arm.get("setting_observed")
     res["valid"] = not res["problems"]
     return res
 
 
 # ───────────────────────── 两臂比较 (与 eval::judge_runs 同规则) ─────────────────────────
+
+_MISS_MS = [40.0]
+
+
+def budget_ms(_pairs):
+    return _MISS_MS[0]
+
+
+def pb_ok(pairs, blk, m):
+    return all(pb.get(m) is not None for b, _, pb in pairs if b == blk)
+
 
 def judge_pair(pf, arms, x, ref):
     """x 臂对 ref 臂 (ref 是对照 = loopstat 的 a 侧)。按块配对, 一块里任一臂失效只剔这一块。"""
@@ -150,33 +169,41 @@ def judge_pair(pf, arms, x, ref):
             power_pairs.append((blk, a, b))
         else:
             dropped.append({"block": blk, "why": "功耗不进判定: " + (a.get("power_problem") or b.get("power_problem") or "")})
+    # 判定表 (占 Bonferroni 预算的): 同 judge_runs = frame_p95、fps_mean、(功耗进得了表时) power_w_mean。
+    # 另加一项只守退化的 missed_frac (超时帧占比), 门槛 alpha, 不占改善预算。
     metrics = [("frame_p95", "lower", frame_pairs), ("fps_mean", "higher", frame_pairs)]
     if len(power_pairs) >= 2:
         metrics.append(("power_w_mean", "lower", power_pairs))
     alpha_win = ALPHA / len(metrics)
+    metrics.append(("missed_frac", "lower", frame_pairs))
+    miss_ms = None
     per, wins, regs = {}, [], []
     for m, better, pairs in metrics:
         n = len(pairs)
-        a = [(f"{ref}{blk}", pa[m]) for blk, pa, _ in pairs]
-        b = [(f"{x}{blk}", pb[m]) for blk, _, pb in pairs]
-        pmin = min_reachable_p(pf, n)
+        a = [(f"{ref}{blk}", pa[m]) for blk, pa, _ in pairs if pa.get(m) is not None and pb_ok(pairs, blk, m)]
+        b = [(f"{x}{blk}", pb[m]) for blk, pa, pb in pairs if pb.get(m) is not None and pa.get(m) is not None]
+        n = min(len(a), len(b))
         if n < 2:
             per[m] = {"status": "缺数据", "n": n}
             continue
+        pmin = min_reachable_p(pf, n)
         c = compare(pf, a, b, m)
         d, p = c.get("diff_mean"), c.get("perm_p_two_sided")
         improved = d is not None and ((d < 0) if better == "lower" else (d > 0))
-        if pmin >= alpha_win:
+        worse = not improved and d not in (None, 0) and p is not None and p < ALPHA
+        can_win = m in ("frame_p95", "power_w_mean")
+        if worse and m == "frame_p95" and (c.get("b_mean") or 0) <= budget_ms(pairs):
+            status = "预算内变长, 不算退化"
+        elif worse:
+            status = "显著变差"
+            regs.append(m)
+        elif not can_win:
+            status = "无显著退化"
+        elif pmin >= alpha_win:
             status = "样本不足判不出改善"
-            if not improved and d not in (None, 0) and p is not None and p < ALPHA:
-                status = "显著变差"
-                regs.append(m)
         elif improved and p < alpha_win:
             status = "显著改善"
             wins.append(m)
-        elif not improved and d not in (None, 0) and p < ALPHA:
-            status = "显著变差"
-            regs.append(m)
         else:
             status = "无显著变化"
         per[m] = {"status": status, "n": n, "min_reachable_p": pmin, "a_mean": c.get("a_mean"),
@@ -184,7 +211,7 @@ def judge_pair(pf, arms, x, ref):
                   "ci95": c.get("ci95"), "hodges_lehmann": c.get("hodges_lehmann"),
                   "a_values": c.get("a_values"), "b_values": c.get("b_values")}
     # 帧率被锁在 30, fps_mean 只当退化守门, 不算「改善」(审计 #8); 但它仍占一份 Bonferroni 预算 (保守)
-    gain_wins = [w for w in wins if w in ("frame_p95", "power_w_mean")]
+    gain_wins = wins
     return {"x": x, "ref": ref, "stat": "exact_permutation (phonefarm loopstat compare)",
             "alpha_win": alpha_win, "alpha_regression": ALPHA, "metrics_in_table": [m for m, _, _ in metrics],
             "n_frame_pairs": len(frame_pairs), "n_power_pairs": len(power_pairs),
@@ -266,6 +293,7 @@ def main():
         sys.exit(f"phonefarm 二进制不存在: {pf}")
     perf_first = plan.get("mode") == "perf-first" if a.perf_first is None else a.perf_first
 
+    _MISS_MS[0] = cfg["frame"].get("miss_ms", 40.0)
     arms = [analyze_arm(pf, d, cfg) for d in sorted(glob.glob(os.path.join(out, "arms", "*"))) if os.path.isdir(d)]
     json.dump(arms, open(os.path.join(out, "arms_analysis.json"), "w"), ensure_ascii=False, indent=1)
     bc = judge_pair(pf, arms, "B", "C")
@@ -275,6 +303,10 @@ def main():
 
     need = next(n for n in range(2, 65) if min_reachable_p(pf, n) < ALPHA / 3)
     reasons = [f"运行中途停止: {plan['stopped']}"] if plan.get("stopped") else []
+    not_applied = [r["label"] for r in arms if r.get("not_applied")]
+    if not_applied:
+        reasons.append(f"B 臂未按设计施加 {len(not_applied)} 臂 (NPU 回退到双线性或没起来, 已剔除): {not_applied}。"
+                       f"这些臂说明的是「施加失败」, 不是「NPU 没用」")
     perf_gain = bool(bc["wins"]) and not bc["regressions"]
     if bc["n_frame_pairs"] < need:
         reasons.append(f"B 对 C 有效块只有 {bc['n_frame_pairs']} 个, 少于 {need} (stat-guards 最少轮数)")
@@ -291,12 +323,14 @@ def main():
     elif null_v not in (None, "pass"):
         reasons.append(f"画质空改动自检 = {null_v}, 这次画质采集本身不稳, 判不了")
     if bc["n_frame_pairs"] < need:
-        gain = "判不了 (有效块不足, 见原因)"
+        gain = "判不了 (B 臂未按设计施加, 有效块不足)" if not_applied else "判不了 (有效块不足, 见原因)"
     elif perf_first:
         gain = "性能增益成立(画质未判定, 只作参考)" if perf_gain else "性能增益不成立"
     else:
         gain = "增益成立" if (perf_gain and image_ok) else "增益不成立"
-    verdict = {"mode": "perf-first" if perf_first else "full", "gain": gain, "perf_gain": perf_gain,
+    verdict = {"mode": "perf-first" if perf_first else "full", "gain": gain, "not_applied_arms": not_applied,
+               "image_policy": {"B": "report" if perf_first else "gate"},
+               "frame_rule": f"帧率守在上限 (fps_mean 不显著下降)、超时帧 (> {_MISS_MS[0]} ms) 占比不显著上升; 预算内 p95 变长不算退化", "perf_gain": perf_gain,
                "image_ok": image_ok, "reasons": reasons, "min_pairs": need,
                "B_vs_C": bc, "B_vs_A": ba, "A_vs_C": ac, "image": img,
                "n_arms": len(arms), "n_arms_valid": sum(r["valid"] for r in arms)}
