@@ -43,6 +43,7 @@ mod grayab;
 mod graylayer;
 mod shotdiff;
 mod iqjudge;
+mod interpjudge;
 mod scorecard;
 mod hypo;
 mod mtools;
@@ -739,6 +740,10 @@ fn main() {
         Some("bench") => {
             // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
             std::process::exit(bench::run_bench(&args[1..]));
+        }
+        Some("interp-judge") => {
+            // 插帧验收: 插出的中间帧对原生 2 倍帧率真值, 静止块/运动块/最差块/包络/细节 + 序列闪烁
+            std::process::exit(interpjudge::run_interp_judge(&args[1..]));
         }
         Some("iq-judge") => {
             // 画质验收: 候选与「原生自己跟自己比」同一水平才算画面不变 (稳定块 PSNR/SSIM + 细节能量)
