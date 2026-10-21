@@ -600,8 +600,14 @@ pub(crate) fn cool_summary(arms: &[Value]) -> (Option<f64>, bool) {
     (worst, arms.iter().any(|a| a["timeout"].as_bool() == Some(true)))
 }
 
-/// 施加后隔多少秒回读 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md: 厂商性能服务约 10 秒内改回)。
-const READBACK_AFTER_S: u64 = 12;
+/// 测量窗口内多久回读一次 plan 里的节点 (两臂都读, 读的节奏一样)。
+/// 厂商性能服务约 10 秒内改回 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md),
+/// 也会在臂中途再改, 所以不是施加后读一次, 而是整段窗口按固定节拍读。
+const READBACK_EVERY_S: u64 = 3;
+/// 改写臂在测量窗口内守住的时间比例至少这么多才进统计 (请求 `protocol.sysparam_hold_min` 可改)。
+const HOLD_MIN_FRAC: f64 = 0.9;
+/// 窗口内有效回读 (adb 调用成功的) 少于这么多次, 守没守住说不清, 不进统计。
+const HOLD_MIN_SAMPLES: usize = 3;
 
 /// 读回 plan 里每一项当前值的一条 shell 命令。输出每行 `<路径>=<值>`。
 pub(crate) fn readback_cmd(plan: &str) -> String {
@@ -676,6 +682,187 @@ pub(crate) fn split_snapshot_diff(before: &str, after: &str) -> (Vec<String>, Ve
         }
     }
     (vendor, other)
+}
+
+/// 测量窗口内的定时回读。按 `t0 + k*every` 的固定节拍读, 每次读数代表一段等长时间,
+/// 所以「守住的读数比例」就是「守住的时间比例」。[`HoldPoller::finish`] 停止时再读最后一次 (窗口末尾)。
+pub(crate) struct HoldPoller {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<Vec<(f64, String)>>,
+}
+
+impl HoldPoller {
+    pub(crate) fn start(serial: &str, cmd: &str, every_s: u64) -> Self {
+        use std::sync::atomic::Ordering;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (serial, cmd, flag) = (serial.to_string(), cmd.to_string(), stop.clone());
+        let handle = std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            let mut out = Vec::new();
+            let mut k: u64 = 0;
+            loop {
+                // 等到下一个节拍; 等的过程中收到停止就跳出, 补读最后一次
+                let due = t0 + std::time::Duration::from_secs(k * every_s.max(1));
+                while std::time::Instant::now() < due && !flag.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                let stopping = flag.load(Ordering::SeqCst);
+                out.push((t0.elapsed().as_secs_f64(), su(&serial, &cmd, 30)));
+                if stopping {
+                    break;
+                }
+                k += 1;
+                // 一次 adb 调用超过一个节拍时跳过已经错过的节拍, 不连发补读
+                let behind = t0.elapsed().as_secs() / every_s.max(1);
+                if behind >= k {
+                    k = behind + 1;
+                }
+            }
+            out
+        });
+        HoldPoller { stop, handle }
+    }
+
+    /// 停止并拿回全部读数 `(距开始秒数, 回读输出)`; 最后一条是停止时的末尾回读。
+    pub(crate) fn finish(self) -> Vec<(f64, String)> {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.handle.join().unwrap_or_default()
+    }
+}
+
+/// 一臂测量窗口内 plan 节点的守住情况。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Hold {
+    /// adb 调用成功的回读次数 (分母)
+    pub samples: usize,
+    /// 其中所有节点都等于写的值的次数
+    pub held: usize,
+    /// adb 调用本身失败、不进分母的次数
+    pub failed_calls: usize,
+    /// 第一次对不上的时刻 (距窗口开始秒数)
+    pub first_lost_s: Option<f64>,
+    /// 对不上的项, 每个 (节点, 读到的值) 只记一次: `路径: 写 X 读到 Y`
+    pub mismatches: Vec<String>,
+    /// 每个节点在窗口里读到过的不同值 (按出现顺序)。对照臂靠它看厂商服务有没有动这个节点。
+    pub values_seen: Vec<(String, Vec<String>)>,
+}
+
+impl Hold {
+    pub(crate) fn frac(&self) -> Option<f64> {
+        (self.samples > 0).then(|| self.held as f64 / self.samples as f64)
+    }
+
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "samples": self.samples,
+            "held": self.held,
+            "hold_frac": self.frac(),
+            "failed_calls": self.failed_calls,
+            "first_lost_s": self.first_lost_s,
+            "mismatches": self.mismatches,
+            "values_seen": self.values_seen.iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect::<serde_json::Map<String, Value>>(),
+        })
+    }
+}
+
+/// 窗口内全部回读 → 守住统计。读不到的节点算对不上 (同 [`readback_mismatches`])。
+pub(crate) fn hold_stats(plan: &str, samples: &[(f64, String)]) -> Hold {
+    let mut h = Hold { samples: 0, held: 0, failed_calls: 0, first_lost_s: None, mismatches: Vec::new(), values_seen: Vec::new() };
+    for (t, out) in samples {
+        if !adb_ok(out) {
+            h.failed_calls += 1;
+            continue;
+        }
+        h.samples += 1;
+        for l in out.lines() {
+            let Some((k, v)) = l.trim().split_once('=') else { continue };
+            if k.starts_with('#') {
+                continue;
+            }
+            let v = v.trim().to_string();
+            match h.values_seen.iter_mut().find(|(p, _)| p == k) {
+                Some((_, vs)) => {
+                    if !vs.contains(&v) {
+                        vs.push(v)
+                    }
+                }
+                None => h.values_seen.push((k.to_string(), vec![v])),
+            }
+        }
+        let bad = readback_mismatches(plan, out);
+        if bad.is_empty() {
+            h.held += 1;
+        } else {
+            h.first_lost_s.get_or_insert(*t);
+            for (path, want, got) in bad {
+                let line = format!("{path}: 写 {want} 读到 {got}");
+                if !h.mismatches.contains(&line) {
+                    h.mismatches.push(line);
+                }
+            }
+        }
+    }
+    h
+}
+
+/// 改写臂进不进统计: 有效回读够数, 且守住比例不低于 `min_frac`。不进的回原因。
+pub(crate) fn hold_verdict(h: &Hold, min_frac: f64) -> Result<(), String> {
+    if h.samples < HOLD_MIN_SAMPLES {
+        return Err(format!(
+            "窗口内有效回读只有 {} 次 (少于 {HOLD_MIN_SAMPLES}), 守没守住说不清",
+            h.samples
+        ));
+    }
+    let f = h.frac().unwrap_or(0.0);
+    if f < min_frac {
+        return Err(format!(
+            "窗口内只守住 {:.0}% 的时间 ({}/{} 次回读), 低于 {:.0}%",
+            f * 100.0,
+            h.held,
+            h.samples,
+            min_frac * 100.0
+        ));
+    }
+    Ok(())
+}
+
+/// 请求里的守住比例门槛, 不合法就用缺省 [`HOLD_MIN_FRAC`]。
+pub(crate) fn hold_min_frac(req: &Value) -> f64 {
+    req["protocol"]["sysparam_hold_min"]
+        .as_f64()
+        .filter(|x| *x > 0.0 && *x <= 1.0)
+        .unwrap_or(HOLD_MIN_FRAC)
+}
+
+/// 厂商性能服务会动的 sysfs 路径 (与 [`vendor_managed`] 是同一组节点, 这里按设备端路径认)。
+pub(crate) fn vendor_managed_path(path: &str) -> bool {
+    let kgsl = path.contains("kgsl")
+        && ["/max_pwrlevel", "/min_pwrlevel", "/thermal_pwrlevel", "/max_gpuclk", "/min_freq", "/max_freq"]
+            .iter()
+            .any(|s| path.ends_with(s));
+    let cpu = path.contains("/cpufreq/policy")
+        && (path.ends_with("/scaling_max_freq") || path.ends_with("/scaling_min_freq"));
+    kgsl || cpu
+}
+
+/// 探测时游戏是否从头到尾都在跑且在前台 (probe_sysparam.sh 的 `probe.game_*` 行)。
+pub(crate) fn probe_game_up(probe: &sysparam::ProbeMap) -> bool {
+    ["running_start", "running_end", "foreground_start", "foreground_end"]
+        .iter()
+        .all(|k| probe.get(&format!("probe.game_{k}")) == Some("yes"))
+}
+
+/// 游戏没在跑时探出来的白名单, 去掉厂商服务会动的节点: 那时厂商游戏模式没介入,
+/// 这些节点「守得住」不代表游戏跑起来后守得住。回 (留下的, 去掉的 pid)。
+pub(crate) fn gate_whitelist_by_probe(wl: sysparam::Whitelist, game_up: bool) -> (sysparam::Whitelist, Vec<String>) {
+    if game_up {
+        return (wl, Vec::new());
+    }
+    let (keep, drop): (Vec<_>, Vec<_>) =
+        wl.into_iter().partition(|(_, s)| !(s.kind == "sysfs" && vendor_managed_path(&s.path)));
+    (keep, drop.into_iter().map(|(k, _)| k).collect())
 }
 
 // ══════════════ 报告装配 ══════════════
@@ -795,15 +982,55 @@ fn revalidate(req: &Value, wl: &sysparam::Whitelist) -> Result<(), String> {
     Ok(())
 }
 
-fn probe_whitelist(serial: &str, evidence: &Path) -> Result<sysparam::Whitelist, String> {
+/// 探白名单前把被测游戏拉到前台跑着。厂商游戏模式只在游戏前台运行时改频率边界,
+/// 游戏没跑时探出来的「守得住」不算数 (审计 #7)。回「是不是本函数拉起来的」(是就由调用方探完停掉)。
+/// 拉不起来不报错: 探测脚本会如实记下游戏不在, [`gate_whitelist_by_probe`] 再按这个去掉相关节点。
+fn probe_bring_up_game(serial: &str, pkg: &str, launch: Option<&LaunchSpec>, dir: &Path) -> bool {
+    let _ = std::fs::create_dir_all(dir);
+    let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
+    let fg = adb(serial, &["shell", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"], 15);
+    if !crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty() && fg.contains(pkg) {
+        return false; // 已经在前台跑着 (触控脚本负载的常态), 不重启它
+    }
+    let r = match launch {
+        // 静态场景一直跑 (frames 很大), 探测要几分钟, 不能中途跑完退出
+        Some(LaunchSpec { static_extras: Some(st), .. }) => start_with_extras(serial, pkg, st, None, &[], dir).map(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(STATIC_SETTLE_S));
+        }),
+        Some(l) => start_with_extras(serial, pkg, &l.extras, l.marker.as_deref(), &[], dir)
+            .and_then(|_| wait_launch_window(serial, pkg, "probe", l.marker.as_deref())),
+        None => start_with_extras(serial, pkg, "", None, &[], dir).map(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(LAUNCH_SETTLE_S));
+        }),
+    };
+    if let Err(e) = r {
+        std::fs::write(dir.join("bring_up_error.txt"), &e).ok();
+    }
+    true
+}
+
+fn probe_whitelist(serial: &str, evidence: &Path, req: &Value) -> Result<sysparam::Whitelist, String> {
     push_tools(serial)?;
-    let out = su(serial, &format!("sh {DEV_TMP}/probe_sysparam.sh"), 600);
+    let _ = std::fs::create_dir_all(evidence);
+    let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen");
+    let launched = probe_bring_up_game(serial, pkg, launch_spec(req).as_ref(), &evidence.join("probe_game"));
+    let out = su(serial, &format!("PROBE_PKG={pkg} sh {DEV_TMP}/probe_sysparam.sh"), 900);
+    if launched {
+        let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    }
     if out.contains("#adb_exit=") && !out.ends_with("#adb_exit=0") {
         return Err(format!("probe_sysparam 失败: {out}"));
     }
-    let _ = std::fs::create_dir_all(evidence);
     std::fs::write(evidence.join("probe.txt"), &out).map_err(|e| e.to_string())?;
-    Ok(sysparam::build_whitelist(&sysparam::parse_probe(&out)))
+    let probe = sysparam::parse_probe(&out);
+    let game_up = probe_game_up(&probe);
+    let (wl, dropped) = gate_whitelist_by_probe(sysparam::build_whitelist(&probe), game_up);
+    std::fs::write(
+        evidence.join("probe_gate.txt"),
+        format!("game_up={game_up}\nlaunched_by_probe={launched}\ndropped_vendor_managed={dropped:?}\n"),
+    )
+    .ok();
+    Ok(wl)
 }
 
 /// 自驱动负载 (`workload.launch`): 应用带 intent extras 启动后自己跑一段确定性路线
@@ -1211,7 +1438,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     // ── 白名单: 请求带着就用它的 (但结构上仍按本端 Spec 解析), 没带就真机探 ──
     let wl = match whitelist_from_payload(req) {
         Some(w) if !w.is_empty() => w,
-        _ => probe_whitelist(serial, evidence)?,
+        _ => probe_whitelist(serial, evidence, req)?,
     };
 
     // ── probe_only: 只探白名单, 不跑候选 ──
@@ -1219,16 +1446,20 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         push_tools(serial)?;
         let before = snapshot(serial);
         std::fs::write(evidence.join("snap_before.txt"), &before).map_err(|e| e.to_string())?;
-        let wl2 = probe_whitelist(serial, evidence)?; // 探测本身要写节点, 重探一遍拿全量
+        let wl2 = probe_whitelist(serial, evidence, req)?; // 探测本身要写节点, 重探一遍拿全量
         let after = snapshot(serial);
         std::fs::write(evidence.join("snap_after.txt"), &after).map_err(|e| e.to_string())?;
         let identical = before == after;
+        // 探测时游戏在跑, 厂商服务自己会改频率边界; 只有其余键变了才算探测留痕
+        let (vendor_drift, other_drift) = split_snapshot_diff(&before, &after);
         report["status"] = json!("REVERTED");
         report["verdict"]["reason"] =
             json!("probe_only: 只探白名单不跑候选, 探测过程的写入已还原");
         report["conditions_observed"] = json!({
             "snapshot_identical": identical,
-            "restored": identical,
+            "restored": other_drift.is_empty(),
+            "snapshot_vendor_drift": vendor_drift,
+            "snapshot_other_drift": other_drift,
             // schema 未列但允许附加: 探测结果就是这一步的全部产出
             "whitelist": wl_pyval(&wl2),
         });
@@ -1343,6 +1574,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let mut contested: Vec<Value> = Vec::new();
     let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
     let mut cool_log: Vec<Value> = Vec::new();
+    let hold_min = hold_min_frac(req);
+    let mut hold_log: Vec<Value> = Vec::new();
     'pairs: for i in 1..=rounds {
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 风扇按死在关 (owner 规矩), 再等冷 —— 风扇状态会改等冷的结果
@@ -1356,7 +1589,26 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                 abort_reason = Some(format!("{arm}{i}: {e}"));
                 break;
             }
-            if arm == "knob" {
+            let label = format!("sp_{arm}{i}");
+            let arm_dir = evidence.join(format!("{arm}{i}"));
+            let rb_cmd = readback_cmd(&plan);
+            // 自驱动负载: 先冷启动游戏、等它进入被测窗口 (marker), 再施加 (审计 #7)。
+            // 游戏切到前台时厂商游戏模式 (perf2-hal / zperfcubeservice) 会套自己的配置,
+            // 在游戏启动前施加的值会在测量开始前就被改回去。触控脚本负载的游戏本来就在前台跑着。
+            if let Some(l) = &launch {
+                let up = std::fs::create_dir_all(&arm_dir)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| start_with_extras(serial, pkg, &l.extras, l.marker.as_deref(), &[], &arm_dir))
+                    .and_then(|_| wait_launch_window(serial, pkg, &label, l.marker.as_deref()));
+                if let Err(e) = up {
+                    let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+                    abort_reason = Some(e);
+                    break;
+                }
+            }
+            // 改写臂施加; 对照臂在同一时刻读一次这些节点的当前值 (同样一次 su 调用, 两臂节奏一致,
+            // 也留下对照臂的起点值)。
+            let pre = if arm == "knob" {
                 let out = su(
                     serial,
                     &format!("sh {DEV_TMP}/knob_sysparam.sh apply {DEV_TMP}/loop_v1_sysparam.plan"),
@@ -1370,58 +1622,58 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                     if r.contains("KNOB_RESTORE_FAIL") {
                         restore_fail = Some(r);
                     }
+                    if launch.is_some() {
+                        let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+                    }
                     break;
                 }
-            }
-            let label = format!("sp_{arm}{i}");
-            // 施加后隔十几秒回读一次 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md: 写得进不等于守得住, 厂商性能服务
-            // perf2-hal / zperfcubeservice 会在约 10 秒内把 GPU/CPU 频率边界改回去)。
-            // 两臂都读 —— 只在改写臂读的话, 那一次 adb 调用本身就成了两臂之间的差别。
-            let rb_cmd = readback_cmd(&plan);
-            let rb_thread = {
-                let (serial, cmd) = (serial.to_string(), rb_cmd.clone());
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(READBACK_AFTER_S));
-                    su(&serial, &cmd, 30)
-                })
+                out
+            } else {
+                su(serial, &rb_cmd, 30)
             };
+            // 测量窗口内按固定节拍回读 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md:
+            // 写得进不等于守得住)。两臂都读 —— 只在改写臂读的话, 回读的 adb 调用本身就成了两臂之间的差别。
+            let poller = HoldPoller::start(serial, &rb_cmd, READBACK_EVERY_S);
             let res = match &launch {
+                // 游戏已经由上面拉起来并进入窗口, 这里不再重启
                 Some(l) => run_one_launch(
                     serial,
                     &label,
-                    &evidence.join(format!("{arm}{i}")),
+                    &arm_dir,
                     seconds,
                     pkg,
                     req["workload"]["render_comm"].as_str(),
                     l,
-                    true,
+                    false,
                 ),
                 None => run_one_with(
                     serial,
                     &label,
-                    &evidence.join(format!("{arm}{i}")),
+                    &arm_dir,
                     seconds,
                     &workload_path,
                     pkg,
                     req["workload"]["render_comm"].as_str(),
                 ),
             };
-            let rb_mid = rb_thread.join().unwrap_or_default();
-            let mut arm_contested: Vec<String> = Vec::new();
-            if arm == "knob" {
-                // 负载跑完、还原之前再读一次: 守住了整段测量才算数
-                let rb_end = su(serial, &rb_cmd, 30);
-                for (when, out) in [("+12s", &rb_mid), ("末尾", &rb_end)] {
-                    for (path, want, got) in readback_mismatches(&plan, out) {
-                        arm_contested.push(format!("{path}: 写 {want} {when}回读 {got}"));
-                    }
-                }
-                std::fs::write(
-                    evidence.join(format!("knob{i}_readback.txt")),
-                    format!("# +{READBACK_AFTER_S}s\n{rb_mid}\n# 末尾\n{rb_end}\n"),
-                )
-                .ok();
+            let samples = poller.finish();
+            if launch.is_some() {
+                // 量完就停掉, 别让它在还原、等冷的时候接着烧
+                let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
             }
+            let hold = hold_stats(&plan, &samples);
+            let mut hold_rec = hold.to_json();
+            hold_rec["arm"] = json!(format!("{arm}{i}"));
+            hold_log.push(hold_rec.clone());
+            {
+                let mut txt = format!("# 施加/起点回读\n{pre}\n");
+                for (t, out) in &samples {
+                    txt.push_str(&format!("# +{t:.1}s\n{out}\n"));
+                }
+                std::fs::write(evidence.join(format!("{arm}{i}_readback.txt")), txt).ok();
+            }
+            // 改写臂按窗口内守住的时间比例判进不进统计
+            let arm_contested = if arm == "knob" { hold_verdict(&hold, hold_min).err() } else { None };
             if arm == "knob" {
                 let r = restore(serial);
                 if r.contains("KNOB_RESTORE_FAIL") && restore_fail.is_none() {
@@ -1429,7 +1681,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                 }
             }
             match res {
-                Ok(m) => {
+                Ok(mut m) => {
+                    m["sysparam_hold"] = hold_rec;
                     // 温度上限: 超了这一组作废
                     let t = run_soc_temp_max(&m);
                     if let (Some(t), Some(cap)) = (t, req["conditions"]["temp_cap_c"].as_f64()) {
@@ -1439,11 +1692,15 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                     }
                     if abort_reason.is_none() {
                         if arm == "knob" {
-                            if arm_contested.is_empty() {
-                                knob_runs.push(m);
-                            } else {
+                            match arm_contested {
+                                None => knob_runs.push(m),
                                 // 守不住的那一臂量的不是这组参数: 不进统计, 单列计数
-                                contested.push(json!({"round": i, "nodes": arm_contested}));
+                                Some(why) => contested.push(json!({
+                                    "round": i,
+                                    "why": why,
+                                    "hold_frac": hold.frac(),
+                                    "nodes": hold.mismatches,
+                                })),
                             }
                         } else {
                             ctrl_runs.push(m);
@@ -1509,9 +1766,13 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         "apply_ok": apply_ok,
         "snapshot_identical": snapshot_identical,
         "restored": restore_fail.is_none(),
-        // 改写臂里有几臂被厂商服务抢回 (施加后 +12s 或负载末尾回读对不上), 这几臂没进统计
+        // 改写臂里有几臂在测量窗口内守住的时间比例低于门槛 (厂商服务抢回), 这几臂没进统计
         "contested_arms": contested.len(),
         "contested": contested,
+        "hold_min_frac": hold_min,
+        "readback_every_s": READBACK_EVERY_S,
+        // 逐臂 (两臂都有) 窗口内回读: 守住比例、读到过的值。对照臂看厂商服务有没有动这些节点
+        "hold_per_arm": hold_log,
         "snapshot_vendor_drift": vendor_drift,
         "snapshot_diff": if snapshot_identical { Value::Null } else {
             json!([
@@ -1541,7 +1802,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
 
     if knob_runs.is_empty() && !contested.is_empty() {
         report["verdict"]["reason"] = json!(format!(
-            "改写臂 {} 臂全部被厂商性能服务抢回 (施加后回读对不上, contested), 没有一臂量的是这组参数",
+            "改写臂 {} 臂在测量窗口内都没守住 (守住时间比例低于门槛, contested), 没有一臂量的是这组参数",
             contested.len()
         ));
         if suspended_via.is_some() {
@@ -2961,6 +3222,114 @@ mod path_tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m[0], ("/sys/class/kgsl/kgsl-3d0/min_pwrlevel".into(), "3".into(), "17".into()));
         assert_eq!(m[1].2, "<读不到>");
+    }
+
+    /// 窗口内定时回读 → 守住比例。adb 失败的那次不进分母; 读不到的节点算没守住;
+    /// 对照臂靠 values_seen 看节点有没有被动过。
+    #[test]
+    fn hold_stats_counts_time_fraction_and_values_seen() {
+        let ok = "/sys/class/kgsl/kgsl-3d0/min_pwrlevel=3\nsystem:refresh_rate_mode=2\n#adb_exit=0".to_string();
+        let lost = "/sys/class/kgsl/kgsl-3d0/min_pwrlevel=17\nsystem:refresh_rate_mode=2\n#adb_exit=0".to_string();
+        let mut samples: Vec<(f64, String)> = (0..9).map(|k| (k as f64 * 3.0, ok.clone())).collect();
+        samples.push((27.0, lost.clone()));
+        samples.push((30.0, "#adb_exit=timeout".to_string()));
+        let h = hold_stats(PLAN, &samples);
+        assert_eq!((h.samples, h.held, h.failed_calls), (10, 9, 1));
+        assert_eq!(h.frac(), Some(0.9));
+        assert_eq!(h.first_lost_s, Some(27.0));
+        assert_eq!(h.mismatches, vec!["/sys/class/kgsl/kgsl-3d0/min_pwrlevel: 写 3 读到 17".to_string()]);
+        assert_eq!(
+            h.values_seen[0],
+            ("/sys/class/kgsl/kgsl-3d0/min_pwrlevel".to_string(), vec!["3".to_string(), "17".to_string()])
+        );
+        assert!(hold_verdict(&h, 0.9).is_ok(), "刚好 90% 算守住");
+        assert!(hold_verdict(&h, 0.95).is_err());
+        let j = h.to_json();
+        assert_eq!(j["hold_frac"], json!(0.9));
+        assert_eq!(j["values_seen"]["system:refresh_rate_mode"], json!(["2"]));
+    }
+
+    /// 回读次数不够 (adb 一直失败) 时说不清, 不算守住; 门槛从请求里取, 不合法用缺省。
+    #[test]
+    fn hold_verdict_needs_enough_samples_and_sane_threshold() {
+        let ok = "/sys/class/kgsl/kgsl-3d0/min_pwrlevel=3\nsystem:refresh_rate_mode=2\n#adb_exit=0".to_string();
+        let h = hold_stats(PLAN, &[(0.0, ok.clone()), (3.0, ok), (6.0, "#adb_exit=1".into())]);
+        assert_eq!(h.frac(), Some(1.0));
+        assert!(hold_verdict(&h, 0.9).unwrap_err().contains("说不清"));
+        assert_eq!(hold_stats(PLAN, &[]).frac(), None);
+        assert_eq!(hold_min_frac(&json!({})), HOLD_MIN_FRAC);
+        assert_eq!(hold_min_frac(&json!({"protocol": {"sysparam_hold_min": 0.75}})), 0.75);
+        assert_eq!(hold_min_frac(&json!({"protocol": {"sysparam_hold_min": 1.5}})), HOLD_MIN_FRAC);
+        assert_eq!(hold_min_frac(&json!({"protocol": {"sysparam_hold_min": 0}})), HOLD_MIN_FRAC);
+    }
+
+    /// 真实数据 (megacity-power-1012c gen1 sys_g1c1, 2026-10-13): plan 写 max_pwrlevel=6,
+    /// 旧流程在游戏重启前施加, +12s 与末尾回读都是 4 (厂商默认值)。新口径下守住 0%, 照样不进统计。
+    #[test]
+    fn hold_replay_1012c_knob_arm_is_contested() {
+        let plan = "# loop_v1 sysparam plan (from request payload)\nsysfs\t/sys/class/kgsl/kgsl-3d0/max_pwrlevel\t6\n";
+        let rb = "/sys/class/kgsl/kgsl-3d0/max_pwrlevel=4\n#adb_exit=0".to_string();
+        let h = hold_stats(plan, &[(12.0, rb.clone()), (40.0, rb.clone()), (43.0, rb)]);
+        assert_eq!(h.frac(), Some(0.0));
+        assert!(hold_verdict(&h, HOLD_MIN_FRAC).unwrap_err().contains("0%"));
+    }
+
+    /// 厂商服务会动的节点按设备端路径认; 普通节点 (总线 boost、governor) 不算。
+    #[test]
+    fn vendor_managed_paths_match_snapshot_keys() {
+        for p in [
+            "/sys/class/kgsl/kgsl-3d0/max_pwrlevel",
+            "/sys/class/kgsl/kgsl-3d0/min_pwrlevel",
+            "/sys/class/devfreq/3d00000.qcom,kgsl-3d0/max_freq",
+            "/sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq",
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq",
+        ] {
+            assert!(vendor_managed_path(p), "{p}");
+        }
+        for p in [
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor",
+            "/sys/devices/system/cpu/bus_dcvs/DDR/boost_freq",
+            "/sys/class/kgsl/kgsl-3d0/devfreq/governor",
+        ] {
+            assert!(!vendor_managed_path(p), "{p}");
+        }
+    }
+
+    /// 探测时游戏没在前台跑 (旧探测结果根本没有 probe.game_* 行) → 厂商会动的节点不进白名单;
+    /// 游戏从头到尾都在前台 → 照常 (这时守不住的节点探测脚本自己已经判 contested 了)。
+    #[test]
+    fn whitelist_drops_vendor_nodes_when_probe_ran_without_game() {
+        let base = "cpu.policies=0\n\
+cpu.policy0.avail_freqs=300000 600000 900000\n\
+cpu.policy0.scaling_min_freq.cur=300000\ncpu.policy0.scaling_max_freq.cur=900000\n\
+cpu.policy0.scaling_min_freq.writable=yes\ncpu.policy0.scaling_min_freq.effect=live\n\
+cpu.policy0.scaling_max_freq.writable=yes\ncpu.policy0.scaling_max_freq.effect=live\n\
+gpu.num_pwrlevels=18\ngpu.min_pwrlevel.cur=17\ngpu.max_pwrlevel.cur=4\n\
+gpu.min_pwrlevel.writable=yes\ngpu.max_pwrlevel.writable=yes\n\
+gpu.min_pwrlevel.effect=live\ngpu.max_pwrlevel.effect=live\n\
+bus.DDR.boost_freq.cur=0\nbus.DDR.avail_freqs=547000 1555000 2092000\nbus.DDR.hw_max_freq=2092000\n\
+bus.DDR.boost_freq.writable=yes\nbus.DDR.boost_freq.effect=live\n";
+        let probe = sysparam::parse_probe(base);
+        let full = sysparam::build_whitelist(&probe);
+        assert!(full.iter().any(|(_, s)| vendor_managed_path(&s.path)), "夹具里得有厂商节点: {full:?}");
+        assert!(!probe_game_up(&probe));
+        let (kept, dropped) = gate_whitelist_by_probe(full.clone(), probe_game_up(&probe));
+        assert!(!dropped.is_empty());
+        assert!(kept.iter().all(|(_, s)| !vendor_managed_path(&s.path)), "{kept:?}");
+        assert_eq!(kept.len() + dropped.len(), full.len());
+
+        let with_game = format!(
+            "probe.game_pkg=com.x\nprobe.game_running_start=yes\nprobe.game_foreground_start=yes\n{base}\
+probe.game_running_end=yes\nprobe.game_foreground_end=yes\n"
+        );
+        let probe = sysparam::parse_probe(&with_game);
+        assert!(probe_game_up(&probe));
+        let (kept, dropped) = gate_whitelist_by_probe(sysparam::build_whitelist(&probe), true);
+        assert!(dropped.is_empty());
+        assert_eq!(kept.len(), full.len());
+        // 中途游戏退了也不算
+        let quit = with_game.replace("probe.game_running_end=yes", "probe.game_running_end=no");
+        assert!(!probe_game_up(&sysparam::parse_probe(&quit)));
     }
 
     /// 只有厂商服务会动的频率边界变了 → 不判留痕; 别的键变了 → 判留痕。
