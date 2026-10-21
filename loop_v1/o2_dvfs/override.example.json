@@ -1,0 +1,8 @@
+[
+  {
+    "_说明": "示例格式。target 与 svc 是推断的占位, 以 vendor_recon.sh 查到的实际配置文件和 init 服务名为准",
+    "target": "/vendor/etc/perf/perfboostsconfig.xml",
+    "edited_local": "/Users/yao/Desktop/code/agent/hgamey/_tmp/opt/O2/vendor_edit/perfboostsconfig.xml",
+    "svc": "init:vendor.perf2-hal"
+  }
+]
