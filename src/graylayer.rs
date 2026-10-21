@@ -501,7 +501,7 @@ pub(crate) fn off_readback(layers_out: &str, state_out: &str) -> String {
 const DEV_TMP_SO: &str = "/data/local/tmp/libVkLayer_refknobs.so";
 
 /// 层 .so 的解析: knobs/gray/build/out/ (build_layer.sh 的产物位)。
-fn layer_so_path() -> String {
+pub(crate) fn layer_so_path() -> String {
     match resolve_path("knobs/gray/build/out/libVkLayer_refknobs.so") {
         Some(p) => p.to_string_lossy().into_owned(),
         None => "knobs/gray/build/out/libVkLayer_refknobs.so".into(),
