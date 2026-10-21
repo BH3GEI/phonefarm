@@ -37,3 +37,4 @@ loop_v1/runs_selftest/
 
 # 节点服务在本仓库根跑任务时的输出目录 (node_service.py 写入)
 _jobs/
+knobs/gray/npu_exp/__pycache__/
