@@ -1134,10 +1134,35 @@ fn eval_runs(runs: &[Value]) -> Vec<Run> {
         .collect()
 }
 
-/// 两臂已跑的每一轮都量到了可信功耗、且是同一种口径 (全电池放电或全 USB 旁路), 功耗才进
-/// 判定; 混了口径这组功耗无效。空集算真 —— 后面的轮次还可能全合格。
+/// 按对取舍后的功耗 (审计 #5): 一臂不合格只剔除那一对, 不再整组作废。
+pub(crate) fn power_pairs_of(knob_runs: &[Value], ctrl_runs: &[Value]) -> sysparam::PowerPairs {
+    let c: Vec<&Value> = ctrl_runs.iter().map(|r| &r["env"]).collect();
+    let k: Vec<&Value> = knob_runs.iter().map(|r| &r["env"]).collect();
+    sysparam::power_pairs(&c, &k)
+}
+
+/// 功耗能不能进判定: 按对剔除不合格的之后, 两臂各至少 2 个同口径的可信值。
 pub(crate) fn all_on_battery(knob_runs: &[Value], ctrl_runs: &[Value]) -> bool {
-    sysparam::power_group_ok(knob_runs.iter().chain(ctrl_runs.iter()).map(|r| &r["env"]))
+    power_pairs_of(knob_runs, ctrl_runs).usable()
+}
+
+/// 判定视图, 但 `power_w_mean` 换成按对取舍后的值 (被剔除的臂不带这个键, 口径统一时换成
+/// 两轨相加的值)。帧时等其余指标与 [`eval_runs`] 相同。
+fn eval_runs_power(runs: &[Value], power: &[Option<f64>]) -> Vec<Run> {
+    runs.iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let label = r["label"].as_str()?.to_string();
+            let mut v = run_view(r);
+            if let PyVal::Obj(kvs) = &mut v {
+                kvs.retain(|(k, _)| k != "power_w_mean");
+                if let Some(w) = power.get(i).copied().flatten() {
+                    kvs.push(("power_w_mean".into(), PyVal::Float(w)));
+                }
+            }
+            Some((label, v))
+        })
+        .collect()
 }
 
 /// 跑满时**可能**进入判定的「显著改善」检验, 各取最宽的 alpha_win:
@@ -1249,9 +1274,15 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     // 失败不致命 —— 拿不到放电态就只是功耗不进判定, 帧时帧率照常测。
     let want_suspend = req["conditions"]["charging_suspend"]["enabled"].as_bool().unwrap_or(false);
     let mut suspended_via: Option<String> = None;
+    let mut usb_supply_note: Option<String> = None;
     if want_suspend {
         let out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
         std::fs::write(evidence.join("charge_suspend.log"), &out).map_err(|e| e.to_string())?;
+        // 开跑前的 USB 输入上限检查 (charge_suspend.sh 旁路时输出): 供电不足要明确写进回包
+        usb_supply_note = sysparam::usb_supply_note(&out);
+        if let Some(n) = &usb_supply_note {
+            eprintln!("[eval] {n}");
+        }
         if adb_ok(&out) && out.contains("CHARGE_SUSPENDED") {
             // 脚本自己回显用的哪个节点; 原样记进报告
             suspended_via = out
@@ -1435,12 +1466,13 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             // 确定性截断: 剩下的臂无论量出什么, 都不可能有指标显著改善 → 跑满也必然不是
             // KEEP, 现在停 (论证见 src/curtail.rs)。KEEP 一侧永远不提前锁定。
             if curtail {
-                let tests = sysparam_win_tests(alpha, all_on_battery(&knob_runs, &ctrl_runs));
                 let (left_a, left_b) = (
                     (rounds as usize).saturating_sub(ctrl_runs.len()),
                     (rounds as usize).saturating_sub(knob_runs.len()),
                 );
-                if !curtail::keep_possible(&eval_runs(&ctrl_runs), &eval_runs(&knob_runs), left_a, left_b, &tests) {
+                let pp = power_pairs_of(&knob_runs, &ctrl_runs);
+                let tests = sysparam_win_tests(alpha, pp.possible(left_a, left_b));
+                if !curtail::keep_possible(&eval_runs_power(&ctrl_runs, &pp.ctrl), &eval_runs_power(&knob_runs, &pp.knob), left_a, left_b, &tests) {
                     curtailed = Some(curtail_note(knob_runs.len(), ctrl_runs.len(), rounds, &tests));
                     break 'pairs;
                 }
@@ -1559,7 +1591,10 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     m["psnr_db"] = Value::Null;
     unavailable(&mut m, "psnr_db", "sysparam 不动画面, 无画质可量");
     if power.is_none() {
-        unavailable(&mut m, "power_watt", "非放电态 (或功耗采样缺失): 整机功耗量不准, 如实 null");
+        let why = power_pairs_of(&knob_runs, &ctrl_runs)
+            .note()
+            .unwrap_or_else(|| "非放电态 (或功耗采样缺失): 整机功耗量不准, 如实 null".into());
+        unavailable(&mut m, "power_watt", &why);
     }
     if m["fps_p95_ms"].is_null() {
         unavailable(&mut m, "fps_p95_ms", "本轮没拿到可用的帧时序");
@@ -1589,9 +1624,11 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         "cross_run_comparable": sysparam::power_cross_run_comparable(
             knob_runs.iter().chain(ctrl_runs.iter()).filter_map(|r| r.get("env")),
         ),
-        "excluded_reason": sysparam::power_group_note(
-            knob_runs.iter().chain(ctrl_runs.iter()).filter_map(|r| r.get("env")),
-        ),
+        // 按对取舍的结果: 剔了哪几对、为什么, 口径, 是否供电不足 (审计 #5)
+        "excluded_reason": power_pairs_of(&knob_runs, &ctrl_runs).note(),
+        "pairs": power_pairs_of(&knob_runs, &ctrl_runs).to_json(),
+        "supply_mode": env["supply_mode"],
+        "usb_supply_check": usb_supply_note.clone(),
     });
 
     report["status"] = json!(if keep { "PASS" } else { "REJECT" });
@@ -1689,11 +1726,12 @@ pub(crate) fn aux_compare(a_runs: &[Run], b_runs: &[Run]) -> Value {
 /// 回 (verdict JSON, 是否保留, 两臂是否都在放电态)。
 pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, rounds: u32) -> (Value, bool, bool) {
     let primary = "frame_p95";
-    let (a_runs, b_runs) = (eval_runs(ctrl_runs), eval_runs(knob_runs));
-    // 与 autoloop 一致的判定指标表: 功耗只在两臂轨道一致且都量到时才进判定。
-    // 一致 ≠ 一定是放电态: 停充后拿 USB 旁路轨的两臂相减也成立 (同一轨、同一套损耗),
+    // 功耗按对取舍 (审计 #5): 一臂不合格只剔除那一对; 口径不一致时统一成两轨同刻相加。
+    // 同口径 ≠ 一定是放电态: 停充后 USB+电池两轨相加的两臂相减也成立 (同一套损耗),
     // 但那个绝对值不能跨任务比, 回包里用 power.rail / cross_run_comparable 标清楚。
-    let on_battery_all = all_on_battery(knob_runs, ctrl_runs);
+    let pp = power_pairs_of(knob_runs, ctrl_runs);
+    let (a_runs, b_runs) = (eval_runs_power(ctrl_runs, &pp.ctrl), eval_runs_power(knob_runs, &pp.knob));
+    let on_battery_all = pp.usable();
     let mut metrics_list: Vec<(String, &str)> =
         vec![("frame_p95".into(), "lower"), ("fps_mean".into(), "higher")];
     if on_battery_all {
@@ -1757,6 +1795,7 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
         "regressions": regressions,
         "per_metric": Value::Object(per_metric.into_iter().collect()),
         "aux": aux,
+        "power_pairs": pp.to_json(),
         "reason": if keep {
             json!(format!("改善 {} 且无显著退化", metrics_list.iter().find(|(m, _)| wins.first() == Some(&m.to_string())).map(|(m, _)| m.clone()).unwrap_or_default()))
         } else if !regressions.is_empty() {
@@ -1785,7 +1824,8 @@ pub(crate) fn aggregate_metrics(m: &mut Value, knob_runs: &[Value], ctrl_runs: &
     m["soc_temp_max_c"] = json!(temps.iter().cloned().reduce(f64::max));
     // 功耗: 只在放电态均值可信时给; 与帧时一样取候选臂全部轮的均值, 不取最后一轮
     let power = if on_battery_all {
-        let xs: Vec<f64> = knob_runs.iter().filter_map(|r| r["env"]["power_w_mean"].as_f64()).collect();
+        // 按对取舍后的候选臂值 (被剔除的对不算, 口径统一时是两轨相加的值)
+        let xs: Vec<f64> = power_pairs_of(knob_runs, ctrl_runs).knob.into_iter().flatten().collect();
         (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
     } else {
         None
@@ -2856,5 +2896,35 @@ mod path_tests {
         dead["game_alive"] = json!(false);
         assert!(live_check_verdict(&dead).is_err());
     }
-}
 
+    /// 审计 #5: 一臂功耗不合格只剔除那一对, 不再让整组功耗静默退出判定。
+    #[test]
+    fn judge_runs_drops_only_the_bad_power_pair() {
+        let run = |label: &str, p95: f64, w: Option<f64>| {
+            json!({
+                "label": label,
+                "summary": {"frame_p95": p95, "fps_mean": 60.0},
+                "env": match w {
+                    Some(w) => json!({"power_valid": true, "power_source": "usb_plus_battery",
+                                      "power_w_mean": w, "power_mixed_w_mean": w, "soc_temp_max_c": 50.0}),
+                    None => json!({"power_valid": false, "power_source": "usb", "power_w_mean": null,
+                                   "power_usable_reason": "非放电态 (测试)", "soc_temp_max_c": 50.0}),
+                },
+            })
+        };
+        // 6 轮剔 1 对剩 5 对: 5v5 精确置换最小 p = 2/252 < alpha/3, 够得着显著
+        let ctrl: Vec<Value> = (1..=6).map(|i| run(&format!("ctrl{i}"), 16.0 + i as f64 * 0.01, if i == 2 { None } else { Some(3.0 + i as f64 * 0.01) })).collect();
+        let knob: Vec<Value> = (1..=6).map(|i| run(&format!("knob{i}"), 16.0 + i as f64 * 0.01, Some(2.5 + i as f64 * 0.01))).collect();
+        let (verdict, _keep, power_in) = judge_runs(&ctrl, &knob, 0.05, 6);
+        assert!(power_in, "剔一对还剩五对, 功耗照常进判定");
+        assert!(verdict["per_metric"].get("power_w_mean").is_some());
+        let pm = &verdict["per_metric"]["power_w_mean"];
+        assert_eq!(pm["status"], "显著改善", "{pm}");
+        assert_eq!(verdict["power_pairs"]["dropped"][0]["round"], 2);
+        assert_eq!(verdict["power_pairs"]["kept_ctrl"], 5);
+        // 候选臂功耗 = 剔除后那五臂的均值 (第 2 轮的候选臂也不算)
+        let mut m = json!({});
+        let w = aggregate_metrics(&mut m, &knob, &ctrl, power_in).unwrap();
+        assert!((w - (2.51 + 2.53 + 2.54 + 2.55 + 2.56) / 5.0).abs() < 1e-9, "{w}");
+    }
+}

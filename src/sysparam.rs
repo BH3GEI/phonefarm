@@ -763,6 +763,177 @@ pub fn power_group_ok<'a>(envs: impl IntoIterator<Item = &'a serde_json::Value>)
     true
 }
 
+/// 一组 ABBA 的功耗按「对」取舍的结果 (审计 #5)。
+///
+/// 以前 [`power_group_ok`] 一臂不合格就整组 false, 功耗静默退出判定; 现在只剔除那一对
+/// (同一轮的对照臂与候选臂), 剩下的对照常进判定, 被剔的对写进回包。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PowerPairs {
+    /// 每一臂进判定的功耗 (W), 与传入顺序一一对应; None = 这一臂被剔除或没量到
+    pub ctrl: Vec<Option<f64>>,
+    pub knob: Vec<Option<f64>>,
+    /// 这组用的口径 (battery / usb_plus_battery / ...); 一臂都没有时 None
+    pub rail: Option<String>,
+    /// 各臂口径不一致, 统一改用两轨同刻相加 (power_mixed_w_mean)
+    pub unified_to_mixed: bool,
+    /// 被剔除的对: (轮次, 从 1 起; 原因)
+    pub dropped: Vec<(usize, String)>,
+    /// 有臂判出供电不足 (混合供电)
+    pub supply_short: bool,
+}
+
+impl PowerPairs {
+    pub fn kept(&self) -> (usize, usize) {
+        (self.ctrl.iter().flatten().count(), self.knob.iter().flatten().count())
+    }
+
+    /// 两臂各至少 2 个有效值, 功耗才进判定 (置换检验最少要 2 对 2)。
+    pub fn usable(&self) -> bool {
+        let (a, b) = self.kept();
+        a >= 2 && b >= 2
+    }
+
+    /// 截断时用: 已保留的加上还没跑的, 两臂都还可能凑够 2 个。
+    pub fn possible(&self, left_ctrl: usize, left_knob: usize) -> bool {
+        let (a, b) = self.kept();
+        a + left_ctrl >= 2 && b + left_knob >= 2
+    }
+
+    /// 人能读的说明: 剔了哪几对、为什么; 进不了判定时为什么。都没有时 None。
+    pub fn note(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if self.unified_to_mixed {
+            parts.push("各臂供电口径不一致, 统一按 USB 与电池两轨同刻相加计".into());
+        }
+        if self.supply_short {
+            parts.push("供电不足: 有臂 USB 输入不够或中途断开, 电池在补电, 已按两轨同刻相加计".into());
+        }
+        if !self.dropped.is_empty() {
+            let list: Vec<String> = self.dropped.iter().map(|(r, why)| format!("第 {r} 轮 ({why})")).collect();
+            parts.push(format!("剔除 {} 对: {}", self.dropped.len(), list.join("; ")));
+        }
+        if !self.usable() {
+            let (a, b) = self.kept();
+            parts.push(format!("功耗不进判定: 剔除后对照臂 {a} 个、候选臂 {b} 个有效值, 每臂至少要 2 个"));
+        }
+        (!parts.is_empty()).then(|| parts.join("。"))
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let (a, b) = self.kept();
+        serde_json::json!({
+            "rail": self.rail,
+            "in_verdict": self.usable(),
+            "kept_ctrl": a,
+            "kept_knob": b,
+            "unified_to_mixed": self.unified_to_mixed,
+            "supply_short": self.supply_short,
+            "dropped": self.dropped.iter().map(|(r, why)| serde_json::json!({"round": r, "reason": why})).collect::<Vec<_>>(),
+            "note": self.note(),
+        })
+    }
+}
+
+/// 一臂 env 的功耗: (是否可信, 口径, 值, 两轨相加的值, 不可信的原因)。
+fn arm_power(e: &serde_json::Value) -> (bool, String, Option<f64>, Option<f64>, String) {
+    let valid = e["power_valid"].as_bool().unwrap_or_else(|| e["on_battery"].as_bool().unwrap_or(false));
+    let w = e["power_w_mean"].as_f64();
+    let rail = e["power_source"].as_str().unwrap_or("battery").to_string();
+    let why = e["power_usable_reason"].as_str().unwrap_or("功耗没量到").to_string();
+    (valid && w.is_some(), rail, w, e["power_mixed_w_mean"].as_f64(), why)
+}
+
+/// 按对取舍功耗。`ctrl[i]` 与 `knob[i]` 是同一轮的两臂; 多出来的单臂 (中途停下) 自成一组,
+/// 合格就留。
+///
+/// 1. 每臂先看自己可不可信 (`power_valid`, 旧证据按 `on_battery`)。
+/// 2. 可信臂的口径不止一种时: 每臂都有 `power_mixed_w_mean` 就统一改用它 (两轨同刻相加,
+///    电池放电与旁路在这个口径下是同一个量); 否则取臂数最多的口径, 其余口径的臂当不可信。
+/// 3. 一对里任一臂不可信, 剔除这一对 (两臂都不进), 原因写进 `dropped`。
+pub fn power_pairs<'a>(ctrl: &[&'a serde_json::Value], knob: &[&'a serde_json::Value]) -> PowerPairs {
+    let arms: Vec<_> = ctrl.iter().chain(knob.iter()).map(|e| arm_power(e)).collect();
+    let supply_short = ctrl.iter().chain(knob.iter()).any(|e| e["supply_short"].as_bool() == Some(true) && arm_power(e).0);
+    let mut rails: Vec<(String, usize)> = Vec::new();
+    for (ok, r, ..) in &arms {
+        if *ok {
+            match rails.iter_mut().find(|(x, _)| x == r) {
+                Some((_, n)) => *n += 1,
+                None => rails.push((r.clone(), 1)),
+            }
+        }
+    }
+    let unified_to_mixed = rails.len() > 1 && arms.iter().filter(|a| a.0).all(|a| a.3.is_some());
+    let main_rail: Option<String> = if unified_to_mixed {
+        Some("usb_plus_battery".into())
+    } else {
+        // 臂数最多的口径; 平手取先出现的
+        rails.iter().fold(None::<&(String, usize)>, |best, x| match best {
+            Some(b) if b.1 >= x.1 => Some(b),
+            _ => Some(x),
+        }).map(|(r, _)| r.clone())
+    };
+    // 每臂: Ok(值) 或 Err(原因)
+    let judge = |a: &(bool, String, Option<f64>, Option<f64>, String)| -> Result<f64, String> {
+        if !a.0 {
+            return Err(a.4.clone());
+        }
+        if unified_to_mixed {
+            return a.3.ok_or_else(|| "缺两轨相加的值".into());
+        }
+        match &main_rail {
+            Some(m) if *m != a.1 => Err(format!("口径 {} 与本组主口径 {m} 不同, 不能相减", a.1)),
+            _ => a.2.ok_or_else(|| a.4.clone()),
+        }
+    };
+    let (nc, nk) = (ctrl.len(), knob.len());
+    let mut out = PowerPairs {
+        ctrl: vec![None; nc],
+        knob: vec![None; nk],
+        rail: main_rail.clone(),
+        unified_to_mixed,
+        dropped: Vec::new(),
+        supply_short,
+    };
+    for i in 0..nc.max(nk) {
+        let c = (i < nc).then(|| judge(&arms[i]));
+        let k = (i < nk).then(|| judge(&arms[nc + i]));
+        match (c, k) {
+            (Some(Ok(a)), Some(Ok(b))) => {
+                out.ctrl[i] = Some(a);
+                out.knob[i] = Some(b);
+            }
+            (Some(Ok(a)), None) => out.ctrl[i] = Some(a),
+            (None, Some(Ok(b))) => out.knob[i] = Some(b),
+            (c, k) => {
+                let mut why: Vec<String> = Vec::new();
+                if let Some(Err(e)) = c {
+                    why.push(format!("对照臂: {e}"));
+                }
+                if let Some(Err(e)) = k {
+                    why.push(format!("候选臂: {e}"));
+                }
+                out.dropped.push((i + 1, why.join(" / ")));
+            }
+        }
+    }
+    if out.ctrl.iter().chain(out.knob.iter()).all(|v| v.is_none()) && main_rail.is_none() {
+        out.rail = None;
+    }
+    out
+}
+
+/// charge_suspend.sh 输出里的开跑前 USB 输入上限检查 (`CHARGE_USB_LIMIT` / `CHARGE_SUPPLY_LOW` 行)
+/// → 一句话。供电不足时以「供电不足」开头; 脚本没做这项检查 (旧脚本、非旁路) 时 None。
+pub fn usb_supply_note(charge_log: &str) -> Option<String> {
+    let low = charge_log.lines().find_map(|l| l.trim().strip_prefix("CHARGE_SUPPLY_LOW").map(|r| r.trim().to_string()));
+    if let Some(r) = low {
+        return Some(if r.starts_with("供电不足") { r } else { format!("供电不足: {r}") });
+    }
+    charge_log
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("CHARGE_USB_LIMIT").map(|r| format!("USB 输入上限检查: {}", r.trim())))
+}
+
 /// 功耗进不了判定的原因 —— 直接写进回包, 不让人猜。
 ///
 /// 两种情形要分开: 两臂轨道不一致 (无法相减) 与 两臂都没量到。
@@ -816,6 +987,10 @@ pub fn power_cross_run_comparable<'a>(envs: impl IntoIterator<Item = &'a serde_j
 
 pub fn env_stats(text: &str) -> PyVal {
     let (mut vi_watts, mut now_watts, mut usb_watts) = (vec![], vec![], vec![]);
+    // 混合口径: 同一条 ENV 样本 (同一时刻) 的 USB 轨 |V x I| + 电池放电功率 (充电为负)。
+    // usb_all_watts 含 USB 读数为 0 的样本, 用来判「USB 有没有在出力」。
+    let (mut mixed_watts, mut usb_all_watts, mut batt_out_watts): (Vec<f64>, Vec<f64>, Vec<f64>) =
+        (vec![], vec![], vec![]);
     let (mut currents, mut voltages): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
     let mut temps: Vec<f64> = vec![];
     let mut status = String::new();
@@ -913,6 +1088,16 @@ pub fn env_stats(text: &str) -> PyVal {
         if uv != 0 && ui != 0 {
             usb_watts.push((uv as f64 / 1e6 * ui as f64 / 1e6).abs());
         }
+        if bv != 0 {
+            let usb_w = (uv as f64 / 1e6 * ui as f64 / 1e6).abs();
+            // 本机约定电池电流正 = 充、负 = 放: 放电功率为正, 充电为负
+            let batt_out = -(bv as f64 / 1e6 * bi as f64 / 1e6);
+            usb_all_watts.push(usb_w);
+            batt_out_watts.push(batt_out);
+            if usb_w + batt_out > 0.0 && (usb_w != 0.0 || bi != 0) {
+                mixed_watts.push(usb_w + batt_out);
+            }
+        }
         if 0 < t && t < 100_000 {
             temps.push(t as f64 / 1000.0);
         }
@@ -922,63 +1107,81 @@ pub fn env_stats(text: &str) -> PyVal {
         (!xs.is_empty()).then(|| py_round(py_sum(xs.iter().copied()) / xs.len() as f64, 4))
     };
 
-    // on_battery 的判据与 phonefarm hwcond.rs::BatteryState::on_battery 一致:
-    // status 不是 Charging **且** 电流确实是放电方向。两个判据都要看, 因为两个都会
-    // 单独骗人 —— 停充之后有的内核仍写 "Not charging" 而不是 "Discharging",
-    // 而 current_now 在充放平衡的瞬间会过零。
+    // 供电判定与 hwcond.rs 的单轨通路是同一个函数 (hwcond::classify_supply, 审计 #15)。
+    // on_battery 仍是「电池确实在放电」这一事实 (status 不是 Charging、不是满电空闲、电流为负),
+    // 两个判据都要看: 停充之后有的内核仍写 "Not charging"; current_now 在充放平衡时会过零。
     let cur_mean = avg(&currents);
     let charging = status.to_lowercase() == "charging";
-    // 满电空闲 (status=Full 且 |电流| < 旁路门限) 不是放电态: 电池不进不出, 整机由 USB 供电。
-    // 2026-10-12 实测把 Full + -3 mA 当成放电, 交了 0.009 W 的「整机功耗」。
-    let full_idle = status.eq_ignore_ascii_case("full") && cur_mean.is_some_and(|c| c.abs() < BYPASS_IDLE_UA);
-    let on_battery = !charging && !full_idle && cur_mean.is_some_and(|c| c < 0.0);
+    let on_battery = cur_mean.is_some_and(|c| crate::hwcond::battery_discharging(&status, c));
 
     let now_mean = avg(&now_watts);
     // 手机整机功耗合理区间。777W 这种读数只能说明单位不对, 不能进任何均值。
     let now_plausible = now_mean.is_some_and(|m| PLAUSIBLE_W.0 <= m && m <= PLAUSIBLE_W.1);
 
-    // 旁路 (bypass): charge_suspend.sh 判成「USB 直供、电池不进不出」(状态文件第三行 bypass)。
-    // 这时 status 仍是 Charging、电池电流 ≈ 0, 整机功耗在 USB 轨上: 取 USB 的 |V x I|
-    // (含充电器转换损耗, 但口径稳定)。电池电流均值必须真的 ≈ 0, 否则说明中途又充上了。
-    let bypass = !on_battery
-        && charge_suspended
-        && charge_mode == "bypass"
-        && cur_mean.is_some_and(|c| c.abs() < BYPASS_IDLE_UA)
-        && !usb_watts.is_empty();
+    let usb_all_mean = avg(&usb_all_watts);
+    let batt_out_mean = avg(&batt_out_watts);
+    let mode = crate::hwcond::classify_supply(&crate::hwcond::SupplyObs {
+        status: &status,
+        battery_ua: cur_mean,
+        usb_w: usb_all_mean,
+        charge_suspended,
+        bypass_mode: charge_mode == "bypass",
+    });
+    use crate::hwcond::SupplyMode;
+    // 旁路 (bypass): 停充后 USB 直供、电池不进不出 (status 常仍写 Charging)
+    let bypass = mode == SupplyMode::Bypass;
+    // 混合口径的值: 只在电池不在充时有意义 (充电电流随电量衰减的那份漂移不进来)
+    let mixed_mean = if mode == SupplyMode::NotDischarging || mode == SupplyMode::Unknown {
+        None
+    } else {
+        avg(&mixed_watts)
+    };
 
     let (mut power_w_mean, mut power_w_median) = (PyVal::Null, PyVal::Null);
-    let reason: String = if bypass {
-        power_w_mean = PyVal::from(avg(&usb_watts));
-        power_w_median = PyVal::Float(py_round(crate::pyjson::median_f64(&usb_watts).unwrap_or(0.0), 4));
-        "旁路供电 (已停充, 整机由 USB 直供, 电池电流 ≈ 0): 用 USB 轨 |V x I|, 含充电器转换损耗; \
-不能和放电态 (电池轨) 的数混在同一组比"
-            .to_string()
-    } else if full_idle {
-        format!(
+    let reason: String = match mode {
+        SupplyMode::Bypass | SupplyMode::Mixed if !mixed_watts.is_empty() => {
+            power_w_mean = PyVal::from(mixed_mean);
+            power_w_median = PyVal::Float(py_round(crate::pyjson::median_f64(&mixed_watts).unwrap_or(0.0), 4));
+            if bypass {
+                "旁路供电 (已停充, 整机由 USB 直供, 电池电流 ≈ 0): 用 USB 轨与电池轨同一时刻相加 \
+(电池项 ≈ 0), 含充电器转换损耗; 不能和放电态 (电池轨) 的数跨任务比"
+                    .to_string()
+            } else {
+                format!(
+                    "混合供电 (供电不足: USB 输入不够或中途断开, 电池同时在放电, 电池放电均值 {} W, \
+USB 均值 {} W): 用 USB 轨与电池轨同一时刻的功率相加; USB 那份含充电器转换损耗, 不能跨任务比",
+                    PyVal::from(batt_out_mean.map(|v| py_round(v, 3))).py_str(),
+                    PyVal::from(usb_all_mean.map(|v| py_round(v, 3))).py_str()
+                )
+            }
+        }
+        SupplyMode::Bypass | SupplyMode::Mixed => "两轨同刻相加需要的电压/电流读数缺失".to_string(),
+        SupplyMode::FullIdle => format!(
             "电池已满且不进不出 (status=Full, current_now 均值={}): 整机由 USB 供电, 但没进旁路 \
 (charge_suspend.sh 没写状态文件), 量不到可信整机功耗。charge_suspend.sh suspend 会在这种状态下关充电并记旁路",
             PyVal::from(cur_mean).py_str()
-        )
-    } else if !on_battery {
-        format!(
+        ),
+        SupplyMode::NotDischarging | SupplyMode::Unknown => format!(
             "非放电态 (status={}, current_now 均值={}): USB 输入功率里含给电池充电的部分, \
 且充电电流随电量单调衰减, 量不到整机功耗。跑之前用 charge_suspend.sh 停充即可",
             if status.is_empty() { "?" } else { &status },
             PyVal::from(cur_mean).py_str()
-        )
-    } else if vi_watts.is_empty() {
-        "读不到 voltage_now/current_now".to_string()
-    } else {
-        power_w_mean = PyVal::from(avg(&vi_watts));
-        power_w_median = PyVal::Float(py_round(
-            crate::pyjson::median_f64(&vi_watts).unwrap_or(0.0),
-            4,
-        ));
-        format!(
-            "放电态{}, 用 |V x I| (本机 power_now 单位有误, 不采用)",
-            if charge_suspended { "(已停充)" } else { "" }
-        )
+        ),
+        SupplyMode::Battery if vi_watts.is_empty() => "读不到 voltage_now/current_now".to_string(),
+        SupplyMode::Battery => {
+            power_w_mean = PyVal::from(avg(&vi_watts));
+            power_w_median = PyVal::Float(py_round(
+                crate::pyjson::median_f64(&vi_watts).unwrap_or(0.0),
+                4,
+            ));
+            format!(
+                "放电态{}, 用 |V x I| (本机 power_now 单位有误, 不采用)",
+                if charge_suspended { "(已停充)" } else { "" }
+            )
+        }
     };
+    let measured = !matches!(power_w_mean, PyVal::Null);
+    let rail = if measured || !mode.measurable() { mode.rail() } else { "usb" };
 
     let mut out = pyobj! {
         "n_samples" => n,
@@ -988,15 +1191,19 @@ pub fn env_stats(text: &str) -> PyVal {
         "charge_suspended" => charge_suspended,
         "on_battery" => on_battery,
         "bypass" => bypass,
-        "power_valid" => (on_battery || bypass) && !matches!(power_w_mean, PyVal::Null),
-        "power_source" => if on_battery { "battery" } else if bypass { "usb_bypass" } else { "usb" },
-        // 这条数到底走的哪根轨: 电池放电 (|V x I|) / USB 旁路 (|V x I| of usb rail) / 都不是。
-        // 以前这里恒写 "battery", 旁路供电的功耗数也带着 "battery" 标签 —— 两个轨的数
-        // 被同一个名字装着, 跨任务一比就把充电器转换损耗算进了优化效果里。
-        "power_rail" => if on_battery { "battery" } else if bypass { "usb_bypass" } else { "usb" },
-        // 能不能跨任务/跨轮比: 只有电池放电态的数才有同一个口径。旁路数只能跟旁路数比,
+        "power_valid" => mode.measurable() && measured,
+        // battery / usb_plus_battery (旁路与混合同一口径: 两轨同刻相加) / usb (量不到)
+        "power_source" => rail,
+        // 这条数到底走的哪根轨。以前这里恒写 "battery", 旁路供电的功耗数也带着 "battery" 标签 ——
+        // 两个轨的数被同一个名字装着, 跨任务一比就把充电器转换损耗算进了优化效果里。
+        "power_rail" => rail,
+        // 供电方式明细: battery / bypass / mixed / full_idle / not_discharging / unknown
+        "supply_mode" => mode.as_str(),
+        // 明确判出供电不足: USB 在 (或本应在) 供电, 电池却在补
+        "supply_short" => mode == SupplyMode::Mixed,
+        // 能不能跨任务/跨轮比: 只有电池放电态的数才有同一个口径。两轨相加的数只能跟同口径比,
         // 而且含充电器转换损耗。
-        "power_cross_run_comparable" => on_battery && !matches!(power_w_mean, PyVal::Null),
+        "power_cross_run_comparable" => mode == SupplyMode::Battery && measured,
         "fan_state" => fan_state,
         "current_now_ua_mean" => cur_mean,
         "voltage_now_uv_mean" => avg(&voltages),
@@ -1004,6 +1211,9 @@ pub fn env_stats(text: &str) -> PyVal {
         "power_now_plausible" => now_plausible,
         "power_vi_w_mean" => avg(&vi_watts),
         "usb_input_w_mean" => avg(&usb_watts),
+        "battery_out_w_mean" => batt_out_mean.map(|v| py_round(v, 4)),
+        // 两轨同刻相加 (混合口径) 的均值。组里口径不一致时 power_pairs 退回用它统一口径
+        "power_mixed_w_mean" => mixed_mean,
         "power_w_mean" => power_w_mean,
         "power_w_median" => power_w_median,
         "power_usable_reason" => reason,
@@ -1523,9 +1733,18 @@ ENV 2.0 4000000 -1000000 NA 0 0 cpu-1-0 200000\n",
 ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
         );
         assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(true)));
+        // 但 USB 同时还在出 0.5 W: 混合供电, 两轨同刻相加 (审计 #5), 不再只取电池轨的 6.0 W
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
+        assert_eq!(s.get("supply_mode"), Some(&PyVal::Str("mixed".into())));
+        assert_eq!(s.get("power_w_mean").unwrap().as_f64(), Some(6.5));
+        assert_eq!(s.get("battery_capacity_pct"), Some(&PyVal::Str("88".into())));
+        // USB 不出力时才是纯电池轨
+        let s = env_stats(
+            "#battery_status=Not charging\n#battery_capacity=88\n#charge_suspended=yes\n\
+ENV 1.0 4000000 -1500000 NA 5000000 0 cpu-1-0 41000\n",
+        );
         assert_eq!(s.get("power_source"), Some(&PyVal::Str("battery".into())));
         assert_eq!(s.get("power_w_mean").unwrap().as_f64(), Some(6.0));
-        assert_eq!(s.get("battery_capacity_pct"), Some(&PyVal::Str("88".into())));
         assert!(matches!(s.get("power_usable_reason"), Some(PyVal::Str(r)) if r.contains("已停充")));
 
         // status 说 Not charging 但电流是正的 = 还在往电池里灌
@@ -1549,10 +1768,12 @@ ENV 3.0 4374000 -12000 NA 5141000 197000 cpu-1-0 41000\n"
         ));
         assert_eq!(s.get("bypass"), Some(&PyVal::Bool(true)));
         assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(false)));
-        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_bypass".into())));
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
         assert_eq!(s.get("power_valid"), Some(&PyVal::Bool(true)));
         let w = s.get("power_w_mean").unwrap().as_f64().unwrap();
-        assert!((w - (5.158 * 0.216 + 5.141 * 0.197) / 2.0).abs() < 1e-3, "{w}");
+        // 两轨同刻相加: USB 减去电池充进去的 (第 1 条 +29 mA), 加上电池放出来的 (第 2 条 −12 mA)
+        let want = (5.158 * 0.216 - 4.375 * 0.029 + 5.141 * 0.197 + 4.374 * 0.012) / 2.0;
+        assert!((w - want).abs() < 1e-3, "{w} vs {want}");
         // 状态文件说旁路, 但电池其实在充 (+1.9 A): 不算, 功耗 null
         let s = env_stats(&format!("{hdr}ENV 1.0 4436000 1926000 NA 4762000 2134000 cpu-1-0 41000\n"));
         assert_eq!(s.get("bypass"), Some(&PyVal::Bool(false)));
@@ -1581,9 +1802,10 @@ ENV 3.0 4412000 -3000 NA 5083000 1009000 cpu-0-0-1 42800\n";
         // charge_suspend.sh 判了满电旁路: 取 USB 轨
         let s = env_stats(&format!("#battery_status=Full\n#battery_capacity=100\n#charge_suspended=yes\n#charge_mode=bypass\n{rows}"));
         assert_eq!(s.get("bypass"), Some(&PyVal::Bool(true)));
-        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_bypass".into())));
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
         let w = s.get("power_w_mean").unwrap().as_f64().unwrap();
-        assert!((w - (4.920 * 0.806 + 5.083 * 1.009) / 2.0).abs() < 1e-3, "{w}");
+        let want = (4.920 * 0.806 + 4.412 * 0.002 + 5.083 * 1.009 + 4.412 * 0.003) / 2.0;
+        assert!((w - want).abs() < 1e-3, "{w} vs {want}");
         // 满电但拔了线在真放电: 仍是放电态
         let s = env_stats("#battery_status=Full\n#charge_suspended=no\n#charge_mode=\n\
 ENV 1.0 4400000 -900000 NA 0 0 cpu-0-0-1 42000\n");
@@ -1605,8 +1827,8 @@ ENV 1.0 4400000 -900000 NA 0 0 cpu-0-0-1 42000\n");
             "#battery_status=Full\n#battery_capacity=100\n#charge_suspended=yes\n#charge_mode=bypass\n\
 ENV 1.0 4412000 -2000 NA 4920000 806000 cpu-0-4-1 44900\n",
         );
-        assert_eq!(bypass.get("power_source"), Some(&PyVal::Str("usb_bypass".into())));
-        assert_eq!(bypass.get("power_rail"), Some(&PyVal::Str("usb_bypass".into())));
+        assert_eq!(bypass.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
+        assert_eq!(bypass.get("power_rail"), Some(&PyVal::Str("usb_plus_battery".into())));
         assert_eq!(bypass.get("power_valid"), Some(&PyVal::Bool(true)), "本轮两臂同轨相减仍成立");
         assert_eq!(
             bypass.get("power_cross_run_comparable"),
@@ -1875,5 +2097,108 @@ GPU 5.0 17 bad\n",
         let old = env_stats("#battery_status=Discharging\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n");
         assert!(old.get("gpu_max_pwrlevel_seen").is_none());
         assert!(old.get("gpu_clk_mhz_mean").is_none());
+    }
+
+    /// 审计 #5 的现场: 停充后 USB 被限在约 0.49 A, status 仍写 Charging, 电池同时在放。
+    /// 以前判成「usb、非放电态」, power_w_mean=null; 现在两轨同刻相加。
+    #[test]
+    fn usb_limited_plus_battery_is_measured_as_mixed() {
+        let s = env_stats(
+            "#battery_status=Charging\n#battery_capacity=90\n#charge_suspended=yes\n#charge_mode=battery\n\
+ENV 1.0 4000000 -600000 NA 5000000 490000 cpu-1-0 41000\n\
+ENV 3.0 4000000 -800000 NA 5000000 490000 cpu-1-0 41000\n",
+        );
+        assert_eq!(s.get("supply_mode"), Some(&PyVal::Str("mixed".into())));
+        assert_eq!(s.get("supply_short"), Some(&PyVal::Bool(true)));
+        assert_eq!(s.get("power_valid"), Some(&PyVal::Bool(true)));
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
+        // (2.45 + 2.4 + 2.45 + 3.2) / 2
+        assert_eq!(s.get("power_w_mean").unwrap().as_f64(), Some(5.25));
+        assert_eq!(s.get("power_cross_run_comparable"), Some(&PyVal::Bool(false)));
+        assert!(matches!(s.get("power_usable_reason"), Some(PyVal::Str(r)) if r.contains("供电不足")));
+    }
+
+    /// 2026-10-12 Megacity 目标运行 (1012b gen1 ctrl5 / ctrl1): 满电停充旁路时, 同一轮里有的臂
+    /// USB 直供, 有的臂 USB 掉成 0、电池放 0.64 A。两臂必须落在同一个口径上。
+    #[test]
+    fn bypass_and_battery_arms_in_one_bypass_run_share_one_rail() {
+        let hdr = "#battery_status=Full\n#battery_capacity=100\n#charge_suspended=yes\n#charge_mode=bypass\n";
+        let usb_arm = env_stats(&format!("{hdr}ENV 1.0 4412000 0 NA 5000000 566000 cpu-1-0 41000\n"));
+        let bat_arm = env_stats(&format!("{hdr}ENV 1.0 4380000 -640000 NA 0 0 cpu-1-0 41000\n"));
+        assert_eq!(usb_arm.get("supply_mode"), Some(&PyVal::Str("bypass".into())));
+        assert_eq!(bat_arm.get("supply_mode"), Some(&PyVal::Str("mixed".into())));
+        assert_eq!(usb_arm.get("power_source"), bat_arm.get("power_source"));
+        assert_eq!(bat_arm.get("power_w_mean").unwrap().as_f64(), Some(2.8032));
+        assert_eq!(usb_arm.get("power_w_mean").unwrap().as_f64(), Some(2.83));
+    }
+
+    fn penv(valid: bool, rail: &str, w: Option<f64>, mixed: Option<f64>) -> serde_json::Value {
+        serde_json::json!({"power_valid": valid, "power_source": rail, "power_w_mean": w,
+                           "power_mixed_w_mean": mixed, "power_usable_reason": "非放电态 (测试)"})
+    }
+
+    #[test]
+    fn one_bad_arm_drops_only_its_pair() {
+        let ok = |w| penv(true, "battery", Some(w), Some(w));
+        let bad = penv(false, "usb", None, None);
+        let ctrl = [ok(3.0), ok(3.1), bad.clone(), ok(3.2)];
+        let knob = [ok(2.8), ok(2.9), ok(2.7), ok(2.85)];
+        let c: Vec<&serde_json::Value> = ctrl.iter().collect();
+        let k: Vec<&serde_json::Value> = knob.iter().collect();
+        let pp = power_pairs(&c, &k);
+        assert!(pp.usable(), "剔一对剩三对, 照常进判定");
+        assert_eq!(pp.kept(), (3, 3));
+        assert_eq!(pp.knob[2], None, "被剔那一对的候选臂也不进");
+        assert_eq!(pp.dropped.len(), 1);
+        assert_eq!(pp.dropped[0].0, 3);
+        assert!(pp.dropped[0].1.contains("对照臂") && pp.dropped[0].1.contains("非放电态"));
+        let note = pp.note().unwrap();
+        assert!(note.contains("剔除 1 对") && note.contains("第 3 轮"), "{note}");
+        assert_eq!(pp.to_json()["in_verdict"], true);
+        // 剔到每臂不足 2 个: 不进判定, 并说清楚
+        let ctrl = [ok(3.0), bad.clone(), bad.clone()];
+        let knob = [ok(2.8), ok(2.9), ok(2.7)];
+        let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
+        assert!(!pp.usable());
+        assert!(pp.note().unwrap().contains("功耗不进判定"));
+        assert!(pp.possible(1, 1) && !pp.possible(0, 0));
+    }
+
+    #[test]
+    fn mixed_rails_are_unified_to_the_two_rail_sum_or_the_majority_rail() {
+        // 各臂都带两轨相加值: 统一改用它, 一对都不剔
+        let ctrl = [penv(true, "battery", Some(2.8), Some(2.81)), penv(true, "usb_plus_battery", Some(2.9), Some(2.9))];
+        let knob = [penv(true, "usb_plus_battery", Some(2.7), Some(2.7)), penv(true, "usb_plus_battery", Some(2.75), Some(2.75))];
+        let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
+        assert!(pp.unified_to_mixed && pp.usable());
+        assert_eq!(pp.ctrl[0], Some(2.81));
+        assert_eq!(pp.rail.as_deref(), Some("usb_plus_battery"));
+        // 旧证据 (没有两轨相加值): 取臂数多的口径, 少数口径那一对剔除
+        let old_bat = serde_json::json!({"on_battery": true, "power_w_mean": 3.0});
+        let byp = penv(true, "usb_bypass", Some(3.3), None);
+        let ctrl = [old_bat.clone(), old_bat.clone(), byp.clone()];
+        let knob = [old_bat.clone(), old_bat.clone(), old_bat.clone()];
+        let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
+        assert!(!pp.unified_to_mixed);
+        assert_eq!(pp.rail.as_deref(), Some("battery"));
+        assert_eq!(pp.kept(), (2, 2));
+        assert!(pp.dropped[0].1.contains("主口径"), "{:?}", pp.dropped);
+        // 中途停下多出来的单臂: 合格就留
+        let ctrl = [old_bat.clone(), old_bat.clone()];
+        let knob = [old_bat.clone(), old_bat.clone(), old_bat.clone()];
+        let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
+        assert_eq!(pp.kept(), (2, 3));
+        assert!(pp.dropped.is_empty() && pp.note().is_none());
+    }
+
+    #[test]
+    fn usb_supply_note_comes_from_the_charge_suspend_log() {
+        let log = "CHARGE_SUSPENDED_BYPASS /sys/class/qcom-battery/battery_charging_enabled: 1 -> 0\n\
+CHARGE_USB_LIMIT limit_ua=490000 usb_uv=5000000 max_mw=2450 need_mw=6000\n\
+CHARGE_SUPPLY_LOW 供电不足: USB 输入上限约 2450 mW, 低于 6000 mW。\n";
+        assert!(usb_supply_note(log).unwrap().starts_with("供电不足"));
+        let log = "CHARGE_USB_LIMIT limit_ua=3000000 usb_uv=9000000 max_mw=27000 need_mw=6000\n";
+        assert!(usb_supply_note(log).unwrap().contains("max_mw=27000"));
+        assert_eq!(usb_supply_note("CHARGE_SUSPENDED x: 1 -> 0\n"), None);
     }
 }
