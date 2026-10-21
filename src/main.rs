@@ -43,6 +43,7 @@ mod grayab;
 mod graylayer;
 mod shotdiff;
 mod iqjudge;
+mod iqdiagnose;
 mod hypo;
 mod mtools;
 mod caps;
@@ -738,6 +739,10 @@ fn main() {
         Some("bench") => {
             // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
             std::process::exit(bench::run_bench(&args[1..]));
+        }
+        Some("iq-diagnose") => {
+            // 画质降质诊断: 哪种降质 (模糊/振铃/锯齿/色偏/块效应/重影/光晕/闪烁)、在哪 (逐块热图 + 区域 + 最差块截图)
+            std::process::exit(iqdiagnose::run_iq_diagnose(&args[1..]));
         }
         Some("iq-judge") => {
             // 画质验收: 候选与「原生自己跟自己比」同一水平才算画面不变 (稳定块 PSNR/SSIM + 细节能量)
