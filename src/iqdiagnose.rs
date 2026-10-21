@@ -1,6 +1,7 @@
 //! 画质降质诊断: 不判「过不过」, 而是说清**哪种**降质、**在哪里**, 给模型 (超分 / 插帧) 回炉用。
 //!
-//! 通过与否仍由 `phonefarm iq-judge` (对原生自噪声) 和 I2 的插帧判据决定。这里只做诊断:
+//! 整条画质链都不判通过 (2026-10-21 起): `phonefarm iq-judge` / `interp-judge` 只列指标、参考线和对照表,
+//! 由人选。这里补「哪种、在哪」:
 //! 候选与**同一时刻**的原生 (真值) 逐块比, 每块 (默认 32×32) 算一组量, 按规则贴类型, 再按区域汇总。
 //!
 //! 每块的量 (都是候选 C 对原生 R):
@@ -1346,7 +1347,7 @@ fn summary_md(rep: &Value) -> String {
     let f = |v: &Value| v.as_f64().unwrap_or(f64::NAN);
     s.push_str("# 画质降质诊断 (phonefarm iq-diagnose)\n\n");
     s.push_str(&format!(
-        "模式: {}; 块 {} 像素; 块 RGB PSNR ≥ {} dB 记为无明显降质。诊断不判通过与否 (那是 iq-judge 的事), 只说哪种降质、在哪。\n\n",
+        "模式: {}; 块 {} 像素; 块 RGB PSNR ≥ {} dB 记为无明显降质。诊断不判通过与否 (iq-judge / interp-judge 也只列指标与参考线), 只说哪种降质、在哪。\n\n",
         rep["mode"].as_str().unwrap_or(""),
         rep["tile"],
         rep["config"]["ok_db"]
@@ -1632,7 +1633,7 @@ const USAGE: &str = "用法: phonefarm iq-diagnose --ref 原生0.png,原生1.png
   [--ui x0,y0,x1,y1]... [--ui-auto] [--tile 32] [--top 12] [--ok-db 45] [--grid 8[,16]] [--detail-thr 0.3] [--ring-pct 2]
   --ref 与每组 --cand 一一对应 (同一时刻)。--out 必须不存在或为空 (不覆盖任何文件)。
   输出: diagnose.json (机器读) + summary.md (人读) + 每组每帧热图与最差块截图 PNG。
-  退出码: 0 = 诊断完成 (不代表画质通过), 2 = 用法/输入错。";
+  退出码: 0 = 诊断完成 (不代表画质如何), 2 = 用法/输入错。";
 
 /// `phonefarm iq-diagnose ...` 见 [`USAGE`]。
 pub fn run_iq_diagnose(args: &[String]) -> i32 {

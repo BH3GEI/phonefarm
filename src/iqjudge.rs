@@ -12,9 +12,10 @@
 //! - **细节能量比**: 全帧亮度拉普拉斯平方之和, 候选 / 对照取 log2。不要求像素对齐, 场景在动也能比;
 //!   放大变糊 (负) 和锯齿/过锐 (正) 都会偏离 0。
 //!
-//! 判定: 任一指标超出「原生自噪声 + 余量」→ 不通过; 三项都能算且都在内 → 通过;
-//! 有指标算不了 (稳定块太少 / 对照不足 3 张 / 场景细节自己就乱跳) 且没有指标不通过 → 判不了。
-//! 判不了不等于通过: 增益要求画面确认不变。
+//! 输出 (2026-10-21 起): **不判通过 / 不通过**, 只列三项指标、各自的原生自噪声和参考线
+//! (「原生自噪声 + 余量」, 原来的门槛), 离参考线多远, 外加对照表与一句话摘要 (见 `crate::iqsheet`)。
+//! 有指标算不了 (稳定块太少 / 对照不足 3 张 / 场景细节自己就乱跳) 就写明算不了。是否接受由人看表决定。
+//! 内部的 [`IqVerdict`] 只给 eval 的 `image_policy = "gate"` (调用方自选的「超出参考线就不量性能」) 用。
 
 use serde_json::{json, Value};
 
@@ -266,22 +267,15 @@ pub(crate) fn on_mask(p: &PairTiles, mask: &[bool]) -> (f64, f64) {
     (psnr_of_mse(mse), 1.0 - ss)
 }
 
-/// 判定结果。
+/// 各指标相对参考线的位置 (内部用, 不进输出): 只给 eval 的 gate 规则和画质差距的内部状态用。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IqVerdict {
-    Pass,
-    Fail(String),
-    Inconclusive(String),
-}
-
-impl IqVerdict {
-    pub(crate) fn label(&self) -> &'static str {
-        match self {
-            IqVerdict::Pass => "pass",
-            IqVerdict::Fail(_) => "fail",
-            IqVerdict::Inconclusive(_) => "inconclusive",
-        }
-    }
+    /// 三项都算得出, 都在参考线原生一侧。
+    WithinRef,
+    /// 有指标在参考线外 (原因列出是哪几项、各差多少)。
+    BeyondRef(String),
+    /// 没有指标在参考线外, 但有指标算不了。
+    NotComputed(String),
 }
 
 pub(crate) fn r4(x: f64) -> f64 {
@@ -289,23 +283,19 @@ pub(crate) fn r4(x: f64) -> f64 {
 }
 
 /// 主判定。`ctrls` = 同设置 (原生) 重拍, 至少 2 张, 建议 ≥ 4; `knobs` = 候选, 至少 1 张。
-/// 候选应夹在对照之间拍 (对照 → 候选 → 对照): 实测候选在所有对照之后/之前拍时, 场景漂移会让空改动也判不通过。
+/// 候选应夹在对照之间拍 (对照 → 候选 → 对照): 实测候选在所有对照之后/之前拍时, 场景漂移会让空改动也落在参考线外。
 pub(crate) fn judge(ctrls: &[Shot], knobs: &[Shot], cfg: &IqConfig) -> (IqVerdict, Value) {
     let mut rep = json!({"n_ctrl": ctrls.len(), "n_knob": knobs.len()});
     if ctrls.len() < 2 || knobs.is_empty() {
-        let v = IqVerdict::Inconclusive(format!(
-            "对照 {} 张 / 候选 {} 张: 至少要 2 张对照 (建议 4 张) 和 1 张候选",
-            ctrls.len(),
-            knobs.len()
-        ));
-        rep["verdict"] = json!(v.label());
-        return (v, rep);
+        let why = format!("对照 {} 张 / 候选 {} 张: 至少要 2 张对照 (建议 4 张) 和 1 张候选", ctrls.len(), knobs.len());
+        finish_rep(&mut rep, Vec::new(), vec![why.clone()]);
+        return (IqVerdict::NotComputed(why), rep);
     }
     let (w, h) = (ctrls[0].w, ctrls[0].h);
     if ctrls.iter().chain(knobs).any(|s| s.w != w || s.h != h || s.tile != cfg.tile) {
-        let v = IqVerdict::Inconclusive("截图尺寸不一致 (或块边长与配置不符), 比不了".into());
-        rep["verdict"] = json!(v.label());
-        return (v, rep);
+        let why = "截图尺寸不一致 (或块边长与配置不符), 比不了".to_string();
+        finish_rep(&mut rep, Vec::new(), vec![why.clone()]);
+        return (IqVerdict::NotComputed(why), rep);
     }
     let (tw, th) = ctrls[0].tiles();
     let t = cfg.tile;
@@ -357,37 +347,46 @@ pub(crate) fn judge(ctrls: &[Shot], knobs: &[Shot], cfg: &IqConfig) -> (IqVerdic
         }
     }
 
-    let mut checks = serde_json::Map::new();
-    let mut fails: Vec<String> = Vec::new();
+    use crate::iqsheet::{row, Better};
+    let mut rows: Vec<Value> = Vec::new();
+    let mut beyond: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
 
     // ① 细节能量
+    let detail_rule = format!("±(原生自噪声 + {:.2})", cfg.detail_margin);
     if self_detail <= cfg.detail_max_self {
         // 多张候选取离 0 最近的那张 (与 eval::judge_image 取「最好的一次」同口径)
         let v = cross_detail.iter().cloned().fold(f64::INFINITY, |a, b| a.min(b.abs()));
         let signed = cross_detail.iter().cloned().min_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap()).unwrap_or(0.0);
         let lim = self_detail + cfg.detail_margin;
-        let ok = v <= lim;
-        checks.insert("detail_log2".into(), json!({"ok": ok, "value": r4(signed), "limit_abs": r4(lim), "self_max_abs": r4(self_detail)}));
-        if !ok {
-            fails.push(format!(
-                "细节能量比 log2 = {signed:+.3} ({}), 超出原生自噪声 ±{self_detail:.3} + {:.2}",
-                if signed < 0.0 { "变糊/丢细节" } else { "多出高频: 锯齿/过锐/噪点" },
-                cfg.detail_margin
-            ));
+        let note = if signed < 0.0 { "负 = 变糊/丢细节" } else { "正 = 多出高频: 锯齿/过锐/噪点" };
+        rows.push(row("detail_log2", "细节能量比 log2", "", Better::NearZero, Some(signed), Some(self_detail), Some(lim), &detail_rule, note));
+        if v > lim {
+            beyond.push(format!("细节能量比 log2 = {signed:+.3} ({}), 参考线 ±{lim:.3}", if signed < 0.0 { "变糊/丢细节" } else { "多出高频" }));
         }
     } else {
-        missing.push(format!("原生自己跟自己细节能量就差 log2 {self_detail:.2} (> {:.2}), 场景太乱", cfg.detail_max_self));
+        let why = format!("原生自己跟自己细节能量就差 log2 {self_detail:.2} (> {:.2}), 场景太乱", cfg.detail_max_self);
+        rows.push(row("detail_log2", "细节能量比 log2", "", Better::NearZero, None, Some(self_detail), None, &detail_rule, &why));
+        missing.push(why);
     }
 
     // ②③ 稳定块 PSNR / 1-SSIM
-    if ctrls.len() < 3 {
-        missing.push("对照只有 2 张: 稳定块就是按这一对挑的, 自噪声被低估, 稳定块判据不算 (至少 3 张, 建议 4 张)".into());
+    let psnr_rule = format!("min(原生自噪声, {:.0}) − {:.1} dB", cfg.psnr_cap_db, cfg.psnr_margin_db);
+    let dssim_rule = format!("{:.1} × 原生自噪声 + {}", cfg.dssim_factor, cfg.dssim_abs);
+    let stable_missing = if ctrls.len() < 3 {
+        Some("对照只有 2 张: 稳定块就是按这一对挑的, 自噪声被低估, 稳定块指标不算 (至少 3 张, 建议 4 张)".to_string())
     } else if n_stable < cfg.min_stable_tiles {
-        missing.push(format!(
-            "稳定块只有 {n_stable} 块 (< {}): 场景大部分在动, 稳定块判据没有分辨力 —— 换静止场景 / 固定抓帧时间点",
+        Some(format!(
+            "稳定块只有 {n_stable} 块 (< {}): 场景大部分在动, 稳定块指标没有分辨力 —— 换静止场景 / 固定抓帧时间点",
             cfg.min_stable_tiles
-        ));
+        ))
+    } else {
+        None
+    };
+    if let Some(why) = stable_missing {
+        rows.push(row("stable_psnr_db", "稳定块 PSNR", "dB", Better::Higher, None, None, None, &psnr_rule, &why));
+        rows.push(row("stable_dssim", "稳定块 1-SSIM", "", Better::Lower, None, None, None, &dssim_rule, &why));
+        missing.push(why);
     } else {
         let selfs: Vec<(f64, f64)> = ctrl_pairs.iter().map(|p| on_mask(p, &mask)).collect();
         let self_psnr = selfs.iter().map(|s| s.0).fold(f64::INFINITY, f64::min);
@@ -396,32 +395,34 @@ pub(crate) fn judge(ctrls: &[Shot], knobs: &[Shot], cfg: &IqConfig) -> (IqVerdic
         let best_dssim = cross_fr.iter().map(|s| s.1).fold(f64::INFINITY, f64::min);
         let plim = self_psnr.min(cfg.psnr_cap_db) - cfg.psnr_margin_db;
         let dlim = cfg.dssim_factor * self_dssim + cfg.dssim_abs;
-        let pok = best_psnr >= plim;
-        let dok = best_dssim <= dlim;
-        checks.insert("stable_psnr_db".into(), json!({"ok": pok, "value": r4(best_psnr), "limit": r4(plim), "self_min": r4(self_psnr)}));
-        checks.insert("stable_dssim".into(), json!({"ok": dok, "value": r4(best_dssim), "limit": r4(dlim), "self_max": r4(self_dssim)}));
-        if !pok {
-            fails.push(format!("稳定块 PSNR {best_psnr:.2} dB < 原生自噪声 {self_psnr:.2} dB (上限按 {:.0}) − {:.1}", cfg.psnr_cap_db, cfg.psnr_margin_db));
+        rows.push(row("stable_psnr_db", "稳定块 PSNR", "dB", Better::Higher, Some(best_psnr), Some(self_psnr), Some(plim), &psnr_rule, "管亮度/颜色偏移"));
+        rows.push(row("stable_dssim", "稳定块 1-SSIM", "", Better::Lower, Some(best_dssim), Some(self_dssim), Some(dlim), &dssim_rule, "管结构: 模糊、锯齿、块效应"));
+        if best_psnr < plim {
+            beyond.push(format!("稳定块 PSNR {best_psnr:.2} dB, 参考线 {plim:.2} dB"));
         }
-        if !dok {
-            fails.push(format!("稳定块 1-SSIM {best_dssim:.4} > {:.1} × 原生自噪声 {self_dssim:.4} + {}", cfg.dssim_factor, cfg.dssim_abs));
+        if best_dssim > dlim {
+            beyond.push(format!("稳定块 1-SSIM {best_dssim:.4}, 参考线 {dlim:.4}"));
         }
     }
-    rep["checks"] = Value::Object(checks);
-    rep["not_evaluated"] = json!(missing);
-    let v = if !fails.is_empty() {
-        IqVerdict::Fail(fails.join("; "))
+    finish_rep(&mut rep, rows, missing.clone());
+    let v = if !beyond.is_empty() {
+        IqVerdict::BeyondRef(beyond.join("; "))
     } else if missing.is_empty() {
-        IqVerdict::Pass
+        IqVerdict::WithinRef
     } else {
-        IqVerdict::Inconclusive(format!("画面判不了 (没有指标不通过, 但有指标算不了): {}", missing.join("; ")))
+        IqVerdict::NotComputed(format!("没有指标在参考线外, 但有指标算不了: {}", missing.join("; ")))
     };
-    rep["verdict"] = json!(v.label());
-    match &v {
-        IqVerdict::Fail(r) | IqVerdict::Inconclusive(r) => rep["reason"] = json!(r),
-        IqVerdict::Pass => {}
-    }
     (v, rep)
+}
+
+/// 输出统一形状: metrics (指标行) / not_computed / summary / sheet。不写通过与否。
+fn finish_rep(rep: &mut Value, rows: Vec<Value>, missing: Vec<String>) {
+    let extra: Vec<String> = if rows.is_empty() { missing.clone() } else { Vec::new() };
+    rep["summary"] = json!(crate::iqsheet::summary(&rows, &extra));
+    rep["sheet"] = json!(crate::iqsheet::sheet(&[("候选 (最好的一张)".to_string(), rows.clone())]));
+    rep["beyond_ref_line"] = json!(crate::iqsheet::beyond_ref_line(&rows));
+    rep["metrics"] = json!(rows);
+    rep["not_computed"] = json!(missing);
 }
 
 /// 读一张截图: PNG/JPEG 走 image 库, 其余按 screencap 裸帧。
@@ -436,13 +437,16 @@ pub(crate) fn load(path: &str, tile: usize) -> Result<Shot, String> {
     Shot::from_rgba(w, h, px, tile).ok_or_else(|| format!("{path}: 尺寸太小"))
 }
 
-/// `phonefarm iq-judge --ctrl a.png,b.png,c.png --knob d.png[,e.png] [--exclude x0,y0,x1,y1]... [--tile 32] [--stable-db 45]`
-/// 输出 JSON; 退出码 0 = 通过, 1 = 不通过, 3 = 判不了, 2 = 用法错。
+/// `phonefarm iq-judge --ctrl a.png,b.png,c.png --knob d.png[,e.png] [--exclude x0,y0,x1,y1]... [--tile 32] [--stable-db 45] [--sheet out.md]`
+/// 输出 JSON (指标 + 参考线 + 对照表 + 摘要, 不判通过); 退出码 0 = 算完 (不代表画质如何), 2 = 用法/输入错。
+/// 多张候选时对照表每张一列, 外加「最好的一张」一列。
 pub fn run_iq_judge(args: &[String]) -> i32 {
     let usage = "用法: phonefarm iq-judge --ctrl a.png,b.png,c.png[,d.png] --knob k1.png[,k2.png] \
-[--exclude x0,y0,x1,y1]... [--tile 32] [--stable-db 45]\n  对照 = 同设置 (原生) 重拍, 至少 3 张; 候选夹在对照之间拍";
+[--exclude x0,y0,x1,y1]... [--tile 32] [--stable-db 45] [--sheet out.md]\n  对照 = 同设置 (原生) 重拍, 至少 3 张; 候选夹在对照之间拍\n  \
+输出只列指标、原生自噪声、参考线和离参考线多远 (不判通过); --sheet 另存对照表 (Markdown)";
     let mut cfg = IqConfig::default();
     let (mut ctrl, mut knob): (Vec<String>, Vec<String>) = (vec![], vec![]);
+    let mut sheet_out: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_default();
@@ -451,6 +455,7 @@ pub fn run_iq_judge(args: &[String]) -> i32 {
             "--knob" => knob.extend(val().split(',').filter(|s| !s.is_empty()).map(String::from)),
             "--tile" => cfg.tile = val().parse().unwrap_or(cfg.tile).clamp(8, 256),
             "--stable-db" => cfg.stable_db = val().parse().unwrap_or(cfg.stable_db),
+            "--sheet" => sheet_out = Some(val()),
             "--exclude" => {
                 let n: Vec<usize> = val().split(',').filter_map(|x| x.trim().parse().ok()).collect();
                 if n.len() != 4 || n[0] >= n[2] || n[1] >= n[3] {
@@ -477,15 +482,33 @@ pub fn run_iq_judge(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let (v, mut rep) = judge(&c, &k, &cfg);
+    let (_, mut rep) = judge(&c, &k, &cfg);
     rep["ctrl"] = json!(ctrl);
     rep["knob"] = json!(knob);
-    println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
-    match v {
-        IqVerdict::Pass => 0,
-        IqVerdict::Fail(_) => 1,
-        IqVerdict::Inconclusive(_) => 3,
+    if k.len() > 1 {
+        rep["sheet"] = json!(per_knob_sheet(&c, &k, &knob, &cfg, &rep));
     }
+    if let Some(p) = &sheet_out {
+        if let Err(e) = std::fs::write(p, rep["sheet"].as_str().unwrap_or("")) {
+            eprintln!("写不了对照表 {p}: {e}");
+            return 2;
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
+    0
+}
+
+/// 多张候选: 「最好的一张」一列 + 每张一列。
+fn per_knob_sheet(c: &[Shot], k: &[Shot], names: &[String], cfg: &IqConfig, best: &Value) -> String {
+    let rows_of = |r: &Value| r["metrics"].as_array().cloned().unwrap_or_default();
+    let mut cols: Vec<(String, Vec<Value>)> = vec![("最好的一张".to_string(), rows_of(best))];
+    for (shot, name) in k.iter().zip(names) {
+        let one = std::slice::from_ref(shot);
+        let (_, r) = judge(c, one, cfg);
+        let short = std::path::Path::new(name).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
+        cols.push((short, rows_of(&r)));
+    }
+    crate::iqsheet::sheet(&cols)
 }
 
 #[cfg(test)]
@@ -559,11 +582,11 @@ mod tests {
         let base = scene(1);
         let ctrls: Vec<Shot> = (0..4).map(|_| shot(&base)).collect();
         let (v, rep) = judge(&ctrls, &[shot(&base)], &cfg());
-        assert_eq!(v, IqVerdict::Pass, "{rep}");
+        assert_eq!(v, IqVerdict::WithinRef, "{rep}");
         let (v, rep) = judge(&ctrls, &[shot(&half_res(&base))], &cfg());
         match v {
-            IqVerdict::Fail(r) => assert!(r.contains("变糊"), "{r}"),
-            _ => panic!("半分辨率放大必须判不通过: {rep}"),
+            IqVerdict::BeyondRef(r) => assert!(r.contains("变糊"), "{r}"),
+            _ => panic!("半分辨率放大必须落在参考线外: {rep}"),
         }
     }
 
@@ -574,11 +597,15 @@ mod tests {
         let ctrls: Vec<Shot> = (0..4).map(|_| shot(&base)).collect();
         let bright: Vec<u8> = base.iter().map(|v| v.saturating_add(2)).collect();
         let (v, rep) = judge(&ctrls, &[shot(&bright)], &cfg());
-        assert!(matches!(v, IqVerdict::Fail(_)), "{rep}");
-        assert_eq!(rep["checks"]["stable_psnr_db"]["ok"], json!(false), "{rep}");
+        assert!(matches!(v, IqVerdict::BeyondRef(_)), "{rep}");
+        let psnr = rep["metrics"].as_array().unwrap().iter().find(|r| r["key"] == "stable_psnr_db").unwrap().clone();
+        assert!(psnr["to_ref_line"].as_f64().unwrap() < 0.0, "{rep}");
+        assert!(rep["beyond_ref_line"].as_array().unwrap().contains(&json!("稳定块 PSNR")), "{rep}");
+        assert!(rep.get("verdict").is_none(), "输出不再有通过与否: {rep}");
+        assert!(rep["sheet"].as_str().unwrap().contains("参考线外"), "{rep}");
     }
 
-    /// 场景里有个物体在动: 空改动应通过 (运动块被排掉), 半分辨率应不通过。
+    /// 场景里有个物体在动: 空改动应在参考线内 (运动块被排掉), 半分辨率应在参考线外。
     /// 这正是全帧 PSNR 做不到的: 两者全帧 PSNR 都被运动主导。
     #[test]
     fn moving_object_is_masked_out() {
@@ -587,37 +614,37 @@ mod tests {
         // 对照: 物体在 20 / 60 / 100 / 140, 候选夹在中间 (80)
         let ctrls = vec![at(20), at(60), at(100), at(140)];
         let (v, rep) = judge(&ctrls, &[at(80)], &cfg());
-        assert_eq!(v, IqVerdict::Pass, "{rep}");
+        assert_eq!(v, IqVerdict::WithinRef, "{rep}");
         assert!(rep["tiles"]["stable"].as_u64().unwrap() < 48, "运动块要被排掉: {rep}");
         let (v, rep) = judge(&ctrls, &[shot(&half_res(&with_object(base.clone(), 80, 70)))], &cfg());
-        assert!(matches!(v, IqVerdict::Fail(_)), "{rep}");
+        assert!(matches!(v, IqVerdict::BeyondRef(_)), "{rep}");
     }
 
-    /// 整个画面都在变: 稳定块判据算不了, 不能因此判通过。
+    /// 整个画面都在变: 稳定块判据算不了, 不能因此当成在参考线内。
     #[test]
     fn whole_frame_moving_is_inconclusive_not_pass() {
         let ctrls: Vec<Shot> = (10..14).map(|s| shot(&scene(s))).collect();
         let (v, rep) = judge(&ctrls, &[shot(&scene(20))], &cfg());
         match v {
-            IqVerdict::Inconclusive(r) => assert!(r.contains("稳定块只有"), "{r}"),
-            _ => panic!("整帧都在动必须判不了: {rep}"),
+            IqVerdict::NotComputed(r) => assert!(r.contains("稳定块只有"), "{r}"),
+            _ => panic!("整帧都在动必须算不了: {rep}"),
         }
     }
 
-    /// 对照不足 3 张: 稳定块判据不算; 只有 1 张对照: 直接判不了。
+    /// 对照不足 3 张: 稳定块判据不算; 只有 1 张对照: 直接算不了。
     #[test]
     fn too_few_controls() {
         let base = scene(4);
         let (v, _) = judge(&[shot(&base)], &[shot(&base)], &cfg());
-        assert!(matches!(v, IqVerdict::Inconclusive(_)));
+        assert!(matches!(v, IqVerdict::NotComputed(_)));
         let (v, rep) = judge(&[shot(&base), shot(&base)], &[shot(&base)], &cfg());
         match v {
-            IqVerdict::Inconclusive(r) => assert!(r.contains("2 张"), "{r}"),
+            IqVerdict::NotComputed(r) => assert!(r.contains("2 张"), "{r}"),
             _ => panic!("{rep}"),
         }
-        // 但细节判据照算: 2 张对照 + 半分辨率候选 → 仍判不通过
+        // 但细节判据照算: 2 张对照 + 半分辨率候选 → 仍在参考线外
         let (v, rep) = judge(&[shot(&base), shot(&base)], &[shot(&half_res(&base))], &cfg());
-        assert!(matches!(v, IqVerdict::Fail(_)), "{rep}");
+        assert!(matches!(v, IqVerdict::BeyondRef(_)), "{rep}");
     }
 
     /// 锯齿 (隔点取样, 关抗锯齿的样子) 让细节能量变大, 也要抓到。
@@ -639,8 +666,9 @@ mod tests {
         }
         let ctrls: Vec<Shot> = (0..4).map(|_| shot(&resolved)).collect();
         let (v, rep) = judge(&ctrls, &[shot(&aliased)], &cfg());
-        assert!(matches!(v, IqVerdict::Fail(_)), "{rep}");
-        assert!(rep["checks"]["detail_log2"]["value"].as_f64().unwrap() > 0.0, "{rep}");
+        assert!(matches!(v, IqVerdict::BeyondRef(_)), "{rep}");
+        let det = rep["metrics"].as_array().unwrap().iter().find(|r| r["key"] == "detail_log2").unwrap().clone();
+        assert!(det["value"].as_f64().unwrap() > 0.0, "{rep}");
     }
 
     #[test]
@@ -650,7 +678,7 @@ mod tests {
         let mut c = cfg();
         c.exclude.push((0, 0, 64, 64)); // 2×2 块
         let (v, rep) = judge(&ctrls, &[shot(&base)], &c);
-        assert_eq!(v, IqVerdict::Pass);
+        assert_eq!(v, IqVerdict::WithinRef);
         assert_eq!(rep["tiles"]["usable"], json!(44));
         // UI 区域里的变化不影响判定
         let mut ui = base.clone();
@@ -660,7 +688,7 @@ mod tests {
             }
         }
         let (v, rep) = judge(&ctrls, &[shot(&ui)], &c);
-        assert_eq!(v, IqVerdict::Pass, "{rep}");
+        assert_eq!(v, IqVerdict::WithinRef, "{rep}");
     }
 
     #[test]
@@ -677,6 +705,6 @@ mod tests {
         let a = shot(&scene(7));
         let b = Shot::from_rgb(W / 2, H, &vec![0u8; W / 2 * H * 3], 32).unwrap();
         let (v, _) = judge(&[shot(&scene(7)), shot(&scene(7)), a], &[b], &cfg());
-        assert!(matches!(v, IqVerdict::Inconclusive(_)));
+        assert!(matches!(v, IqVerdict::NotComputed(_)));
     }
 }

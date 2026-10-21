@@ -1,9 +1,11 @@
 //! 判定的「记分卡」与三处去掉的一票否决 (judge/v1-scorecard)。
 //!
-//! 1. **画质不再一票否决基于模型的候选**: `protocol.image_policy`
-//!    - `"gate"` (缺省): 原来的做法, 画面不过门槛就 ABORT, 不量性能。
-//!    - `"report"`: 给基于模型的超分 / 插帧候选用。画面判据照跑, 结果记成 `verdict.quality_gap`,
-//!      性能判定照算。性能过了而画面差距没关闭 → 状态 `KEEP_WITH_QUALITY_GAP`, 绝不是 PASS。
+//! 1. **画质不判通过, 只列数** (2026-10-21 用户: 「不要『通过』这个指标。都列出来, 让人选就行」):
+//!    `verdict.quality_gap` 是指标行 + 参考线 + 对照表 + 摘要 (见 `crate::iqsheet`), 没有通过 / 不通过字段。
+//!    `protocol.image_policy` 只决定参考线要不要拿来省上机时间:
+//!    - `"gate"` (缺省): 有指标在参考线外就 ABORT, 不量性能 (调用方自选的省时规则, 原行为)。
+//!    - `"report"`: 给基于模型的超分 / 插帧候选用。画质照列, 性能照判。性能有显著改善而画质有指标
+//!      在参考线外 / 算不了 → 状态 `KEEP_WITH_QUALITY_GAP` (留给人看表选), 不是 PASS。
 //! 2. **锁帧时帧时变长不一定算退化**: 见 [`capped_budget_check`]。
 //! 3. **臂内悄悄回退**: 旋钮自报回退 / 部分施加的那一臂记「未按设计施加」, 连同同一轮的对照臂
 //!    一起拿出统计, 见 [`knob_application`]。
@@ -50,25 +52,18 @@ impl ImagePolicy {
 /// 状态: 性能过了, 画面差距没关闭 (只在 image_policy=report 时出现)。
 pub(crate) const KEEP_WITH_QUALITY_GAP: &str = "KEEP_WITH_QUALITY_GAP";
 
-/// 画面差距的状态。
+/// 画质相对参考线的内部状态 (只用来定 status, 不进输出)。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum GapState {
-    /// 画面与原生同水平 (判据通过)。
+    /// 各指标都算得出且都在参考线原生一侧。
     Closed,
-    /// 判据不通过: 有差距。
+    /// 有指标在参考线外。
     Open(String),
-    /// 判不了 / 没比 (截图失败、场景太乱、没有静态画面)。
+    /// 有指标算不了 / 没比 (截图失败、场景太乱、没有静态画面)。
     Unverified(String),
 }
 
 impl GapState {
-    pub(crate) fn label(&self) -> &'static str {
-        match self {
-            GapState::Closed => "closed",
-            GapState::Open(_) => "open",
-            GapState::Unverified(_) => "unverified",
-        }
-    }
     pub(crate) fn reason(&self) -> Option<&str> {
         match self {
             GapState::Closed => None,
@@ -77,18 +72,51 @@ impl GapState {
     }
 }
 
-/// `verdict.quality_gap`。`detail` = 画面判据原样 (iq-judge 报告 / PSNR 门槛 / storeop-check)。
-pub(crate) fn quality_gap_json(policy: ImagePolicy, state: &GapState, source: &str, detail: Value) -> Value {
+/// `verdict.quality_gap`: 指标行 (`metrics`) + 对照表 (`sheet`) + 摘要 (`summary`), 不判通过。
+/// `rows` = 画质指标行 (见 [`image_rows`]); `detail` = 画面比对原样 (iq-judge 报告 / PSNR / storeop-check)。
+/// `state` 只用来补「算不了」的原因, 不输出成通过与否。
+pub(crate) fn quality_gap_json(policy: ImagePolicy, state: &GapState, source: &str, rows: Vec<Value>, detail: Value) -> Value {
+    let mut nc: Vec<String> = Vec::new();
+    if let GapState::Unverified(r) = state {
+        nc.push(r.clone());
+    }
+    let mut beyond = crate::iqsheet::beyond_ref_line(&rows);
+    if let (GapState::Open(r), true) = (state, beyond.is_empty()) {
+        // 没有数值行的来源 (storeop-check 现场开关): 原因原样列出
+        beyond.push(r.clone());
+    }
     json!({
         "policy": policy.as_str(),
-        "state": state.label(),
-        "reason": state.reason(),
         "source": source,
+        "metrics": rows,
+        "beyond_ref_line": beyond,
+        "not_computed": nc,
+        "summary": crate::iqsheet::summary(&rows, &nc),
+        "sheet": crate::iqsheet::sheet(&[("候选".to_string(), rows.clone())]),
         "detail": detail,
-        // iq-diagnose (quality/q1-diagnose) 还没合进来: 合进来后在这里放逐块的差距诊断
         "diagnose": Value::Null,
-        "diagnose_note": "iq-diagnose 未合入本分支 (quality/q1-diagnose 尚无提交), 差距诊断请对 evidence_dir 里的截图离线跑",
+        "diagnose_note": "逐块看哪种降质、在哪: 对 evidence_dir 里的截图离线跑 phonefarm iq-diagnose",
     })
+}
+
+/// 画质指标行: iq-judge 的三项 (稳定块 PSNR / 1-SSIM / 细节能量) + 全帧 PSNR (对同设置重拍噪声底)。
+/// `iq_rep` = iq-judge 报告 (没有就 Null); 全帧 PSNR 的参考线 = 噪声底 − `margin_db`。
+pub(crate) fn image_rows(iq_rep: &Value, psnr_used: Option<f64>, noise_floor: Option<f64>, margin_db: f64) -> Vec<Value> {
+    let mut rows: Vec<Value> = iq_rep["metrics"].as_array().cloned().unwrap_or_default();
+    if psnr_used.is_some() || noise_floor.is_some() {
+        rows.push(crate::iqsheet::row(
+            "frame_psnr_db",
+            "全帧 PSNR (同位置截图)",
+            "dB",
+            crate::iqsheet::Better::Higher,
+            psnr_used,
+            noise_floor,
+            noise_floor.map(|n| n - margin_db),
+            &format!("同设置重拍噪声底 − {margin_db:.1} dB"),
+            "场景在动时被运动主导, 只作参照",
+        ));
+    }
+    rows
 }
 
 /// 性能判定之后定最终状态。`perf_keep` = 统计判定「有显著改善且无显著退化」。
@@ -116,10 +144,10 @@ pub(crate) fn finalize_status(report: &mut Value, perf_keep: bool, policy: Image
         report["verdict"]["would_keep"] = json!(true);
         let why = state.reason().unwrap_or("");
         report["verdict"]["reason"] = json!(if status == KEEP_WITH_QUALITY_GAP {
-            format!("性能统计通过, 画面差距没关闭 ({why}): 记为「有收益但画质有差距」, 不是增益 (统计结果: {stat_reason})")
+            format!("性能有显著改善; 画质有指标在参考线外或算不了 ({why}): 画质数字与对照表见 verdict.quality_gap, 由人选 (统计结果: {stat_reason})")
         } else {
             report["verdict"]["image_unverified"] = json!(why);
-            format!("性能统计通过, 但画面没能确认不变 ({why}), 不算增益 (统计结果: {stat_reason})")
+            format!("性能有显著改善, 但画质有指标算不了 ({why}); image_policy=gate 下不记为增益 (统计结果: {stat_reason})")
         });
     }
 }
@@ -355,9 +383,10 @@ pub(crate) fn is_safety_reason(r: &str) -> bool {
     ["结温", "超过上限", "崩溃", "crash", "clean_exit=false", "进程没了", "闪退"].iter().any(|k| r.contains(k))
 }
 
-/// gate 策略下画面没过门槛的 ABORT 理由 (不是「没测成」, 是按 gate 停下的)。
+/// gate 策略下画面超出参考线的 ABORT 理由 (不是「没测成」, 是按 gate 停下的)。旧回包的两种前缀也认。
+pub(crate) const IMAGE_GATE_PREFIX: &str = "画面超出参考线";
 pub(crate) fn is_image_gate_reason(r: &str) -> bool {
-    r.starts_with("画面出错") || r.starts_with("画质判据不通过")
+    r.starts_with(IMAGE_GATE_PREFIX) || r.starts_with("画面出错") || r.starts_with("画质判据不通过")
 }
 
 fn metric_row(dimension: &str, metric: &str, pm: &Value, unavailable_reason: Option<String>) -> Value {
@@ -421,22 +450,23 @@ pub(crate) fn build(report: &Value, policy: ImagePolicy) -> Value {
         not_run("power", "power_w_mean")
     };
 
-    // 画质差距
+    // 画质: 只列数 (指标 + 参考线 + 离参考线多远), 不给 better/worse
     let gap = &report["verdict"]["quality_gap"];
     let image = if gap.is_object() {
-        let (st, why) = match gap["state"].as_str() {
-            Some("closed") => ("same", "画面与原生自噪声同水平".to_string()),
-            Some("open") => ("worse", format!("画面差距没关闭: {}", gap["reason"].as_str().unwrap_or(""))),
-            _ => ("not_measured", format!("画面没判成: {}", gap["reason"].as_str().unwrap_or(""))),
-        };
-        json!({"dimension": "image_quality_gap", "metric": gap["source"], "value": gap["detail"]["checks"], "unit": null,
-            "ci95": null, "status": st, "reason": why})
+        let has_rows = gap["metrics"].as_array().is_some_and(|a| !a.is_empty()) || gap["beyond_ref_line"].as_array().is_some_and(|a| !a.is_empty());
+        let why = gap["summary"].as_str().map(String::from).unwrap_or_else(|| {
+            // 旧回包 (state/reason 形状)
+            gap["reason"].as_str().unwrap_or("").to_string()
+        });
+        json!({"dimension": "image_quality_gap", "metric": gap["source"], "value": gap["metrics"], "unit": null,
+            "ci95": null, "status": if has_rows { "listed" } else { "not_measured" },
+            "beyond_ref_line": gap["beyond_ref_line"], "sheet": gap["sheet"], "reason": why})
     } else if overall == "gated" {
         json!({"dimension": "image_quality_gap", "metric": "image_gate", "value": null, "unit": null, "ci95": null,
-            "status": "worse", "reason": format!("image_policy=gate: {reason}")})
+            "status": "listed", "reason": format!("image_policy=gate (调用方选的省时规则): {reason}")})
     } else if report["verdict"]["measure_only"].as_bool() == Some(true) {
         json!({"dimension": "image_quality_gap", "metric": "measure_only", "value": null, "unit": null, "ci95": null,
-            "status": "worse", "reason": "只量上限的旋钮: 画面必然变化, 不按画面判"})
+            "status": "not_measured", "reason": "只量上限的旋钮: 画面必然变化, 不按画面看"})
     } else {
         json!({"dimension": "image_quality_gap", "metric": null, "value": null, "unit": null, "ci95": null,
             "status": "not_measured", "reason": "本次没有画面比对 (这类改动不比画面, 或没走到那一步)"})
@@ -460,7 +490,7 @@ pub(crate) fn build(report: &Value, policy: ImagePolicy) -> Value {
             "unit": null, "ci95": null, "status": "worse",
             "reason": format!("剔除了一部分对 (环境不一致 {env_dropped} 对, 未按设计施加 {unapplied} 对, 功耗不可信 {power_dropped} 对), 其余照判")}),
         "gated" => json!({"dimension": "measurement_validity", "metric": null, "value": validity_value, "unit": null, "ci95": null,
-            "status": "not_measured", "reason": "按 image_policy=gate 停在画面门槛, 性能没量"}),
+            "status": "not_measured", "reason": "按 image_policy=gate 停在画质参考线, 性能没量"}),
         _ => json!({"dimension": "measurement_validity", "metric": null, "value": validity_value, "unit": null, "ci95": null,
             "status": "same", "reason": "各臂按设计测成"}),
     };
@@ -472,7 +502,7 @@ pub(crate) fn build(report: &Value, policy: ImagePolicy) -> Value {
         "image_policy": policy.as_str(),
         "rows": [frame, power, image, validity, fps],
         "rule": "只有安全 (结温上限、崩溃) 和「没测成」让整个结果无效; 其它任何单项变差只记在那一行。\
-                 status: better / same / worse / not_measured",
+                 status: better / same / worse / not_measured; 画质那一行恒为 listed (只列指标、参考线、对照表, 不判通过, 由人选)",
     })
 }
 
@@ -512,17 +542,19 @@ mod tests {
     fn report_policy_with_open_gap_is_never_plain_pass() {
         let mut r = rep_keep();
         let st = GapState::Open("细节能量比 log2 = -0.6 (变糊/丢细节)".into());
-        finalize_status(&mut r, true, ImagePolicy::Report, &st, quality_gap_json(ImagePolicy::Report, &st, "iq_judge", json!({})));
+        finalize_status(&mut r, true, ImagePolicy::Report, &st, quality_gap_json(ImagePolicy::Report, &st, "iq_judge", vec![], json!({})));
         assert_eq!(r["status"], KEEP_WITH_QUALITY_GAP);
         assert_eq!(r["verdict"]["is_pareto_improvement"], false, "不是 PASS 就不许让上层当成可采纳");
         assert_eq!(r["verdict"]["would_keep"], true);
-        assert_eq!(r["verdict"]["quality_gap"]["state"], "open");
-        assert!(r["verdict"]["reason"].as_str().unwrap().contains("画面差距没关闭"));
+        assert!(r["verdict"]["quality_gap"].get("state").is_none(), "画质不输出通过与否");
+        assert_eq!(r["verdict"]["quality_gap"]["beyond_ref_line"], json!(["细节能量比 log2 = -0.6 (变糊/丢细节)"]));
+        assert!(r["verdict"]["reason"].as_str().unwrap().contains("参考线外"));
         // 判不了也不是 PASS
         let mut r = rep_keep();
         let st = GapState::Unverified("稳定块只有 3 块".into());
-        finalize_status(&mut r, true, ImagePolicy::Report, &st, quality_gap_json(ImagePolicy::Report, &st, "iq_judge", json!({})));
+        finalize_status(&mut r, true, ImagePolicy::Report, &st, quality_gap_json(ImagePolicy::Report, &st, "iq_judge", vec![], json!({})));
         assert_eq!(r["status"], KEEP_WITH_QUALITY_GAP);
+        assert_eq!(r["verdict"]["quality_gap"]["not_computed"], json!(["稳定块只有 3 块"]));
         // 差距关闭 → PASS
         let mut r = rep_keep();
         finalize_status(&mut r, true, ImagePolicy::Report, &GapState::Closed, json!({}));
@@ -531,16 +563,16 @@ mod tests {
         // 性能没过 → REJECT, 差距照记
         let mut r = rep_keep();
         let st = GapState::Open("x".into());
-        finalize_status(&mut r, false, ImagePolicy::Report, &st, quality_gap_json(ImagePolicy::Report, &st, "iq_judge", json!({})));
+        finalize_status(&mut r, false, ImagePolicy::Report, &st, quality_gap_json(ImagePolicy::Report, &st, "iq_judge", vec![], json!({})));
         assert_eq!(r["status"], "REJECT");
-        assert_eq!(r["verdict"]["quality_gap"]["state"], "open");
+        assert!(r["verdict"]["quality_gap"]["summary"].as_str().unwrap().contains("不判通过"));
     }
 
     #[test]
     fn gate_policy_keeps_old_behaviour_for_unverified_image() {
         let mut r = rep_keep();
         let st = GapState::Unverified("画质判据没跑成".into());
-        finalize_status(&mut r, true, ImagePolicy::Gate, &st, quality_gap_json(ImagePolicy::Gate, &st, "iq_judge", json!({})));
+        finalize_status(&mut r, true, ImagePolicy::Gate, &st, quality_gap_json(ImagePolicy::Gate, &st, "iq_judge", vec![], json!({})));
         assert_eq!(r["status"], "REJECT");
         assert_eq!(r["verdict"]["image_unverified"], "画质判据没跑成");
         assert_eq!(r["verdict"]["would_keep"], true);
@@ -670,13 +702,16 @@ mod tests {
         let mut r = judged(KEEP_WITH_QUALITY_GAP, "显著改善",
             json!({"status": "无显著变化", "diff_pct": 0.5, "p": 0.4, "ci95": [-0.1, 0.3], "a_mean": 33.0, "b_mean": 33.2}));
         let st = GapState::Open("稳定块 PSNR 38 < 41".into());
-        r["verdict"]["quality_gap"] = quality_gap_json(ImagePolicy::Report, &st, "iq_judge", json!({"checks": {"stable_psnr_db": {"ok": false}}}));
+        let rows = vec![crate::iqsheet::row("stable_psnr_db", "稳定块 PSNR", "dB", crate::iqsheet::Better::Higher, Some(38.0), Some(42.0), Some(41.0), "r", "")];
+        r["verdict"]["quality_gap"] = quality_gap_json(ImagePolicy::Report, &st, "iq_judge", rows, json!({}));
         let sc = build(&r, ImagePolicy::Report);
         assert_eq!(sc["overall"], "valid");
         assert_eq!(row(&sc, "power")["status"], "better");
         assert_eq!(row(&sc, "power")["ci95"], json!([-0.4, -0.2]));
         assert_eq!(row(&sc, "frame_time")["status"], "same");
-        assert_eq!(row(&sc, "image_quality_gap")["status"], "worse");
+        assert_eq!(row(&sc, "image_quality_gap")["status"], "listed", "画质只列数, 不判好坏");
+        assert_eq!(row(&sc, "image_quality_gap")["value"][0]["to_ref_line"], json!(-3.0));
+        assert!(row(&sc, "image_quality_gap")["sheet"].as_str().unwrap().contains("参考线外 3.00"));
         assert_eq!(row(&sc, "measurement_validity")["status"], "same");
         for d in ["frame_time", "power", "image_quality_gap", "measurement_validity"] {
             let x = row(&sc, d);
@@ -706,9 +741,11 @@ mod tests {
         assert_eq!((sc["overall"].as_str(), sc["invalid_kind"].as_str()), (Some("invalid"), Some("not_measured")));
         assert_eq!(row(&sc, "frame_time")["status"], "not_measured");
         // gate 下画面门槛停下: 不是「无效」, 画质一行记变差
-        let sc = build(&abort("画面出错: PSNR 22 dB < 噪声底"), ImagePolicy::Gate);
+        let sc = build(&abort("画面超出参考线 (全帧 PSNR): 22 dB < 噪声底"), ImagePolicy::Gate);
         assert_eq!(sc["overall"], "gated");
-        assert_eq!(row(&sc, "image_quality_gap")["status"], "worse");
+        assert_eq!(row(&sc, "image_quality_gap")["status"], "listed");
+        // 旧回包的前缀也认
+        assert_eq!(build(&abort("画面出错: PSNR 22 dB < 噪声底"), ImagePolicy::Gate)["overall"], "gated");
         // 帧时显著变差 + 功耗缺数据: 照样 valid, 只在各自那一行
         let mut r = judged("REJECT", "缺数据", json!({"status": "显著变差", "diff_pct": 9.0, "p": 0.01, "ci95": [1, 2], "a_mean": 16, "b_mean": 17.4}));
         r["verdict"]["per_metric"].as_object_mut().unwrap().remove("power_w_mean");

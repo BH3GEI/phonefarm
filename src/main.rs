@@ -43,6 +43,7 @@ mod grayab;
 mod graylayer;
 mod shotdiff;
 mod iqjudge;
+mod iqsheet;
 mod interpjudge;
 mod scorecard;
 mod iqdiagnose;

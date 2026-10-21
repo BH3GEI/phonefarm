@@ -3648,7 +3648,7 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
         if let Err(why) = &verdict {
             if !policy.is_report() {
                 report["conditions_observed"] = json!({"image_check": {"method": "storeop_check_live", "result": v}});
-                report["verdict"]["reason"] = json!(format!("画面出错: {why}"));
+                report["verdict"]["reason"] = json!(format!("{} (storeop-check 现场开关, image_policy=gate 不量性能): {why}", crate::scorecard::IMAGE_GATE_PREFIX));
                 report["evidence_dir"] = json!(evidence.display().to_string());
                 return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
             }
@@ -3952,16 +3952,16 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
         if policy.is_report() {
             gap_open.push(format!("全帧 PSNR: {reason}"));
         } else if abort_reason.is_none() {
-            abort_reason = Some(format!("画面出错: {reason} (截图见 evidence_dir)"));
+            abort_reason = Some(format!("{} (全帧 PSNR, image_policy=gate 不量性能): {reason} (截图见 evidence_dir)", crate::scorecard::IMAGE_GATE_PREFIX));
         }
     }
     let mut image_unverified: Option<String> = None;
     match iq.as_ref().map(|(v, _)| v) {
-        Some(crate::iqjudge::IqVerdict::Fail(reason)) if policy.is_report() => gap_open.push(format!("画质判据: {reason}")),
-        Some(crate::iqjudge::IqVerdict::Fail(reason)) if abort_reason.is_none() => {
-            abort_reason = Some(format!("画面出错 (画质判据): {reason} (截图见 evidence_dir)"));
+        Some(crate::iqjudge::IqVerdict::BeyondRef(reason)) if policy.is_report() => gap_open.push(format!("画质指标: {reason}")),
+        Some(crate::iqjudge::IqVerdict::BeyondRef(reason)) if abort_reason.is_none() => {
+            abort_reason = Some(format!("{} (画质指标, image_policy=gate 不量性能): {reason} (截图见 evidence_dir)", crate::scorecard::IMAGE_GATE_PREFIX));
         }
-        Some(crate::iqjudge::IqVerdict::Inconclusive(r)) => image_unverified = Some(r.clone()),
+        Some(crate::iqjudge::IqVerdict::NotComputed(r)) => image_unverified = Some(r.clone()),
         _ => {}
     }
     let gap_state = if !gap_open.is_empty() {
@@ -3974,10 +3974,15 @@ fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<
     let gap_json = crate::scorecard::quality_gap_json(
         policy,
         &gap_state,
-        if live_check.is_some() { "storeop_check_live" } else { "iq_judge+psnr_gate" },
+        if live_check.is_some() { "storeop_check_live" } else { "iq_judge+psnr" },
+        if live_check.is_some() {
+            Vec::new()
+        } else {
+            crate::scorecard::image_rows(iq.as_ref().map(|(_, r)| r).unwrap_or(&Value::Null), best_knob, noise_floor, image_gate.margin_db)
+        },
         match (&live_check, &iq) {
             (Some(v), _) => json!({"storeop_check": v}),
-            (None, Some((_, rep))) => json!({"checks": rep["checks"], "iq": rep, "psnr_db_used": best_knob, "noise_floor_db": noise_floor}),
+            (None, Some((_, rep))) => json!({"iq": rep, "psnr_db_used": best_knob, "noise_floor_db": noise_floor}),
             _ => Value::Null,
         },
     );
