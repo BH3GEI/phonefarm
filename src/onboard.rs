@@ -1373,7 +1373,7 @@ fn measure(dev: &Dev, m: &MeasureCfg<'_>) -> (Vec<RoundStat>, Vec<Value>, bool, 
         let pre = dev.cap();
         let label = format!("onboard_{short}_r{i}");
         let dir = out.join("rounds").join(format!("r{i}"));
-        let r = run_one_with(&dev.serial, &label, &dir, cap_s, workload, pkg, comm);
+        let r = run_one_with(&dev.serial, &label, &dir, cap_s, workload, pkg, comm, None);
         std::thread::sleep(Duration::from_millis(1500));
         let post = dev.cap();
         // 原始 trace 压缩留档 (判据可离线重放, 但一轮十几 MB, 不压磁盘吃不消)

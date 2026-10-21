@@ -321,6 +321,8 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(1).max(1) as u32;
     let seconds = req["workload"]["seconds"].as_i64().unwrap_or(30).max(1) as u64;
     let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
+    let spf = crate::eval::declared_spf(req);
+    let fps_cap_declared = crate::eval::declared_fps_cap(req);
     let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
     let empty = BTreeMap::new();
     let (mut knob_runs, mut ctrl_runs, mut cool_log, mut checks) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -349,7 +351,7 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                 break 'pairs;
             }
             let arm_launch = crate::eval::LaunchSpec { extras, marker: marker.clone(), static_extras: None };
-            let res = run_one_launch(serial, &format!("wb_{tag}"), &dir, seconds, &pkg, req["workload"]["render_comm"].as_str(), &arm_launch, false);
+            let res = run_one_launch(serial, &format!("wb_{tag}"), &dir, seconds, &pkg, req["workload"]["render_comm"].as_str(), &arm_launch, false, None, spf);
             // 采完等 harness 走完路线落 json, 再核对旋钮
             let out = wait_out_json(serial, &pkg);
             let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
@@ -402,6 +404,9 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         "arm_order": crate::curtail::order_note(order_seed, rounds as usize),
         "charge_settle": charge_settle,
         "env_consistency": consistency_note(&dropped, true),
+        "marker_to_capture": crate::eval::marker_delay_note(&knob_runs, &ctrl_runs),
+        "spf_declared": spf,
+        "fps_cap_declared": fps_cap_declared,
         "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
     });
     report["evidence_dir"] = json!(evidence.display().to_string());
@@ -418,9 +423,11 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         ));
         return done(&report);
     }
-    let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
+    let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds, fps_cap_declared);
     report["verdict"] = verdict;
     append_dropped_reason(&mut report, &dropped);
+    let md = report["conditions_observed"]["marker_to_capture"].clone();
+    crate::eval::append_marker_delay_reason(&mut report, &md);
     let mut m = report["metrics"].take();
     let psnr = m["psnr_db"].clone();
     let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);

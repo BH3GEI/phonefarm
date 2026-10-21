@@ -928,6 +928,9 @@ pub struct Cond {
     pub lock_freq: bool,
     /// 锁频时钉在哪一档 (缺省: 锁频前的 max_pwrlevel)。档位号越大频率越低。
     pub lock_level: Option<u32>,
+    /// 审计 #9: 只钉 GPU 档位 (kgsl min/max_pwrlevel), CPU 调速器与总线不动 (与 --lock-freq 互斥)。
+    /// 2026-10-21 run1/run2 实测同一配置帧率在 231–347 fps 之间跳台阶, 就是档位没受控。
+    pub lock_gpu_level: Option<u32>,
     /// 等冷时还要等 GPU 热限档 (kgsl thermal_pwrlevel) 回到 <= 这一档。None = 不等。
     ///
     /// 2026-10-21 红魔实测: SoC 结温 2 秒内就回到 45C 以下, 但 thermal_pwrlevel 一组里从 0
@@ -945,7 +948,7 @@ impl Cond {
             "capdur_s": self.capdur_s, "cool_c": self.cool_c, "cool_timeout_s": self.cool_timeout_s,
             "temp_cap_c": self.temp_cap_c, "charge_suspend": self.charge_suspend,
             "fan": "off",
-            "lock_freq": self.lock_freq, "lock_level": self.lock_level, "scene": rb::SCENE,
+            "lock_freq": self.lock_freq, "lock_level": self.lock_level, "lock_gpu_level": self.lock_gpu_level, "scene": rb::SCENE,
             "cool_tpl": self.cool_tpl,
         })
     }
@@ -1187,7 +1190,16 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     } else {
         None
     };
-    let unlock = |lock: &Option<hwcond::Lock>| -> bool { lock.as_ref().map(|l| l.restore(&s.dev)).unwrap_or(true) };
+    // 审计 #9: 只锁 GPU 档位的档 (CPU/总线不动), 同样只包住跑测
+    let gpu_lock = match (c.lock_freq, c.lock_gpu_level) {
+        (false, Some(level)) => Some(crate::eval::GpuLevelLock::apply(serial, level, dir).map_err(|e| format!("GPU 档位锁失败: {e}"))?),
+        _ => None,
+    };
+    let unlock = |lock: &Option<hwcond::Lock>| -> bool {
+        let a = lock.as_ref().map(|l| l.restore(&s.dev)).unwrap_or(true);
+        let b = gpu_lock.as_ref().map(|g| g.restore()["restored"].as_bool() == Some(true)).unwrap_or(true);
+        a && b
+    };
 
     // 3) 清场 + 起负载
     let files = rb::FILES;
@@ -1316,6 +1328,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
         "apply_ok": apply_ok,
         "seconds_total": py_round(t0.elapsed().as_secs_f64(), 1),
         "lock_freq": c.lock_freq,
+        "lock_gpu_level": c.lock_gpu_level,
         "pwr": { "start": pwr_start, "end": pwr_end, "changed": pwr_changed(&pwr_start, &pwr_end) },
     });
     std::fs::write(dir.join("arm.json"), serde_json::to_string_pretty(&arm).unwrap_or_default()).ok();
@@ -1447,6 +1460,7 @@ const USAGE: &str = "用法:
 条件: [--serial S] [--template ../refbench/selftest/load.spv] [--intensity 1] [--iters 64]
       [--base-wg 4000] [--frames N] [--warmup 2] [--capdur 10] [--cool-c 45] [--cool-timeout 240]
       [--cool-tpl 4 | --no-cool-tpl] [--temp-cap 70] [--no-charge-suspend] [--lock-freq] [--lock-level N (隐含 --lock-freq)]
+      [--lock-gpu-level N (只钉 kgsl min/max_pwrlevel, 每臂锁、跑完还原; 与 --lock-freq 互斥)]
 
 判定一律走现有链 (loopstat::compare + sysparam::decide; 画面走 eval --request kind=shader),
 本命令不另写统计。证据与判定输入全部落盘, report 不碰设备、可离线重算。";
@@ -1509,6 +1523,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             charge_suspend: true,
             lock_freq: false,
             lock_level: None,
+            lock_gpu_level: None,
             cool_tpl: Some(4),
         },
         frames_given: false,
@@ -1553,8 +1568,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 a.cond.lock_level = Some(num(it.next(), k)? as u32);
                 a.cond.lock_freq = true;
             }
+            "--lock-gpu-level" => a.cond.lock_gpu_level = Some(num(it.next(), k)? as u32),
             other => return Err(format!("不认识的参数 {other}\n\n{USAGE}")),
         }
+    }
+    if a.cond.lock_freq && a.cond.lock_gpu_level.is_some() {
+        return Err("--lock-gpu-level 与 --lock-freq/--lock-level 互斥 (后者已含 GPU 档位)".into());
     }
     Ok(a)
 }
