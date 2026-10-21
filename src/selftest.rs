@@ -1571,6 +1571,15 @@ fn cmd_calibrate(mut a: Args) -> Result<(), String> {
 
 fn cmd_run(mut a: Args) -> Result<(), String> {
     let out = a.out.clone().ok_or("缺 --out")?;
+    // 结构性防护 (放在建目录、写 plan.json 之前, 免得拒跑还留下一份 pairs 不对的 plan):
+    // 样本量不够时精确置换检验的最小可达 p 就比 alpha 还大 ——
+    // 这种配置在数学上不可能判出显著改善, 跑再久也只是把「什么都没学到」重算一遍。
+    // 2026-10-21 实测: --pairs 3 时每题 3v3, 最小双侧 p = 2/C(6,3) = 0.1 > alpha_win 0.025,
+    // 于是一道预期 −14.7% 帧时的考题也被判成「没有任何指标显著改善」。
+    // 功耗进不进判定要等数据 (两臂是否全程放电态), 开跑前按最严的 alpha/3 算
+    // (alpha/2 与 alpha/3 下最少都是 5 对, 这里取严只是不给「功耗进表」留漏洞)
+    let alpha_win = crate::sysparam::ALPHA / crate::loopstat::MAX_WIN_METRICS as f64;
+    crate::loopstat::ensure_resolvable(a.pairs, alpha_win, "--pairs")?;
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let template = read_template(&a.cond)?;
     let calib = load_calib(&a)?;
@@ -1611,24 +1620,6 @@ fn cmd_run(mut a: Args) -> Result<(), String> {
         .filter(|cs| !out.join(&cs.id).join("case_done.json").is_file())
         .collect();
     log(&format!("考题 {} 道, 待跑 {} 道, 每道 {}v{}, frames={}", cases.len(), todo.len(), a.pairs, a.pairs, c.frames));
-    // 结构性防护: 样本量不够时精确置换检验的最小可达 p 就比 alpha 还大 ——
-    // 这种配置在数学上不可能判出显著改善, 跑再久也只是把「什么都没学到」重算一遍。
-    // 2026-10-21 实测: --pairs 3 时每题 3v3, 最小双侧 p = 2/C(6,3) = 0.1 > alpha_win 0.025,
-    // 于是一道预期 −14.7% 帧时的考题也被判成「没有任何指标显著改善」。
-    let alpha = 0.05_f64;
-    let alpha_win = alpha / 2.0; // 帧时/帧率两张表 (功耗进判定时是 3, 更严)
-    let p_min = crate::loopstat::min_two_sided_p(a.pairs);
-    if p_min >= alpha_win {
-        return Err(format!(
-            "{}v{} 的样本量判不出显著改善: 精确置换检验的最小双侧 p = {p_min:.4}, \
-而显著改善要求 p < {alpha_win:.4}。--pairs 至少给 {}, 否则这一轮的结论只能是「没有显著变化」",
-            a.pairs,
-            a.pairs,
-            (2..=64)
-                .find(|n| crate::loopstat::min_two_sided_p(*n) < alpha_win)
-                .unwrap_or(5),
-        ));
-    }
     if todo.is_empty() {
         return cmd_report(&a);
     }
