@@ -43,6 +43,7 @@ mod grayab;
 mod graylayer;
 mod shotdiff;
 mod iqjudge;
+mod scorecard;
 mod hypo;
 mod mtools;
 mod caps;
