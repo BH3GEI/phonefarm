@@ -128,8 +128,9 @@ fn wait_out_json(serial: &str, pkg: &str) -> Result<Value, String> {
     }
 }
 
-/// 静态场景截两张 (相隔 1 秒), 回原始 RGBA
-fn static_shots(serial: &str, pkg: &str, extras: &str, marker: Option<&str>, label: &str, outdir: &Path) -> Result<Vec<Vec<u8>>, String> {
+/// 静态场景截两张 (相隔 1 秒), 回 (宽, 高, 原始 RGBA)。每张都落盘成 PNG:
+/// 2026-10-19 Megacity 那轮没存图, 事后想换指标重判都没有原始数据。
+fn static_shots(serial: &str, pkg: &str, extras: &str, marker: Option<&str>, label: &str, outdir: &Path) -> Result<Vec<(u32, u32, Vec<u8>)>, String> {
     std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
     start_with_extras(serial, pkg, extras, marker, &[OUT_FILE], outdir)?;
     let r = wait_launch_window(serial, pkg, label, marker);
@@ -146,10 +147,14 @@ fn static_shots(serial: &str, pkg: &str, extras: &str, marker: Option<&str>, lab
     };
     let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
     r?;
-    Ok(shots
+    let parsed: Vec<(u32, u32, Vec<u8>)> = shots
         .into_iter()
-        .filter_map(|d| crate::frameaudit::parse_raw(&d).map(|(_, _, px)| px.to_vec()))
-        .collect())
+        .filter_map(|d| crate::frameaudit::parse_raw(&d).map(|(w, h, px)| (w as u32, h as u32, px.to_vec())))
+        .collect();
+    for (n, shot) in parsed.iter().enumerate() {
+        crate::eval::save_png(&outdir.join(format!("shot{n}.png")), shot);
+    }
+    Ok(parsed)
 }
 
 pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
@@ -182,6 +187,7 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     let min_psnr = req["payload"]["image_check"]["min_psnr_db"].as_f64().unwrap_or(GRAY_MIN_PSNR_DB);
     let mut image = json!({"min_psnr_db": min_psnr, "static_extras": launch.static_extras});
     let mut image_fail: Option<String> = None;
+    let mut iq_verdict: Option<crate::iqjudge::IqVerdict> = None;
     if let Some(se) = &launch.static_extras {
         let shot = |extras: &str, tag: &str| static_shots(serial, &pkg, extras, marker.as_deref(), tag, &evidence.join(format!("static_{tag}")));
         let c1 = shot(se, "ctrl1");
@@ -189,10 +195,19 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         let c2 = shot(se, "ctrl2");
         match (c1, k, c2) {
             (Ok(c1), Ok(k), Ok(c2)) if !c1.is_empty() && !k.is_empty() && !c2.is_empty() => {
-                let p = |a: &Vec<u8>, b: &Vec<u8>| psnr_rgba(a, b).map(|x| (x * 1000.0).round() / 1000.0);
+                let p = |a: &(u32, u32, Vec<u8>), b: &(u32, u32, Vec<u8>)| psnr_rgba(&a.2, &b.2).map(|x| (x * 1000.0).round() / 1000.0);
                 let knob_vs_ctrl = [p(&k[0], &c1[0]), p(&k[0], &c2[0])];
                 let ctrl_vs_ctrl = p(&c1[0], &c2[0]);
                 let within = [c1.get(1).and_then(|x| p(&c1[0], x)), k.get(1).and_then(|x| p(&k[0], x))];
+                // 画质判据 (稳定块 PSNR/SSIM + 细节能量, 都对原生自噪声): 对照 = 前后两次启动各 2 张 (共 4 张),
+                // 候选 = 夹在中间那次启动的 2 张。全帧 PSNR 门槛分不出 MSAA 4→1 (见 iqjudge 模块注释)。
+                let iq_cfg = crate::iqjudge::IqConfig::from_request(&req["payload"]["image_check"]);
+                let to_shot = |s: &(u32, u32, Vec<u8>)| crate::iqjudge::Shot::from_rgba(s.0 as usize, s.1 as usize, &s.2, iq_cfg.tile);
+                let iq_ctrl: Vec<_> = c1.iter().chain(c2.iter()).filter_map(to_shot).collect();
+                let iq_knob: Vec<_> = k.iter().filter_map(to_shot).collect();
+                let (iq, iq_rep) = crate::iqjudge::judge(&iq_ctrl, &iq_knob, &iq_cfg);
+                image["iq"] = iq_rep;
+                iq_verdict = Some(iq);
                 image["psnr_knob_vs_ctrl"] = json!(knob_vs_ctrl);
                 image["psnr_ctrl_vs_ctrl"] = json!(ctrl_vs_ctrl);
                 image["psnr_within_1s"] = json!(within);
@@ -228,6 +243,21 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         }
     } else {
         unavailable(&mut report["metrics"], "psnr_db", "workload.launch 没给 static_extras, 无静态画面可比");
+    }
+    // 画质判据: 不通过 = 画面出错 (与 PSNR 门槛同等处理); 判不了 = 照常量性能, 但不许判 PASS (增益要求画面确认不变)
+    let mut image_unverified: Option<String> = None;
+    match &iq_verdict {
+        Some(crate::iqjudge::IqVerdict::Fail(r)) if !measure_only && image_fail.is_none() => {
+            image_fail = Some(format!("画质判据不通过: {r}"));
+        }
+        Some(crate::iqjudge::IqVerdict::Inconclusive(r)) => image_unverified = Some(r.clone()),
+        None if image_fail.is_none() && launch.static_extras.is_some() => {
+            image_unverified = Some("画质判据没跑成".into())
+        }
+        _ => {}
+    }
+    if launch.static_extras.is_none() {
+        image_unverified = Some("没有静态画面可比 (workload.launch 缺 static_extras)".into());
     }
     report["image_check"] = image;
     if let Some(e) = image_fail {
@@ -377,6 +407,13 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
             if qc.is_empty() { "payload.measure_only".to_string() } else { qc.join(",") }
         ));
         report["status"] = json!("REJECT");
+    } else if let (true, Some(why)) = (keep, &image_unverified) {
+        // 性能过了, 画面没确认不变: 不算增益
+        report["status"] = json!("REJECT");
+        report["verdict"]["would_keep"] = json!(true);
+        report["verdict"]["image_unverified"] = json!(why);
+        let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
+        report["verdict"]["reason"] = json!(format!("性能统计通过, 但画面没能确认不变 ({why}), 不算增益 (统计结果: {r})"));
     } else {
         report["status"] = json!(if keep { "PASS" } else { "REJECT" });
     }
