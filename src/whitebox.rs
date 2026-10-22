@@ -16,7 +16,7 @@
 //!    结果里标 `measure_only`, 状态不会是 PASS —— 它们回答的是「这块浪费值多少」, 不是可采纳的优化。
 
 use crate::eval::{
-    adb, arm_fan_off, fan_mismatch, fan_still_on, aggregate_metrics, arm_cool_timeout, arm_wait_cool, base_report, cool_summary, judge_runs, push_tools,
+    adb, append_dropped_reason, arm_fan_off, consistency_note, fan_mismatch, fan_still_on, settle_pair, wait_charge_settled, aggregate_metrics, arm_cool_timeout, arm_wait_cool, base_report, cool_summary, judge_runs, push_tools,
     run_one_launch, run_soc_temp_max, start_with_extras, su, unavailable, wait_launch_window, launch_spec,
     psnr_rgba, adb_ok, GRAY_MIN_PSNR_DB, DEV_TMP,
 };
@@ -128,8 +128,9 @@ fn wait_out_json(serial: &str, pkg: &str) -> Result<Value, String> {
     }
 }
 
-/// 静态场景截两张 (相隔 1 秒), 回原始 RGBA
-fn static_shots(serial: &str, pkg: &str, extras: &str, marker: Option<&str>, label: &str, outdir: &Path) -> Result<Vec<Vec<u8>>, String> {
+/// 静态场景截两张 (相隔 1 秒), 回 (宽, 高, 原始 RGBA)。每张都落盘成 PNG:
+/// 2026-10-19 Megacity 那轮没存图, 事后想换指标重判都没有原始数据。
+fn static_shots(serial: &str, pkg: &str, extras: &str, marker: Option<&str>, label: &str, outdir: &Path) -> Result<Vec<(u32, u32, Vec<u8>)>, String> {
     std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
     start_with_extras(serial, pkg, extras, marker, &[OUT_FILE], outdir)?;
     let r = wait_launch_window(serial, pkg, label, marker);
@@ -146,10 +147,14 @@ fn static_shots(serial: &str, pkg: &str, extras: &str, marker: Option<&str>, lab
     };
     let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
     r?;
-    Ok(shots
+    let parsed: Vec<(u32, u32, Vec<u8>)> = shots
         .into_iter()
-        .filter_map(|d| crate::frameaudit::parse_raw(&d).map(|(_, _, px)| px.to_vec()))
-        .collect())
+        .filter_map(|d| crate::frameaudit::parse_raw(&d).map(|(w, h, px)| (w as u32, h as u32, px.to_vec())))
+        .collect();
+    for (n, shot) in parsed.iter().enumerate() {
+        crate::eval::save_png(&outdir.join(format!("shot{n}.png")), shot);
+    }
+    Ok(parsed)
 }
 
 pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
@@ -172,6 +177,9 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     };
     let qc = quality_changing(&knobs) ;
     let measure_only = !qc.is_empty() || req["payload"]["measure_only"].as_bool().unwrap_or(false);
+    // 画质策略 (judge/v1-scorecard): report 下画面判据只记差距, 性能照量照判
+    let policy = crate::scorecard::ImagePolicy::from_request(req).unwrap_or(crate::scorecard::ImagePolicy::Gate);
+    let mut gap_open: Vec<String> = Vec::new();
     let pkg = req["package"].as_str().unwrap_or("com.unity.megacity.metro").to_string();
     let base_extras = launch.extras.clone();
     let knob_full = format!("{base_extras} {kx}");
@@ -182,6 +190,7 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     let min_psnr = req["payload"]["image_check"]["min_psnr_db"].as_f64().unwrap_or(GRAY_MIN_PSNR_DB);
     let mut image = json!({"min_psnr_db": min_psnr, "static_extras": launch.static_extras});
     let mut image_fail: Option<String> = None;
+    let mut iq_verdict: Option<crate::iqjudge::IqVerdict> = None;
     if let Some(se) = &launch.static_extras {
         let shot = |extras: &str, tag: &str| static_shots(serial, &pkg, extras, marker.as_deref(), tag, &evidence.join(format!("static_{tag}")));
         let c1 = shot(se, "ctrl1");
@@ -189,10 +198,19 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         let c2 = shot(se, "ctrl2");
         match (c1, k, c2) {
             (Ok(c1), Ok(k), Ok(c2)) if !c1.is_empty() && !k.is_empty() && !c2.is_empty() => {
-                let p = |a: &Vec<u8>, b: &Vec<u8>| psnr_rgba(a, b).map(|x| (x * 1000.0).round() / 1000.0);
+                let p = |a: &(u32, u32, Vec<u8>), b: &(u32, u32, Vec<u8>)| psnr_rgba(&a.2, &b.2).map(|x| (x * 1000.0).round() / 1000.0);
                 let knob_vs_ctrl = [p(&k[0], &c1[0]), p(&k[0], &c2[0])];
                 let ctrl_vs_ctrl = p(&c1[0], &c2[0]);
                 let within = [c1.get(1).and_then(|x| p(&c1[0], x)), k.get(1).and_then(|x| p(&k[0], x))];
+                // 画质判据 (稳定块 PSNR/SSIM + 细节能量, 都对原生自噪声): 对照 = 前后两次启动各 2 张 (共 4 张),
+                // 候选 = 夹在中间那次启动的 2 张。全帧 PSNR 门槛分不出 MSAA 4→1 (见 iqjudge 模块注释)。
+                let iq_cfg = crate::iqjudge::IqConfig::from_request(&req["payload"]["image_check"]);
+                let to_shot = |s: &(u32, u32, Vec<u8>)| crate::iqjudge::Shot::from_rgba(s.0 as usize, s.1 as usize, &s.2, iq_cfg.tile);
+                let iq_ctrl: Vec<_> = c1.iter().chain(c2.iter()).filter_map(to_shot).collect();
+                let iq_knob: Vec<_> = k.iter().filter_map(to_shot).collect();
+                let (iq, iq_rep) = crate::iqjudge::judge(&iq_ctrl, &iq_knob, &iq_cfg);
+                image["iq"] = iq_rep;
+                iq_verdict = Some(iq);
                 image["psnr_knob_vs_ctrl"] = json!(knob_vs_ctrl);
                 image["psnr_ctrl_vs_ctrl"] = json!(ctrl_vs_ctrl);
                 image["psnr_within_1s"] = json!(within);
@@ -215,6 +233,10 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                         // 只量上限的旋钮本来就会改画面, 不按画面判; 噪声底照样记下来
                         image["gate"] = gate.gate("skipped_measure_only");
                     }
+                    crate::eval::ImageRuling::Fail(reason) if policy.is_report() => {
+                        image["gate"] = gate.gate("failed");
+                        gap_open.push(format!("全帧 PSNR: {reason}"));
+                    }
                     crate::eval::ImageRuling::Fail(reason) => {
                         image["gate"] = gate.gate("failed");
                         image_fail = Some(reason);
@@ -223,12 +245,52 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
             }
             (a, b, c) => {
                 let errs: Vec<String> = [a.err(), b.err(), c.err()].into_iter().flatten().collect();
-                image_fail = Some(format!("静态场景截图失败: {}", if errs.is_empty() { "截到的图解析不了".into() } else { errs.join("; ") }));
+                let why = format!("静态场景截图失败: {}", if errs.is_empty() { "截到的图解析不了".into() } else { errs.join("; ") });
+                if policy.is_report() {
+                    // report: 画面没比成只记「判不了」, 性能照量
+                    image["shot_error"] = json!(why);
+                } else {
+                    image_fail = Some(why);
+                }
             }
         }
     } else {
         unavailable(&mut report["metrics"], "psnr_db", "workload.launch 没给 static_extras, 无静态画面可比");
     }
+    // 画质判据: 不通过 = 画面出错 (与 PSNR 门槛同等处理); 判不了 = 照常量性能, 但不许判 PASS (增益要求画面确认不变)
+    let mut image_unverified: Option<String> = None;
+    match &iq_verdict {
+        Some(crate::iqjudge::IqVerdict::Fail(r)) if !measure_only && policy.is_report() => {
+            gap_open.push(format!("画质判据: {r}"));
+        }
+        Some(crate::iqjudge::IqVerdict::Fail(r)) if !measure_only && image_fail.is_none() => {
+            image_fail = Some(format!("画质判据不通过: {r}"));
+        }
+        Some(crate::iqjudge::IqVerdict::Inconclusive(r)) => image_unverified = Some(r.clone()),
+        None if image_fail.is_none() && launch.static_extras.is_some() => {
+            image_unverified = Some("画质判据没跑成".into())
+        }
+        _ => {}
+    }
+    if launch.static_extras.is_none() {
+        image_unverified = Some("没有静态画面可比 (workload.launch 缺 static_extras)".into());
+    }
+    if let (None, Some(e)) = (&image_unverified, image["shot_error"].as_str()) {
+        image_unverified = Some(e.to_string());
+    }
+    let gap_state = if !gap_open.is_empty() {
+        crate::scorecard::GapState::Open(gap_open.join("; "))
+    } else if let Some(r) = &image_unverified {
+        crate::scorecard::GapState::Unverified(r.clone())
+    } else {
+        crate::scorecard::GapState::Closed
+    };
+    let gap_json = crate::scorecard::quality_gap_json(
+        policy,
+        &gap_state,
+        "iq_judge+psnr_gate",
+        json!({"checks": image["iq"]["checks"], "iq": image["iq"], "psnr_db_used": image["psnr_db_used"], "noise_floor_db": image["noise_floor_db"]}),
+    );
     report["image_check"] = image;
     if let Some(e) = image_fail {
         report["verdict"]["reason"] = json!(e);
@@ -246,6 +308,8 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                 .or_else(|| Some("charge_suspend.sh".into()));
         }
     }
+    // 停充成功后等电池停止吸电再开第一臂 (审计 #13)
+    let charge_settle = suspended_via.as_ref().map(|_| wait_charge_settled(serial));
     let restore_charge = |serial: &str| {
         if suspended_via.is_some() {
             let cr = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
@@ -261,8 +325,12 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     let empty = BTreeMap::new();
     let (mut knob_runs, mut ctrl_runs, mut cool_log, mut checks) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut abort: Option<String> = None;
+    // 臂序随机 (审计 #13), 种子进报告; 环境不一致的对单独剔除 (审计 #9 #11)
+    let order_seed = crate::curtail::order_seed(req["protocol"]["order_seed"].as_u64());
+    let knob_first = crate::curtail::knob_first_order(rounds as usize, order_seed);
+    let mut dropped: Vec<Value> = Vec::new();
     'pairs: for i in 1..=rounds {
-        for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
+        for arm in if knob_first[i as usize - 1] { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             let tag = format!("{arm}{i}");
             let fan = arm_fan_off(serial);
             let mut c = arm_wait_cool(serial, cool_c, &tag, arm_cool_timeout(&cool_log));
@@ -306,14 +374,17 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                 break 'pairs;
             }
             match res {
-                Ok(m) => {
+                Ok(mut m) => {
                     if let (Some(t), Some(cap)) = (run_soc_temp_max(&m), req["conditions"]["temp_cap_c"].as_f64()) {
                         if t > cap {
                             abort = Some(format!("{tag} SoC 结温 {t}C 超过上限 {cap}C"));
                             break 'pairs;
                         }
                     }
+                    m["round"] = json!(i);
                     if arm == "knob" { knob_runs.push(m) } else { ctrl_runs.push(m) }
+                    // 白盒旋钮不动 GPU 档位, 档位分布照比
+                    settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true);
                 }
                 Err(e) => {
                     abort = Some(e);
@@ -328,6 +399,10 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         "cool_c_target": cool_c, "cool_reached_c": cool_reached, "cool_timeout": cool_timeout,
         "cool_per_arm": cool_log, "temp_cap_c": req["conditions"]["temp_cap_c"],
         "knob_extras": kx, "knob_checks": checks,
+        "arm_order": crate::curtail::order_note(order_seed, rounds as usize),
+        "charge_settle": charge_settle,
+        "env_consistency": consistency_note(&dropped, true),
+        "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
     });
     report["evidence_dir"] = json!(evidence.display().to_string());
     if let Some(r) = abort {
@@ -336,12 +411,16 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     }
 
     // ── 判定 ──
-    if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
-        report["verdict"]["reason"] = json!(e);
+    if knob_runs.is_empty() && !dropped.is_empty() {
+        report["verdict"]["reason"] = json!(format!(
+            "{} 对两臂测量环境都不一致 (风扇或 GPU 档位), 全部剔除, 没有可比的数据 (见 conditions_observed.env_consistency)",
+            dropped.len()
+        ));
         return done(&report);
     }
     let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
     report["verdict"] = verdict;
+    append_dropped_reason(&mut report, &dropped);
     let mut m = report["metrics"].take();
     let psnr = m["psnr_db"].clone();
     let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
@@ -377,8 +456,11 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
             if qc.is_empty() { "payload.measure_only".to_string() } else { qc.join(",") }
         ));
         report["status"] = json!("REJECT");
+        report["verdict"]["is_pareto_improvement"] = json!(false);
     } else {
-        report["status"] = json!(if keep { "PASS" } else { "REJECT" });
+        // 画面差距关闭才可能 PASS; report 下性能过了而差距没关闭 → KEEP_WITH_QUALITY_GAP;
+        // gate 下画面没确认不变 → REJECT (原行为)
+        crate::scorecard::finalize_status(&mut report, keep, policy, &gap_state, gap_json);
     }
     done(&report)
 }

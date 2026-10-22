@@ -374,6 +374,35 @@ pub fn arms_prefix(case_dir: &Path, n: usize) -> Result<(Vec<ArmRec>, Vec<ArmRec
     Ok((a, b))
 }
 
+/// 一臂的负载是否真的生效 (算子装上、干净跑完)。有逐项 checks 时按 checks 算 ——
+/// 2026-10-21 之前的 arm.json 把 capture_ok 并进了 apply_ok, 这样旧证据也能分开重判。
+pub fn arm_apply_ok(m: &Value) -> bool {
+    match m["arm"]["checks"].as_object().filter(|o| !o.is_empty()) {
+        Some(o) => o.values().all(|v| v == &json!(true)),
+        None => m["arm"]["apply_ok"].as_bool() == Some(true),
+    }
+}
+
+/// 一臂的采集窗够不够 (没记这一项的旧证据算够)。
+pub fn arm_capture_ok(m: &Value) -> bool {
+    m["arm"]["capture_ok"].as_bool() != Some(false)
+}
+
+/// 剔除采集失败的那几对 (两臂同轮, 按 arms_prefix 的顺序一一对应)。回 (A, B, 被剔除的对的标签)。
+/// 只剔这一对, 不让一臂采集失败把整道题作废 (审计 #16)。
+pub fn drop_capture_failed(a: &[ArmRec], b: &[ArmRec]) -> (Vec<ArmRec>, Vec<ArmRec>, Vec<String>) {
+    let (mut ka, mut kb, mut dropped) = (Vec::new(), Vec::new(), Vec::new());
+    for (x, y) in a.iter().zip(b.iter()) {
+        if arm_capture_ok(&x.1) && arm_capture_ok(&y.1) {
+            ka.push(x.clone());
+            kb.push(y.clone());
+        } else {
+            dropped.push(format!("{}+{}", y.0, x.0));
+        }
+    }
+    (ka, kb, dropped)
+}
+
 /// 走现有判定链: loopstat::compare + sysparam::decide。
 ///
 /// `scale`: 只给注入法用 —— 把 B 臂帧时乘上 (1+δ)、帧率除以 (1+δ), 模拟一个
@@ -421,7 +450,7 @@ pub fn judge_arms(
     let power_available = !all.is_empty()
         && all.iter().all(|(_, m)| m["env"]["power_w_mean"].as_f64().is_some())
         && sysparam::power_group_ok(all.iter().map(|(_, m)| &m["env"]));
-    let apply_ok = all.iter().all(|(_, m)| m["arm"]["apply_ok"].as_bool() == Some(true));
+    let apply_ok = all.iter().all(|(_, m)| arm_apply_ok(m));
     let temp_max = all
         .iter()
         .filter_map(|(_, m)| m["env"]["soc_temp_max_c"].as_f64())
@@ -474,10 +503,20 @@ pub fn judge_case(case_dir: &Path, n: usize, temp_cap_c: f64) -> Value {
             })
         }
     };
+    let (a, b, capture_dropped) = drop_capture_failed(&a, &b);
+    if a.is_empty() {
+        return json!({
+            "n": n, "verdict": "ABORT", "outcome": "abort",
+            "reason": format!("前 {n} 轮每一对都有一臂采集失败 (capture_ok=false), 全部剔除"),
+            "capture_dropped_pairs": capture_dropped,
+        });
+    }
     let (snap_ok, _) = snapshot_check(case_dir);
     let d = pv(&judge_arms(&a, &b, temp_cap_c, snap_ok, None));
     let mut out = d.clone();
     out["n"] = json!(n);
+    // 采集失败只剔除那一对, 剔了哪几对如实列出 (n_pairs 是剔除后实际进判定的对数)
+    out["capture_dropped_pairs"] = json!(capture_dropped);
     out["outcome"] = json!(classify(&case.kind, &d));
     // 只标出来、不改判定: GPU 档位在采集窗里被改过的臂 (见 read_pwr)
     let changed: Vec<String> = a
@@ -550,7 +589,10 @@ pub fn injection_curve(aa_dirs: &[PathBuf], n: usize, temp_cap_c: f64) -> Value 
         let Ok((a_all, b_all)) = arms_prefix(dir, p) else { continue };
         let (snap_ok, _) = snapshot_check(dir);
         for s in 0..=(p - n) {
-            windows.push((a_all[s..s + n].to_vec(), b_all[s..s + n].to_vec(), snap_ok));
+            let (a, b, _) = drop_capture_failed(&a_all[s..s + n], &b_all[s..s + n]);
+            if !a.is_empty() {
+                windows.push((a, b, snap_ok));
+            }
         }
     }
     if windows.is_empty() {
@@ -624,6 +666,7 @@ pub fn report(root: &Path, ns: &[usize]) -> Value {
                     "verdict": j["verdict"], "outcome": j["outcome"], "reason": j["reason"],
                     "wins": j["wins"], "regressions": j["regressions"],
                     "power_in_verdict": j["power_in_verdict"], "temp_max_c": j["temp_max_c"],
+                    "capture_dropped_pairs": j["capture_dropped_pairs"], "n_pairs": j["n_pairs"],
                     "frame_p95": metric_brief(&j, "frame_p95"),
                     "fps_mean": metric_brief(&j, "fps_mean"),
                     "power_w_mean": metric_brief(&j, "power_w_mean"),
@@ -885,6 +928,13 @@ pub struct Cond {
     pub lock_freq: bool,
     /// 锁频时钉在哪一档 (缺省: 锁频前的 max_pwrlevel)。档位号越大频率越低。
     pub lock_level: Option<u32>,
+    /// 等冷时还要等 GPU 热限档 (kgsl thermal_pwrlevel) 回到 <= 这一档。None = 不等。
+    ///
+    /// 2026-10-21 红魔实测: SoC 结温 2 秒内就回到 45C 以下, 但 thermal_pwrlevel 一组里从 0
+    /// 爬到 4、6、7 不回落, 同一负载帧率随之 347 → 306 → 258 台阶式下降; 一轮两臂落在不同档时
+    /// (ctrl 6 / knob 4) 方向直接判反。只看结温的等冷管不住这个。
+    /// 缺省 4: 空闲 60 秒后实测多停在 4–6, 等回 0 会每臂等到超时。
+    pub cool_tpl: Option<u32>,
 }
 
 impl Cond {
@@ -896,6 +946,7 @@ impl Cond {
             "temp_cap_c": self.temp_cap_c, "charge_suspend": self.charge_suspend,
             "fan": "off",
             "lock_freq": self.lock_freq, "lock_level": self.lock_level, "scene": rb::SCENE,
+            "cool_tpl": self.cool_tpl,
         })
     }
 }
@@ -1105,6 +1156,26 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
         Ok((z, t, w)) => json!({ "zone": z, "c": t, "waited_s": w, "timeout": false }),
         Err(e) => json!({ "error": e, "timeout": true, "waited_s": c.cool_timeout_s }),
     };
+    // 1b) 等 GPU 热限档回落 (见 Cond::cool_tpl)。超时同样不作废, 如实记录
+    let cool_tpl = match c.cool_tpl {
+        None => Value::Null,
+        Some(max) => {
+            let t1 = Instant::now();
+            let first = read_pwr(serial);
+            let mut last = first.clone();
+            let mut timeout = false;
+            while tpl_cool_enough(&last, max) == Some(false) {
+                if t1.elapsed().as_secs() >= c.cool_timeout_s {
+                    timeout = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(3));
+                last = read_pwr(serial);
+            }
+            json!({ "max": max, "tpl_before": first.get("thermal_pwrlevel"), "tpl_after": last.get("thermal_pwrlevel"),
+                    "waited_s": t1.elapsed().as_secs(), "timeout": timeout })
+        }
+    };
     let cool_s = t0.elapsed().as_secs_f64();
     let pwr_start = read_pwr(serial);
 
@@ -1149,13 +1220,14 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     let env_path = dir.join("env.txt");
     let sampler = Command::new(adb_path())
         .args(["-s", serial, "shell"])
-        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {} 1'", c.capdur_s))
+        // 第三个参数: ftrace_capture.sh 采完才写 trace_raw.txt, 一出现采样就停 (审计 #3); 时长只是上限
+        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {} 1 {REMOTE_DIR}/trace_raw.txt'", c.capdur_s + 20))
         .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
         .stderr(std::process::Stdio::null())
         .spawn();
     let raw = format!("{REMOTE_DIR}/trace_raw.txt");
     let flt = format!("{REMOTE_DIR}/trace_kgsl.txt");
-    let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {} {raw}", c.capdur_s), c.capdur_s + 90);
+    let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {} {raw} {}", c.capdur_s, rb::PACKAGE), c.capdur_s + 90);
     std::fs::write(dir.join("capture.log"), &cap).ok();
     let pwr_end = read_pwr(serial);
     // 只留解析器会读的行 (与 looptrace::parse 的预筛同一条件), 30 MB → 几百 KB
@@ -1206,7 +1278,11 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     let text = std::fs::read(&local_trace).map_err(|e| e.to_string())?;
     let summary = looptrace::parse_with_spf(&String::from_utf8_lossy(&text), rb::SUBMIT_COMM, Some(1)).summarize();
     std::fs::write(dir.join("summary.json"), dumps(&summary)).map_err(|e| e.to_string())?;
-    let env = sysparam::env_stats(&std::fs::read_to_string(&env_path).unwrap_or_default());
+    // 功耗只取 trace 采集窗内的样本, 丢第一个点 (审计 #3)
+    let env = sysparam::env_stats_window(
+        &std::fs::read_to_string(&env_path).unwrap_or_default(),
+        sysparam::capture_window_from_trace(&String::from_utf8_lossy(&text)),
+    );
     std::fs::write(dir.join("env.json"), dumps(&env)).map_err(|e| e.to_string())?;
     gzip_replace(&local_trace)?;
 
@@ -1231,10 +1307,13 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     );
     let arm = json!({
         "label": label, "load": load.to_json(), "remote_spv": remote_spv,
-        "started_at": started_at, "cool": cool, "cool_s": py_round(cool_s, 1),
+        "started_at": started_at, "cool": cool, "cool_tpl": cool_tpl, "cool_s": py_round(cool_s, 1),
         "checks": checks, "capture_ok": capture_ok, "span_s": span,
         "expected_s": py_round(expected_s, 2),
-        "apply_ok": apply_ok && capture_ok,
+        // 审计 #16: 两件事分开记 —— apply_ok 只看负载自报 (算子装上、干净跑完),
+        // capture_ok 是采集窗够不够。以前合成一个 apply_ok, 采集失败被记成「旋钮未全部生效」,
+        // 一臂失败整题作废; 现在采集失败只剔除那一对 (见 drop_capture_failed)
+        "apply_ok": apply_ok,
         "seconds_total": py_round(t0.elapsed().as_secs_f64(), 1),
         "lock_freq": c.lock_freq,
         "pwr": { "start": pwr_start, "end": pwr_end, "changed": pwr_changed(&pwr_start, &pwr_end) },
@@ -1293,6 +1372,12 @@ pub fn parse_pwr(text: &str) -> Value {
     Value::Object(m)
 }
 
+/// GPU 热限档是否已回落到 <= `max`。读不到 / 不是数 = None (不知道, 调用方不等)。
+pub fn tpl_cool_enough(pwr: &Value, max: u32) -> Option<bool> {
+    let v = pwr.get("thermal_pwrlevel")?.as_str()?.trim().parse::<u32>().ok()?;
+    Some(v <= max)
+}
+
 /// 档位在这一臂里变没变 (只看档位, 当前频率本来就随负载变)。读不到算「不知道」, 不算变了。
 pub fn pwr_changed(start: &Value, end: &Value) -> Option<bool> {
     let keys = ["max_pwrlevel", "min_pwrlevel", "thermal_pwrlevel"];
@@ -1315,8 +1400,30 @@ fn gzip_replace(p: &Path) -> Result<(), String> {
     std::fs::remove_file(p).map_err(|e| e.to_string())
 }
 
+/// 这一臂是不是「没跑完 / 没采到」这类基础设施问题 (不是算子没生效)。
+///
+/// 2026-10-21 实测, 一组 8 道考题里两道各坏了 1 臂, 整道 16 臂判 ABORT:
+/// - worsewg800_1/knob8: 算子自报全部生效、跑完, trace 却只采到 0.03 秒 (8 帧), capture_ok=false;
+/// - betterwg300_1/knob8: refbench 跑到 2311/6200 帧被打断 (clean_exit=false)。
+/// 两种都与量到的数值无关, 与「没起跑 / 没拉回」一样重试一次, 不偏。
+/// 算子本身没装上 (postfx_active / shader_path / run_id 有 false) 不重试, 照旧交给判定链 ABORT。
+pub fn infra_failed(v: &Value) -> bool {
+    let arm = &v["arm"];
+    let ck = &arm["checks"];
+    let knob_applied = ["postfx_active", "shader_path", "run_id"].iter().all(|k| ck[*k] == json!(true));
+    let ran_through = ck["clean_exit"] == json!(true) && ck["frames_submitted"] == json!(true);
+    knob_applied && (!ran_through || arm["capture_ok"] == json!(false))
+}
+
 fn run_arm_retry(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote: &str) -> Result<Value, String> {
-    match run_arm(s, c, label, dir, load, remote) {
+    let first = match run_arm(s, c, label, dir, load, remote) {
+        Ok(v) if infra_failed(&v) => Err(format!(
+            "{label}: 没跑完或没采到 (checks={} capture_ok={} span_s={})",
+            v["arm"]["checks"], v["arm"]["capture_ok"], v["arm"]["span_s"]
+        )),
+        other => other,
+    };
+    match first {
         Ok(v) => Ok(v),
         Err(e) => {
             // 基础设施失败重试一次 (不看量到的数, 所以不偏): 旧目录挪开留证
@@ -1339,7 +1446,7 @@ const USAGE: &str = "用法:
 考题清单: aa*4,better:1*2,worse:2 (帧时幅度%, 需标定) 或 better-wg:50 (直接给工作组数差)
 条件: [--serial S] [--template ../refbench/selftest/load.spv] [--intensity 1] [--iters 64]
       [--base-wg 4000] [--frames N] [--warmup 2] [--capdur 10] [--cool-c 45] [--cool-timeout 240]
-      [--temp-cap 70] [--no-charge-suspend] [--lock-freq] [--lock-level N (隐含 --lock-freq)]
+      [--cool-tpl 4 | --no-cool-tpl] [--temp-cap 70] [--no-charge-suspend] [--lock-freq] [--lock-level N (隐含 --lock-freq)]
 
 判定一律走现有链 (loopstat::compare + sysparam::decide; 画面走 eval --request kind=shader),
 本命令不另写统计。证据与判定输入全部落盘, report 不碰设备、可离线重算。";
@@ -1402,6 +1509,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             charge_suspend: true,
             lock_freq: false,
             lock_level: None,
+            cool_tpl: Some(4),
         },
         frames_given: false,
     };
@@ -1435,6 +1543,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--capdur" => a.cond.capdur_s = num(it.next(), k)? as u64,
             "--cool-c" => a.cond.cool_c = num(it.next(), k)?,
             "--cool-timeout" => a.cond.cool_timeout_s = num(it.next(), k)? as u64,
+            "--cool-tpl" => a.cond.cool_tpl = Some(num(it.next(), k)? as u32),
+            "--no-cool-tpl" => a.cond.cool_tpl = None,
             "--temp-cap" => a.cond.temp_cap_c = num(it.next(), k)?,
             "--no-charge-suspend" => a.cond.charge_suspend = false,
             "--fan-on" => return Err("--fan-on 已取消: 风扇一律不开 (owner 规定), 需要降温靠等冷".into()),
@@ -1542,14 +1652,15 @@ fn cmd_calibrate(mut a: Args) -> Result<(), String> {
             let label = format!("cal_wg{}_{r}", l.heavy_wg);
             match run_arm_retry(&s, &c, &label, &out.join(&label), l, remote) {
                 Ok(v) => {
-                    if v["arm"]["apply_ok"] == json!(true) {
+                    if v["arm"]["apply_ok"] == json!(true) && v["arm"]["capture_ok"] != json!(false) {
                         if let Some(p50) = v["summary"]["frame_p50"].as_f64() {
                             points.push((l.heavy_wg, p50));
                         }
                     }
                     runs.push(json!({ "label": label, "heavy_wg": l.heavy_wg, "frame_p50": v["summary"]["frame_p50"],
                         "frame_p95": v["summary"]["frame_p95"], "fps_mean": v["summary"]["fps_mean"],
-                        "power_w_mean": v["env"]["power_w_mean"], "seconds_total": v["arm"]["seconds_total"], "apply_ok": v["arm"]["apply_ok"] }));
+                        "power_w_mean": v["env"]["power_w_mean"], "seconds_total": v["arm"]["seconds_total"], "apply_ok": v["arm"]["apply_ok"],
+                        "capture_ok": v["arm"]["capture_ok"] }));
                 }
                 Err(e) => runs.push(json!({ "label": label, "error": e })),
             }
@@ -1571,6 +1682,15 @@ fn cmd_calibrate(mut a: Args) -> Result<(), String> {
 
 fn cmd_run(mut a: Args) -> Result<(), String> {
     let out = a.out.clone().ok_or("缺 --out")?;
+    // 结构性防护 (放在建目录、写 plan.json 之前, 免得拒跑还留下一份 pairs 不对的 plan):
+    // 样本量不够时精确置换检验的最小可达 p 就比 alpha 还大 ——
+    // 这种配置在数学上不可能判出显著改善, 跑再久也只是把「什么都没学到」重算一遍。
+    // 2026-10-21 实测: --pairs 3 时每题 3v3, 最小双侧 p = 2/C(6,3) = 0.1 > alpha_win 0.025,
+    // 于是一道预期 −14.7% 帧时的考题也被判成「没有任何指标显著改善」。
+    // 功耗进不进判定要等数据 (两臂是否全程放电态), 开跑前按最严的 alpha/3 算
+    // (alpha/2 与 alpha/3 下最少都是 5 对, 这里取严只是不给「功耗进表」留漏洞)
+    let alpha_win = crate::sysparam::ALPHA / crate::loopstat::MAX_WIN_METRICS as f64;
+    crate::loopstat::ensure_resolvable(a.pairs, alpha_win, "--pairs")?;
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let template = read_template(&a.cond)?;
     let calib = load_calib(&a)?;
@@ -1611,24 +1731,6 @@ fn cmd_run(mut a: Args) -> Result<(), String> {
         .filter(|cs| !out.join(&cs.id).join("case_done.json").is_file())
         .collect();
     log(&format!("考题 {} 道, 待跑 {} 道, 每道 {}v{}, frames={}", cases.len(), todo.len(), a.pairs, a.pairs, c.frames));
-    // 结构性防护: 样本量不够时精确置换检验的最小可达 p 就比 alpha 还大 ——
-    // 这种配置在数学上不可能判出显著改善, 跑再久也只是把「什么都没学到」重算一遍。
-    // 2026-10-21 实测: --pairs 3 时每题 3v3, 最小双侧 p = 2/C(6,3) = 0.1 > alpha_win 0.025,
-    // 于是一道预期 −14.7% 帧时的考题也被判成「没有任何指标显著改善」。
-    let alpha = 0.05_f64;
-    let alpha_win = alpha / 2.0; // 帧时/帧率两张表 (功耗进判定时是 3, 更严)
-    let p_min = crate::loopstat::min_two_sided_p(a.pairs);
-    if p_min >= alpha_win {
-        return Err(format!(
-            "{}v{} 的样本量判不出显著改善: 精确置换检验的最小双侧 p = {p_min:.4}, \
-而显著改善要求 p < {alpha_win:.4}。--pairs 至少给 {}, 否则这一轮的结论只能是「没有显著变化」",
-            a.pairs,
-            a.pairs,
-            (2..=64)
-                .find(|n| crate::loopstat::min_two_sided_p(*n) < alpha_win)
-                .unwrap_or(5),
-        ));
-    }
     if todo.is_empty() {
         return cmd_report(&a);
     }
@@ -1928,6 +2030,32 @@ mod tests {
         assert_eq!(classify("better", &json!({"verdict": "ABORT"})), "abort");
     }
 
+    /// 审计 #16: 采集失败不再记成「旋钮未全部生效」, 也不再整题作废, 只剔除那一对。
+    #[test]
+    fn capture_failure_drops_only_its_pair_and_is_not_an_apply_failure() {
+        let (a, mut b) = arms(10.0, -0.05);
+        b[2].1["arm"]["capture_ok"] = json!(false);
+        assert!(arm_apply_ok(&b[2].1));
+        let (ka, kb, dropped) = drop_capture_failed(&a, &b);
+        assert_eq!((ka.len(), kb.len()), (4, 4));
+        assert_eq!(dropped, vec!["knob3+ctrl3".to_string()]);
+        assert!(ka.iter().all(|r| r.0 != "ctrl3") && kb.iter().all(|r| r.0 != "knob3"));
+        let d = pv(&judge_arms(&ka, &kb, 70.0, true, None));
+        assert_ne!(d["verdict"], "ABORT", "{d}");
+        assert_eq!(d["n_pairs"], 4);
+        // 旧证据: apply_ok 是合成的 false, 但逐项 checks 全真 → 负载其实生效了
+        let old = json!({"arm": {"apply_ok": false, "capture_ok": false,
+            "checks": {"clean_exit": true, "postfx_active": true}}});
+        assert!(arm_apply_ok(&old));
+        assert!(!arm_capture_ok(&old));
+        // checks 里真有一项假: 才是负载没生效
+        let bad = json!({"arm": {"apply_ok": false, "capture_ok": true,
+            "checks": {"clean_exit": true, "postfx_active": false}}});
+        assert!(!arm_apply_ok(&bad));
+        // 没记 capture_ok 的更旧证据: 算采集够
+        assert!(arm_capture_ok(&json!({"arm": {"apply_ok": true}})));
+    }
+
     #[test]
     fn power_only_judged_when_every_run_was_on_battery() {
         let (a, mut b) = arms(10.0, 0.0);
@@ -1986,6 +2114,48 @@ mod tests {
         assert_eq!(r1["time_cost"]["per_n"][0]["minutes_per_experiment"], 5.0);
         assert!(render(&r1).contains("混淆矩阵"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_interrupted_or_uncaptured_arm_is_retried_but_an_unapplied_knob_is_not() {
+        let ok = json!(true);
+        let checks = json!({ "clean_exit": ok, "postfx_active": ok, "shader_path": ok, "run_id": ok, "frames_submitted": ok });
+        // 10-21 worsewg800_1/knob8: 算子全生效、跑完, trace 只有 0.03 秒
+        let lost = json!({ "arm": { "checks": checks, "capture_ok": false, "span_s": 0.0339, "apply_ok": false } });
+        assert!(infra_failed(&lost));
+        // 10-21 betterwg300_1/knob8: 跑到一半被打断
+        let mut cut = checks.clone();
+        cut["clean_exit"] = json!(false);
+        cut["frames_submitted"] = json!(false);
+        assert!(infra_failed(&json!({ "arm": { "checks": cut, "capture_ok": false, "apply_ok": false } })));
+        let good = json!({ "arm": { "checks": checks, "capture_ok": true, "apply_ok": true } });
+        assert!(!infra_failed(&good));
+        // 算子没装上: 不是基础设施问题, 不重试, 让判定链按 ABORT 处理
+        let mut bad = checks.clone();
+        bad["postfx_active"] = json!(false);
+        assert!(!infra_failed(&json!({ "arm": { "checks": bad, "capture_ok": true, "apply_ok": false } })));
+        assert!(!infra_failed(&json!({ "arm": {} })));
+    }
+
+    #[test]
+    fn cooling_waits_for_the_gpu_thermal_level_not_just_temperature() {
+        // 10-21 实测: 结温已在 45C 以下, thermal_pwrlevel 仍停在 6 —— 这时不算冷
+        let hot = parse_pwr("max_pwrlevel=0\nmin_pwrlevel=17\nthermal_pwrlevel=6\ngpuclk=578000000\n");
+        let back = parse_pwr("max_pwrlevel=0\nmin_pwrlevel=17\nthermal_pwrlevel=0\ngpuclk=160000000\n");
+        assert_eq!(tpl_cool_enough(&hot, 0), Some(false));
+        assert_eq!(tpl_cool_enough(&hot, 6), Some(true));
+        assert_eq!(tpl_cool_enough(&back, 0), Some(true));
+        // 读不到就是「不知道」, 不能无限等下去
+        assert_eq!(tpl_cool_enough(&parse_pwr("max_pwrlevel=0\n"), 0), None);
+        assert_eq!(tpl_cool_enough(&parse_pwr("thermal_pwrlevel=x\n"), 0), None);
+        // 缺省等回 4 档以内 (空闲 60 秒后实测多停在 4–6, 缺省 0 会每臂等到超时), 也能用参数关掉
+        let a = parse_args(&["run".to_string()]).unwrap();
+        assert_eq!(a.cond.cool_tpl, Some(4));
+        let a = parse_args(&["run".into(), "--no-cool-tpl".into()]).unwrap();
+        assert_eq!(a.cond.cool_tpl, None);
+        let a = parse_args(&["run".into(), "--cool-tpl".into(), "3".into()]).unwrap();
+        assert_eq!(a.cond.cool_tpl, Some(3));
+        assert_eq!(a.cond.to_json()["cool_tpl"], json!(3));
     }
 
     #[test]

@@ -175,11 +175,73 @@ pub fn abba_order(pairs: usize) -> Vec<(bool, usize)> {
         .collect()
 }
 
+/// 臂序随机化 (审计 #13): 以前 31/31 个 case 都是候选臂先跑, 停充后最初那段电池仍在吸电、
+/// 应用刚启动那段的系统状态, 永远落在候选臂上, ABBA 抵消不了「第一臂」这个固定偏差。
+///
+/// 规则 (先于数据冻结): 每两对为一块, 块内用一次抛硬币决定是「候选先, 对照先」还是
+/// 「对照先, 候选先」; 轮数是奇数时最后一对单独抛一次。这样第一臂是谁由种子决定,
+/// 同时仍保留 ABBA 的逐块平衡 (线性热漂移照样在块内抵消)。
+/// 返回每一对「是否候选臂先跑」。同一个种子逐位可复现, 种子要原样记进报告。
+pub fn knob_first_order(pairs: usize, seed: u64) -> Vec<bool> {
+    let mut rng = SplitMix64(seed);
+    let mut out = Vec::with_capacity(pairs);
+    while out.len() < pairs {
+        let first = rng.next() & 1 == 1;
+        out.push(first);
+        if out.len() < pairs {
+            out.push(!first);
+        }
+    }
+    out
+}
+
+/// 按 [`knob_first_order`] 展开的到达顺序: `(是否候选臂, 第几轮)`。
+pub fn seeded_order(pairs: usize, seed: u64) -> Vec<(bool, usize)> {
+    knob_first_order(pairs, seed)
+        .into_iter()
+        .enumerate()
+        .flat_map(|(k, knob_first)| [(knob_first, k + 1), (!knob_first, k + 1)])
+        .collect()
+}
+
+/// 臂序种子: 请求给了 `protocol.order_seed` 就用它 (复现用), 否则取当前时间的纳秒数。
+pub fn order_seed(req_seed: Option<u64>) -> u64 {
+    req_seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    })
+}
+
+/// 臂序记录, 原样进回包 `conditions_observed.arm_order`。
+pub fn order_note(seed: u64, pairs: usize) -> serde_json::Value {
+    serde_json::json!({
+        "seed": seed,
+        "knob_first": knob_first_order(pairs, seed),
+        "rule": "每两对一块, 块内抛一次硬币决定先跑哪一臂, 下一对反过来; 奇数轮的最后一对单独抛 (src/curtail.rs knob_first_order)",
+    })
+}
+
+/// splitmix64: 不引依赖的小随机数源, 只用来定臂序。
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+
 // ══════════════ 离线回放: 拿归档的两臂逐轮数据, 按 ABBA 到达顺序重演截断 ══════════════
 
-const REPLAY_USAGE: &str = "用法: phonefarm curtail-replay <A臂(对照)glob> <B臂(候选)glob> [--alpha 0.05] [--metrics m1,m2,..]\n\
+const REPLAY_USAGE: &str = "用法: phonefarm curtail-replay <A臂(对照)glob> <B臂(候选)glob> [--alpha 0.05] [--metrics m1,m2,..] [--order-seed N]\n\
     glob 命中目录取其下 summary.json, 命中文件 (如 metrics.json) 直接用; 轮次取标签里的第一个数字。\n\
-    缺省指标表: frame_p95 / fps_mean / power_w_mean 里两臂每轮都有的那几个 (方向按 sysparam 判定表)。";
+    缺省指标表: frame_p95 / fps_mean / power_w_mean 里两臂每轮都有的那几个 (方向按 sysparam 判定表)。\n\
+    --order-seed: 按回包 conditions_observed.arm_order.seed 的随机臂序重演 (缺省按旧的固定 ABBA)。";
 
 /// 标签里的第一个数字 = 第几轮 (ctrl3 / bw_knob3 / a3_gameup)。
 fn round_of(label: &str) -> Option<usize> {
@@ -275,7 +337,13 @@ pub fn run_replay(args: &[String]) -> i32 {
     let (mut na, mut nb) = (0usize, 0usize);
     let mut stop: Option<usize> = None;
     let mut partial_keep = false;
-    for (k, (is_b, i)) in abba_order(pairs).into_iter().enumerate() {
+    // 2026-10-21 之后的归档按随机臂序跑 (回包 conditions_observed.arm_order.seed);
+    // 给了 --order-seed 就按那个顺序重演, 没给按旧的固定 ABBA
+    let order = match opt("--order-seed").and_then(|v| v.parse::<u64>().ok()) {
+        Some(seed) => seeded_order(pairs, seed),
+        None => abba_order(pairs),
+    };
+    for (k, (is_b, i)) in order.into_iter().enumerate() {
         let have = |arm: &[Run]| arm.iter().any(|r| round_of(&r.0) == Some(i));
         if is_b && have(&b) {
             nb += 1;
@@ -459,6 +527,36 @@ mod tests {
     fn abba_order_matches_eval_and_autoloop() {
         let o = abba_order(3);
         assert_eq!(o, vec![(true, 1), (false, 1), (false, 2), (true, 2), (true, 3), (false, 3)]);
+    }
+
+    #[test]
+    fn seeded_order_is_reproducible_balanced_and_not_always_knob_first() {
+        // 同一个种子逐位复现
+        assert_eq!(knob_first_order(7, 42), knob_first_order(7, 42));
+        // 每块两对: 后一对与前一对相反 (ABBA 的逐块平衡还在)
+        for seed in 0..200u64 {
+            let o = knob_first_order(6, seed);
+            assert_eq!(o.len(), 6);
+            for k in (0..6).step_by(2) {
+                assert_ne!(o[k], o[k + 1], "seed {seed}");
+            }
+            let s = seeded_order(6, seed);
+            assert_eq!(s.len(), 12);
+            // 每一对两臂各一次
+            for i in 1..=6 {
+                assert_eq!(s.iter().filter(|(_, r)| *r == i).count(), 2);
+                assert_eq!(s.iter().filter(|(b, r)| *r == i && *b).count(), 1);
+            }
+        }
+        // 第一臂不再永远是候选臂: 200 个种子里两种都要出现, 且大致各半
+        let knob_first = (0..200u64).filter(|s| knob_first_order(1, *s)[0]).count();
+        assert!((60..=140).contains(&knob_first), "{knob_first}");
+        // 奇数轮的最后一对也是抛硬币定的
+        assert_eq!(knob_first_order(5, 9).len(), 5);
+        let note = order_note(42, 4);
+        assert_eq!(note["seed"], 42);
+        assert_eq!(note["knob_first"].as_array().unwrap().len(), 4);
+        assert_eq!(order_seed(Some(7)), 7);
     }
 
     #[test]

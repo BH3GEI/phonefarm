@@ -676,14 +676,8 @@ fn min_reachable_p(pairs: i64) -> Option<f64> {
     if pairs < 2 {
         return None;
     }
-    let mut c: f64 = 1.0;
-    for i in 1..=pairs {
-        c = c * (pairs + i) as f64 / i as f64;
-        if !c.is_finite() {
-            return None;
-        }
-    }
-    Some(2.0 / c)
+    // 公式只在 loopstat 一处; 溢出时它返回 0.0, 这里换成 None
+    Some(crate::loopstat::min_two_sided_p(pairs as usize)).filter(|p| *p > 0.0)
 }
 
 /// 判定指标的方向: `Some(true)` = 越小越好。不在判定表里的指标返回 `None`。
@@ -767,6 +761,204 @@ pub fn power_group_ok<'a>(envs: impl IntoIterator<Item = &'a serde_json::Value>)
     true
 }
 
+/// 一组 ABBA 的功耗按「对」取舍的结果 (审计 #5)。
+///
+/// 以前 [`power_group_ok`] 一臂不合格就整组 false, 功耗静默退出判定; 现在只剔除那一对
+/// (同一轮的对照臂与候选臂), 剩下的对照常进判定, 被剔的对写进回包。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PowerPairs {
+    /// 每一臂进判定的功耗 (W), 与传入顺序一一对应; None = 这一臂被剔除或没量到
+    pub ctrl: Vec<Option<f64>>,
+    pub knob: Vec<Option<f64>>,
+    /// 这组用的口径 (battery / usb_plus_battery / ...); 一臂都没有时 None
+    pub rail: Option<String>,
+    /// 各臂口径不一致, 统一改用两轨同刻相加 (power_mixed_w_mean)
+    pub unified_to_mixed: bool,
+    /// 被剔除的对: (轮次, 从 1 起; 原因)
+    pub dropped: Vec<(usize, String)>,
+    /// 有臂判出供电不足 (混合供电)
+    pub supply_short: bool,
+}
+
+impl PowerPairs {
+    pub fn kept(&self) -> (usize, usize) {
+        (self.ctrl.iter().flatten().count(), self.knob.iter().flatten().count())
+    }
+
+    /// 两臂各至少 2 个有效值, 功耗才进判定 (置换检验最少要 2 对 2)。
+    pub fn usable(&self) -> bool {
+        let (a, b) = self.kept();
+        a >= 2 && b >= 2
+    }
+
+    /// 截断时用: 已保留的加上还没跑的, 两臂都还可能凑够 2 个。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn possible(&self, left_ctrl: usize, left_knob: usize) -> bool {
+        let (a, b) = self.kept();
+        a + left_ctrl >= 2 && b + left_knob >= 2
+    }
+
+    /// 人能读的说明: 剔了哪几对、为什么; 进不了判定时为什么。都没有时 None。
+    pub fn note(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if self.unified_to_mixed {
+            parts.push("各臂供电口径不一致, 统一按 USB 与电池两轨同刻相加计".into());
+        }
+        if self.supply_short {
+            parts.push("供电不足: 有臂 USB 输入不够或中途断开, 电池在补电, 已按两轨同刻相加计".into());
+        }
+        if !self.dropped.is_empty() {
+            let list: Vec<String> = self.dropped.iter().map(|(r, why)| format!("第 {r} 轮 ({why})")).collect();
+            parts.push(format!("剔除 {} 对: {}", self.dropped.len(), list.join("; ")));
+        }
+        if !self.usable() {
+            let (a, b) = self.kept();
+            parts.push(format!("功耗不进判定: 剔除后对照臂 {a} 个、候选臂 {b} 个有效值, 每臂至少要 2 个"));
+        }
+        (!parts.is_empty()).then(|| parts.join("。"))
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let (a, b) = self.kept();
+        serde_json::json!({
+            "rail": self.rail,
+            "in_verdict": self.usable(),
+            "kept_ctrl": a,
+            "kept_knob": b,
+            "unified_to_mixed": self.unified_to_mixed,
+            "supply_short": self.supply_short,
+            "dropped": self.dropped.iter().map(|(r, why)| serde_json::json!({"round": r, "reason": why})).collect::<Vec<_>>(),
+            "note": self.note(),
+        })
+    }
+}
+
+/// 一臂 env 的功耗: (是否可信, 口径, 值, 两轨相加的值, 不可信的原因)。
+fn arm_power(e: &serde_json::Value) -> (bool, String, Option<f64>, Option<f64>, String) {
+    let valid = e["power_valid"].as_bool().unwrap_or_else(|| e["on_battery"].as_bool().unwrap_or(false));
+    let w = e["power_w_mean"].as_f64();
+    let rail = e["power_source"].as_str().unwrap_or("battery").to_string();
+    let why = e["power_usable_reason"].as_str().unwrap_or("功耗没量到").to_string();
+    (valid && w.is_some(), rail, w, e["power_mixed_w_mean"].as_f64(), why)
+}
+
+/// 按对取舍功耗。`ctrl[i]` 与 `knob[i]` 是同一轮的两臂; 多出来的单臂 (中途停下) 自成一组,
+/// 合格就留。
+///
+/// 1. 每臂先看自己可不可信 (`power_valid`, 旧证据按 `on_battery`)。
+/// 2. 可信臂的口径不止一种时: 每臂都有 `power_mixed_w_mean` 就统一改用它 (两轨同刻相加,
+///    电池放电与旁路在这个口径下是同一个量); 否则取臂数最多的口径, 其余口径的臂当不可信。
+/// 3. 一对里任一臂不可信, 剔除这一对 (两臂都不进), 原因写进 `dropped`。
+pub fn power_pairs<'a>(ctrl: &[&'a serde_json::Value], knob: &[&'a serde_json::Value]) -> PowerPairs {
+    let (nc, nk) = (ctrl.len(), knob.len());
+    let n = nc.max(nk);
+    let c: Vec<Option<&serde_json::Value>> = (0..n).map(|i| ctrl.get(i).copied()).collect();
+    let k: Vec<Option<&serde_json::Value>> = (0..n).map(|i| knob.get(i).copied()).collect();
+    let rounds: Vec<usize> = (1..=n).collect();
+    let mut out = power_pairs_slots(&c, &k, &rounds);
+    out.ctrl.truncate(nc);
+    out.knob.truncate(nk);
+    out
+}
+
+/// [`power_pairs`] 的本体, 按「轮」对齐: 第 j 个槽是第 `round_no[j]` 轮, `ctrl[j]` / `knob[j]`
+/// 是这一轮的对照臂 / 候选臂, 缺的一臂为 None (中途停下、或候选臂没进统计)。
+/// 只有一臂的轮自成一组, 合格就留; 两臂都在时任一臂不可信就剔除这一对。
+/// 回的 `ctrl` / `knob` 按槽排列 (长度 = 槽数), `dropped` 里的轮次是 `round_no` 的值。
+pub fn power_pairs_slots(
+    ctrl: &[Option<&serde_json::Value>],
+    knob: &[Option<&serde_json::Value>],
+    round_no: &[usize],
+) -> PowerPairs {
+    let n = ctrl.len().max(knob.len());
+    fn slot<'a>(v: &[Option<&'a serde_json::Value>], j: usize) -> Option<&'a serde_json::Value> {
+        v.get(j).copied().flatten()
+    }
+    let present: Vec<&serde_json::Value> = (0..n).flat_map(|j| [slot(ctrl, j), slot(knob, j)]).flatten().collect();
+    let supply_short = present.iter().any(|e| e["supply_short"].as_bool() == Some(true) && arm_power(e).0);
+    let arms: Vec<_> = present.iter().map(|e| arm_power(e)).collect();
+    let mut rails: Vec<(String, usize)> = Vec::new();
+    for (ok, r, ..) in &arms {
+        if *ok {
+            match rails.iter_mut().find(|(x, _)| x == r) {
+                Some((_, n)) => *n += 1,
+                None => rails.push((r.clone(), 1)),
+            }
+        }
+    }
+    let unified_to_mixed = rails.len() > 1 && arms.iter().filter(|a| a.0).all(|a| a.3.is_some());
+    let main_rail: Option<String> = if unified_to_mixed {
+        Some("usb_plus_battery".into())
+    } else {
+        // 臂数最多的口径; 平手取先出现的
+        rails.iter().fold(None::<&(String, usize)>, |best, x| match best {
+            Some(b) if b.1 >= x.1 => Some(b),
+            _ => Some(x),
+        }).map(|(r, _)| r.clone())
+    };
+    // 每臂: Ok(值) 或 Err(原因)
+    let judge = |e: &serde_json::Value| -> Result<f64, String> {
+        let a = arm_power(e);
+        if !a.0 {
+            return Err(a.4.clone());
+        }
+        if unified_to_mixed {
+            return a.3.ok_or_else(|| "缺两轨相加的值".into());
+        }
+        match &main_rail {
+            Some(m) if *m != a.1 => Err(format!("口径 {} 与本组主口径 {m} 不同, 不能相减", a.1)),
+            _ => a.2.ok_or_else(|| a.4.clone()),
+        }
+    };
+    let mut out = PowerPairs {
+        ctrl: vec![None; n],
+        knob: vec![None; n],
+        rail: main_rail.clone(),
+        unified_to_mixed,
+        dropped: Vec::new(),
+        supply_short,
+    };
+    for j in 0..n {
+        let c = slot(ctrl, j).map(&judge);
+        let k = slot(knob, j).map(&judge);
+        match (c, k) {
+            (Some(Ok(a)), Some(Ok(b))) => {
+                out.ctrl[j] = Some(a);
+                out.knob[j] = Some(b);
+            }
+            (Some(Ok(a)), None) => out.ctrl[j] = Some(a),
+            (None, Some(Ok(b))) => out.knob[j] = Some(b),
+            (None, None) => {}
+            (c, k) => {
+                let mut why: Vec<String> = Vec::new();
+                if let Some(Err(e)) = c {
+                    why.push(format!("对照臂: {e}"));
+                }
+                if let Some(Err(e)) = k {
+                    why.push(format!("候选臂: {e}"));
+                }
+                out.dropped.push((round_no.get(j).copied().unwrap_or(j + 1), why.join(" / ")));
+            }
+        }
+    }
+    if out.ctrl.iter().chain(out.knob.iter()).all(|v| v.is_none()) && main_rail.is_none() {
+        out.rail = None;
+    }
+    out
+}
+
+/// charge_suspend.sh 输出里的开跑前 USB 输入上限检查 (`CHARGE_USB_LIMIT` / `CHARGE_SUPPLY_LOW` 行)
+/// → 一句话。供电不足时以「供电不足」开头; 脚本没做这项检查 (旧脚本、非旁路) 时 None。
+pub fn usb_supply_note(charge_log: &str) -> Option<String> {
+    let low = charge_log.lines().find_map(|l| l.trim().strip_prefix("CHARGE_SUPPLY_LOW").map(|r| r.trim().to_string()));
+    if let Some(r) = low {
+        return Some(if r.starts_with("供电不足") { r } else { format!("供电不足: {r}") });
+    }
+    charge_log
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("CHARGE_USB_LIMIT").map(|r| format!("USB 输入上限检查: {}", r.trim())))
+}
+
 /// 功耗进不了判定的原因 —— 直接写进回包, 不让人猜。
 ///
 /// 两种情形要分开: 两臂轨道不一致 (无法相减) 与 两臂都没量到。
@@ -825,40 +1017,126 @@ pub(crate) struct SampleWindow {
     pub interval_s: Option<f64>,
     pub first_uptime: Option<f64>,
     pub last_uptime: Option<f64>,
+    /// v2 采样器的功耗快循环间隔 (`power_interval=`); v1 为 None
+    pub power_interval_s: Option<f64>,
 }
 
 /// Done marker, declared protocol and every uptime are required; one lucky row is not a window.
+///
+/// 两版采样器 (loop_v1/auto/sample_env.sh):
+/// - v1: 只有 ENV 行, 按「次数 × 间隔」走满 dur, 行数必须恰为 ceil(dur/interval)。
+/// - v2 (ruler fix-C): ENV 行按 /proc/uptime 每 interval 一条, 其间 PWR 快循环行 (≥5 Hz);
+///   给了停止标志时在 ftrace 采集结束后提前停 (`#stop_seen`), 主机端再按 trace 采集窗截取。
+///   所以 v2 的首末时刻按全部功耗行 (ENV+PWR) 算, 相邻功耗行不超过 2 × interval,
+///   没提前停时跨度要走满 dur; 提前停时跨度由 [`trace_window_covered`] 对采集窗核对。
 pub(crate) fn sample_window(text:&str)->SampleWindow {
-    let field=|key:&str|text.lines().find(|l|l.starts_with("#sample_env v1 "))
+    let header=text.lines().find(|l|l.starts_with("#sample_env v1 ")||l.starts_with("#sample_env v2 "));
+    let v2=header.is_some_and(|l|l.starts_with("#sample_env v2 "));
+    let field=|key:&str|header
         .and_then(|l|l.split_whitespace().find_map(|t|t.strip_prefix(key)))
         .and_then(|x|x.parse::<f64>().ok()).filter(|x|x.is_finite() && *x>0.0);
     let duration_s=field("dur=");let interval_s=field("interval=");
-    let rows:Vec<&str>=text.lines().filter(|l|l.starts_with("ENV ")).collect();
-    let times:Vec<f64>=rows.iter().filter_map(|l|l.split_whitespace().nth(1)?.parse::<f64>().ok())
-        .filter(|x|x.is_finite() && *x>=0.0).collect();
-    let first_uptime=times.first().copied();let last_uptime=times.last().copied();
+    let power_interval_s=if v2 {field("power_interval=")} else {None};
     let done=text.lines().rfind(|l|!l.trim().is_empty())==Some("#sample_env done");
+    let parse_times=|rows:&[&str]|->Vec<f64>{rows.iter().filter_map(|l|l.split_whitespace().nth(1)?.parse::<f64>().ok())
+        .filter(|x|x.is_finite() && *x>=0.0).collect()};
+    if v2 {
+        let env_rows:Vec<&str>=text.lines().filter(|l|l.starts_with("ENV ")).collect();
+        let rows:Vec<&str>=text.lines().filter(|l|l.starts_with("ENV ")||l.starts_with("PWR ")).collect();
+        let times=parse_times(&rows);
+        let first_uptime=times.first().copied();let last_uptime=times.last().copied();
+        let stopped=text.lines().any(|l|l.starts_with("#stop_seen"));
+        let complete=duration_s.zip(interval_s).is_some_and(|(dur,ivl)|
+            ivl<=dur && rows.len()>=2 && !env_rows.is_empty() && times.len()==rows.len() && done
+            && times.windows(2).all(|w|w[1]-w[0]>=0.0 && w[1]-w[0]<=ivl*2.0)
+            && (stopped || last_uptime.zip(first_uptime).is_some_and(|(b,a)|b-a>=dur-ivl-0.1)));
+        return SampleWindow{complete,duration_s,interval_s,first_uptime,last_uptime,power_interval_s};
+    }
+    let rows:Vec<&str>=text.lines().filter(|l|l.starts_with("ENV ")).collect();
+    let times=parse_times(&rows);
+    let first_uptime=times.first().copied();let last_uptime=times.last().copied();
     let complete=duration_s.zip(interval_s).is_some_and(|(dur,ivl)|
         ivl<=dur && rows.len()>=2 && rows.len()==(dur/ivl).ceil() as usize
         && times.len()==rows.len() && done && times.windows(2).all(|w|w[1]-w[0]>=ivl*0.5 && w[1]-w[0]<=ivl*2.0)
         && last_uptime.zip(first_uptime).is_some_and(|(b,a)|b-a>=dur-ivl-0.1));
-    SampleWindow{complete,duration_s,interval_s,first_uptime,last_uptime}
+    SampleWindow{complete,duration_s,interval_s,first_uptime,last_uptime,power_interval_s}
 }
 
 /// ftrace capture metadata uses /proc/uptime too, so compare clocks without assuming event trace_clock.
+///
+/// v2 采样器见到停止标志 (采集结束后才写出的 trace 文件) 就停, 最后一条功耗行与采集结束之间
+/// 最多差一个快循环周期加读节点的耗时, 所以末端放宽 2 × power_interval + 0.1 s。
 pub(crate) fn trace_window_covered(window:&SampleWindow,trace:&str,expected_capture_s:u64)->bool {
     let field=|key:&str|trace.lines().find(|l|l.starts_with("#loop_v1_meta capture_start_uptime="))
         .and_then(|l|l.split_whitespace().find_map(|t|t.strip_prefix(key)))
         .and_then(|x|x.parse::<f64>().ok()).filter(|x|x.is_finite());
+    let tail_slack=window.power_interval_s.map_or(0.0,|p|2.0*p+0.1);
     match (window.first_uptime,window.last_uptime,field("capture_start_uptime="),field("capture_end_uptime="),field("duration_req=")) {
         (Some(a),Some(b),Some(start),Some(end),Some(dur))=>window.complete && dur==expected_capture_s as f64
-            && end-start>=dur-0.1 && end-start<=dur+5.0 && a<=start && b>=end,
+            && end-start>=dur-0.1 && end-start<=dur+5.0 && a<=start && b+tail_slack>=end,
         _=>false,
     }
 }
 
 pub fn env_stats(text: &str) -> PyVal {
+    env_stats_impl(text, None)
+}
+
+/// [`env_stats`] 的取窗版 (审计 #3): 功耗样本 (ENV/PWR 行) 只取落在 trace 采集窗
+/// `[capture_start_uptime, capture_end_uptime]` 里的, 并且整段的第一个功耗样本一律丢掉
+/// (采样器刚起、`su` + shell 启动本身在耗电, 实测每臂第一个点都偏高, msaa1 是 7.18–7.20 W)。
+/// GPU 行同样截窗 (它是功耗的辅助证据, 空闲段的低频会把均值拉低)。
+/// 结温不截窗: 它是作废线 (超温上限), 整段都要看。
+///
+/// `window` 为 None (trace 里没有 capture 时间) 时只丢第一个点, 并在 `power_window` 里写明没截窗。
+/// 输出比 [`env_stats`] 多几个键, 都追加在末尾: `power_window`、`n_power_samples_total`、
+/// `n_power_samples_used`、`power_sample_hz`。
+pub fn env_stats_window(text: &str, window: Option<(f64, f64)>) -> PyVal {
+    env_stats_impl(text, Some(window))
+}
+
+/// 从 trace 文本头部的 `#loop_v1_meta capture_start_uptime=… capture_end_uptime=…` 取采集窗。
+/// 这一行由 ftrace_capture.sh 写在文件最前面, 所以读到第一行非 `#` 就停, 不扫整个 trace。
+pub fn capture_window_from_trace(trace: &str) -> Option<(f64, f64)> {
+    let (mut a, mut b) = (None, None);
+    for line in trace.lines() {
+        if !line.starts_with('#') {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("#loop_v1_meta") {
+            for tok in rest.split_whitespace() {
+                match tok.split_once('=') {
+                    Some(("capture_start_uptime", v)) => a = v.parse::<f64>().ok(),
+                    Some(("capture_end_uptime", v)) => b = v.parse::<f64>().ok(),
+                    _ => {}
+                }
+            }
+        }
+    }
+    match (a, b) {
+        (Some(a), Some(b)) if b > a => Some((a, b)),
+        _ => None,
+    }
+}
+
+/// `clip`: None = 旧口径 (全部样本, 不丢第一个点, 输出与以前逐字节相同);
+/// Some(w) = 取窗口径 (见 [`env_stats_window`])。
+fn env_stats_impl(text: &str, clip: Option<Option<(f64, f64)>>) -> PyVal {
+    let in_window = |up: Option<f64>| -> bool {
+        match clip {
+            Some(Some((a, b))) => up.is_some_and(|u| a <= u && u <= b),
+            _ => true,
+        }
+    };
+    let mut first_power_seen = false;
+    let (mut n_power_total, mut n_power_used) = (0usize, 0usize);
+    // 解析不了的功耗行 (ENV/PWR), 整窗证据要求为 0
+    let mut n_malformed = 0usize;
     let (mut vi_watts, mut now_watts, mut usb_watts) = (vec![], vec![], vec![]);
+    // 混合口径: 同一条 ENV 样本 (同一时刻) 的 USB 轨 |V x I| + 电池放电功率 (充电为负)。
+    // usb_all_watts 含 USB 读数为 0 的样本, 用来判「USB 有没有在出力」。
+    let (mut mixed_watts, mut usb_all_watts, mut batt_out_watts): (Vec<f64>, Vec<f64>, Vec<f64>) =
+        (vec![], vec![], vec![]);
     let (mut currents, mut voltages): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
     let mut temps: Vec<f64> = vec![];
     let mut status = String::new();
@@ -904,6 +1182,9 @@ pub fn env_stats(text: &str) -> PyVal {
         }
         if let Some(rest) = line.strip_prefix("GPU ") {
             let p: Vec<&str> = rest.split_whitespace().collect();
+            if clip.is_some() && !in_window(p.first().and_then(|x| x.parse::<f64>().ok())) {
+                continue;
+            }
             if let (Some(Ok(l)), Some(Ok(hz))) =
                 (p.get(1).map(|x| x.parse::<i64>()), p.get(2).map(|x| x.parse::<i64>()))
             {
@@ -916,15 +1197,46 @@ pub fn env_stats(text: &str) -> PyVal {
             }
             continue;
         }
-        if !line.starts_with("ENV ") {
+        // PWR 行 (sample_env v2 的快循环): 只有功耗字段, 没有结温
+        let is_env = line.starts_with("ENV ");
+        if !is_env && !line.starts_with("PWR ") {
             continue;
         }
         // ENV <uptime> <batt_uv> <batt_ua> <batt_uw|NA> <usb_uv> <usb_ua> <热区> <毫摄氏度>
+        // PWR <uptime> <batt_uv> <batt_ua> <batt_uw|NA> <usb_uv> <usb_ua>
         let parts: Vec<&str> = line.split_whitespace().collect();
-        // Every ENV row belongs to the claimed sample window, including malformed rows.
-        n += 1;
-        if parts.len() != 9 { continue; }
+        // 整窗证据 (main): 窗内每一条功耗行都要解析得了, 坏行不能悄悄跳过。
+        // 计数在解析之前 —— 解析失败的样本照样算采到过 (与旧版一致)
+        if is_env {
+            n += 1;
+        }
+        if parts.len() != if is_env { 9 } else { 7 } {
+            n_malformed += 1;
+            continue;
+        }
+        let Ok(uptime) = parts[1].parse::<f64>() else {
+            n_malformed += 1;
+            continue;
+        };
+        if is_env && clip.is_some() {
+            // 结温不截窗, 整段都看 (超温是作废线)
+            if let Ok(t) = parts[8].parse::<i64>() {
+                if 0 < t && t < 100_000 {
+                    temps.push(t as f64 / 1000.0);
+                }
+            }
+        }
+        // 取窗口径 (ruler fix-C): 丢掉整段第一个功耗样本, 窗外的不进功耗
+        if clip.is_some() {
+            n_power_total += 1;
+            let first = !first_power_seen;
+            first_power_seen = true;
+            if first || !in_window(Some(uptime)) {
+                continue;
+            }
+        }
         let (Ok(bv), Ok(bi)) = (parts[2].parse::<i64>(), parts[3].parse::<i64>()) else {
+            n_malformed += 1;
             continue;
         };
         let bp = if parts[4] == "NA" {
@@ -932,15 +1244,29 @@ pub fn env_stats(text: &str) -> PyVal {
         } else {
             match parts[4].parse::<i64>() {
                 Ok(v) => Some(v),
-                Err(_) => continue,
+                Err(_) => {
+                    n_malformed += 1;
+                    continue;
+                }
             }
         };
         let (Ok(uv), Ok(ui)) = (parts[5].parse::<i64>(), parts[6].parse::<i64>()) else {
+            n_malformed += 1;
             continue;
         };
-        let Ok(t) = parts[8].parse::<i64>() else {
-            continue;
+        // 旧口径: 结温在功耗字段之后解析, 解析不了整行作废 (与以前一致)
+        let t = if clip.is_none() && is_env {
+            let Ok(t) = parts[8].parse::<i64>() else {
+                n_malformed += 1;
+                continue;
+            };
+            Some(t)
+        } else {
+            None
         };
+        if clip.is_some() {
+            n_power_used += 1;
+        }
 
         if bv != 0 {
             voltages.push(bv as f64);
@@ -959,8 +1285,20 @@ pub fn env_stats(text: &str) -> PyVal {
         if uv != 0 && ui != 0 {
             usb_watts.push((uv as f64 / 1e6 * ui as f64 / 1e6).abs());
         }
-        if 0 < t && t < 100_000 {
-            temps.push(t as f64 / 1000.0);
+        if bv != 0 {
+            let usb_w = (uv as f64 / 1e6 * ui as f64 / 1e6).abs();
+            // 本机约定电池电流正 = 充、负 = 放: 放电功率为正, 充电为负
+            let batt_out = -(bv as f64 / 1e6 * bi as f64 / 1e6);
+            usb_all_watts.push(usb_w);
+            batt_out_watts.push(batt_out);
+            if usb_w + batt_out > 0.0 && (usb_w != 0.0 || bi != 0) {
+                mixed_watts.push(usb_w + batt_out);
+            }
+        }
+        if let Some(t) = t {
+            if 0 < t && t < 100_000 {
+                temps.push(t as f64 / 1000.0);
+            }
         }
     }
 
@@ -968,72 +1306,110 @@ pub fn env_stats(text: &str) -> PyVal {
         (!xs.is_empty()).then(|| py_round(py_sum(xs.iter().copied()) / xs.len() as f64, 4))
     };
 
-    // on_battery 的判据与 phonefarm hwcond.rs::BatteryState::on_battery 一致:
-    // status 不是 Charging **且** 电流确实是放电方向。两个判据都要看, 因为两个都会
-    // 单独骗人 —— 停充之后有的内核仍写 "Not charging" 而不是 "Discharging",
-    // 而 current_now 在充放平衡的瞬间会过零。
+    // 供电判定与 hwcond.rs 的单轨通路是同一个函数 (hwcond::classify_supply, 审计 #15)。
+    // on_battery 仍是「电池确实在放电」这一事实 (status 不是 Charging、不是满电空闲、电流为负),
+    // 两个判据都要看: 停充之后有的内核仍写 "Not charging"; current_now 在充放平衡时会过零。
     let cur_mean = avg(&currents);
     let charging = status.to_lowercase() == "charging";
-    // 满电空闲 (status=Full 且 |电流| < 旁路门限) 不是放电态: 电池不进不出, 整机由 USB 供电。
-    // 2026-10-12 实测把 Full + -3 mA 当成放电, 交了 0.009 W 的「整机功耗」。
-    let full_idle = status.eq_ignore_ascii_case("full") && cur_mean.is_some_and(|c| c.abs() < BYPASS_IDLE_UA);
-    let on_battery = !charging && !full_idle && cur_mean.is_some_and(|c| c < 0.0);
-    // Every sample must support discharge; a negative average can hide charging intervals.
-    let statuses_ok = |st: &str| matches!(st.to_lowercase().as_str(), "discharging" | "not charging");
-    let coverage=sample_window(text);
-    let power_window_verified = coverage.complete && statuses_ok(&status) && statuses_ok(&status_after)
-        && n > 0 && currents.len() == n && vi_watts.len() == n
-        && currents.iter().all(|c| *c < 0.0)
-        && vi_watts.iter().all(|w| (crate::hwcond::POWER_MIN_W..=crate::hwcond::POWER_MAX_W).contains(w));
+    let on_battery = cur_mean.is_some_and(|c| crate::hwcond::battery_discharging(&status, c));
 
     let now_mean = avg(&now_watts);
     // 手机整机功耗合理区间。777W 这种读数只能说明单位不对, 不能进任何均值。
     let now_plausible = now_mean.is_some_and(|m| PLAUSIBLE_W.0 <= m && m <= PLAUSIBLE_W.1);
 
-    // 旁路 (bypass): charge_suspend.sh 判成「USB 直供、电池不进不出」(状态文件第三行 bypass)。
-    // 这时 status 仍是 Charging、电池电流 ≈ 0, 整机功耗在 USB 轨上: 取 USB 的 |V x I|
-    // (含充电器转换损耗, 但口径稳定)。电池电流均值必须真的 ≈ 0, 否则说明中途又充上了。
-    let bypass = !on_battery
-        && charge_suspended
-        && charge_mode == "bypass"
-        && cur_mean.is_some_and(|c| c.abs() < BYPASS_IDLE_UA)
-        && !usb_watts.is_empty();
+    let usb_all_mean = avg(&usb_all_watts);
+    let batt_out_mean = avg(&batt_out_watts);
+    let mode = crate::hwcond::classify_supply(&crate::hwcond::SupplyObs {
+        status: &status,
+        battery_ua: cur_mean,
+        usb_w: usb_all_mean,
+        charge_suspended,
+        bypass_mode: charge_mode == "bypass",
+    });
+    use crate::hwcond::SupplyMode;
+    // 旁路 (bypass): 停充后 USB 直供、电池不进不出 (status 常仍写 Charging)
+    let bypass = mode == SupplyMode::Bypass;
+    // 混合口径的值: 只在电池不在充时有意义 (充电电流随电量衰减的那份漂移不进来)
+    let mixed_mean = if mode == SupplyMode::NotDischarging || mode == SupplyMode::Unknown {
+        None
+    } else {
+        avg(&mixed_watts)
+    };
+
+    // 整窗证据 (main 侧 qualification): 平均是负的不等于整窗在放电 —— 一段充电能被别段的放电掩盖。
+    // 窗内 (取窗口径) 或整段 (旧口径) 每一条功耗行都要解析得了、读数在可信区间;
+    // 电池放电态另要前后 status 都是放电、每条电流都为负。旁路/混合 (ruler fix-D) 的 status
+    // 会在 Full / Charging / Discharging 间跳, 不看 status, 改看两轨同刻相加的每一条都可信。
+    let statuses_ok = |st: &str| matches!(st.to_lowercase().as_str(), "discharging" | "not charging");
+    let in_range = |w: &f64| (crate::hwcond::POWER_MIN_W..=crate::hwcond::POWER_MAX_W).contains(w);
+    let coverage = sample_window(text);
+    let rows_ok = coverage.complete && n > 0 && n_malformed == 0 && !currents.is_empty();
+    let power_window_verified = rows_ok
+        && match mode {
+            SupplyMode::Battery => {
+                statuses_ok(&status)
+                    && statuses_ok(&status_after)
+                    && vi_watts.len() == currents.len()
+                    && currents.iter().all(|c| *c < 0.0)
+                    && vi_watts.iter().all(in_range)
+            }
+            SupplyMode::Bypass | SupplyMode::Mixed => {
+                mixed_watts.len() == currents.len() && mixed_watts.iter().all(in_range)
+            }
+            _ => false,
+        };
 
     let (mut power_w_mean, mut power_w_median) = (PyVal::Null, PyVal::Null);
-    let reason: String = if bypass {
-        power_w_mean = PyVal::from(avg(&usb_watts));
-        power_w_median = PyVal::Float(py_round(crate::pyjson::median_f64(&usb_watts).unwrap_or(0.0), 4));
-        "旁路供电 (已停充, 整机由 USB 直供, 电池电流 ≈ 0): 用 USB 轨 |V x I|, 含充电器转换损耗; \
-不能和放电态 (电池轨) 的数混在同一组比"
-            .to_string()
-    } else if full_idle {
-        format!(
+    let reason: String = match mode {
+        SupplyMode::Bypass | SupplyMode::Mixed if mixed_watts.is_empty() => "两轨同刻相加需要的电压/电流读数缺失".to_string(),
+        SupplyMode::Battery if vi_watts.is_empty() => "读不到 voltage_now/current_now".to_string(),
+        SupplyMode::FullIdle => format!(
             "电池已满且不进不出 (status=Full, current_now 均值={}): 整机由 USB 供电, 但没进旁路 \
 (charge_suspend.sh 没写状态文件), 量不到可信整机功耗。charge_suspend.sh suspend 会在这种状态下关充电并记旁路",
             PyVal::from(cur_mean).py_str()
-        )
-    } else if !on_battery {
-        format!(
+        ),
+        SupplyMode::NotDischarging | SupplyMode::Unknown => format!(
             "非放电态 (status={}, current_now 均值={}): USB 输入功率里含给电池充电的部分, \
 且充电电流随电量单调衰减, 量不到整机功耗。跑之前用 charge_suspend.sh 停充即可",
             if status.is_empty() { "?" } else { &status },
             PyVal::from(cur_mean).py_str()
-        )
-    } else if !power_window_verified {
-        "整窗放电证据不完整或采样越界：需要前后状态、每条负电流与可信 V×I；旧记录不代填通过".to_string()
-    } else if vi_watts.is_empty() {
-        "读不到 voltage_now/current_now".to_string()
-    } else {
-        power_w_mean = PyVal::from(avg(&vi_watts));
-        power_w_median = PyVal::Float(py_round(
-            crate::pyjson::median_f64(&vi_watts).unwrap_or(0.0),
-            4,
-        ));
-        format!(
-            "放电态{}, 用 |V x I| (本机 power_now 单位有误, 不采用)",
-            if charge_suspended { "(已停充)" } else { "" }
-        )
+        ),
+        _ if !power_window_verified => format!(
+            "整窗{}证据不完整或采样越界 (供电 {}): 需要完整采样窗、前后状态、窗内每条功耗行可解析且在可信区间{}; 旧记录不代填通过",
+            if mode == SupplyMode::Battery { "放电" } else { "供电" },
+            mode.as_str(),
+            if mode == SupplyMode::Battery { "、每条负电流" } else { "" }
+        ),
+        SupplyMode::Bypass | SupplyMode::Mixed => {
+            power_w_mean = PyVal::from(mixed_mean);
+            power_w_median = PyVal::Float(py_round(crate::pyjson::median_f64(&mixed_watts).unwrap_or(0.0), 4));
+            if bypass {
+                "旁路供电 (已停充, 整机由 USB 直供, 电池电流 ≈ 0): 用 USB 轨与电池轨同一时刻相加 \
+(电池项 ≈ 0), 含充电器转换损耗; 不能和放电态 (电池轨) 的数跨任务比"
+                    .to_string()
+            } else {
+                format!(
+                    "混合供电 (供电不足: USB 输入不够或中途断开, 电池同时在放电, 电池放电均值 {} W, \
+USB 均值 {} W): 用 USB 轨与电池轨同一时刻的功率相加; USB 那份含充电器转换损耗, 不能跨任务比",
+                    PyVal::from(batt_out_mean.map(|v| py_round(v, 3))).py_str(),
+                    PyVal::from(usb_all_mean.map(|v| py_round(v, 3))).py_str()
+                )
+            }
+        }
+        SupplyMode::Battery => {
+            power_w_mean = PyVal::from(avg(&vi_watts));
+            power_w_median = PyVal::Float(py_round(
+                crate::pyjson::median_f64(&vi_watts).unwrap_or(0.0),
+                4,
+            ));
+            format!(
+                "放电态{}, 用 |V x I| (本机 power_now 单位有误, 不采用)",
+                if charge_suspended { "(已停充)" } else { "" }
+            )
+        }
     };
+    let measured = !matches!(power_w_mean, PyVal::Null);
+    let rail = if measured || !mode.measurable() { mode.rail() } else { "usb" };
 
     let mut out = pyobj! {
         "n_samples" => n,
@@ -1051,15 +1427,19 @@ pub fn env_stats(text: &str) -> PyVal {
         "charge_suspended" => charge_suspended,
         "on_battery" => on_battery,
         "bypass" => bypass,
-        "power_valid" => (on_battery || bypass) && !matches!(power_w_mean, PyVal::Null),
-        "power_source" => if on_battery { "battery" } else if bypass { "usb_bypass" } else { "usb" },
-        // 这条数到底走的哪根轨: 电池放电 (|V x I|) / USB 旁路 (|V x I| of usb rail) / 都不是。
-        // 以前这里恒写 "battery", 旁路供电的功耗数也带着 "battery" 标签 —— 两个轨的数
-        // 被同一个名字装着, 跨任务一比就把充电器转换损耗算进了优化效果里。
-        "power_rail" => if on_battery { "battery" } else if bypass { "usb_bypass" } else { "usb" },
-        // 能不能跨任务/跨轮比: 只有电池放电态的数才有同一个口径。旁路数只能跟旁路数比,
+        "power_valid" => mode.measurable() && measured,
+        // battery / usb_plus_battery (旁路与混合同一口径: 两轨同刻相加) / usb (量不到)
+        "power_source" => rail,
+        // 这条数到底走的哪根轨。以前这里恒写 "battery", 旁路供电的功耗数也带着 "battery" 标签 ——
+        // 两个轨的数被同一个名字装着, 跨任务一比就把充电器转换损耗算进了优化效果里。
+        "power_rail" => rail,
+        // 供电方式明细: battery / bypass / mixed / full_idle / not_discharging / unknown
+        "supply_mode" => mode.as_str(),
+        // 明确判出供电不足: USB 在 (或本应在) 供电, 电池却在补
+        "supply_short" => mode == SupplyMode::Mixed,
+        // 能不能跨任务/跨轮比: 只有电池放电态的数才有同一个口径。两轨相加的数只能跟同口径比,
         // 而且含充电器转换损耗。
-        "power_cross_run_comparable" => on_battery && !matches!(power_w_mean, PyVal::Null),
+        "power_cross_run_comparable" => mode == SupplyMode::Battery && measured,
         "fan_state" => fan_state,
         "current_now_ua_mean" => cur_mean,
         "voltage_now_uv_mean" => avg(&voltages),
@@ -1067,6 +1447,9 @@ pub fn env_stats(text: &str) -> PyVal {
         "power_now_plausible" => now_plausible,
         "power_vi_w_mean" => avg(&vi_watts),
         "usb_input_w_mean" => avg(&usb_watts),
+        "battery_out_w_mean" => batt_out_mean.map(|v| py_round(v, 4)),
+        // 两轨同刻相加 (混合口径) 的均值。组里口径不一致时 power_pairs 退回用它统一口径
+        "power_mixed_w_mean" => mixed_mean,
         "power_w_mean" => power_w_mean,
         "power_w_median" => power_w_median,
         "power_usable_reason" => reason,
@@ -1087,7 +1470,66 @@ pub fn env_stats(text: &str) -> PyVal {
             PyVal::from(gpu_mhz.iter().copied().reduce(f64::max).map(|v| py_round(v, 1))),
         ));
     }
+    // 取窗口径的记录 (旧口径不加, 输出不变)
+    if let (PyVal::Obj(kvs), Some(w)) = (&mut out, clip) {
+        kvs.push((
+            "power_window".into(),
+            match w {
+                Some((a, b)) => pyobj! {
+                    "start_uptime" => a,
+                    "end_uptime" => b,
+                    "first_sample_dropped" => true,
+                },
+                None => pyobj! {
+                    "start_uptime" => PyVal::Null,
+                    "end_uptime" => PyVal::Null,
+                    "first_sample_dropped" => true,
+                    "note" => "trace 里没有 capture_start/end_uptime, 没截窗, 只丢了第一个点",
+                },
+            },
+        ));
+        kvs.push(("n_power_samples_total".into(), PyVal::from(n_power_total)));
+        kvs.push(("n_power_samples_used".into(), PyVal::from(n_power_used)));
+        kvs.push((
+            "power_sample_hz".into(),
+            PyVal::from(w.filter(|(a, b)| b > a).map(|(a, b)| py_round(n_power_used as f64 / (b - a), 2))),
+        ));
+        // 审查 R1 #1 #8: 取窗口径下功耗只有两件事都成立才可信 ——
+        //  · env.txt 是 v2 采样器写的 (首行 `#sample_env v2`): 旧 sample_env.sh 不认停止标志,
+        //    3 个点/窗、负载结束后接着采空闲段, 数是错的但不报错;
+        //  · trace 头给了采集窗: 没窗就是全段 (含采集前准备与收尾), 与截了窗的另一臂差 30–70%,
+        //    同组相减没有意义。
+        // 这两种情况下 power_w_mean 照算 (离线复核用), 但 power_valid=false, 不进判定。
+        let mut invalid: Vec<&str> = Vec::new();
+        if !sample_env_v2_header(text) {
+            invalid.push("env.txt 首行不是 `#sample_env v2` (设备端 sample_env.sh 是旧版, 没按停止标志截止)");
+        }
+        if w.is_none() {
+            invalid.push("trace 头没有 capture_start/end_uptime, 功耗没截窗");
+        }
+        if !invalid.is_empty() {
+            for (k, v) in kvs.iter_mut() {
+                match k.as_str() {
+                    "power_valid" | "power_cross_run_comparable" => *v = PyVal::Bool(false),
+                    "power_usable_reason" => {
+                        if let PyVal::Str(s) = v {
+                            *s = format!("{s} [功耗作废: {}]", invalid.join("; "));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
     out
+}
+
+/// env.txt 是不是 v2 采样器 (`sample_env.sh` 2026-10-21 版) 写的: 第一个非空行以 `#sample_env v2` 开头。
+pub fn sample_env_v2_header(text: &str) -> bool {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .is_some_and(|l| l.starts_with("#sample_env v2"))
 }
 
 // ══════════════ 判定 ══════════════
@@ -1618,9 +2060,18 @@ ENV 2.0 4000000 -1000000 NA 0 0 cpu-1-0 200000\n",
 ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
         );
         assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(true)));
+        // 但 USB 同时还在出 0.5 W: 混合供电, 两轨同刻相加 (审计 #5), 不再只取电池轨的 6.0 W
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
+        assert_eq!(s.get("supply_mode"), Some(&PyVal::Str("mixed".into())));
+        assert_eq!(s.get("power_w_mean").unwrap().as_f64(), Some(6.5));
+        assert_eq!(s.get("battery_capacity_pct"), Some(&PyVal::Str("88".into())));
+        // USB 不出力时才是纯电池轨
+        let s = complete_stats(
+            "#battery_status=Not charging\n#battery_status_after=Not charging\n#battery_capacity=88\n#charge_suspended=yes\n\
+ENV 1.0 4000000 -1500000 NA 5000000 0 cpu-1-0 41000\n",
+        );
         assert_eq!(s.get("power_source"), Some(&PyVal::Str("battery".into())));
         assert_eq!(s.get("power_w_mean").unwrap().as_f64(), Some(6.0));
-        assert_eq!(s.get("battery_capacity_pct"), Some(&PyVal::Str("88".into())));
         assert!(matches!(s.get("power_usable_reason"), Some(PyVal::Str(r)) if r.contains("已停充")));
 
         // status 说 Not charging 但电流是正的 = 还在往电池里灌
@@ -1638,16 +2089,19 @@ ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
     #[test]
     fn bypass_takes_usb_rail_power_only_when_the_battery_is_really_idle() {
         let hdr = "#battery_status=Charging\n#battery_capacity=96\n#charge_suspended=yes\n#charge_mode=bypass\n";
-        let s = env_stats(&format!(
+        // 整窗证据 (main): 采样协议头、done 标记齐全才给功耗数
+        let s = complete_stats(&format!(
             "{hdr}ENV 1.0 4375000 29000 NA 5158000 216000 cpu-1-0 41000\n\
 ENV 3.0 4374000 -12000 NA 5141000 197000 cpu-1-0 41000\n"
         ));
         assert_eq!(s.get("bypass"), Some(&PyVal::Bool(true)));
         assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(false)));
-        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_bypass".into())));
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
         assert_eq!(s.get("power_valid"), Some(&PyVal::Bool(true)));
         let w = s.get("power_w_mean").unwrap().as_f64().unwrap();
-        assert!((w - (5.158 * 0.216 + 5.141 * 0.197) / 2.0).abs() < 1e-3, "{w}");
+        // 两轨同刻相加: USB 减去电池充进去的 (第 1 条 +29 mA), 加上电池放出来的 (第 2 条 −12 mA)
+        let want = (5.158 * 0.216 - 4.375 * 0.029 + 5.141 * 0.197 + 4.374 * 0.012) / 2.0;
+        assert!((w - want).abs() < 1e-3, "{w} vs {want}");
         // 状态文件说旁路, 但电池其实在充 (+1.9 A): 不算, 功耗 null
         let s = env_stats(&format!("{hdr}ENV 1.0 4436000 1926000 NA 4762000 2134000 cpu-1-0 41000\n"));
         assert_eq!(s.get("bypass"), Some(&PyVal::Bool(false)));
@@ -1674,11 +2128,12 @@ ENV 3.0 4412000 -3000 NA 5083000 1009000 cpu-0-0-1 42800\n";
         assert_eq!(s.get("power_valid"), Some(&PyVal::Bool(false)));
         assert!(matches!(s.get("power_usable_reason"), Some(PyVal::Str(r)) if r.contains("满")));
         // charge_suspend.sh 判了满电旁路: 取 USB 轨
-        let s = env_stats(&format!("#battery_status=Full\n#battery_capacity=100\n#charge_suspended=yes\n#charge_mode=bypass\n{rows}"));
+        let s = complete_stats(&format!("#battery_status=Full\n#battery_capacity=100\n#charge_suspended=yes\n#charge_mode=bypass\n{rows}"));
         assert_eq!(s.get("bypass"), Some(&PyVal::Bool(true)));
-        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_bypass".into())));
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
         let w = s.get("power_w_mean").unwrap().as_f64().unwrap();
-        assert!((w - (4.920 * 0.806 + 5.083 * 1.009) / 2.0).abs() < 1e-3, "{w}");
+        let want = (4.920 * 0.806 + 4.412 * 0.002 + 5.083 * 1.009 + 4.412 * 0.003) / 2.0;
+        assert!((w - want).abs() < 1e-3, "{w} vs {want}");
         // 满电但拔了线在真放电: 仍是放电态
         let s = env_stats("#battery_status=Full\n#charge_suspended=no\n#charge_mode=\n\
 ENV 1.0 4400000 -900000 NA 0 0 cpu-0-0-1 42000\n");
@@ -1699,12 +2154,12 @@ ENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\nENV 3.0 4000000 -1000000 NA 0 0 c
         assert_eq!(battery.get("power_rail"), Some(&PyVal::Str("battery".into())));
         assert_eq!(battery.get("power_cross_run_comparable"), Some(&PyVal::Bool(true)));
 
-        let bypass = env_stats(
+        let bypass = complete_stats(
             "#battery_status=Full\n#battery_capacity=100\n#charge_suspended=yes\n#charge_mode=bypass\n\
 ENV 1.0 4412000 -2000 NA 4920000 806000 cpu-0-4-1 44900\n",
         );
-        assert_eq!(bypass.get("power_source"), Some(&PyVal::Str("usb_bypass".into())));
-        assert_eq!(bypass.get("power_rail"), Some(&PyVal::Str("usb_bypass".into())));
+        assert_eq!(bypass.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
+        assert_eq!(bypass.get("power_rail"), Some(&PyVal::Str("usb_plus_battery".into())));
         assert_eq!(bypass.get("power_valid"), Some(&PyVal::Bool(true)), "本轮两臂同轨相减仍成立");
         assert_eq!(
             bypass.get("power_cross_run_comparable"),
@@ -1785,6 +2240,32 @@ ENV 1.0 4412000 -2000 NA 4920000 806000 cpu-0-4-1 44900\n",
         assert!(!trace_window_covered(&sample_window(good),"#loop_v1_meta capture_start_uptime=102 capture_end_uptime=105 duration_req=3",3));
         let one="#sample_env v1 dur=30 interval=2\n#battery_status=Discharging\nENV 100 4000000 -1000000 NA 0 0 cpu-1-0 41000\n#battery_status_after=Discharging\n#sample_env done";
         assert!(!sample_window(one).complete);assert_eq!(env_stats(one).get("power_w_mean"),Some(&PyVal::Null));
+    }
+
+    /// 合并 (main 整窗证据 × ruler fix-C v2 采样器): v2 采样器见停止标志提前停时, 窗口完整性按
+    /// ENV+PWR 全部功耗行判, 末端对 trace 采集窗放宽两个快循环周期; 没停止标志就要走满 dur。
+    #[test]
+    fn v2_sampler_window_accepts_stop_marker_and_covers_capture() {
+        let v2 = "#sample_env v2 dur=40 interval=2 power_interval=0.2 stop=/x\n#battery_status=Discharging\n\
+ENV 100.00 4000000 -1000000 NA 0 0 cpu-1-0 41000\nPWR 100.20 4000000 -1000000 NA 0 0\n\
+ENV 102.00 4000000 -1000000 NA 0 0 cpu-1-0 41000\nPWR 103.50 4000000 -1000000 NA 0 0\n\
+ENV 104.00 4000000 -1000000 NA 0 0 cpu-1-0 41000\nPWR 104.80 4000000 -1000000 NA 0 0\n\
+#stop_seen uptime=104.95\n#battery_status_after=Discharging\n#sample_env done\n";
+        let w = sample_window(v2);
+        assert!(w.complete);
+        assert_eq!((w.first_uptime, w.last_uptime), (Some(100.0), Some(104.8)));
+        // 采集窗 [100.5, 105.0], 最后一条功耗行 104.8 在放宽 0.5 s 之内
+        let trace = "#loop_v1_meta capture_start_uptime=100.5 capture_end_uptime=105.0 duration_req=4.5\n";
+        assert!(trace_window_covered(&w, trace, 4) == false, "duration_req 对不上");
+        let trace = "#loop_v1_meta capture_start_uptime=100.5 capture_end_uptime=104.5 duration_req=4\n";
+        assert!(trace_window_covered(&w, trace, 4));
+        // 没停止标志又没走满 dur: 不完整
+        assert!(!sample_window(&v2.replace("#stop_seen uptime=104.95\n", "")).complete);
+        // 相邻功耗行间隔超过 2 × interval: 不完整
+        assert!(!sample_window(&v2.replace("PWR 103.50", "PWR 107.50").replace("ENV 104.00", "ENV 108.00").replace("PWR 104.80", "PWR 108.80")).complete);
+        let s = env_stats_window(v2, Some((100.5, 104.5)));
+        assert_eq!(s.get("power_window_verified"), Some(&PyVal::Bool(true)));
+        assert_eq!(s.get("power_w_mean").and_then(|v| v.as_f64()), Some(4.0));
     }
 
     #[test]
@@ -2018,5 +2499,257 @@ GPU 5.0 17 bad\n",
         let old = env_stats("#battery_status=Discharging\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n");
         assert!(old.get("gpu_max_pwrlevel_seen").is_none());
         assert!(old.get("gpu_clk_mhz_mean").is_none());
+    }
+
+    /// 审计 #3: trace 头部的采集窗取得到; 没有就 None; 不往 trace 正文里扫。
+    #[test]
+    fn capture_window_from_trace_reads_header_only() {
+        let t = "#loop_v1_meta capture_start_uptime=100.50 capture_end_uptime=110.52 duration_req=10\n\
+#loop_v1_meta gpu_model=Adreno840v2\n\
+ <...>-1 [000] 1.0: kgsl_x: a=1\n\
+#loop_v1_meta capture_start_uptime=1 capture_end_uptime=2\n";
+        assert_eq!(capture_window_from_trace(t), Some((100.5, 110.52)));
+        assert_eq!(capture_window_from_trace("#loop_v1_meta gpu_model=x\nbody\n"), None);
+        // 起止颠倒或解析不了 = 没有窗口
+        assert_eq!(
+            capture_window_from_trace("#loop_v1_meta capture_start_uptime=5 capture_end_uptime=4\n"),
+            None
+        );
+    }
+
+    const V2_TEXT: &str = "#sample_env v2 dur=14 interval=2 power_interval=0.2 stop=/x\n\
+#battery_status=Discharging\n\
+ENV 99.00 4000000 -3000000 NA 0 0 cpu-1-0 45000\n\
+GPU 99.00 3 900000000\n\
+PWR 99.80 4000000 -7000000 NA 0 0\n\
+PWR 100.20 4000000 -1000000 NA 0 0\n\
+ENV 100.40 4000000 -1000000 NA 0 0 cpu-1-0 50000\n\
+GPU 100.40 3 600000000\n\
+PWR 100.60 4000000 -1500000 NA 0 0\n\
+PWR 101.00 4000000 -500000 NA 0 0\n\
+ENV 101.50 4000000 -100000 NA 0 0 cpu-1-0 48000\n\
+GPU 101.50 3 160000000\n\
+#stop_seen uptime=101.60\n\
+#battery_status_after=Discharging\n\
+#sample_env done\n";
+
+    /// 审计 #3 #4: 功耗只取窗内样本 (含 PWR 快循环行), 第一个点不要, 结温整段看, GPU 截窗。
+    #[test]
+    fn env_stats_window_clips_power_to_capture_window() {
+        let s = env_stats_window(V2_TEXT, Some((100.0, 101.0)));
+        // 99.00 是第一个点 (丢), 99.80 与 101.50 在窗外;
+        // 窗内 100.20 (4 W)、100.40 (4 W)、100.60 (6 W)、101.00 (2 W) → 均值 4 W
+        assert_eq!(s.get("n_power_samples_total").and_then(|v| v.as_i64()), Some(7));
+        assert_eq!(s.get("n_power_samples_used").and_then(|v| v.as_i64()), Some(4));
+        assert_eq!(s.get("power_w_mean").and_then(|v| v.as_f64()), Some(4.0));
+        assert_eq!(s.get("power_sample_hz").and_then(|v| v.as_f64()), Some(4.0));
+        // 结温不截窗: 最高 50 °C, 均值按三条 ENV 行
+        assert_eq!(s.get("soc_temp_max_c").and_then(|v| v.as_f64()), Some(50.0));
+        assert_eq!(s.get("soc_temp_mean_c").and_then(|v| v.as_f64()), Some(47.667));
+        // GPU 截窗: 只剩 100.40 那一行
+        assert_eq!(s.get("gpu_clk_mhz_mean").and_then(|v| v.as_f64()), Some(600.0));
+        assert_eq!(s.get("n_samples").and_then(|v| v.as_i64()), Some(3));
+        let w = s.get("power_window").unwrap();
+        assert_eq!(w.get("start_uptime").and_then(|v| v.as_f64()), Some(100.0));
+        assert_eq!(w.get("first_sample_dropped"), Some(&PyVal::Bool(true)));
+    }
+
+    /// 没有采集窗时只丢第一个点, 并写明没截窗; 第一个点即使在窗内也丢。
+    #[test]
+    fn env_stats_window_drops_first_sample() {
+        let s = env_stats_window(V2_TEXT, None);
+        // 7 个功耗样本去掉第一个 (12 W) → 剩 6 个: 28+4+4+6+2+0.4 = 44.4 → 均值 7.4
+        // (99.80 原为 36 W; 整窗证据要求每条都在可信区间 0.05..30 W, 改成 28 W)
+        assert_eq!(s.get("n_power_samples_used").and_then(|v| v.as_i64()), Some(6));
+        assert_eq!(s.get("power_w_mean").and_then(|v| v.as_f64()), Some(7.4));
+        assert!(s.get("power_window").unwrap().get("note").is_some());
+        assert_eq!(s.get("power_sample_hz"), Some(&PyVal::Null));
+        let early = env_stats_window(V2_TEXT, Some((99.0, 102.0)));
+        assert_eq!(early.get("n_power_samples_used").and_then(|v| v.as_i64()), Some(6));
+    }
+
+    /// 审查 R1 #1 #8: 没有 v2 头 (旧采样器) 或没有采集窗 (没截窗) 时功耗不可信, 不进判定;
+    /// 数照算, 原因写明。两件都齐时不受影响。
+    #[test]
+    fn env_stats_window_invalidates_power_without_v2_header_or_window() {
+        let ok = env_stats_window(V2_TEXT, Some((100.0, 101.0)));
+        assert_eq!(ok.get("power_valid"), Some(&PyVal::Bool(true)));
+        assert!(!ok.get("power_usable_reason").unwrap().py_str().contains("功耗作废"));
+
+        let no_window = env_stats_window(V2_TEXT, None);
+        assert_eq!(no_window.get("power_valid"), Some(&PyVal::Bool(false)));
+        assert_eq!(no_window.get("power_cross_run_comparable"), Some(&PyVal::Bool(false)));
+        assert!(no_window.get("power_w_mean").and_then(|v| v.as_f64()).is_some(), "数照算, 只是不可信");
+        assert!(no_window.get("power_usable_reason").unwrap().py_str().contains("没截窗"));
+
+        let v1 = V2_TEXT.replacen("#sample_env v2", "#sample_env v1", 1);
+        let old = env_stats_window(&v1, Some((100.0, 101.0)));
+        assert_eq!(old.get("power_valid"), Some(&PyVal::Bool(false)));
+        assert!(old.get("power_usable_reason").unwrap().py_str().contains("#sample_env v2"));
+        assert!(!sample_env_v2_header(&v1));
+        assert!(sample_env_v2_header("\n  #sample_env v2 dur=1\n"));
+        assert!(!sample_env_v2_header("#battery_status=x\n#sample_env v2\n"), "必须是首行");
+    }
+
+    /// 旧口径 (env_stats) 对没有 PWR 行的证据: 不截窗、不丢点、不加新键 (整窗证据仍要齐, 见 main 的 sample_window)。
+    #[test]
+    fn env_stats_legacy_unchanged_and_has_no_window_keys() {
+        let t = "#battery_status=Discharging\n#battery_status_after=Discharging\n\
+ENV 1.0 4000000 -3000000 NA 0 0 cpu-1-0 41000\n\
+ENV 3.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n";
+        let s = complete_stats(t);
+        assert_eq!(s.get("power_w_mean").and_then(|v| v.as_f64()), Some(8.0));
+        assert!(s.get("power_window").is_none());
+        assert!(s.get("n_power_samples_used").is_none());
+    }
+
+    /// 审计 #5 的现场: 停充后 USB 被限在约 0.49 A, status 仍写 Charging, 电池同时在放。
+    /// 以前判成「usb、非放电态」, power_w_mean=null; 现在两轨同刻相加。
+    #[test]
+    fn usb_limited_plus_battery_is_measured_as_mixed() {
+        let s = complete_stats(
+            "#battery_status=Charging\n#battery_capacity=90\n#charge_suspended=yes\n#charge_mode=battery\n\
+ENV 1.0 4000000 -600000 NA 5000000 490000 cpu-1-0 41000\n\
+ENV 3.0 4000000 -800000 NA 5000000 490000 cpu-1-0 41000\n",
+        );
+        assert_eq!(s.get("supply_mode"), Some(&PyVal::Str("mixed".into())));
+        assert_eq!(s.get("supply_short"), Some(&PyVal::Bool(true)));
+        assert_eq!(s.get("power_valid"), Some(&PyVal::Bool(true)));
+        assert_eq!(s.get("power_source"), Some(&PyVal::Str("usb_plus_battery".into())));
+        // (2.45 + 2.4 + 2.45 + 3.2) / 2
+        assert_eq!(s.get("power_w_mean").unwrap().as_f64(), Some(5.25));
+        assert_eq!(s.get("power_cross_run_comparable"), Some(&PyVal::Bool(false)));
+        assert!(matches!(s.get("power_usable_reason"), Some(PyVal::Str(r)) if r.contains("供电不足")));
+    }
+
+    /// 2026-10-12 Megacity 目标运行 (1012b gen1 ctrl5 / ctrl1): 满电停充旁路时, 同一轮里有的臂
+    /// USB 直供, 有的臂 USB 掉成 0、电池放 0.64 A。两臂必须落在同一个口径上。
+    #[test]
+    fn bypass_and_battery_arms_in_one_bypass_run_share_one_rail() {
+        let hdr = "#battery_status=Full\n#battery_capacity=100\n#charge_suspended=yes\n#charge_mode=bypass\n";
+        let usb_arm = complete_stats(&format!("{hdr}ENV 1.0 4412000 0 NA 5000000 566000 cpu-1-0 41000\n"));
+        let bat_arm = complete_stats(&format!("{hdr}ENV 1.0 4380000 -640000 NA 0 0 cpu-1-0 41000\n"));
+        assert_eq!(usb_arm.get("supply_mode"), Some(&PyVal::Str("bypass".into())));
+        assert_eq!(bat_arm.get("supply_mode"), Some(&PyVal::Str("mixed".into())));
+        assert_eq!(usb_arm.get("power_source"), bat_arm.get("power_source"));
+        assert_eq!(bat_arm.get("power_w_mean").unwrap().as_f64(), Some(2.8032));
+        assert_eq!(usb_arm.get("power_w_mean").unwrap().as_f64(), Some(2.83));
+    }
+
+    fn penv(valid: bool, rail: &str, w: Option<f64>, mixed: Option<f64>) -> serde_json::Value {
+        serde_json::json!({"power_valid": valid, "power_source": rail, "power_w_mean": w,
+                           "power_mixed_w_mean": mixed, "power_usable_reason": "非放电态 (测试)"})
+    }
+
+    #[test]
+    fn one_bad_arm_drops_only_its_pair() {
+        let ok = |w| penv(true, "battery", Some(w), Some(w));
+        let bad = penv(false, "usb", None, None);
+        let ctrl = [ok(3.0), ok(3.1), bad.clone(), ok(3.2)];
+        let knob = [ok(2.8), ok(2.9), ok(2.7), ok(2.85)];
+        let c: Vec<&serde_json::Value> = ctrl.iter().collect();
+        let k: Vec<&serde_json::Value> = knob.iter().collect();
+        let pp = power_pairs(&c, &k);
+        assert!(pp.usable(), "剔一对剩三对, 照常进判定");
+        assert_eq!(pp.kept(), (3, 3));
+        assert_eq!(pp.knob[2], None, "被剔那一对的候选臂也不进");
+        assert_eq!(pp.dropped.len(), 1);
+        assert_eq!(pp.dropped[0].0, 3);
+        assert!(pp.dropped[0].1.contains("对照臂") && pp.dropped[0].1.contains("非放电态"));
+        let note = pp.note().unwrap();
+        assert!(note.contains("剔除 1 对") && note.contains("第 3 轮"), "{note}");
+        assert_eq!(pp.to_json()["in_verdict"], true);
+        // 剔到每臂不足 2 个: 不进判定, 并说清楚
+        let ctrl = [ok(3.0), bad.clone(), bad.clone()];
+        let knob = [ok(2.8), ok(2.9), ok(2.7)];
+        let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
+        assert!(!pp.usable());
+        assert!(pp.note().unwrap().contains("功耗不进判定"));
+        assert!(pp.possible(1, 1) && !pp.possible(0, 0));
+    }
+
+    #[test]
+    fn mixed_rails_are_unified_to_the_two_rail_sum_or_the_majority_rail() {
+        // 各臂都带两轨相加值: 统一改用它, 一对都不剔
+        let ctrl = [penv(true, "battery", Some(2.8), Some(2.81)), penv(true, "usb_plus_battery", Some(2.9), Some(2.9))];
+        let knob = [penv(true, "usb_plus_battery", Some(2.7), Some(2.7)), penv(true, "usb_plus_battery", Some(2.75), Some(2.75))];
+        let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
+        assert!(pp.unified_to_mixed && pp.usable());
+        assert_eq!(pp.ctrl[0], Some(2.81));
+        assert_eq!(pp.rail.as_deref(), Some("usb_plus_battery"));
+        // 旧证据 (没有两轨相加值): 取臂数多的口径, 少数口径那一对剔除
+        let old_bat = serde_json::json!({"on_battery": true, "power_w_mean": 3.0});
+        let byp = penv(true, "usb_bypass", Some(3.3), None);
+        let ctrl = [old_bat.clone(), old_bat.clone(), byp.clone()];
+        let knob = [old_bat.clone(), old_bat.clone(), old_bat.clone()];
+        let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
+        assert!(!pp.unified_to_mixed);
+        assert_eq!(pp.rail.as_deref(), Some("battery"));
+        assert_eq!(pp.kept(), (2, 2));
+        assert!(pp.dropped[0].1.contains("主口径"), "{:?}", pp.dropped);
+        // 中途停下多出来的单臂: 合格就留
+        let ctrl = [old_bat.clone(), old_bat.clone()];
+        let knob = [old_bat.clone(), old_bat.clone(), old_bat.clone()];
+        let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
+        assert_eq!(pp.kept(), (2, 3));
+        assert!(pp.dropped.is_empty() && pp.note().is_none());
+    }
+
+    /// 合并后 C 与 D 的组合顺序: 功耗样本先按 trace 采集窗截取 (C), 截窗后的样本再做供电分类 (D),
+    /// 最后在一组里按对剔除 (D)。窗外的充电样本不能影响分类, 窗内的充电样本不能被窗外的放电样本掩盖。
+    #[test]
+    fn power_is_clipped_then_classified_then_pair_dropped() {
+        let hdr = "#sample_env v2 dur=14 interval=2 power_interval=0.2 stop=/x\n#battery_status=Discharging\n\
+#charge_suspended=no\n#charge_mode=\n";
+        // 窗外 (第一个点与 99.5、101.5) 在充电, 窗内 [100, 101] 纯电池放电 1 A × 4 V
+        let good = format!(
+            "{hdr}ENV 99.00 4000000 1500000 NA 5000000 2000000 cpu-1-0 45000\n\
+PWR 99.50 4000000 1500000 NA 5000000 2000000\n\
+PWR 100.20 4000000 -1000000 NA 0 0\n\
+PWR 100.60 4000000 -1000000 NA 0 0\n\
+ENV 101.00 4000000 -1000000 NA 0 0 cpu-1-0 45000\n\
+PWR 101.50 4000000 1500000 NA 5000000 2000000\n#stop_seen\n#battery_status_after=Discharging\n#sample_env done\n"
+        );
+        // 反过来: 窗外放电, 窗内在充电
+        let bad = format!(
+            "{hdr}ENV 99.00 4000000 -1000000 NA 0 0 cpu-1-0 45000\n\
+PWR 99.50 4000000 -1000000 NA 0 0\n\
+PWR 100.20 4000000 1500000 NA 5000000 2000000\n\
+PWR 100.60 4000000 1500000 NA 5000000 2000000\n\
+ENV 101.00 4000000 1500000 NA 5000000 2000000 cpu-1-0 45000\n\
+PWR 101.50 4000000 -1000000 NA 0 0\n#stop_seen\n#battery_status_after=Discharging\n#sample_env done\n"
+        );
+        let w = Some((100.0, 101.0));
+        let g = env_stats_window(&good, w);
+        assert_eq!(g.get("supply_mode"), Some(&PyVal::Str("battery".into())), "只看窗内: 放电");
+        assert_eq!(g.get("power_valid"), Some(&PyVal::Bool(true)));
+        assert_eq!(g.get("power_w_mean").and_then(|v| v.as_f64()), Some(4.0));
+        // 不截窗时窗外的充电样本会把它拖成非放电态 —— 说明分类确实在截窗之后
+        assert_ne!(env_stats(&good).get("supply_mode"), Some(&PyVal::Str("battery".into())));
+        let b = env_stats_window(&bad, w);
+        assert_eq!(b.get("supply_mode"), Some(&PyVal::Str("not_discharging".into())), "窗内在充电");
+        assert_eq!(b.get("power_valid"), Some(&PyVal::Bool(false)));
+        // 按对剔除: 第 2 轮对照臂不可信, 只剔第 2 对
+        let to_json = |v: &PyVal| -> serde_json::Value { serde_json::from_str(&crate::pyjson::dumps(v)).unwrap() };
+        let (g, b) = (to_json(&g), to_json(&b));
+        let ctrl = [&g, &b, &g];
+        let knob = [&g, &g, &g];
+        let pp = power_pairs(&ctrl, &knob);
+        assert_eq!(pp.kept(), (2, 2));
+        assert!(pp.usable());
+        assert_eq!(pp.dropped.len(), 1);
+        assert_eq!(pp.dropped[0].0, 2);
+        assert!(pp.dropped[0].1.contains("对照臂"), "{:?}", pp.dropped);
+    }
+
+    #[test]
+    fn usb_supply_note_comes_from_the_charge_suspend_log() {
+        let log = "CHARGE_SUSPENDED_BYPASS /sys/class/qcom-battery/battery_charging_enabled: 1 -> 0\n\
+CHARGE_USB_LIMIT limit_ua=490000 usb_uv=5000000 max_mw=2450 need_mw=6000\n\
+CHARGE_SUPPLY_LOW 供电不足: USB 输入上限约 2450 mW, 低于 6000 mW。\n";
+        assert!(usb_supply_note(log).unwrap().starts_with("供电不足"));
+        let log = "CHARGE_USB_LIMIT limit_ua=3000000 usb_uv=9000000 max_mw=27000 need_mw=6000\n";
+        assert!(usb_supply_note(log).unwrap().contains("max_mw=27000"));
+        assert_eq!(usb_supply_note("CHARGE_SUSPENDED x: 1 -> 0\n"), None);
     }
 }

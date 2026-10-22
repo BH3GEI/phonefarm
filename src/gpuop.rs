@@ -155,6 +155,9 @@ pub struct PowerSource {
     /// 这一轮有没有用 root 停充, 停的是哪个节点。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charging_suspended_via: Option<String>,
+    /// 旁路停充时开跑前的 USB 输入上限检查结论 (不够时以「供电不足」开头)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb_supply: Option<String>,
 }
 
 /// 画质真值的出处。跟着报告走, 让 dB 可回溯。
@@ -569,6 +572,9 @@ pub fn parse_runner_output(stdout: &str) -> Result<RunnerReport, String> {
 // ══════════════ 冻结判定规则 ══════════════
 
 /// 插帧赛道的伪影判据。
+///
+/// 这里只比候选臂与基线臂 (同场 A/B)。插帧画质的验收 (对原生 2 倍帧率真值逐帧比、HUD 逐像素、
+/// 最差运动块、包络外像素对真值自噪声、序列闪烁) 在 `interpjudge` / `phonefarm interp-judge`。
 ///
 /// 为什么不用绝对阈值: 这两个量和参考场景强相关 (运动幅度、HUD 面积、纹理复杂度
 /// 都会改变绝对值), 跟 PSNR 的绝对 dB 一样不可跨场景搬。所以判据是
@@ -1095,7 +1101,14 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             s
         })
         .collect();
-    let power_ok = hwcond::power_usable_with_battery(a.power_rail, &probe, Some(&battery));
+    // 供电判定与 sample_env 通路同一个函数 (hwcond::classify_supply); 停充了就认旁路
+    let power_ok = hwcond::power_usable_supply(a.power_rail, &probe, Some(&battery), suspend.is_some());
+    // 开跑前查 USB 输入上限: 不够就明确说「供电不足」, 不让它静默变成功耗缺测
+    let usb_supply = suspend.as_ref().filter(|g| g.mode() == hwcond::SupplyMode::Bypass).map(|_| {
+        let c = hwcond::read_usb_supply(&phone, hwcond::USB_SUPPLY_NEED_W);
+        hwcond::progress("gpu-op", &c.note);
+        c.note
+    });
     let power_source = PowerSource {
         rail: a.power_rail.as_str().to_string(),
         battery_status: battery.status.clone(),
@@ -1103,6 +1116,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         battery_capacity_pct: battery.capacity_pct,
         on_battery: battery.on_battery(),
         charging_suspended_via: suspend.as_ref().map(|g| g.node().to_string()),
+        usb_supply,
     };
     if let Err(e) = power_ok {
         eprintln!("功耗采样不可用: {e}");

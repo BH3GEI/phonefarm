@@ -672,6 +672,23 @@ static void inject(VkCommandBuffer handle, const DevDisp &d, VkRenderPass rp,
     cb.dispatches.push_back(std::move(g));
     cb.active = cb.dispatches.size() - 1;
     Dispatch &owned = cb.dispatches.back();
+    // npuop (debug.knobs.npuop=1): NPU 结果就绪时由它把超分结果解包进本次 dispatch 自有的输出图,
+    // 并打包本帧画面给下一帧推理; 没就绪/本帧解包集已用掉时返回 false, 照常走下面的 upop。
+    if (g_npuop) {
+        auto src_info = images.find({d.dev, owned.contract.image});
+        uint32_t sw = src_info != images.end() ? src_info->second.w : 0;
+        uint32_t sh = src_info != images.end() ? src_info->second.h : 0;
+        if (npuop_record(handle, d, owned.contract.image, owned.contract.view, owned.contract.sampler, sw, sh,
+                         owned.output, owned.view, owned.w, owned.h)) {
+            if (g_upop)
+                g_artifact_stats.record(reinterpret_cast<uintptr_t>(handle));
+            g_cp.w = owned.w;
+            g_cp.h = owned.h;
+            g_cp.fmt = VK_FORMAT_R8G8B8A8_UNORM;
+            ++g_cp.copies;
+            return;
+        }
+    }
     VkImageMemoryBarrier barriers[2]{};
     barriers[0].sType = barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barriers[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;

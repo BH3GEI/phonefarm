@@ -400,6 +400,9 @@ fn eval_sysparam_entry_respects_existing_manual_lease_before_device_access() {
     req["kind"] = json!("sysparam");
     req["payload"] = json!({"params":{}});
     req["workload"] = json!({"carrier":"game_replay","script":null,"seconds":30});
+    // ruler stat-guards: sysparam 走精确置换检验, rounds=4 时最小可达 p (2/70) 够不着 alpha/3,
+    // 收端在校验阶段就拒收 (同样不碰设备)。这里要测的是租约, 给一个判得出显著的轮数。
+    req["protocol"]["rounds"] = json!(6);
     let path = f.dir.join("request.json");
     std::fs::write(&path, req.to_string()).unwrap();
     let r = f

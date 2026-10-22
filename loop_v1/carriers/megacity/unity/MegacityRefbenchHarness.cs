@@ -43,7 +43,7 @@ namespace Megacity.Refbench
     public sealed class MegacityRefbenchHarness : MonoBehaviour
     {
         const int    ContractVersion = 1;
-        const string HarnessVersion  = "0.2.0-knobs";
+        const string HarnessVersion  = "0.3.0-unlocked";
         const string Carrier         = "megacity";
 
         // 与 contract/launch.json 对齐
@@ -68,6 +68,24 @@ namespace Megacity.Refbench
         string m_Scene, m_RunId, m_RouteName, m_VSync, m_UnityScene;
         int    m_Frames, m_Warmup, m_Settle;
         float  m_ResScale;
+
+        // ---- 帧率上限与路线推进方式 (审计 #8, 2026-10-21) ----
+        // 旧版两个分支都写 targetFrameRate=-1, 在 Android 上 -1 就是 30 fps, 实测 fps_mean 29.3-29.7,
+        // 「帧率不锁」不成立。现在 vsync=off 时 vSyncCount=0 + targetFrameRate=fps_cap(缺省 1000),
+        // 实际上限由屏幕刷新率 / 系统帧调度决定, 回读值和窗口内观察到的帧率写进 json 的 frame_pacing。
+        //
+        // 解锁后帧率随候选变化, 而 phonefarm 的采集窗是 marker 之后固定秒数 (game_opt_loop 里
+        // Megacity seconds=30)。相机若仍按帧序号推进, 快的一臂在同样 30 秒里会飞得更远, 两臂量的
+        // 不是同一段路线。所以缺省改为按时间推进 (pace=time): u = 窗口内已过时间 / route_seconds,
+        // 同一时刻两臂相机在同一位置, 固定秒数的采集窗覆盖的是同一段路线。
+        // route_seconds 缺省 = frames / 30, 与旧版在 30 fps 下的飞行速度完全相同, 旧的 extras 不用改。
+        // pace=frame 保留旧行为 (逐帧位姿完全相同), 只在需要复现旧数据时用。
+        const float LegacyPaceFps = 30f;
+        string m_Pace;
+        float  m_RouteSeconds;
+        int    m_FpsCap;
+        int    m_RequestedTargetFps;
+        double m_WarmupSeconds, m_WindowSeconds;
 
         // ---- 白盒旋钮 (阶段 3, https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MEGACITY_WHITEBOX_KNOBS.md W1–W7) ----
         // 全部可选; 不给就不碰。生效结果逐条写进 json 的 "knobs": 想要的值、怎么改的
@@ -106,6 +124,9 @@ namespace Megacity.Refbench
             // settle 是"等城市装完"的上界, 不是固定等待 —— 装完就提前走
             m_Settle    = ParseInt(GetIntentExtra("settle"),  7200, 0, 200000);
             m_ResScale  = ParseFloat(GetIntentExtra("resscale"), 1.0f, 0.25f, 2.0f);
+            m_Pace      = GetIntentExtra("pace") == "frame" ? "frame" : "time";
+            m_RouteSeconds = ParseFloat(GetIntentExtra("route_seconds"), m_Frames / LegacyPaceFps, 1f, 100000f);
+            m_FpsCap    = ParseInt(GetIntentExtra("fps_cap"), 1000, 1, 1000);
             m_KMsaa            = GetIntentExtra("msaa");               // W1: 1 / 2 / 4
             m_KStoreOpt        = GetIntentExtra("store_opt");          // W2: auto / discard / store
             m_KFeatOff         = GetIntentExtra("feat_off");           // W3: 逗号分隔的渲染器特性名 (子串匹配, 不分大小写)
@@ -119,9 +140,12 @@ namespace Megacity.Refbench
         IEnumerator Start()
         {
             // 1) 把一切会让两轮不一样的自适应行为按死
-            //    帧率不锁 -> 分位数统计能在固定采集窗内拿到更多帧(与 refbench 同理)
-            if (m_VSync == "on") { QualitySettings.vSyncCount = 1; Application.targetFrameRate = -1; }
-            else                 { QualitySettings.vSyncCount = 0; Application.targetFrameRate = -1; }
+            //    帧率不锁 -> 分位数统计能在固定采集窗内拿到更多帧(与 refbench 同理)。
+            //    注意 Android 上 targetFrameRate=-1 等于 30 fps (旧版就栽在这里), 必须给一个大数。
+            //    移动端忽略 vSyncCount, 真正的上限是屏幕刷新率, 回读写进 json 的 frame_pacing。
+            if (m_VSync == "on") { QualitySettings.vSyncCount = 1; m_RequestedTargetFps = -1; }
+            else                 { QualitySettings.vSyncCount = 0; m_RequestedTargetFps = m_FpsCap; }
+            Application.targetFrameRate = m_RequestedTargetFps;
 
             Screen.sleepTimeout = SleepTimeout.NeverSleep;
             // 交通/AI 若用了 UnityEngine.Random, 固定种子消掉这一路的轮间差异。
@@ -189,8 +213,10 @@ namespace Megacity.Refbench
             m_Cam = TakeOverCamera();
             if (m_Cam == null) { Abort("no_camera"); yield break; }
 
-            // 7) 预热: 钉在路线起点渲染 warmup 帧, 等 shader 与常驻分配落定
+            // 7) 预热: 钉在路线起点渲染 warmup 帧, 等 shader 与常驻分配落定。
+            //    预热的帧数/耗时顺带给出实际帧率上限 (只作核对上限用, 不是测量, 帧时仍归 ftrace)。
             ApplyPose(0f);
+            double w0 = Time.realtimeSinceStartupAsDouble;
             for (int i = 0; i < m_Warmup; i++)
             {
                 yield return new WaitForEndOfFrame();
@@ -198,24 +224,34 @@ namespace Megacity.Refbench
                 ApplyPose(0f);
                 m_WarmupRendered++;
             }
+            m_WarmupSeconds = Time.realtimeSinceStartupAsDouble - w0;
+            Debug.Log("[refbench] frame_pacing " + FramePacingJson());
 
             // 8) 落 started 标记 —— 采集从这里开始算
             WriteStartedMarker();
 
-            // 9) 被测窗口: 相机位姿只由帧序号决定, 不读 deltaTime。
-            //    这是整个载体确定性的根: 同 frames 同 route 两轮走的是逐帧完全相同的位姿序列,
-            //    帧率高低不会改变走过的路径, 所以两轮的渲染负载可比。
-            for (int i = 0; i < m_Frames; i++)
+            // 9) 被测窗口。
+            //    pace=time (缺省): 相机位姿只由窗口内已过的真实时间决定, 跑满 route_seconds 秒。
+            //      phonefarm 在 marker 之后采固定秒数, 两臂帧率不同时, 同一时刻相机仍在同一位置,
+            //      采集窗覆盖同一段路线。帧数随帧率变, 如实记 frames_rendered。
+            //    pace=frame (旧行为): 位姿只由帧序号决定, 跑满 frames 帧。逐帧位姿完全相同,
+            //      但帧率不锁时固定秒数的采集窗会在两臂覆盖不同长度的路线, 只用于复现旧数据。
+            double t0 = Time.realtimeSinceStartupAsDouble;
+            for (int i = 0; ; i++)
             {
+                double el = Time.realtimeSinceStartupAsDouble - t0;
+                if (m_Pace == "frame" ? i >= m_Frames : el >= m_RouteSeconds) break;
                 yield return new WaitForEndOfFrame();
-                if (!Application.isFocused) { Abort("focus_lost"); yield break; }
+                if (!Application.isFocused) { m_WindowSeconds = Time.realtimeSinceStartupAsDouble - t0; Abort("focus_lost"); yield break; }
 
-                float u = (m_Scene == "city_static")
-                        ? 0f
-                        : (m_Frames <= 1 ? 0f : (float)i / (m_Frames - 1));
+                float u;
+                if (m_Scene == "city_static") u = 0f;
+                else if (m_Pace == "frame")   u = m_Frames <= 1 ? 0f : (float)i / (m_Frames - 1);
+                else                          u = (float)((Time.realtimeSinceStartupAsDouble - t0) / m_RouteSeconds);
                 ApplyPose(u);
                 m_Rendered++;
             }
+            m_WindowSeconds = Time.realtimeSinceStartupAsDouble - t0;
 
             m_CleanExit = true;
             Finish();
@@ -245,6 +281,31 @@ namespace Megacity.Refbench
             // URP 的逐相机附加数据由 URP 在 OnEnable 时补齐, 这里不手动构造,
             // 免得和不同 URP 版本的 UniversalAdditionalCameraData 绑死。
             return cam;
+        }
+
+        // 帧率上限的事实: 要的值、回读值、屏幕刷新率、预热与窗口里观察到的帧率。
+        // 观察帧率 = 帧数 / 真实时间, 只用来核对「上限到底是多少」(例: 仍是 30 就说明没解锁),
+        // 不进任何判定; 判定用的帧时仍由 loop_v1 从 raw ftrace 算。
+        string FramePacingJson()
+        {
+            var ci = CultureInfo.InvariantCulture;
+            double hz = -1;
+            try { hz = Screen.currentResolution.refreshRateRatio.value; } catch { }
+            string F(double x) => (double.IsNaN(x) || double.IsInfinity(x)) ? "null" : x.ToString("0.###", ci);
+            var sb = new StringBuilder(256);
+            sb.Append('{');
+            JS(sb, "pace", m_Pace); sb.Append(',');
+            sb.Append("\"route_seconds\":").Append(F(m_RouteSeconds)).Append(',');
+            J(sb, "requested_target_frame_rate", m_RequestedTargetFps); sb.Append(',');
+            J(sb, "target_frame_rate", Application.targetFrameRate); sb.Append(',');
+            J(sb, "vsync_count", QualitySettings.vSyncCount); sb.Append(',');
+            sb.Append("\"display_refresh_hz\":").Append(F(hz)).Append(',');
+            sb.Append("\"warmup_seconds\":").Append(F(m_WarmupSeconds)).Append(',');
+            sb.Append("\"warmup_observed_fps\":").Append(m_WarmupSeconds > 0 ? F(m_WarmupRendered / m_WarmupSeconds) : "null").Append(',');
+            sb.Append("\"window_seconds\":").Append(F(m_WindowSeconds)).Append(',');
+            sb.Append("\"window_observed_fps\":").Append(m_WindowSeconds > 0 ? F(m_Rendered / m_WindowSeconds) : "null");
+            sb.Append('}');
+            return sb.ToString();
         }
 
         void ApplyPose(float u)
@@ -649,6 +710,9 @@ namespace Megacity.Refbench
             J(sb, "frames", m_Frames); sb.Append(',');
             J(sb, "warmup", m_Warmup); sb.Append(',');
             J(sb, "settle", m_Settle); sb.Append(',');
+            JS(sb, "pace", m_Pace ?? ""); sb.Append(',');
+            sb.Append("\"route_seconds\":").Append(m_RouteSeconds.ToString("R", ci)).Append(',');
+            J(sb, "fps_cap", m_FpsCap); sb.Append(',');
             sb.Append("\"resscale\":").Append(m_ResScale.ToString("R", ci)).Append(',');
             JS(sb, "msaa", m_KMsaa ?? ""); sb.Append(',');
             JS(sb, "store_opt", m_KStoreOpt ?? ""); sb.Append(',');
@@ -713,6 +777,7 @@ namespace Megacity.Refbench
             JS(sb, "mode_set", m_ModeSet);
             sb.Append("},");
 
+            sb.Append("\"frame_pacing\":").Append(FramePacingJson()).Append(',');
             J(sb, "frames_rendered", m_Rendered); sb.Append(',');
             J(sb, "warmup_frames_rendered", m_WarmupRendered); sb.Append(',');
             sb.Append("\"clean_exit\":").Append(m_CleanExit ? "true" : "false");

@@ -436,20 +436,72 @@ impl GrayLayer {
                 15,
             );
         }
-        format!(
-            "已摘层。回读:\n  debug.vulkan.layers = [{}]\n  state               = [{}]",
-            self.getprop("debug.vulkan.layers"),
-            self.ashell(&format!("su -c 'cat {STATE} 2>/dev/null'"), 15)
-                .trim_end_matches("#adb_exit=0")
-                .trim()
+        // 回读: STATE 上面刚删, 不能再 `cat` (文件不在时 cat 必然退出码 1, 回包带
+        // `#adb_exit=1`, 以前被 eval 当成「摘层失败」, 每次灰档评测都 ABORT)。
+        // 改成显式探测在不在, 回包只写剥掉退出码后的内容, 失败只用 OFF_FAIL_MARK 标。
+        off_readback(
+            &self.ashell("getprop debug.vulkan.layers", 15),
+            &self.ashell(
+                &format!("su -c 'if [ -e {STATE} ]; then echo PRESENT; cat {STATE}; else echo ABSENT; fi'"),
+                15,
+            ),
         )
     }
+}
+
+/// 摘层回包里表示「这一步确实失败了」的唯一标记。eval 判摘层是否干净只认它,
+/// 不再看回包里有没有 `#adb_exit=1` (那个会把「文件本来就该不在」误判成失败)。
+pub(crate) const OFF_FAIL_MARK: &str = "警告";
+
+/// 摘层后的回读结论 (纯函数, 便于单测)。
+///
+/// - `layers_out`: `getprop debug.vulkan.layers` 的原始回包 (带 `#adb_exit=N`)。
+///   命令没成功、或属性还非空 → 失败。
+/// - `state_out`: `if [ -e STATE ]; then echo PRESENT; cat STATE; else echo ABSENT; fi` 的原始回包。
+///   只有退出码 0 且首行明确是 `ABSENT` 才算删干净; 命令失败 / 回包看不懂 → 失败 (不当成「已删」)。
+pub(crate) fn off_readback(layers_out: &str, state_out: &str) -> String {
+    let mut warn: Vec<String> = Vec::new();
+    let layers = GrayLayer::adb_stdout(layers_out).trim().to_string();
+    let layers_shown = if !adb_ok(layers_out) {
+        warn.push(format!("{OFF_FAIL_MARK}: debug.vulkan.layers 回读失败 ({})", layers_out.trim()));
+        "?".to_string()
+    } else {
+        if !layers.is_empty() {
+            warn.push(format!("{OFF_FAIL_MARK}: debug.vulkan.layers 还没清空: {layers}"));
+        }
+        layers
+    };
+    let body = GrayLayer::adb_stdout(state_out).trim();
+    let mut lines = body.lines();
+    let first = lines.next().unwrap_or("").trim();
+    let state_shown = if !adb_ok(state_out) {
+        warn.push(format!("{OFF_FAIL_MARK}: {STATE} 回读失败 ({})", state_out.trim()));
+        "?".to_string()
+    } else if first == "ABSENT" {
+        "已删除".to_string()
+    } else if first == "PRESENT" {
+        let rest: Vec<&str> = lines.map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        let rest = rest.join(" ");
+        warn.push(format!("{OFF_FAIL_MARK}: {STATE} 没删掉, 内容: {rest}"));
+        format!("仍在: {rest}")
+    } else {
+        warn.push(format!("{OFF_FAIL_MARK}: {STATE} 回读看不懂: {body:?}"));
+        "?".to_string()
+    };
+    let mut out = format!(
+        "已摘层。回读:\n  debug.vulkan.layers = [{layers_shown}]\n  state               = [{state_shown}]"
+    );
+    for w in warn {
+        out.push('\n');
+        out.push_str(&w);
+    }
+    out
 }
 
 const DEV_TMP_SO: &str = "/data/local/tmp/libVkLayer_refknobs.so";
 
 /// 层 .so 的解析: knobs/gray/build/out/ (build_layer.sh 的产物位)。
-fn layer_so_path() -> String {
+pub(crate) fn layer_so_path() -> String {
     match resolve_path("knobs/gray/build/out/libVkLayer_refknobs.so") {
         Some(p) => p.to_string_lossy().into_owned(),
         None => "knobs/gray/build/out/libVkLayer_refknobs.so".into(),
@@ -560,5 +612,37 @@ mod storeop_tests {
         assert!(storeop_spec(&[("zzzzzzzz".into(), 0)]).is_err());
         let many: Vec<(String, u32)> = (0..6).map(|i| ("0123456789abcdef".to_string(), i)).collect();
         assert!(storeop_spec(&many).unwrap_err().contains("上限"));
+    }
+}
+
+#[cfg(test)]
+mod off_readback_tests {
+    use super::{off_readback, OFF_FAIL_MARK};
+
+    /// 正常摘层: 属性已清空, STATE 已删 —— 以前的写法这里 `cat` 必然 #adb_exit=1, 被判失败。
+    #[test]
+    fn clean_off_has_no_fail_mark_and_no_exit_token() {
+        let log = off_readback("\n#adb_exit=0", "ABSENT\n#adb_exit=0");
+        assert!(!log.contains(OFF_FAIL_MARK), "{log}");
+        assert!(!log.contains("#adb_exit="), "{log}");
+        assert!(log.contains("state               = [已删除]"), "{log}");
+    }
+
+    #[test]
+    fn leftover_prop_or_state_is_a_failure() {
+        let log = off_readback("VK_LAYER_refknobs_readonly\n#adb_exit=0", "ABSENT\n#adb_exit=0");
+        assert!(log.contains(OFF_FAIL_MARK), "{log}");
+        let log = off_readback("\n#adb_exit=0", "PRESENT\ncom.miHoYo.Yuanshen|/data/app/x/lib/arm64\n#adb_exit=0");
+        assert!(log.contains(OFF_FAIL_MARK), "{log}");
+        assert!(log.contains("com.miHoYo.Yuanshen"), "{log}");
+    }
+
+    /// 回读命令本身失败 (su 拒绝 / 超时 / 设备掉线) 不能当成「已删」。
+    #[test]
+    fn failed_or_garbled_readback_is_a_failure() {
+        assert!(off_readback("\n#adb_exit=0", "#adb_exit=1").contains(OFF_FAIL_MARK));
+        assert!(off_readback("\n#adb_exit=0", "#adb_exit=timeout").contains(OFF_FAIL_MARK));
+        assert!(off_readback("#adb_exit=err", "ABSENT\n#adb_exit=0").contains(OFF_FAIL_MARK));
+        assert!(off_readback("\n#adb_exit=0", "su: not found\n#adb_exit=0").contains(OFF_FAIL_MARK));
     }
 }

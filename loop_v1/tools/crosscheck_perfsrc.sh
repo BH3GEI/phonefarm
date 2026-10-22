@@ -137,7 +137,7 @@ sleep "$LEAD"
 
 # 2) 同一窗口里并排起三路采集
 #    A1: ftrace (逐帧口径的事实来源)
-adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/ftrace_capture.sh $CAPDUR /data/local/tmp/xcheck_$LABEL.txt'" \
+adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/ftrace_capture.sh $CAPDUR /data/local/tmp/xcheck_$LABEL.txt $PKG'" \
     > "$OUTDIR/capture.log" 2>&1 &
 FT_PID=$!
 
