@@ -260,6 +260,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 工件:  gray-artifact {build (--source sampled.comp | --adapted-artifact DIR) --out DIR [--ndk DIR] [--timeout-seconds 1..120] [--process-supervision own-helper-groups|inherited-group] | inspect --spirv FILE | verify --artifact DIR | adapt-storage --source original.comp --spirv original.spv --out DIR | verify-adaptation --artifact DIR} [--json]
        (离线编译/ABI/摘要门禁; deployable=false, 不构成真机部署资格)
        gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
+       gray-ab recover --session DIR --serial S [--json]
+       (loadop 支持 --json / --evidence-origin device|synthetic；完整会话停充与恢复，copyprobe 尚未迁移)
        (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)
 画质:  sequence-quality --reference R.json --candidate C.json --rules frozen.json [--out tasks/quality/report.json]
        (配对连续帧 RGB PSNR/色偏/残差变化, 零 Token 离线; PASS 只覆盖冻结指标, 不证明无鬼影)

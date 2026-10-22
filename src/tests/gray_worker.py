@@ -159,14 +159,44 @@ gray_child_finish 0
         self.assertEqual(json.loads((r / "input-complete.json").read_text())["run"], "script_normal")
         before = host.files()
         self.assertEqual(host.call("verify_gray_idle", "verify")[:2], (0, "GRAY_IDLE_QUIESCENT\n"))
+        self.assertEqual(host.call("verify_gray_groups", "verify")[:2], (0, "GRAY_GROUPS_QUIESCENT\n"))
         self.assertEqual(host.files(), before)
+        normal = r
         r = sample("script_deadline", True)
         self.assertNotEqual((r / "workload_exit.txt").read_text().strip(), "0")
         self.assertFalse((r / "input-complete.json").exists())
+        (normal / "input-complete.json").unlink()
+        before = host.files()
+        self.assertEqual(host.call("verify_gray_groups", "verify")[:2], (0, "GRAY_GROUPS_QUIESCENT\n"))
         self.assertEqual(host.call("verify_gray_idle", "verify")[0], 77)
+        self.assertEqual(host.files(), before)
+        # The read-only receiver also accepts a valid closed-owner fixture, but
+        # this weaker proof must not satisfy the normal completion verifier.
+        closed = host.d / "session.closed"
+        closed.mkdir()
+        (closed / "owner").write_text("fixture-token fixture-boot reconcile\n")
+        before = host.files()
+        self.assertEqual(host.call("verify_gray_groups", "verify")[:2], (0, "GRAY_GROUPS_QUIESCENT\n"))
+        self.assertEqual(host.call("verify_bench", "verify")[0], 77)
+        self.assertEqual(host.files(), before)
+        (closed / "owner").write_text("another-token fixture-boot reconcile\n")
+        self.assertEqual(host.call("verify_gray_groups", "verify")[0], 86)
+        (closed / "owner").unlink()
+        closed.rmdir()
+        ledger = normal / "children.tsv"
+        original_ledger = ledger.read_text()
+        with ledger.open("a") as output:
+            output.write("thermal_sampler\t2147483647\t123\t" + str(host.d / "thermal_sampler.sh") + "\n")
+        before = host.files()
+        self.assertEqual(host.call("verify_gray_groups", "verify")[0], 77)
+        self.assertEqual(host.files(), before)
+        ledger.write_text(original_ledger)
         self.assertEqual(host.call("reconcile_bench", "reconcile")[0], 77)
         self.assertFalse((host.d / "session.closed").exists())
         self.assertTrue((host.d / "worker.lock/owner").exists())
+        before = host.files()
+        self.assertEqual(host.call("verify_gray_groups", "verify")[0], 85)
+        self.assertEqual(host.files(), before)
         self.assertFalse((host.d / "forbidden-restore").exists())
 
     def test_script_trace_qualification_png_and_capture_window(self):

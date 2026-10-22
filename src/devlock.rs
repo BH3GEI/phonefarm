@@ -86,6 +86,9 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
     if matches!(sub, "bench" | "capture") && rest.iter().any(|a| a == "--recover") {
         return false;
     }
+    if sub == "gray-ab" && rest.first().is_some_and(|a| a == "recover") {
+        return false;
+    }
     // preflight: 只读核查不拿锁; --fix 要写风扇/音量，跟测量一样排队
     if sub == "preflight" {
         return rest.iter().any(|a| a == "--fix");
@@ -322,6 +325,8 @@ mod tests {
         assert!(needs_lock("frame-audit", &v(&["storeop-check", "--rule", "a:1"])));
         assert!(!needs_lock("frame-audit", &v(&["analyze", "f.json"])));
         assert!(!needs_lock("frame-audit", &v(&["recover", "--session", "session", "--serial", "S"])));
+        assert!(!needs_lock("gray-ab", &v(&["recover", "--session", "session", "--serial", "S"])));
+        assert!(needs_lock("gray-ab", &v(&["--mode", "loadop", "--out", "x"])));
         assert!(!needs_lock("frame-audit", &v(&[])));
     }
 

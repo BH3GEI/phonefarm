@@ -5,6 +5,7 @@ use std::{cell::RefCell, fs, path::Path, time::{Duration, Instant}};
 
 const SCHEMA: &str = "phonefarm/gray-eval-launch-session@1";
 const SCRIPT_SCHEMA: &str = "phonefarm/gray-eval-script-session@1";
+const LOADOP_SCHEMA: &str = "phonefarm/gray-ab-loadop-session@1";
 const CHILD_GUARD: &str = include_str!("../loop_v1/tools/gray_child_guard.sh");
 const FAN: &str = "/sys/kernel/fan/fan_enable";
 const WORKER: &str = include_str!("../loop_v1/tools/confirmation_worker.sh");
@@ -15,6 +16,7 @@ const SAMPLER: &str = include_str!("../loop_v1/auto/sample_env.sh");
 pub(crate) struct Parent {
     pub base: Session,
     state: RefCell<Value>,
+    charge: RefCell<Option<crate::hwcond::ChargeSuspend>>,
 }
 
 impl Parent {
@@ -24,20 +26,36 @@ impl Parent {
     pub fn new_script(base: Session, request: &Value, plan: &crate::gray_script::Plan) -> Result<Self,String> {
         Self::new_with_plan(base, request, Some(plan))
     }
+    pub fn new_loadop(base:Session,request:&Value,plan:&crate::gray_script::Plan)->Result<Self,String> {
+        if base.eval_identity()?["completion_owner"]!="gray_ab_loadop" {return Err("loadop parent owner differs".into());}
+        Self::new_with_plan(base,request,Some(plan))
+    }
     fn new_with_plan(base: Session, request: &Value, plan: Option<&crate::gray_script::Plan>) -> Result<Self,String> {
         let id = base.eval_identity()?;
-        if (id["completion_owner"] == "gray_eval_script") != plan.is_some() {return Err("parent plan/owner mismatch".into());}
+        let loadop=id["completion_owner"]=="gray_ab_loadop";
+        if (loadop || id["completion_owner"]=="gray_eval_script") != plan.is_some() {return Err("parent plan/owner mismatch".into());}
+        // Foreign/legacy/partial charging records are refused before any device write.
+        let charging=if loadop {
+            let path=crate::hwcond::lock_state_path("charge",&Some(id["serial"].as_str().ok_or("missing serial")?.into()))?;
+            if crate::hwcond::charge_record(&path)?.is_some() {return Err(format!("charging record {} is not owned by this new session",path.display()));}
+            json!({"stage":"not_started","record_path":path,"binding":null,"history":[],"initial":null,"last_observation":null})
+        }else{Value::Null};
         let token = id["token"].as_str().ok_or("missing token")?;
-        let state = json!({"schema":if plan.is_some(){SCRIPT_SCHEMA}else{SCHEMA},"identity":id,"stage":"created","request":request,"input_plan":plan.map(|p|p.to_value()),
+        let state = json!({"schema":if loadop{LOADOP_SCHEMA}else if plan.is_some(){SCRIPT_SCHEMA}else{SCHEMA},"identity":id,"stage":"created","request":request,"input_plan":plan.map(|p|p.to_value()),
             "remote":format!("/data/local/tmp/phonefarm-confirmation-gray-{token}"),
             "trace":format!("/sys/kernel/tracing/instances/phonefarm_gray_{token}"),
-            "deployment":"not_started","tools_created":false,"trace_state":"not_started","fan":null,"pending":null,"rounds":[]});
+            "deployment":"not_started","tools_created":false,"trace_state":"not_started","fan":null,"pending":null,"rounds":[],"charging":charging});
         new_file(&base.dir.join("eval-session.json"), &serde_json::to_vec_pretty(&state).unwrap())?;
-        Ok(Self {base, state:RefCell::new(state)})
+        Ok(Self {base, state:RefCell::new(state),charge:RefCell::new(None)})
     }
 
     pub fn resume(dir: &Path, serial: &str) -> Result<Self, String> {
-        let base = Session::resume_eval(dir, serial)?;
+        Self::resume_base(Session::resume_eval(dir, serial)?)
+    }
+    pub fn resume_loadop(dir:&Path,serial:&str)->Result<Self,String> {
+        Self::resume_base(Session::resume_loadop(dir,serial)?)
+    }
+    fn resume_base(base:Session)->Result<Self,String> {
         let state: Value = serde_json::from_slice(&crate::confirmation_transport::bounded(&base.dir.join("eval-session.json"), 8*1024*1024)?)
             .map_err(|e| e.to_string())?;
         let id = base.eval_identity()?;
@@ -55,8 +73,9 @@ impl Parent {
         if !state["fan"].is_null() && (!matches!(state["fan"]["original"].as_str(),Some("0"|"1")) || !state["fan"]["changed"].is_boolean()) {
             return Err("invalid original fan state".into());
         }
-        if state["schema"]==SCRIPT_SCHEMA { script_plan(&state)?; }
-        Ok(Self {base,state:RefCell::new(state)})
+        if scripted(&state) {script_plan(&state)?;}
+        if state["schema"]==LOADOP_SCHEMA {validate_charging(&state["charging"],&id)?;if !state["fan"].is_null(){return Err("loadop session cannot own fan conditioning".into());}}
+        Ok(Self {base,state:RefCell::new(state),charge:RefCell::new(None)})
     }
 
     fn update(&self, f: impl FnOnce(&mut Value)) -> Result<(), String> {
@@ -104,7 +123,7 @@ impl Parent {
         self.update(|s|{s["identity"]=id.clone();s["deployment"]=json!("installing");})?;
         let owner=format!("{} {}",id["token"].as_str().unwrap(),id["boot_id"].as_str().ok_or("missing boot")?);
         self.mutate("eval_tools_directory",&["shell".into(),format!("set -eu; command -v setsid; test ! -e {d}; mkdir {d}; printf '%s\\n' {owner} > {d}/owner; sync",d=q(&remote),owner=q(&owner))],30_000,|s|s["tools_created"]=json!(true))?;
-        let script = if self.state.borrow()["schema"]==SCRIPT_SCHEMA {Some(script_plan(&self.state.borrow())?)} else {None};
+        let script = if scripted(&self.state.borrow()) {Some(script_plan(&self.state.borrow())?)} else {None};
         let input = script.as_ref().map(|p|p.shell());
         let sampler = script.as_ref().map(|_|crate::gray_script::sampler_shell());
         let mut tools = vec![("worker.sh",WORKER),("bootstrap.sh",BOOTSTRAP),
@@ -154,6 +173,9 @@ impl Parent {
         Ok((wc==Some(true),sc==Some(true)))
     }
     fn round_text(&self,label:&str,name:&str)->Result<String,String> {
+        if self.state.borrow()["schema"]==LOADOP_SCHEMA && !self.base.eval_present(&format!("{}/{label}/{name}",self.remote()))? {
+            return Err(format!("{label}/{name}: expected collection evidence absent; original remote ledger retained"));
+        }
         self.read("eval_sample_evidence",&format!("{} && cat {}/{}/{}",self.owned()?,q(&self.remote()),q(label),q(name)))
     }
     fn round_png(&self,label:&str,name:&str,out:&Path)->Result<(),String> {
@@ -203,7 +225,7 @@ impl Parent {
     }
     fn verify_inputs(&self)->Result<(),String> {
         let state=self.state.borrow().clone();
-        if state["schema"]!=SCRIPT_SCHEMA {return Ok(());}
+        if !scripted(&state) {return Ok(());}
         let plan=script_plan(&state)?;
         for round in state["rounds"].as_array().ok_or("missing input rounds")? {
             let label=round["label"].as_str().filter(|s|!s.is_empty()&&s.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_')).ok_or("invalid input round label")?;
@@ -220,7 +242,98 @@ impl Parent {
         if self.read("eval_resource_identity","cat /proc/sys/kernel/random/boot_id")?.trim()!=boot {return Err("device boot changed; parent resource restoration refused".into());}
         Ok(())
     }
+    fn loadop_charge(&self)->Result<Value,String> {
+        if self.state.borrow()["schema"]!=LOADOP_SCHEMA {return Err("charging is only owned by gray-ab loadop".into());}
+        let charge=self.state.borrow()["charging"].clone();validate_charging(&charge,&self.base.eval_identity()?)?;Ok(charge)
+    }
+    fn battery(&self)->Result<crate::hwcond::BatteryState,String> {
+        let root="/sys/class/power_supply/battery";
+        let text=self.read("loadop_battery",&format!("s=$(cat {root}/status) && c=$(cat {root}/current_now) && p=$(cat {root}/capacity) && printf '%s\n%s\n%s\n' \"$s\" \"$c\" \"$p\""))?;
+        let fields:Vec<_>=text.lines().collect();
+        if fields.len()!=3 || !matches!(fields[0],"Charging"|"Discharging"|"Not charging"|"Full") {return Err("battery status is not a recognized three-field observation".into());}
+        let current=fields[1].trim().parse::<i64>().map_err(|_|"battery current is unknown")?;
+        let capacity=fields[2].trim().parse::<i64>().ok().filter(|v|(0..=100).contains(v)).ok_or("battery capacity is unknown")?;
+        Ok(crate::hwcond::BatteryState{status:fields[0].into(),current_ua:Some(current),capacity_pct:Some(capacity)})
+    }
+    pub fn prepare_charging(&self)->Result<Value,String> {
+        let charge=self.loadop_charge()?;self.identity()?;
+        if charge["stage"]!="not_started" || self.state.borrow()["deployment"]!="ready" {return Err("charging preparation requires a fresh deployed loadop session".into());}
+        let path=Path::new(charge["record_path"].as_str().unwrap());
+        if crate::hwcond::charge_record(path)?.is_some() {return Err("foreign charging record appeared before conditioning".into());}
+        let initial=self.battery()?;
+        self.update(|s|s["charging"]["initial"]=battery_value(&initial))?;
+        if initial.on_battery() {
+            self.update(|s|s["charging"]["stage"]=json!("observed_no_mutation"))?;
+            return self.charging_observation();
+        }
+        let phone=ChargeShell::new(self);
+        let guard=crate::hwcond::ChargeSuspend::apply_with_hooks(&phone,path,
+            |node,saved,want|self.bind_charge(path,node,saved,want),
+            ||self.update(|s|s["charging"]["stage"]=json!("restoring")),
+            ||self.charge_restored("candidate_rollback"))?;
+        *self.charge.borrow_mut()=Some(guard);
+        self.update(|s|s["charging"]["stage"]=json!("suspended"))?;
+        self.charging_observation()
+    }
+    fn bind_charge(&self,path:&Path,node:&str,saved:&str,want:&str)->Result<(),String> {
+        if crate::hwcond::charge_record(path)?!=Some((node.into(),saved.into())) {return Err("new charging record does not contain the saved original values".into());}
+        let id=self.base.eval_identity()?;
+        let evidence=self.base.dir.join(format!("charge-record-{}-{}.txt",std::process::id(),chrono::Utc::now().timestamp_micros()));
+        new_file(&evidence,&crate::confirmation_transport::bounded(path,65536)?)?;
+        let binding=json!({"serial":id["serial"],"token":id["token"],"session":self.base.dir,"record_path":path,
+            "node":node,"original":saved,"experiment":want,"record_evidence":evidence,"recorded_at":chrono::Utc::now().to_rfc3339()});
+        self.update(|s|{s["charging"]["binding"]=binding;s["charging"]["stage"]=json!("recorded");})
+    }
+    pub fn charging_observation(&self)->Result<Value,String> {
+        let charge=self.loadop_charge()?;self.identity()?;
+        if !matches!(charge["stage"].as_str(),Some("suspended"|"observed_no_mutation")) {return Err("loadop charging is not prepared for collection".into());}
+        let path=Path::new(charge["record_path"].as_str().unwrap());
+        let control=if charge["stage"]=="suspended" {
+            let binding=&charge["binding"];
+            if crate::hwcond::charge_record(path)?!=Some((binding["node"].as_str().unwrap().into(),binding["original"].as_str().unwrap().into())) {return Err("charging record no longer matches this session".into());}
+            let node=binding["node"].as_str().unwrap();
+            let current=ChargeShell::new(self).node(node)?.ok_or("owned charging control disappeared")?;
+            if Some(current.as_str())!=binding["experiment"].as_str() {return Err("charging control readback differs from the session experiment value".into());}
+            json!({"node":node,"original":binding["original"],"experiment":binding["experiment"],"readback":current})
+        } else {
+            if crate::hwcond::charge_record(path)?.is_some(){return Err("unexpected charge record in observed-only session".into());}Value::Null
+        };
+        let battery=self.battery()?;
+        let value=json!({"stage":charge["stage"],"control_modified_by_session":charge["stage"]=="suspended","control":control,
+            "battery":battery_value(&battery),"on_battery":battery.on_battery(),"observed_at":chrono::Utc::now().to_rfc3339(),"record_path":path});
+        self.update(|s|s["charging"]["last_observation"]=value.clone())?;
+        if !battery.on_battery() {return Err(format!("loadop requires actual discharging before sampling: {}",battery.why_not_on_battery()));}
+        Ok(value)
+    }
+    fn charge_restored(&self,reason:&str)->Result<(),String> {
+        self.update(|s|{
+            let mut binding=s["charging"]["binding"].clone();binding["restored_at"]=json!(chrono::Utc::now().to_rfc3339());binding["reason"]=json!(reason);binding["original_readback_verified"]=json!(true);
+            s["charging"]["history"].as_array_mut().unwrap().push(binding);
+            s["charging"]["binding"]=Value::Null;s["charging"]["stage"]=json!(if reason=="candidate_rollback"{"unmodified"}else{"restored"});
+        })
+    }
+    fn restore_charging(&self)->Result<(),String> {
+        let charge=self.loadop_charge()?;
+        let path=Path::new(charge["record_path"].as_str().unwrap());
+        match charge["stage"].as_str() {
+            Some("not_started"|"observed_no_mutation"|"unmodified"|"restored")=>{
+                if crate::hwcond::charge_record(path)?.is_some() {return Err("unowned charging record present during restoration".into());}return Ok(());
+            },
+            Some("recorded"|"suspended"|"restoring")=>{},
+            _=>return Err("unknown charging recovery stage".into()),
+        }
+        let binding=&charge["binding"];
+        // loadop_charge validated the persisted original record before reuse.
+        let mut guard=match self.charge.borrow_mut().take() {
+            Some(guard)=>guard,
+            None=>crate::hwcond::ChargeSuspend::from_bound_record(path,binding["node"].as_str().unwrap(),binding["original"].as_str().unwrap(),charge["stage"]=="restoring")?,
+        };
+        self.update(|s|s["charging"]["stage"]=json!("restoring"))?;
+        if !guard.restore_checked(&ChargeShell::new(self))? {*self.charge.borrow_mut()=Some(guard);return Err("owned charging restoration readback differs; record retained".into());}
+        self.charge_restored("session_finish")
+    }
     pub fn fan_off(&self)->Result<Value,String> {
+        if self.state.borrow()["schema"]==LOADOP_SCHEMA {return Err("loadop session does not own fan conditioning".into());}
         if self.state.borrow()["deployment"]!="ready" {return Err("fan conditioning requires deployed eval resources".into());}
         self.identity()?;
         if !self.base.eval_present(FAN)? {return Ok(json!({"before":null,"after":null,"forced":false}));}
@@ -257,6 +370,12 @@ impl Parent {
             return Ok(json!({"no_parent_device_mutations":true,"remote_session_closed":null,"fan_restored":null}));
         }
         self.clear()?;self.identity()?;
+        if state["schema"]==LOADOP_SCHEMA && state["deployment"]=="ready" {
+            // Group proof is independent of input natural completion. Restore
+            // charging before the stronger closure check can fail on input.
+            if self.worker("verify_gray_groups","verify",None,false)?.trim()!="GRAY_GROUPS_QUIESCENT" {return Err("loadop groups not currently quiescent; charging retained".into());}
+            self.restore_charging()?;
+        }
         match state["deployment"].as_str() {
             Some("ready")=>{
                 let closed=self.read("eval_closed",&format!("{} && if [ -d {}/session.closed ]; then echo CLOSED; else echo OPEN; fi",self.owned()?,q(&self.remote())))?;
@@ -293,7 +412,7 @@ impl Parent {
             if self.read("eval_fan_restore_readback",&format!("cat {FAN}"))?.trim()!=original {return Err("fan restoration readback differs".into());}
         }
         Ok(json!({"remote_session_closed":state["tools_created"]==true,"owned_trace_absent":true,"fan_restored":true,
-            "remote":self.remote(),"tool_policy":"retain closed ownership ledger, scripts and round evidence","charging_or_frequency_changed":false}))
+            "remote":self.remote(),"tool_policy":"retain closed ownership ledger, scripts and round evidence","charging_or_frequency_changed":if state["schema"]==LOADOP_SCHEMA{Value::Null}else{json!(false)},"frequency_changed":false,"charging":self.state.borrow()["charging"]}))
     }
     pub fn finish(&self,error:Option<&str>)->Result<Value,String> {
         let resources=self.close_resources();
@@ -306,7 +425,7 @@ impl Parent {
         let mut value=json!({"schema":schema,"status":if verified{"verified"}else{"required"},
             "scope":scope,"serial":id["serial"],"token":id["token"],"session":self.base.dir,
             "evidence_origin":id["evidence_origin"],"base_recovery":id["base_recovery"],"base":base.as_ref().ok(),
-            "resources":resources.as_ref().ok(),"error":resources.as_ref().err().or(base.as_ref().err()),
+            "resources":resources.as_ref().ok(),"charging":self.state.borrow()["charging"],"error":resources.as_ref().err().or(base.as_ref().err()),
             "experiment_error":error,"game_state_restored":false,"report_path":path});
         new_file(&path,&serde_json::to_vec_pretty(&value).unwrap())?;
         if verified {self.base.complete_eval(&path)?;value["status"]=json!("reported_complete");}
@@ -314,16 +433,86 @@ impl Parent {
     }
 }
 
+fn battery_value(battery:&crate::hwcond::BatteryState)->Value {
+    json!({"status":battery.status,"current_now_ua":battery.current_ua,"capacity_pct":battery.capacity_pct,"on_battery":battery.on_battery()})
+}
+fn validate_charging(charge:&Value,id:&Value)->Result<(),String> {
+    let serial=id["serial"].as_str().ok_or("missing charge serial")?;
+    let path=crate::hwcond::lock_state_path("charge",&Some(serial.into()))?;
+    if charge["record_path"]!=json!(path) || charge["history"].as_array().is_none()
+        || !matches!(charge["stage"].as_str(),Some("not_started"|"recorded"|"suspended"|"restoring"|"restored"|"unmodified"|"observed_no_mutation")) {
+        return Err("invalid parent charging obligation".into());
+    }
+    let bound=matches!(charge["stage"].as_str(),Some("recorded"|"suspended"|"restoring"));
+    if bound {
+        let b=&charge["binding"];
+        let node=b["node"].as_str().ok_or("missing original charge node")?;
+        let saved=b["original"].as_str().ok_or("missing original charge value")?;
+        if ["serial","token","session"].iter().any(|k|b[*k]!=id[*k]) || b["record_path"]!=charge["record_path"]
+            || crate::hwcond::parse_charge_ctl_state(&crate::hwcond::charge_ctl_state_text(node,saved)).is_none()
+            || b["experiment"].as_str().is_none_or(|v|v.parse::<i64>().is_err())
+            || b["record_evidence"].as_str().is_none_or(|p|Path::new(p).parent()!=id["session"].as_str().map(Path::new)) {
+            return Err("charging original values are not bound to this session".into());
+        }
+        match crate::hwcond::charge_record(&path)? {
+            Some(values) if values==(node.into(),saved.into())=>{},
+            None if charge["stage"]=="restoring"=>{},
+            _=>return Err("charging record differs from the bound original values".into()),
+        }
+    } else if !charge["binding"].is_null() {return Err("inactive charging obligation retains an unknown binding".into());}
+    Ok(())
+}
+struct ChargeShell<'a> {parent:&'a Parent,error:RefCell<Option<String>>}
+impl<'a> ChargeShell<'a> {
+    fn new(parent:&'a Parent)->Self {Self{parent,error:RefCell::new(None)}}
+    fn ready(&self)->Result<(),String> {
+        self.parent.clear()?;
+        if let Some(error)=self.error.borrow().as_ref(){return Err(error.clone());}Ok(())
+    }
+    fn execute(&self,command:&str,ms:u64,mutation:bool)->Result<String,String> {
+        self.ready()?;
+        let id=self.parent.base.eval_identity()?;
+        let boot=id["boot_id"].as_str().ok_or("missing charge boot identity")?;
+        let command=format!("test \"$(cat /proc/sys/kernel/random/boot_id)\" = {} && {command}",q(boot));
+        let args=["shell".into(),command];
+        if mutation {self.parent.mutate("charge_control",&args,ms,|_|{})}
+        else {Ok(self.parent.base.eval_transport("charge_read",&args,ms,false)?.stdout)}
+    }
+    fn node(&self,path:&str)->Result<Option<String>,String> {
+        self.ready()?;
+        if !crate::hwcond::CHARGE_CTL_CANDIDATES.iter().any(|n|n.path==path){return Err("unknown charging node".into());}
+        // Successful directory enumeration proves absence. cat errors are never
+        // converted into an absent/unsupported candidate.
+        if !self.parent.base.eval_present(path)? {return Ok(None);}
+        let value=self.execute(&format!("su -c {}",q(&format!("cat {}",q(path)))),8_000,false)?;
+        let value=value.trim();
+        if value.parse::<i64>().is_err(){return Err(format!("charging node {path} has an invalid value"));}
+        Ok(Some(value.into()))
+    }
+    fn text_result(&self,result:Result<String,String>)->String {
+        match result {Ok(value)=>value,Err(error)=>{*self.error.borrow_mut()=Some(error);String::new()}}
+    }
+}
+impl crate::hwcond::Shell for ChargeShell<'_> {
+    fn shell(&self,cmd:&str,ms:u64)->String {self.text_result(self.execute(cmd,ms,false))}
+    fn shell_write(&self,cmd:&str,ms:u64)->String {self.text_result(self.execute(cmd,ms,true))}
+    fn check(&self)->Result<(),String> {self.ready()}
+    fn charge_node(&self,path:&str)->Result<Option<String>,String> {self.node(path)}
+    fn charge_battery(&self)->Result<crate::hwcond::BatteryState,String> {self.ready()?;self.parent.identity()?;self.parent.battery()}
+}
+
 fn validate_parent_kind(state:&Value,id:&Value)->Result<(),String> {
     let valid=match id["completion_owner"].as_str() {
         Some("gray_eval_launch")=>state["schema"]==SCHEMA && (state["identity"]["completion_owner"].is_null()||state["identity"]["completion_owner"]=="gray_eval_launch"),
         Some("gray_eval_script")=>state["schema"]==SCRIPT_SCHEMA && state["identity"]["completion_owner"]=="gray_eval_script",
+        Some("gray_ab_loadop")=>state["schema"]==LOADOP_SCHEMA && state["identity"]["completion_owner"]=="gray_ab_loadop",
         _=>false,
     };
     if valid {Ok(())}else{Err("parent schema/completion owner mismatch".into())}
 }
+fn scripted(state:&Value)->bool {state["schema"]==SCRIPT_SCHEMA || state["schema"]==LOADOP_SCHEMA}
 fn script_plan(state:&Value)->Result<crate::gray_script::Plan,String> {
-    if state["schema"]!=SCRIPT_SCHEMA {return Err("finite input requires script parent".into());}
+    if !scripted(state) {return Err("finite input requires script parent".into());}
     let value=&state["input_plan"];
     let plan=crate::gray_script::parse(&value["steps"],value["seconds"].as_u64().ok_or("missing input seconds")?)?;
     if plan.to_value()!=*value {return Err("invalid normalized input plan".into());}
@@ -368,6 +557,9 @@ mod tests {
         let new=json!({"schema":SCRIPT_SCHEMA,"identity":script});
         assert!(validate_parent_kind(&new,&script).is_ok());
         assert!(validate_parent_kind(&new,&launch).is_err());
+        let loadop=json!({"completion_owner":"gray_ab_loadop"});
+        assert!(validate_parent_kind(&json!({"schema":LOADOP_SCHEMA,"identity":loadop}),&loadop).is_ok());
+        assert!(validate_parent_kind(&new,&loadop).is_err());
         let window=|child,start,end|json!({"schema":"phonefarm/gray-child-time@1","child":child,"exit_code":0,"start":start,"end":end});
         let mut evidence=json!({"natural_completion":{"schema":"phonefarm/gray-input-complete@1","start":100.0,"end":112.0},"actual":{
             "workload-time.json":window("workload",100.0,112.0),"trace-time.json":window("trace",106.0,109.0),"sampler-time.json":window("sampler",99.0,114.0),

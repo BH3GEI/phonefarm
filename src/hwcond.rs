@@ -25,6 +25,15 @@ use std::path::{Path, PathBuf};
 pub(crate) trait Shell {
     fn shell(&self, cmd: &str, ms: u64) -> String;
     fn shell_write(&self, cmd: &str, ms: u64) -> String { self.shell(cmd, ms) }
+    fn check(&self) -> Result<(), String> { Ok(()) }
+    fn charge_node(&self, path: &str) -> Result<Option<String>, String> {
+        let value=self.shell(&format!("su -c 'cat {path} 2>/dev/null'"),8_000);
+        self.check()?;
+        Ok((!value.trim().is_empty()).then(||value.trim().to_owned()))
+    }
+    fn charge_battery(&self) -> Result<BatteryState, String> {
+        let state=read_battery_state(self);self.check()?;Ok(state)
+    }
 }
 
 impl Shell for crate::device::Device {
@@ -596,7 +605,7 @@ pub fn parse_battery_state(text: &str) -> Option<BatteryState> {
     })
 }
 
-pub fn read_battery_state(phone: &impl Shell) -> BatteryState {
+pub fn read_battery_state(phone: &(impl Shell + ?Sized)) -> BatteryState {
     parse_battery_state(&phone.shell(&battery_state_cmd(), 8_000)).unwrap_or_default()
 }
 
@@ -705,7 +714,19 @@ impl ChargeSuspend {
         phone: &impl Shell,
         state_path: &std::path::Path,
     ) -> Result<ChargeSuspend, String> {
-        let bat = read_battery_state(phone);
+        Self::apply_with_hooks(phone,state_path,|_,_,_|Ok(()),||Ok(()),||Ok(()))
+    }
+
+    /// The owner binds the durable record before the first write. Rollback hooks
+    /// distinguish a still-owned record from an explicitly verified candidate.
+    pub(crate) fn apply_with_hooks(
+        phone:&impl Shell, state_path:&Path,
+        mut before_write:impl FnMut(&str,&str,&str)->Result<(),String>,
+        mut before_rollback:impl FnMut()->Result<(),String>,
+        mut after_rollback:impl FnMut()->Result<(),String>,
+    )->Result<Self,String> {
+        phone.check()?;
+        let bat = phone.charge_battery()?;
         if let Some(cap) = bat.capacity_pct {
             if cap < MIN_CAPACITY_FOR_SUSPEND_PCT {
                 return Err(format!(
@@ -722,11 +743,7 @@ impl ChargeSuspend {
 
         let mut tried: Vec<String> = Vec::new();
         for node in CHARGE_CTL_CANDIDATES {
-            let saved = phone.shell(&format!("su -c 'cat {} 2>/dev/null'", node.path), 8_000);
-            let saved = saved.trim().to_string();
-            if saved.is_empty() {
-                continue; // 这台机器没有这个节点
-            }
+            let Some(saved)=phone.charge_node(node.path)? else {continue;};
             let Some(want) = suspend_value(node.how, bat.capacity_pct) else { continue };
 
             // 先落状态文件再动设备: 中途被杀也能回滚
@@ -735,15 +752,18 @@ impl ChargeSuspend {
                 return Err(format!("停充节点 {} 原值无法安全保存: {saved:?}", node.path));
             }
             save_state(state_path, &text)?;
-
+            before_write(node.path,&saved,&want)?;
+            phone.check()?;
             phone.shell_write(&format!("su -c 'echo {want} > {}'", node.path), 8_000);
 
+            phone.check()?;
             // 回读确认**停充真的生效** —— 写进去不代表内核认。
             // 本机 charge_control_end_threshold 出厂就是 80 而电量 91% 照充不误, 就是活例。
-            let ok = (0..(SUSPEND_SETTLE_MS / 500).max(1)).any(|_| {
+            let mut ok=false;
+            for _ in 0..(SUSPEND_SETTLE_MS/500).max(1) {
                 std::thread::sleep(Duration::from_millis(500));
-                read_battery_state(phone).on_battery()
-            });
+                if phone.charge_battery()?.on_battery() {ok=true;break;}
+            }
             if ok {
                 progress("charge", &format!("已停充: {} {saved} → {want}", node.path));
                 return Ok(ChargeSuspend {
@@ -757,9 +777,11 @@ impl ChargeSuspend {
             let mut candidate = ChargeSuspend {
                 path: node.path.into(), saved, state_path: state_path.into(), restored: false,
             };
-            if !candidate.restore(phone) {
+            before_rollback()?;
+            if !candidate.restore_checked(phone)? {
                 return Err(format!("停充候选 {} 无效且未确认恢复；停止尝试，核查 {}", node.path, state_path.display()));
             }
+            after_rollback()?;
             tried.push(format!("{} (写 {want} 无效)", node.path));
         }
         Err(if tried.is_empty() {
@@ -776,27 +798,35 @@ impl ChargeSuspend {
 
     /// 恢复充电并清掉状态文件; 返回是否确认恢复。
     pub fn restore(&mut self, phone: &impl Shell) -> bool {
-        if self.restored {
-            return true;
-        }
-        phone.shell_write(&format!("su -c 'echo {} > {}'", self.saved, self.path), 8_000);
-        let back = phone.shell(&format!("su -c 'cat {} 2>/dev/null'", self.path), 8_000);
-        let ok = back.trim() == self.saved;
-        if ok {
-            self.restored = clear_restored_state(&self.state_path);
-        } else {
-            progress(
-                "charge",
-                &format!(
-                    "恢复充电后回读不符: {} 期望 {} 实得 {}; 状态文件留着, 下次启动会再回滚一次",
-                    self.path,
-                    self.saved,
-                    back.trim()
-                ),
-            );
-        }
-        self.restored
+        self.restore_checked(phone).unwrap_or(false)
     }
+    pub(crate) fn restore_checked(&mut self, phone: &impl Shell) -> Result<bool,String> {
+        phone.check()?;
+        if self.restored {return Ok(true);}
+        phone.shell_write(&format!("su -c 'echo {} > {}'", self.saved, self.path),8_000);
+        phone.check()?;
+        let back=phone.charge_node(&self.path)?;
+        if back.as_deref()==Some(&self.saved) {
+            clear_state(&self.state_path)?;
+            self.restored=true;
+        } else {
+            progress("charge",&format!("恢复充电读回不符: {} 期望 {} 实得 {:?}; 保留 {}",self.path,self.saved,back,self.state_path.display()));
+        }
+        Ok(self.restored)
+    }
+    /// Reconstruct only a caller-bound obligation. A missing record is accepted
+    /// solely after that owner durably entered restoration; the write/readback
+    /// still runs and record disappearance alone never proves recovery.
+    pub(crate) fn from_bound_record(state_path:&Path,path:&str,saved:&str,restoration_started:bool)->Result<Self,String> {
+        if parse_charge_ctl_state(&charge_ctl_state_text(path,saved)).is_none() {return Err("invalid bound charging values".into());}
+        match charge_record(state_path)? {
+            Some(actual) if actual==(path.to_owned(),saved.to_owned())=>{},
+            None if restoration_started=>{},
+            _=>return Err("charging record differs from the current parent binding".into()),
+        }
+        Ok(Self{path:path.into(),saved:saved.into(),state_path:state_path.into(),restored:false})
+    }
+
 }
 
 impl Drop for ChargeSuspend {
@@ -814,6 +844,10 @@ impl Drop for ChargeSuspend {
             );
         }
     }
+}
+
+pub(crate) fn charge_record(path:&Path)->Result<Option<(String,String)>,String> {
+    read_state(path)?.map(|text|parse_charge_ctl_state(&text).ok_or_else(||format!("invalid charge recovery record {}; preserved",path.display()))).transpose()
 }
 
 /// 回滚上次遗留的停充状态 (进程被杀没来得及还原)。返回 `None` 表示没有遗留。
@@ -1358,6 +1392,42 @@ mod tests {
     }
     impl Drop for RecoveryFixture {
         fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn owned_charge_binds_before_write_and_does_not_treat_errors_as_absence() {
+        use std::cell::{Cell,RefCell};
+        struct Phone<'a> {path:&'a Path,bound:Cell<bool>,value:Cell<i32>,writes:RefCell<Vec<String>>,permission:bool,uncertain:Cell<bool>,fail_write:bool}
+        impl Shell for Phone<'_> {
+            fn shell(&self,_:&str,_:u64)->String {panic!("owned charge must use typed optional/battery reads")}
+            fn shell_write(&self,cmd:&str,_:u64)->String {
+                assert!(self.bound.get());assert!(charge_record(self.path).unwrap().is_some());
+                self.writes.borrow_mut().push(cmd.into());self.value.set(if cmd.contains("echo 1 "){1}else{0});
+                if self.fail_write{self.uncertain.set(true);}String::new()
+            }
+            fn check(&self)->Result<(),String> {if self.uncertain.get(){Err("transport completion unknown".into())}else{Ok(())}}
+            fn charge_node(&self,path:&str)->Result<Option<String>,String> {
+                self.check()?;
+                if self.permission{return Err("permission denied".into());}
+                if path==CHARGE_CTL_CANDIDATES[0].path{return Ok(None);}
+                Ok(Some(self.value.get().to_string()))
+            }
+            fn charge_battery(&self)->Result<BatteryState,String> {
+                self.check()?;Ok(BatteryState{status:if self.value.get()==1{"Discharging"}else{"Charging"}.into(),current_ua:Some(if self.value.get()==1{-100000}else{100000}),capacity_pct:Some(80)})
+            }
+        }
+        let f=RecoveryFixture::new();let path=f.0.join("charge");
+        let phone=Phone{path:&path,bound:Cell::new(false),value:Cell::new(0),writes:RefCell::new(Vec::new()),permission:false,uncertain:Cell::new(false),fail_write:false};
+        let mut guard=ChargeSuspend::apply_with_hooks(&phone,&path,|node,saved,_|{
+            assert_eq!(node,CHARGE_CTL_CANDIDATES[1].path);assert_eq!(charge_record(&path)?,Some((node.into(),saved.into())));phone.bound.set(true);Ok(())
+        },||Ok(()),||Ok(())).unwrap();
+        assert!(guard.restore_checked(&phone).unwrap());assert!(!path.exists());assert_eq!(phone.writes.borrow().len(),2);
+        let denied=Phone{permission:true,..phone};
+        assert!(ChargeSuspend::apply(&denied,&path).err().unwrap().contains("permission denied"));
+        assert_eq!(denied.writes.borrow().len(),2);assert!(!path.exists());
+        let uncertain=Phone{permission:false,fail_write:true,bound:Cell::new(false),..denied};
+        assert!(ChargeSuspend::apply_with_hooks(&uncertain,&path,|_,_,_|{uncertain.bound.set(true);Ok(())},||Ok(()),||Ok(())).is_err());
+        assert_eq!(uncertain.writes.borrow().len(),3);assert!(charge_record(&path).unwrap().is_some());
     }
 
     #[test]

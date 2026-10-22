@@ -84,107 +84,6 @@ pub(crate) fn launch_to_world_layered(serial: &str) -> Result<(), String> {
     Err("等不到大世界, 本臂作废".into())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn arm(
-    serial: &str,
-    gl: &GrayLayer,
-    label: &str,
-    rewrite: bool,
-    outdir: &Path,
-    workload: &Path,
-    seconds: u64,
-    _pf_bin: &str,
-    lease: &crate::devlease::Lease,
-) -> Result<(), String> {
-    eprintln!("── 臂 {label} (rewrite={}) ──", rewrite as u8);
-    let _ = su(
-        serial,
-        "rm -f /storage/emulated/0/Android/data/com.miHoYo.Yuanshen/files/knobs_layer_out.json",
-        15,
-    );
-    let mode = if rewrite { "loadop" } else { "target" };
-    gl.mount_mode(mode, "com.miHoYo.Yuanshen", false)?;
-    launch_to_world_layered(serial)?;
-    // 功耗与帧数据同窗口采: run_once 的采集窗口是 t=6..36s, 这里 t=10 起采约 12s
-    let power_path = outdir.join("power.json");
-    let s2 = serial.to_string();
-    std::thread::scope(|scope| {
-        let sampler = scope.spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(10));
-            sample_perf_under_lease(&s2, &power_path, lease)
-        });
-        let result = run_one(
-            serial,
-            label,
-            outdir,
-            seconds,
-            workload,
-            "com.miHoYo.Yuanshen",
-        );
-        let sampled = sampler
-            .join()
-            .map_err(|_| "nested sampler panicked".to_string())?;
-        result?;
-        sampled
-    })?;
-    // 层自报落盘
-    let marker = su(
-        serial,
-        "cat /storage/emulated/0/Android/data/com.miHoYo.Yuanshen/files/knobs_layer_out.json",
-        30,
-    );
-    std::fs::write(outdir.join("knobs_layer_out.json"), marker.trim()).ok();
-    eprintln!(
-        "  层自报: {}",
-        crate::graylayer::GrayLayer::adb_stdout(&marker)
-            .chars()
-            .take(320)
-            .collect::<String>()
-    );
-    // 轮次有效性自检: 原神每帧发 2 次 cmdbatch, spf 必须是 2; 帧时按游戏内帧率
-    // 设置分两档判 (60 帧档 ~16.7ms, 30 帧档 ~33.3ms)
-    if let Ok(s) = std::fs::read_to_string(outdir.join("summary.json")) {
-        if let Ok(v) = serde_json::from_str::<Value>(&s) {
-            let spf = v["submits_per_frame"].as_i64().unwrap_or(0);
-            let p50 = v["frame_p50"].as_f64().unwrap_or(0.0);
-            let ok = spf == 2 && ((15.5..=18.0).contains(&p50) || (31.0..=36.0).contains(&p50));
-            eprintln!(
-                "  自检: spf={spf} p50={p50}ms fps={} -> {}",
-                v["fps_mean"],
-                if ok {
-                    "有效"
-                } else {
-                    "可疑, 该轮建议丢弃"
-                }
-            );
-        }
-    }
-    Ok(())
-}
-
-fn sample_perf_under_lease(
-    serial: &str,
-    out: &Path,
-    lease: &crate::devlease::Lease,
-) -> Result<(), String> {
-    let args = [
-        "--serial",
-        serial,
-        "--app",
-        "com.miHoYo.Yuanshen",
-        "--rounds",
-        "8",
-        "--power-rail",
-        "battery",
-        "--suspend-charging",
-        "--json",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect::<Vec<_>>();
-    crate::perfsrc::perf_to_file_under_lease(&args, lease, out)
-}
-
 /// 无层臂: 不推 .so 干净基线。进世界判定用截帧亮度差 (与"门"页比, >40% 判离开)。
 fn arm_none(serial: &str, label: &str, outdir: &Path, workload: &Path, pf_bin: &str) -> Result<(), String> {
     let _ = std::fs::create_dir_all(outdir);
@@ -327,18 +226,232 @@ fn run_workload_and_shots(
     Ok(())
 }
 
+const LOADOP_PROTOCOL: &str = "gray_ab_loadop_whole_round_charge_v1";
+const LOADOP_SECONDS: u64 = 30;
+
+fn save_json(path: &Path, value: &Value) -> Result<(), String> {
+    crate::confirmation_transport::new_file(path, &serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?)
+}
+
+fn recover_loadop(args: &[String]) -> Result<(Value, i32), String> {
+    let (mut dir, mut serial) = (None, None);
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--session" => dir = it.next(),
+            "--serial" => serial = it.next(),
+            "--json" => {},
+            _ => return Err(format!("unknown gray-ab recover argument: {arg}")),
+        }
+    }
+    let parent = crate::gray_eval_session::Parent::resume_loadop(
+        Path::new(dir.ok_or("missing --session")?), serial.ok_or("missing --serial")?)?;
+    let report = parent.finish(Some("explicit same-context recovery; original collection is unchanged"))?;
+    let code = if report["status"] == "reported_complete" { 0 } else { 2 };
+    Ok((report, code))
+}
+
+fn owned_screen(parent: &crate::gray_eval_session::Parent, path: &Path, plan: &crate::gray_script::Plan) -> Result<(u32, u32), String> {
+    parent.base.screenshot(path)?;
+    let raw = crate::frameaudit::png_raw(path)?;
+    let (w, h, _) = crate::framecheck::parse_screencap(&raw)?;
+    plan.validate_screen(w, h)?;
+    Ok((w, h))
+}
+
+fn scene_counts(marker: &Value) -> Option<(u64, u64)> {
+    // Current layer evidence uses readonly_stats; older artifacts used the root.
+    let stats = if marker["readonly_stats"].is_object() { &marker["readonly_stats"] } else { marker };
+    Some((stats["frames"].as_u64()?, stats["render_pass_begins"].as_u64()?))
+}
+
+fn loadop_world(parent: &crate::gray_eval_session::Parent, out: &Path, plan: &crate::gray_script::Plan) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    loop {
+        if !parent.base.target_alive()? { return Err("target exited before layer readiness".into()); }
+        if parent.base.marker()?.as_ref().and_then(scene_counts).is_some() { break; }
+        if start.elapsed().as_secs() >= 80 { return Err("current layer marker unavailable".into()); }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    parent.base.narrow()?;
+    std::thread::sleep(Duration::from_secs(30));
+    let (w, h) = owned_screen(parent, &out.join("gate.png"), plan)?;
+    if GATE_X >= w || GATE_Y >= h { return Err("scene entry coordinate outside actual screenshot".into()); }
+    parent.base.tap(GATE_X, GATE_Y)?;
+    for _ in 0..18 {
+        let before = parent.base.marker()?.as_ref().and_then(scene_counts).ok_or("scene counters absent")?;
+        std::thread::sleep(Duration::from_secs(10));
+        if !parent.base.target_alive()? { return Err("target exited while waiting for world".into()); }
+        let after = parent.base.marker()?.as_ref().and_then(scene_counts).ok_or("scene counters absent")?;
+        if let (Some(df), Some(dr)) = (after.0.checked_sub(before.0), after.1.checked_sub(before.1)) {
+            if df > 0 && dr / df >= IN_WORLD_PPF as u64 { return Ok(()); }
+        }
+    }
+    Err("world scene counter condition not reached".into())
+}
+
+fn loadop_power(run: &Value, charge: &Value) -> Result<Value, String> {
+    let env = &run["env"];
+    let valid = env["on_battery"] == true && env["power_valid"] == true
+        && env["power_window_verified"] == true && env["trace_window_verified"] == true
+        && env["n_samples"].as_u64().is_some_and(|n| n > 0);
+    let mut snap = crate::perfsrc::PerfSnapshot::empty("android_sysfs");
+    snap.sample_count = env["n_samples"].as_u64().unwrap_or(0) as usize;
+    snap.power_watt = if valid { env["power_w_mean"].as_f64() } else { None };
+    if env["thermal_window_verified"] == true { snap.soc_temp_c = env["soc_temp_mean_c"].as_f64(); }
+    for (field, reason) in [
+        ("fps", "frame timing is recorded separately in summary.json"),
+        ("frame_time_mean_ms", "frame timing is recorded separately in summary.json"),
+        ("fps_p95_ms", "frame timing is recorded separately in summary.json"),
+        ("gpu_temp_c", "not sampled by the owned environment sampler"),
+        ("battery_temp_c", "not sampled by the owned environment sampler"),
+    ] { snap.unavailable.push(crate::perfsrc::Unavailable { field: field.into(), reason: reason.into() }); }
+    if snap.soc_temp_c.is_none() { snap.unavailable.push(crate::perfsrc::Unavailable { field: "soc_temp_c".into(), reason: "complete thermal window unavailable".into() }); }
+    if snap.power_watt.is_none() { snap.unavailable.push(crate::perfsrc::Unavailable { field: "power_watt".into(), reason: "battery discharge or complete sampler/trace window unverified".into() }); }
+    snap.meta = Some(std::collections::BTreeMap::from([
+        ("power_rail".into(), "battery".into()), ("protocol".into(), LOADOP_PROTOCOL.into()),
+        ("on_battery".into(), (env["on_battery"] == true).to_string()),
+        ("battery_status".into(), env["battery_status"].as_str().unwrap_or("unknown").into()),
+        ("scope".into(), "whole sampler window including lead/tail; covers trace capture window".into()),
+    ]));
+    let mut report = serde_json::to_value(snap).map_err(|e| e.to_string())?;
+    report["protocol"] = json!(LOADOP_PROTOCOL);
+    report["window"] = json!({"duration_s":env["sample_duration_s"],"interval_s":env["sample_interval_s"],
+        "first_uptime":env["sample_first_uptime"],"last_uptime":env["sample_last_uptime"],
+        "trace_window_verified":env["trace_window_verified"],"power_window_verified":env["power_window_verified"]});
+    report["charging"] = charge.clone();
+    report["legacy_charge_header_used"] = json!(false);
+    Ok(report)
+}
+
+fn collect_loadop(lease: crate::devlease::Lease, out: &Path, pairs: u32, plan: &crate::gray_script::Plan, origin: &str) -> Result<(Value, i32), String> {
+    let serial = lease.serial.clone();
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let out = out.canonicalize().map_err(|e| e.to_string())?;
+    let out = out.as_path();
+    // Refuse old arm directories before any device mutation, even for a fresh session.
+    for i in 1..=pairs { for prefix in ["ctrl", "knob"] {
+        match std::fs::symlink_metadata(out.join(format!("{prefix}{i}"))) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => return Err(e.to_string()),
+            Ok(_) => return Err(format!("existing {prefix}{i} evidence; use a new output directory")),
+        }
+    }}
+    let base = crate::gray_session::Session::new_loadop(lease, out, crate::plugins::genshin::PACKAGE, origin)?;
+    let parent = crate::gray_eval_session::Parent::new_loadop(base, &json!({"protocol":LOADOP_PROTOCOL,"pairs":pairs}), plan)?;
+    let mut arms = Vec::new();
+    let collected = (|| -> Result<(), String> {
+        let caps = parent.capabilities()?;
+        if caps.root != Some(true) || caps.trace_available != Some(true) { return Err("root and isolated ftrace are required".into()); }
+        parent.base.prepare()?;
+        parent.base.install_loadop(None)?;
+        parent.base.eval_stop_target()?;
+        parent.deploy()?;
+        parent.prepare_charging()?;
+        for i in 1..=pairs { for (prefix, rewrite) in [("ctrl", false), ("knob", true)] {
+            let label = format!("{prefix}{i}"); let dir = out.join(&label);
+            let result = (|| -> Result<Value, String> {
+                std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
+                parent.admission_ready()?;
+                parent.stage(&label)?;
+                parent.base.restart_loadop(&label, rewrite)?;
+                loadop_world(&parent, &dir, plan)?;
+                owned_screen(&parent, &dir.join("scene.png"), plan)?;
+                let before = parent.charging_observation()?;
+                let run = crate::eval::run_owned_gray_script(&parent, plan, &label, &dir)?;
+                let after = parent.charging_observation()?;
+                let marker = parent.base.marker()?.ok_or("current arm layer evidence absent")?;
+                save_json(&dir.join("knobs_layer_out.json"), &marker)?;
+                let power = loadop_power(&run, &json!({"before":before,"after":after}))?;
+                save_json(&dir.join("power.json"), &power)?;
+                if power["power_watt"].is_null() { return Err("complete battery power window unavailable; raw evidence retained".into()); }
+                parent.admission_ready()?;
+                let spf = run["summary"]["submits_per_frame"].as_i64();
+                let p50 = run["summary"]["frame_p50"].as_f64();
+                let advisory = spf == Some(2) && p50.is_some_and(|v| (15.5..=18.0).contains(&v) || (31.0..=36.0).contains(&v));
+                Ok(json!({"run":dir.join("run.json"),"power":dir.join("power.json"),"layer":dir.join("knobs_layer_out.json"),
+                    "scene_counter_check":true,"legacy_timing_advisory_ok":advisory,"rewrite_effective":marker["effective"]}))
+            })();
+            arms.push(json!({"arm":label,"status":if result.is_ok(){"collected"}else{"failed"},"rewrite":rewrite,"passdump":0,
+                "evidence":result.as_ref().ok(),"error":result.as_ref().err()}));
+            result?;
+        }}
+        Ok(())
+    })();
+    let collection = json!({"schema":"phonefarm/gray-ab-loadop-attempt@1","session":parent.base.dir,
+        "protocol":LOADOP_PROTOCOL,"collection_ok":collected.is_ok(),"arms":arms,"error":collected.as_ref().err()});
+    let persistence_error = save_json(&parent.base.dir.join("gray-ab-collection.json"), &collection).err();
+    let collection_ok = collected.is_ok();
+    let error = match (collected.err(), persistence_error.as_deref()) {
+        (Some(e), Some(p)) => Some(format!("{e}; collection persistence: {p}")),
+        (None, Some(p)) => Some(format!("collection persistence: {p}")),
+        (e, None) => e,
+    };
+    let recovery = parent.finish(error.as_deref()).unwrap_or_else(|e| json!({"status":"required","error":e,"session":parent.base.dir}));
+    let mut code = if persistence_error.is_some() || recovery["status"] != "reported_complete" { 2 } else if error.is_some() { 1 } else { 0 };
+    let path = out.join(format!("gray-ab-{}-{}.json", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+    let mut report = json!({"schema":"phonefarm/gray-ab-collection@1","serial":serial,"mode":"loadop","protocol":LOADOP_PROTOCOL,
+        "session":parent.base.dir,"evidence_origin":origin,"collection_ok":collection_ok,"arms":arms,"error":error,"persistence_error":persistence_error,
+        "collection":parent.base.dir.join("gray-ab-collection.json"),"recovery":recovery,"recovery_status":recovery["status"],
+        "job_recovery_complete":false,"game_state_restored":false,"report_path":path});
+    if let Err(error) = save_json(&path, &report) {
+        code = 2;
+        report["report_path"] = Value::Null;
+        report["report_write_error"] = json!({"path":path,"error":error});
+    }
+    Ok((report, code))
+}
+
+fn emit_owned(result: Result<(Value, i32), String>) -> i32 {
+    match result {
+        Ok((report, code)) => { println!("{}", serde_json::to_string_pretty(&report).unwrap()); code },
+        Err(error) => { eprintln!("{error}"); println!("{}", json!({"error":error,"recovery_status":"not_started_or_unknown"})); 2 },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loadop_power_requires_discharge_and_a_bound_window() {
+        let mut run = json!({"env":{"on_battery":true,"power_valid":true,"power_window_verified":true,
+            "trace_window_verified":true,"n_samples":20,"power_w_mean":6.0,
+            "sample_duration_s":40,"sample_interval_s":2,"sample_first_uptime":98,"sample_last_uptime":136}});
+        let good = loadop_power(&run, &json!({"mode":"observed_no_mutation"})).unwrap();
+        assert_eq!(good["power_watt"], 6.0);
+        assert_eq!(good["sample_count"], 20);
+        assert_eq!(good["window"]["duration_s"], 40);
+        assert!(good["fps"].is_null());
+        run["env"]["trace_window_verified"] = json!(false);
+        assert!(loadop_power(&run, &Value::Null).unwrap()["power_watt"].is_null());
+        run["env"]["trace_window_verified"] = json!(true);
+        run["env"]["on_battery"] = json!(false);
+        assert!(loadop_power(&run, &Value::Null).unwrap()["power_watt"].is_null());
+    }
+}
+
 pub fn run_gray_ab(args: &[String]) -> i32 {
+    if args.first().is_some_and(|a| a == "recover") { return emit_owned(recover_loadop(&args[1..])); }
     let mut pairs = 5u32;
     let mut mode = "loadop".to_string();
     let mut serial = std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into());
     let mut out = PathBuf::new();
+    let mut origin = "device".to_string();
+    let mut owned_options = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--pairs" => pairs = it.next().and_then(|v| v.parse().ok()).unwrap_or(5),
+            "--pairs" => match it.next().and_then(|v| v.parse().ok()) {
+                Some(n) => pairs = n,
+                None => { eprintln!("--pairs requires a positive integer"); return 2; },
+            },
             "--mode" => mode = it.next().cloned().unwrap_or_else(|| "loadop".into()),
             "--serial" => serial = it.next().cloned().unwrap_or(serial),
             "--out" => out = it.next().map(PathBuf::from).unwrap_or_default(),
+            "--json" => owned_options = true,
+            "--evidence-origin" => { owned_options = true; origin = it.next().cloned().unwrap_or_default(); },
             other => {
                 eprintln!("不认识的参数 {other}\n用法: phonefarm gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>");
                 return 2;
@@ -348,6 +461,21 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
     if !matches!(mode.as_str(), "loadop" | "copyprobe") {
         eprintln!("--mode 只认 loadop|copyprobe");
         return 2;
+    }
+    if out.as_os_str().is_empty() || pairs == 0 || !matches!(origin.as_str(), "device" | "synthetic") {
+        eprintln!("gray-ab requires --out, positive --pairs and valid --evidence-origin"); return 2;
+    }
+    if mode == "copyprobe" && owned_options {
+        eprintln!("copyprobe has not migrated to the owned loadop protocol; --json/--evidence-origin are loadop-only"); return 2;
+    }
+    if mode == "loadop" {
+        return emit_owned((|| {
+            let path = crate::eval::resolve_path("knobs/gray/workload_spin_touch_v1.json").ok_or("finite spin-touch workload unavailable")?;
+            let input: Value = serde_json::from_slice(&crate::confirmation_transport::bounded(&path, 1024*1024)?).map_err(|e| e.to_string())?;
+            let plan = crate::gray_script::parse(&input, LOADOP_SECONDS)?;
+            let lease = crate::devlease::Lease::target(Some(&serial), "gray-ab")?;
+            collect_loadop(lease, &out, pairs, &plan, &origin)
+        })());
     }
     let _lease = match crate::devlease::Lease::target(Some(&serial), "gray-ab") {
         Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
@@ -371,12 +499,8 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
     }
     if let Err(e)=std::fs::create_dir_all(&out) {eprintln!("{e}");return 2;}
     let mut arms:Vec<(String,bool)>=Vec::new();
-    if mode=="loadop" {
-        for i in 1..=pairs {arms.push((format!("ctrl{i}"),false));arms.push((format!("knob{i}"),true));}
-    } else {
-        arms.extend([("none1".into(),false),("none2".into(),false)]);
-        for i in 1..=probes {arms.push((format!("probe{i}"),true));}
-    }
+    arms.extend([("none1".into(),false),("none2".into(),false)]);
+    for i in 1..=probes {arms.push((format!("probe{i}"),true));}
     let mut records=Vec::new();
     let mut code=0;
     for (label,rewrite) in arms {
@@ -391,9 +515,7 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
             records.push(json!({"arm":label,"status":"not_started","deactivation_before":before_record}));
             code=2;break;
         }
-        let measured=if mode=="loadop" {
-            arm(&serial,&gl,&label,rewrite,&arm_dir,&workload,30,&pf_bin,&_lease)
-        } else if rewrite {arm_copyprobe(&serial,&gl,&label,&arm_dir,&workload,&pf_bin)}
+        let measured=if rewrite {arm_copyprobe(&serial,&gl,&label,&arm_dir,&workload,&pf_bin)}
         else {arm_none(&serial,&label,&arm_dir,&workload,&pf_bin)};
         // A failed experiment still retires its target. A retirement failure
         // ends this loop; no extra force-stop or next-arm writes follow it.

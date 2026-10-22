@@ -2250,6 +2250,10 @@ fn run_owned_gray(parent:&crate::gray_eval_session::Parent,workload:&OwnedGrayWo
     Ok(result)
 }
 
+pub(crate) fn run_owned_gray_script(parent:&crate::gray_eval_session::Parent,plan:&crate::gray_script::Plan,label:&str,out:&Path)->Result<Value,String> {
+    run_owned_gray(parent,&OwnedGrayWorkload::Script(plan.clone()),label,out,plan.seconds,None)
+}
+
 fn effective_gray_hits(marker:&Value)->u64 {
     marker["effective"].as_array().map(|xs|xs.iter().filter_map(|e|e["begins"].as_u64()).sum()).unwrap_or(0)
 }

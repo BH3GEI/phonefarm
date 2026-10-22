@@ -13,6 +13,7 @@ const SCOPE: &str = "gray_capture_owned_installation_properties_target_stopped";
 const EVAL_OWNER: &str = "gray_eval_launch";
 const EVAL_SCOPE: &str = "gray_eval_launch_owned_resources";
 const SCRIPT_OWNER: &str = "gray_eval_script";
+const LOADOP_OWNER: &str = "gray_ab_loadop";
 const CAP: u64 = 8 * 1024 * 1024;
 
 pub(crate) struct Session {
@@ -36,6 +37,10 @@ impl Session {
     }
     pub fn new_script(lease: Lease, out: &Path, pkg: &str, origin: &str) -> Result<Self, String> {
         Self::new_owned(lease, out, pkg, origin, SCRIPT_OWNER, None)
+    }
+
+    pub fn new_loadop(lease: Lease, out: &Path, pkg: &str, origin: &str) -> Result<Self,String> {
+        Self::new_owned(lease,out,pkg,origin,LOADOP_OWNER,None)
     }
 
     fn new_owned(lease: Lease, out: &Path, pkg: &str, origin: &str, owner: &str, marker: Option<&str>) -> Result<Self, String> {
@@ -71,11 +76,15 @@ impl Session {
         Self::resume_owned(dir, serial, EVAL_OWNER)
     }
 
+    pub fn resume_loadop(dir:&Path,serial:&str)->Result<Self,String> {Self::resume_owned(dir,serial,LOADOP_OWNER)}
+
     fn resume_owned(dir: &Path, serial: &str, owner: &str) -> Result<Self, String> {
         let dir = dir.canonicalize().map_err(|e| e.to_string())?;
         let state: Value = serde_json::from_slice(&bounded(&dir.join("session.json"), 1024 * 1024)?).map_err(|e| e.to_string())?;
         validate(&state, &dir, serial)?;
-        if owner == EVAL_OWNER { require_parent(&state)?; } else { require_owner(&state, owner)?; }
+        if owner == EVAL_OWNER {
+            if !matches!(completion_owner(&state)?,EVAL_OWNER|SCRIPT_OWNER) {return Err("this parent requires gray-ab recover".into());}
+        } else { require_owner(&state, owner)?; }
         pending_clear(&state)?;
         let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
         let lease = Lease::acquire_recovery(&root, &legacy, serial, &dir, Duration::from_secs(1))?;
@@ -317,6 +326,11 @@ impl Session {
         self.install_mode(so, false, None, None, false)
     }
 
+    pub fn install_loadop(&self,so:Option<&str>)->Result<(),String> {
+        require_owner(&self.state.borrow(),LOADOP_OWNER)?;
+        self.install_mode(so,false,None,None,false)
+    }
+
     fn install_mode(&self, so: Option<&str>, ts: bool, extras: Option<&str>, storeop: Option<&str>, frameaudit: bool) -> Result<(), String> {
         self.ready()?;
         if self.state.borrow()["stage"] != "prepared" { return Err("gray capture must be prepared before install".into()); }
@@ -371,7 +385,7 @@ impl Session {
         }
         for property in LAYER_PROPERTIES.into_iter().filter(|p| *p != "debug.vulkan.layers") {
             let value = match property {
-                "debug.knobs.passdump" => "1",
+                "debug.knobs.passdump" if completion_owner(&self.state.borrow())? != LOADOP_OWNER => "1",
                 "debug.knobs.frameaudit" if frameaudit => "1",
                 "debug.knobs.frameaudit_ts" if ts => "1",
                 graylayer::STOREOP_PROP => storeop.unwrap_or("0"),
@@ -405,6 +419,10 @@ impl Session {
     pub fn restart_script(&self, label: &str, layered: bool, loadop: bool, storeop: &str) -> Result<(), String> {
         require_owner(&self.state.borrow(), SCRIPT_OWNER)?;
         self.restart_mode(label, layered.then_some(storeop), loadop && layered, "")
+    }
+    pub fn restart_loadop(&self,label:&str,rewrite:bool)->Result<(),String> {
+        require_owner(&self.state.borrow(),LOADOP_OWNER)?;
+        self.restart_mode(label,Some("0"),rewrite,"")
     }
     fn restart_mode(&self, label: &str, rule: Option<&str>, loadop: bool, extras: &str) -> Result<(), String> {
         self.eval_ready()?;
@@ -449,7 +467,7 @@ impl Session {
         journal(&self.dir, json!({"event":"eval_round","generation":generation,"label":label,"rule":rule}))?;
         for property in LAYER_PROPERTIES.into_iter().filter(|p| *p != "debug.vulkan.layers") {
             let value = match property {
-                "debug.knobs.passdump" if rule.is_some() => "1",
+                "debug.knobs.passdump" if rule.is_some() && completion_owner(&self.state.borrow())? != LOADOP_OWNER => "1",
                 "debug.knobs.loadop" if loadop => "1",
                 graylayer::STOREOP_PROP => rule.as_deref().unwrap_or("0"),
                 _ => "0",
@@ -689,7 +707,7 @@ fn completion_owner(state: &Value) -> Result<&str, String> {
     match state["schema"].as_str() {
         Some(LEGACY_SCHEMA) if state.get("completion_owner").is_none() || state["completion_owner"] == "standalone" => Ok("standalone"),
         Some(SCHEMA) => match state["completion_owner"].as_str() {
-            Some(owner @ ("standalone" | EVAL_OWNER | SCRIPT_OWNER)) => Ok(owner),
+            Some(owner @ ("standalone" | EVAL_OWNER | SCRIPT_OWNER | LOADOP_OWNER)) => Ok(owner),
             _ => Err("gray session has no recognized completion owner".into()),
         },
         _ => Err("unsupported gray session schema or completion owner".into()),
@@ -707,6 +725,7 @@ pub(crate) fn parent_recovery_contract(owner: &str) -> Result<(&'static str, &'s
     match owner {
         EVAL_OWNER => Ok(("phonefarm/gray-eval-launch-recovery@1", EVAL_SCOPE)),
         SCRIPT_OWNER => Ok(("phonefarm/gray-eval-script-recovery@1", "gray_eval_script_owned_resources")),
+        LOADOP_OWNER => Ok(("phonefarm/gray-ab-loadop-recovery@1", "gray_ab_loadop_owned_resources")),
         _ => Err("gray session is not owned by an eval parent".into()),
     }
 }
@@ -765,7 +784,7 @@ fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
             || state.get("round_label").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|s| !valid_label(s)))
             || state.get("base_recovery").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|p| Path::new(p).parent() != Some(dir)))
             || (owner == "standalone" && (!state["launch_marker"].is_null() || state["generation"] != 0 || !state["round_label"].is_null() || !state["base_recovery"].is_null()))
-            || (owner == SCRIPT_OWNER && !state["launch_marker"].is_null())
+            || (matches!(owner,SCRIPT_OWNER|LOADOP_OWNER) && !state["launch_marker"].is_null())
             || (state["stage"] != "active" && (state["generation"] != 0 || !state["round_label"].is_null())) {
             return Err("invalid gray session generation, marker or recovery evidence".into());
         }
@@ -889,6 +908,9 @@ mod tests {
         assert!(require_owner(&script,EVAL_OWNER).is_err());
         assert_eq!(parent_recovery_contract(SCRIPT_OWNER).unwrap(),("phonefarm/gray-eval-script-recovery@1","gray_eval_script_owned_resources"));
         assert_ne!(parent_recovery_contract(SCRIPT_OWNER).unwrap(),parent_recovery_contract(EVAL_OWNER).unwrap());
+        let loadop=json!({"schema":SCHEMA,"completion_owner":LOADOP_OWNER});
+        assert!(require_parent(&loadop).is_ok());assert!(require_owner(&loadop,SCRIPT_OWNER).is_err());
+        assert_eq!(parent_recovery_contract(LOADOP_OWNER).unwrap(),("phonefarm/gray-ab-loadop-recovery@1","gray_ab_loadop_owned_resources"));
         let paths = session_output_paths(&parent).unwrap();
         assert_eq!(paths.len(), 7);
         assert_eq!(paths[6], "/storage/emulated/0/Android/data/com.example.fixture/files/megacity_started");

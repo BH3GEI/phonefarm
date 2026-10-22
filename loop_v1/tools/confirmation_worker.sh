@@ -6,7 +6,7 @@ case "$D" in /data/local/tmp/phonefarm-confirmation-*) ;; *) exit 70 ;; esac
 case "$TOKEN:$RUN" in *[!a-zA-Z0-9_:-]*) exit 70 ;; esac
 [ "$(cat "$D/owner")" = "$TOKEN $BOOT" ] || exit 71
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT" ] || exit 72
-[ "$MODE" = verify_bench ] || [ ! -e "$D/session.closed" ] || exit 86
+case "$MODE" in verify_bench|verify_gray_groups) ;; *) [ ! -e "$D/session.closed" ] || exit 86 ;; esac
 # A capability diagnostic session cannot enter any performance sampling mode.
 if [ -e "$D/thermal-purpose.txt" ]; then
   [ -f "$D/thermal-purpose.txt" ] && [ "$(cat "$D/thermal-purpose.txt")" = capability_absolute_v1 ] || exit 87
@@ -196,7 +196,7 @@ children_valid() {
   [ -e "$R/children.tsv" ] || [ -L "$R/children.tsv" ] || return 0
   ledger_complete "$R/children.tsv" || return 1
   CHILD_ROWS=$(awk -F '\t' -v w="$D/workload.sh" -v s="$D/sample_env.sh" -v tr="$D/trace.sh" -v scripted="$GRAY_SCRIPT_ROUND" -v th="$D/thermal_sampler.sh" -v rr="$D/render_ownership.sh" -v mode="$MODE" '
-    BEGIN {bench=(mode=="bench" || mode=="gray_sample" || mode=="gray_script_sample" || mode=="verify_gray_idle" || mode=="reconcile_bench" || mode=="verify_bench")}
+    BEGIN {bench=(mode=="bench" || mode=="gray_sample" || mode=="gray_script_sample" || mode=="verify_gray_idle" || mode=="verify_gray_groups" || mode=="reconcile_bench" || mode=="verify_bench")}
     scripted && (!bench || mode=="bench" || mode=="gray_sample") {bad=1}
     bench && $1!="workload" && $1!="sampler" && !(scripted && $1=="trace") {bad=1}
     ((mode=="render_readonly" || mode=="reconcile_render") && $1!="render_reader") ||
@@ -229,7 +229,7 @@ pending_known() {
 group_absent_remote() {
   expected=$1
   case "$MODE" in
-    bench|gray_sample|gray_script_sample|verify_gray_idle|reconcile_bench|verify_bench)
+    bench|gray_sample|gray_script_sample|verify_gray_idle|verify_gray_groups|reconcile_bench|verify_bench)
       # Rootless bench cannot inspect unrelated root processes. ESRCH for the
       # exact negative PGID proves absence; EPERM and unknown errors do not.
       ;;
@@ -393,7 +393,8 @@ verify_owned_children() {
   for prior in "$D"/*; do
     [ -d "$prior" ] || continue
     [ "$prior" != "$D/session.closed" ] || continue
-    R=$prior; quiescent && input_natural_complete || return 77
+    R=$prior; quiescent || return 77
+    [ "$MODE" = verify_gray_groups ] || input_natural_complete || return 77
   done
 }
 input_natural_complete() {
@@ -408,13 +409,23 @@ input_natural_complete() {
     {rest=substr($0,length(prefix)+1); if(rest !~ /^"steps":[0-9]+,"declared_ms":[0-9]+,"start":[0-9]+([.][0-9]+)?,"end":[0-9]+([.][0-9]+)?\}$/) bad=1}
     END {exit (bad || NR!=1)}' "$R/input-complete.json"
 }
+valid_closed_owner() {
+  [ -d "$D/session.closed" ] && [ ! -L "$D/session.closed" ] || return 1
+  ledger_complete "$D/session.closed/owner" || return 1
+  awk -v t="$TOKEN" -v b="$BOOT" 'NF!=3 || $1!=t || $2!=b || $3!~/^[a-zA-Z0-9_:-]+$/ {bad=1} END {exit (bad || NR!=1)}' "$D/session.closed/owner"
+}
 # Closed bench verification is read-only and cannot reacquire or clear a lock.
 if [ "$MODE" = verify_bench ]; then
-  [ -d "$D/session.closed" ] && [ ! -L "$D/session.closed" ] || exit 86
-  ledger_complete "$D/session.closed/owner" || exit 86
-  awk -v t="$TOKEN" -v b="$BOOT" 'NF!=3 || $1!=t || $2!=b || $3!~/^[a-zA-Z0-9_:-]+$/ {bad=1} END {exit (bad || NR!=1)}' "$D/session.closed/owner" || exit 86
+  valid_closed_owner || exit 86
   verify_owned_children || exit $?
   echo BENCH_CLOSED_QUIESCENT
+  exit 0
+fi
+if [ "$MODE" = verify_gray_groups ]; then
+  # Group absence permits independent charge restoration, never input completion.
+  if [ -e "$D/session.closed" ] || [ -L "$D/session.closed" ]; then valid_closed_owner || exit 86; fi
+  verify_owned_children || exit $?
+  echo GRAY_GROUPS_QUIESCENT
   exit 0
 fi
 if [ "$MODE" = verify_gray_idle ]; then
