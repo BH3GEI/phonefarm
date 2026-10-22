@@ -702,10 +702,35 @@ pub(crate) fn snapshots_restored(before: &str, after: &str) -> bool {
             && split_snapshot_diff(before, after).1.is_empty())
 }
 
-fn probe_report(report: &mut Value, before: &str, after: &str, wl: &sysparam::Whitelist) {
+/// 探测脚本的每一次差异写都当场回读核对过已还原: 至少一条 `.effect_restored=yes`, 没有一条 `=NO`。
+pub(crate) fn probe_writes_verified(probe_txt: &str) -> bool {
+    let mut ok = 0;
+    for l in probe_txt.lines() {
+        if l.contains(".effect_restored=NO") {
+            return false;
+        }
+        if l.trim_end().ends_with(".effect_restored=yes") {
+            ok += 1;
+        }
+    }
+    ok > 0
+}
+
+/// 探测前后的「已还原」。快照逐项相等; 或者只有厂商自管的频率边界变了, 且探测的每一次写入
+/// 都当场核对过还原 (探测把自己的写入留在节点上时, 当场回读会报 effect_restored=NO, 照样拦下)。
+/// 2026-10-22 红魔实测: 厂商性能服务在探测的几十秒里就把 kgsl.max_pwrlevel 17→0、
+/// policy6.scaling_max 1632000→4608000 改了, 9 次差异写全部当场还原, 严格比对却让后续实验一律禁跑。
+pub(crate) fn probe_snapshots_restored(before: &str, after: &str, probe_txt: &str) -> bool {
+    snapshots_identical(before, after)
+        || (adb_ok(before) && adb_ok(after) && before.lines().any(|l| l.contains('='))
+            && split_snapshot_diff(before, after).1.is_empty()
+            && probe_writes_verified(probe_txt))
+}
+
+fn probe_report(report: &mut Value, before: &str, after: &str, probe_txt: &str, wl: &sysparam::Whitelist) {
     let identical = snapshots_identical(before,after);
-    // 探测写的正是这些频率边界节点, 「厂商自管」的差别在这里不能放过 (main 资格口径); 只记不放行
-    let restored = identical;
+    // 厂商自管的频率边界变化, 只有在探测的每次写入都当场核对过还原时才放行 (见 probe_snapshots_restored)
+    let restored = probe_snapshots_restored(before, after, probe_txt);
     let (vendor_drift, other_drift) = split_snapshot_diff(before, after);
     report["status"] = json!(if restored {"REVERTED"} else {"ABORT"});
     report["verdict"]["reason"] = json!(if restored {"probe_only: 探测写入已验证还原 (厂商自管的频率边界变化只记不判)"} else {"probe_only: 快照缺失/读取失败或不一致，不能声称已还原"});
@@ -2054,11 +2079,12 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let wl=probe_whitelist(serial,evidence,req)?;
     let after_probe=snapshot(serial);
     std::fs::write(evidence.join("snap_after_probe.txt"),&after_probe).map_err(|e|e.to_string())?;
-    let probe_restored=snapshots_identical(&before_probe,&after_probe);
+    let probe_txt=std::fs::read_to_string(evidence.join("probe.txt")).unwrap_or_default();
+    let probe_restored=probe_snapshots_restored(&before_probe,&after_probe,&probe_txt);
     facts.device.control_verified=Some(!wl.is_empty()); facts.restored=Some(probe_restored);
     record_qualification(&mut report,evidence,&facts)?;
     if probe_only {
-        probe_report(&mut report,&before_probe,&after_probe,&wl);
+        probe_report(&mut report,&before_probe,&after_probe,&probe_txt,&wl);
         report["conditions_observed"]["preexisting_state"]=json!(preexisting);
         report["evidence_dir"] = json!(evidence.display().to_string());
         record_qualification(&mut report,evidence,&facts)?;
@@ -4705,10 +4731,30 @@ mod tests {
     fn probe_only_never_claims_reverted_from_failed_or_missing_snapshot() {
         for (a,b) in [("",""),("x=1\n#adb_exit=1","x=1\n#adb_exit=1"),("x=1\n#adb_exit=0","x=2\n#adb_exit=0")] {
             let mut r=base_report(&v2_req("sysparam",json!({"params":{}})),"sysparam");
-            probe_report(&mut r,a,b,&vec![]);
+            probe_report(&mut r,a,b,"",&vec![]);
             assert_eq!(r["status"],"ABORT");assert_eq!(r["conditions_observed"]["restored"],false);
         }
         assert!(snapshots_identical("x=1\n#adb_exit=0","x=1\n#adb_exit=0"));
+    }
+
+    #[test]
+    fn probe_tolerates_vendor_drift_only_when_every_probe_write_was_restored() {
+        let before = "kgsl.max_pwrlevel=17\ncpu.policy6.scaling_max=1632000\nfan.x=0\n#adb_exit=0";
+        let vendor = "kgsl.max_pwrlevel=0\ncpu.policy6.scaling_max=4608000\nfan.x=0\n#adb_exit=0";
+        let other = "kgsl.max_pwrlevel=0\ncpu.policy6.scaling_max=4608000\nfan.x=1\n#adb_exit=0";
+        let ok = "cpu.policy6.scaling_max_freq.effect=live\ncpu.policy6.scaling_max_freq.effect_restored=yes\n";
+        let left = "cpu.policy6.scaling_max_freq.effect_restored=yes\ngpu.max_pwrlevel.effect_restored=NO(want=17 got=18)\n";
+        assert!(probe_snapshots_restored(before, vendor, ok));
+        // 探测把自己的写入留下了: 当场回读报 NO, 拦下
+        assert!(!probe_snapshots_restored(before, vendor, left));
+        // 没有探测核对记录: 退回严格比对
+        assert!(!probe_snapshots_restored(before, vendor, ""));
+        // 厂商自管之外的键变了: 拦下
+        assert!(!probe_snapshots_restored(before, other, ok));
+        let mut r = base_report(&v2_req("sysparam", json!({"params": {}})), "sysparam");
+        probe_report(&mut r, before, vendor, ok, &vec![]);
+        assert_eq!(r["status"], "REVERTED");
+        assert_eq!(r["conditions_observed"]["snapshot_identical"], false);
     }
 
     #[test]
