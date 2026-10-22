@@ -373,6 +373,9 @@ class Session:
         d.su(f"cat {CHARGE_NODE} > {self.ddir}/charging_enabled_pre.txt")
         d.pull_su(f"{self.ddir}/nodes_pre.txt", str(self.out / "nodes_pre.txt"))
         self.state["nodes_pre"] = f"{self.ddir}/nodes_pre.txt"
+        # 先撤掉之前会话可能钉在 sysfs 上的约束, 游戏启动时厂商从干净状态下发配置 (见 o2_nodes.sh 头注释)
+        rel = d.su(f"sh {DEV}/o2_nodes.sh release {self.ddir}/nodes_pre.txt")
+        self.state["release_at_start"] = rel.strip()[-300:]
         # 2) 原神帧率设置: 原文件留底 (设备上一份、本机一份), 再写锁帧档
         d.su(f"cp -p {PREFS} {self.ddir}/prefs_orig.xml", check=not self.a.dry_run)
         d.pull_su(f"{self.ddir}/prefs_orig.xml", str(self.out / "prefs_orig.xml"))
@@ -489,10 +492,8 @@ class Session:
         missing = [AXES[ax][0] for ax in self.axes() if AXES[ax][0] not in wl]
         self.state["probe"] = {"missing": missing, "stock": {k: (wl.get(k) or {}).get("current") for k, _ in AXES.values()}}
         self.save()
-        gpu_stock = (wl.get("gpu.max_pwrlevel") or {}).get("current")
-        if not self.a.dry_run and gpu_stock not in (None, "0"):
-            raise RuntimeError(f"探到的厂商起点里 gpu.max_pwrlevel={gpu_stock} 不是 0: 起点被温控压低, "
-                               "这样定出的阶梯没有意义, 整轮不跑 (等手机凉下来、停充后重开)")
+        # 注意: 红魔的 gpu.max_pwrlevel 是厂商每几秒改一次的动态值 (2026-10-22 实测 0↔17), 探测瞬间的
+        # current 不代表「厂商起点」; GPU 轴大概率会被 fix-B 的守住比例判成 contested。
         if missing:
             self.dev.note(f"游戏运行时这些节点没进白名单 (厂商服务抢回或不可写): {missing}。"
                           "要扫它们得先用 vendor_override.sh 接管厂商配置, 再重开会话 (--override)。")
@@ -567,10 +568,12 @@ def do_restore(dev, st, out):
         res[f"override:{ov['target']}"] = "ok" if dev.dry or "O2_RESTORE_OK" in o else f"FAIL {o[-300:]}"
     if st.get("nodes_pre"):
         time.sleep(0 if dev.dry else 10)
-        o = dev.su(f"sh {DEV}/o2_nodes.sh restore {st['nodes_pre']}")
-        res["nodes"] = "ok" if dev.dry or "O2_RESTORE_OK" in o else f"FAIL {o[-600:]}"
+        # 撤掉约束而不是写回快照: 快照可能是在厂商限频时记的, 写回去会把限频值钉住 (见 o2_nodes.sh 头注释)。
+        # 之后游戏再启动时厂商会重新下发它的游戏配置。
+        o = dev.su(f"sh {DEV}/o2_nodes.sh release {st['nodes_pre']}")
+        res["nodes"] = "ok" if dev.dry or "O2_RELEASED" in o else f"PARTIAL {o[-600:]}"
         o = dev.su(f"sh {DEV}/o2_nodes.sh check {st['nodes_pre']}")
-        res["nodes_check"] = o.strip()[-600:]
+        res["nodes_vs_snapshot"] = o.strip()[-600:]
     o = dev.su(f"cat {CHARGE_NODE}")
     res["charging_enabled_now"] = o.strip()
     if not dev.dry and o.strip() != "1":

@@ -5,7 +5,14 @@
 #   o2_nodes.sh check   <文件>   当前值与记录逐行比对, 列出不同的键; 全同输出 O2_NODES_SAME
 #   o2_nodes.sh restore <文件>   只把「本实验会写的键」写回记录值, 再核对一遍
 #                                成功 O2_RESTORE_OK, 有键没回来 O2_RESTORE_FAIL <键...>
+#   o2_nodes.sh release <文件>   撤掉约束: governor 写回记录值, scaling_max/min 写成硬件上下限
+#                                (cpuinfo_max/min_freq), GPU 档位放开到 0..最低档。成功 O2_RELEASED
 #   o2_nodes.sh show             只打印当前值
+#
+# 还原用 release, 不用 restore。sysfs 的这几个节点是厂商性能服务和我们共用的 (谁最后写谁生效),
+# 厂商只在状态切换时重写。2026-10-22 红魔实测: restore 把发热限频时记下的 883/768 MHz 写回去后,
+# 厂商不再改, CPU 上限在游戏里一直卡在这两个值上; 改成写硬件上下限、再重开游戏, 厂商重新下发了
+# 游戏配置 (中核 1.23→3.63 GHz, 超大核 1.38→1.50 GHz 动态)。
 #
 # 会写的键: cpu.policyN.{scaling_governor,scaling_max_freq,scaling_min_freq}、
 #           gpu.{max_pwrlevel,min_pwrlevel}。其余 (thermal_pwrlevel、max_gpuclk、总线、
@@ -84,6 +91,31 @@ restore_gpu() {  # kgsl: 恒有 max_pwrlevel <= min_pwrlevel (数字越大越慢
   fi
 }
 
+release_all() {  # release_all <记录文件>
+  f="$1"
+  for p in "$CPU"/policy*; do
+    [ -d "$p" ] || continue
+    n=$(basename "$p")
+    gov=$(val_of "cpu.$n.scaling_governor" "$f")
+    if [ -n "$gov" ] && [ "$(rd "$p/scaling_governor")" != "$gov" ]; then put "$p/scaling_governor" "$gov"; fi
+    put "$p/scaling_max_freq" "$(rd "$p/cpuinfo_max_freq")"
+    put "$p/scaling_min_freq" "$(rd "$p/cpuinfo_min_freq")"
+  done
+  nl=$(rd "$KGSL/num_pwrlevels")
+  if [ -n "$nl" ]; then
+    put "$KGSL/min_pwrlevel" "$((nl - 1))"
+    put "$KGSL/max_pwrlevel" 0
+  fi
+  sleep 1
+  bad=""
+  for p in "$CPU"/policy*; do
+    [ -d "$p" ] || continue
+    [ "$(rd "$p/scaling_max_freq")" = "$(rd "$p/cpuinfo_max_freq")" ] || bad="$bad $(basename "$p").max=$(rd "$p/scaling_max_freq")"
+    [ "$(rd "$p/scaling_min_freq")" = "$(rd "$p/cpuinfo_min_freq")" ] || bad="$bad $(basename "$p").min=$(rd "$p/scaling_min_freq")"
+  done
+  if [ -z "$bad" ]; then echo O2_RELEASED; else echo "O2_RELEASE_PARTIAL$bad (厂商服务可能已在改写, 记录在案)"; fi
+}
+
 diff_keys() {  # diff_keys <记录文件> [只看可写键=1]
   now=$(dump)
   grep -v '^#' "$1" | while IFS= read -r line; do
@@ -97,6 +129,11 @@ diff_keys() {  # diff_keys <记录文件> [只看可写键=1]
 
 case "${1:-show}" in
   show) dump ;;
+  release)
+    f="${2:?缺文件名}"
+    [ -f "$f" ] || { echo "O2_RELEASE_FAIL 记录文件不在: $f"; exit 2; }
+    release_all "$f"
+    ;;
   save)
     f="${2:?缺文件名}"
     if [ -e "$f" ]; then echo "O2_REFUSE $f 已存在, 不覆盖"; exit 2; fi
