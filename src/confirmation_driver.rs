@@ -262,12 +262,7 @@ fn request(path: &Path) -> Result<(Request, Vec<u8>, Vec<u8>, Vec<u8>), String> 
     Ok((req, bytes, w, a))
 }
 fn roots() -> Result<(PathBuf, PathBuf, Duration), String> {
-    let root = std::env::var_os("PHONEFARM_LEASE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("phonefarm-device-leases"));
-    let legacy = std::env::var_os("DEVLOCK_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/private/tmp/claude-501"));
+    let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
     let ms = std::env::var("PHONEFARM_LEASE_TIMEOUT_MS")
         .unwrap_or("600000".into())
         .parse::<u64>()

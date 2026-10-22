@@ -684,14 +684,9 @@ impl Lease {
     }
 
     pub fn target(requested: Option<&str>, label: &str) -> Result<Self, String> {
+        let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
         let serial = crate::device::resolve_serial(requested)
             .ok_or("cannot resolve exactly one device; pass --serial (lease not acquired)")?;
-        let root = std::env::var_os("PHONEFARM_LEASE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("phonefarm-device-leases"));
-        let legacy = std::env::var_os("DEVLOCK_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/private/tmp/claude-501"));
         let ms = std::env::var("PHONEFARM_LEASE_TIMEOUT_MS")
             .ok()
             .map(|v| v.parse::<u64>())
@@ -867,16 +862,34 @@ fn lease_status(legacy_root: &Path) -> Value {
         "error":if errors.is_empty(){None}else{Some(errors.join("; "))}})
 }
 
+pub(crate) fn storage_status(storage: &crate::lease_storage::Storage) -> Value {
+    let mut result = storage.devlock_dir.as_ref().map(|p| lease_status(p)).unwrap_or_else(||
+        json!({"schema_version":1,"status":"unknown","bridge_held":null,"entries":[],"error":null}));
+    if storage.readiness != "ready" {
+        if result["status"] != "blocked" { result["status"] = json!("unknown"); }
+        result["error"] = json!(storage.error);
+    }
+    result["storage"] = json!(storage);
+    result
+}
+
 pub fn run_lease(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("init") {
+        if args.len() != 2 || args[1] != "--participants-stopped" {
+            eprintln!("phonefarm lease init --participants-stopped (stop every old participant first)");
+            return 2;
+        }
+        return match crate::lease_storage::resolve().init() {
+            Ok(storage) => { println!("{}", storage_status(&storage)); 0 }
+            Err(e) => { eprintln!("lease initialization refused: {e}"); 2 }
+        };
+    }
     if args.first().map(String::as_str) == Some("status") {
         if args.len() != 2 || args[1] != "--json" {
             eprintln!("phonefarm lease status --json");
             return 2;
         }
-        let legacy = std::env::var_os("DEVLOCK_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/private/tmp/claude-501"));
-        println!("{}", lease_status(&legacy));
+        println!("{}", storage_status(&crate::lease_storage::resolve()));
         return 0;
     }
     let split = args.iter().position(|a| a == "--").unwrap_or(args.len());
@@ -907,12 +920,10 @@ pub fn run_lease(args: &[String]) -> i32 {
         eprintln!("lease requires explicit --serial");
         return 2;
     };
-    let root = std::env::var_os("PHONEFARM_LEASE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("phonefarm-device-leases"));
-    let legacy = std::env::var_os("DEVLOCK_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/private/tmp/claude-501"));
+    let (root, legacy) = match crate::lease_storage::resolve().require_ready() {
+        Ok(paths) => paths,
+        Err(e) => { eprintln!("{e}"); return 2; }
+    };
     if recover {
         if !confirm || split != args.len() {
             eprintln!("recovery requires --confirm-device-idle after independently verifying remote workloads stopped and device restored; no command allowed");

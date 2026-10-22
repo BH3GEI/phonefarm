@@ -87,7 +87,12 @@ impl Drop for OwnedGroup {
 #[test]
 fn status_without_serial_leaves_missing_roots_missing() {
     let f = Fixture::new("readonly-status");
-    let status = f.status();
+    let mut status = f.status();
+    let storage = status.as_object_mut().unwrap().remove("storage").unwrap();
+    assert_eq!(storage["schema_version"], 1);
+    assert_eq!(storage["mode"], "custom");
+    assert_eq!(storage["readiness"], "ready");
+    assert_eq!(storage["devlock_dir"], json!(f.dir.canonicalize().unwrap().join("legacy")));
     assert_eq!(
         status,
         json!({"schema_version":1,"status":"clear","bridge_held":false,
@@ -218,4 +223,60 @@ fn old_idle_format_one_without_extensions_remains_manual_assertion_only_compatib
     .unwrap();
     assert_eq!(record["device_verified"], false);
     assert_eq!(record["device_idle_confirmation"], "operator_assertion");
+}
+
+#[test]
+fn preflight_fix_keeps_its_strong_lease_and_nested_recovery_blocks_transport() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("preflight-fix");
+    let fake = f.dir.join("fake-adb");
+    std::fs::write(&fake, r#"#!/usr/bin/env python3
+import pathlib, sys
+root=pathlib.Path(__file__).parent
+cmd=' '.join(sys.argv[1:])
+with (root/'fake-calls').open('a') as log: log.write(cmd+'\n')
+if 'echo 0 > /sys/kernel/fan/fan_enable' in cmd: (root/'fan-fixed').touch()
+elif 'fan_enable' in cmd: print('0' if (root/'fan-fixed').exists() else '1')
+elif 'set-volume 3 0' in cmd: (root/'volume-fixed').touch()
+elif 'media_session volume' in cmd: print('volume is '+('0' if (root/'volume-fixed').exists() else '2'))
+elif '/sys/class/thermal' in cmd: print('cpu-0 40000')
+"#).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let devlock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("tools/devlock");
+    let command = || {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_phonefarm"));
+        c.current_dir(&f.dir).env("DEVLOCK_DIR", f.dir.join("legacy"))
+            .env("PHONEFARM_LEASE_DIR", f.dir.join("leases"))
+            .env("PHONEFARM_LEASE_TIMEOUT_MS", "50")
+            .env("DEVLOCK_BIN", &devlock).env("ADB_BIN", &fake)
+            .args(["preflight", "--fix", "--serial", "fake-device", "--json", "--lock-wait", "0s"]);
+        c
+    };
+    let fixed = command().output().unwrap();
+    f.save("fix", &fixed);
+    assert!(fixed.status.success(), "{}", String::from_utf8_lossy(&fixed.stderr));
+    assert!(f.dir.join("fan-fixed").exists());
+    assert!(f.dir.join("volume-fixed").exists());
+    assert_eq!(f.status()["status"], "clear");
+    let calls = std::fs::read(f.dir.join("fake-calls")).unwrap();
+    let nested = f.dir.join("legacy/phonefarm-lease.d");
+    std::fs::create_dir(&nested).unwrap();
+    let marker = nested.join("phonefarm-lease.json");
+    std::fs::write(&marker, r#"{"format":1,"recovery_required":true}"#).unwrap();
+    let before = std::fs::read(&marker).unwrap();
+    let blocked = command().output().unwrap();
+    f.save("nested-blocked", &blocked);
+    assert!(!blocked.status.success());
+    assert_eq!(std::fs::read(f.dir.join("fake-calls")).unwrap(), calls);
+    assert_eq!(std::fs::read(marker).unwrap(), before);
+
+    // Invalid storage fails before the default 120-minute queue wait or any probe.
+    let start = std::time::Instant::now();
+    let invalid = Command::new(env!("CARGO_BIN_EXE_phonefarm"))
+        .env("DEVLOCK_DIR", "relative-invalid")
+        .env("DEVLOCK_BIN", &devlock).env("ADB_BIN", &fake)
+        .args(["preflight", "--fix", "--serial", "fake-device"]).output().unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(std::fs::read(f.dir.join("fake-calls")).unwrap(), calls);
 }

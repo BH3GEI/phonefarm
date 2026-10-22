@@ -57,9 +57,9 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ./phonefarm devices                        # adb / hdc / iOS 三族设备一并列出（iOS 只列 USB 上看得见的，不代表 WDA 已就绪）
 ./phonefarm keepalive [--status|--watch]   # 农场级保活：唤醒 + 解锁 + 不息屏
 ./phonefarm fleet [--json]                 # 农场只读快照：每台手机的在线/型号/电量/温度/风扇/
-                                           # 前台应用/保活策略 + 设备锁。别人持锁时自动降成
-                                           # 只读 sysfs 的轻量档，不跑 dumpsys（锁在 $DEVLOCK_LABEL
-                                           # 或 --lock-label 名下时算自己的，走完整档）
+                                           # 前台应用/保活策略 + 设备锁。租约域必须明确 clear；
+                                           # 持锁、恢复待处理、未知或未初始化时返回暂不可用。
+                                           # 标签与 --probe-while-locked 不能绕过租约检查。
 tools/devlock status                       # 设备锁：谁持有、谁在排队（碰设备的子命令自己拿锁）
 ./phonefarm probe --serial S "只读命令"     # 只读调试通道
 ./phonefarm exec --serial S "命令" --yes    # 写操作通道，高危，必须显式 --yes

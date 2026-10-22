@@ -18,7 +18,7 @@
 //! label 的来源: `--lock-label` > 环境 `DEVLOCK_LABEL` > `phonefarm`。lead 预排了队列时
 //! 必须用队列里那个名字, 自己起一个新名字会排到队尾。
 //!
-//! 不拿锁的子命令: `fleet` (只读快照, 本身就按锁自动降级)、`devices` (只问 adb)、
+//! 不拿锁的子命令: `fleet` (只读快照, 非空闲租约域拒绝探测)、`devices` (只问 adb)、
 //! `keepalive` (常驻保活, 拿锁就把别人全挡住)、`serve`, 以及所有纯离线的解析/报告类。
 
 use std::path::PathBuf;
@@ -167,7 +167,11 @@ pub fn script_path() -> Option<PathBuf> {
 }
 
 fn call(script: &PathBuf, args: &[&str]) -> (bool, String) {
-    match Command::new(script).args(args).output() {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return (false, format!("cannot select phonefarm storage resolver: {e}")),
+    };
+    match Command::new(script).args(args).env("PHONEFARM_BIN", exe).output() {
         Ok(o) => (
             o.status.success(),
             format!(
@@ -199,6 +203,10 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
             return Gate::Exit(2);
         }
     };
+    if let Err(e) = crate::lease_storage::resolve().require_ready() {
+        eprintln!("device lock storage unavailable: {e}");
+        return Gate::Exit(2);
+    }
     if opts.disabled {
         eprintln!("⚠ --no-devlock: 不拿设备锁直接碰设备。共享手机上两边的数都可能作废。");
         return Gate::Proceed;
@@ -254,6 +262,7 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
 fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<(), String> {
     let t0 = Instant::now();
     loop {
+        crate::lease_storage::resolve().require_ready()?;
         let (ok, out) = call(script, &["acquire", label]);
         if ok {
             eprintln!("设备锁: 已拿到 ({label})");

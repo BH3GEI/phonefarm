@@ -15,21 +15,9 @@
 //! 3. **读不到就留空**。每个字段都是 `Option`, 采不到记 `None` 并在 `unknown` 里写清楚
 //!    是哪一项、为什么。不拿 0 或空串冒充读数 —— 面板据此显示「未知」。
 //!
-//! 设备锁不是 phonefarm 的东西, 是农场上大家共用的一个文件锁 (`devlock`)。
-//! 这里**只读它的三个文件**, 不去 exec 那个脚本, 更不会去抢锁。
-//!
-//! # 别人占着手机的时候读什么
-//!
-//! 「只读」不等于「零影响」。一次 `dumpsys window` 会在设备上拉起一个进程,
-//! 而对面可能正在量 30 秒的帧时 —— 一个 CPU 尖峰就够多出一帧 jank。
-//! 所以探测分两档, 按设备锁自动选:
-//!
-//! - **锁空闲 / 锁是自己的 / 心跳已超期** → 完整档: getprop + dumpsys + settings get。
-//! - **锁被别人持有** → 轻量档: 只 `cat` 几个 sysfs 节点 (温度、电量、风扇、uptime)。
-//!   读文件不拉进程, 是这台机器正在跑测试时仍然安全的那部分。
-//!   dumpsys 才拿得到的字段 (前台应用、亮屏、保活策略) 照常留空并写明原因。
-//!
-//! `--probe-while-locked` 可以强制走完整档 —— 它会干扰对面的测量, 要用请自己清楚。
+//! 探测前读取同一宿主租约域的只读状态；只有明确 clear 才枚举或读取设备。
+//! held / blocked / unknown 或存储未初始化时返回暂不可用，不把缓存或空列表当新快照。
+//! 标签和兼容参数 `--probe-while-locked` 不提供所有权，也不能绕过这个入口检查。
 
 use crate::device::Device;
 use crate::hwcond;
@@ -38,10 +26,6 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime};
-
-/// 设备锁默认所在目录。可用 `--lock-dir` 或 `DEVLOCK_DIR` 覆盖 ——
-/// 这个路径是本机农场的约定, 不是 phonefarm 的一部分。
-const DEFAULT_LOCK_DIR: &str = "/private/tmp/claude-501";
 
 /// `devlock` 脚本认为心跳多久没动就算废弃 (它的 `STALE` 缺省值)。
 const LOCK_STALE_SECS: u64 = 600;
@@ -926,9 +910,9 @@ fn enumerate(adb: Option<&str>) -> (Vec<AdbEntry>, Vec<String>) {
 pub struct Opts {
     pub serial: Option<String>,
     pub timeout_ms: u64,
-    pub lock_dir: PathBuf,
+    pub lock_dir: Option<PathBuf>,
     pub screens: Option<Screens>,
-    /// 自己持有的设备锁标签。锁正是这个标签时按"锁是自己的"处理。
+    /// 兼容旧调用方的标签；不提供所有权证明或绕过租约状态。
     pub own_label: Option<String>,
     /// 别人持锁时也强行走完整档。会干扰对面的测量, 默认关。
     pub probe_while_locked: bool,
@@ -939,9 +923,7 @@ impl Default for Opts {
         Opts {
             serial: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
-            lock_dir: PathBuf::from(
-                std::env::var("DEVLOCK_DIR").unwrap_or_else(|_| DEFAULT_LOCK_DIR.to_string()),
-            ),
+            lock_dir: None,
             screens: None,
             own_label: None,
             probe_while_locked: false,
@@ -949,21 +931,15 @@ impl Default for Opts {
     }
 }
 
-/// 这一轮该走哪一档。
-///
-/// 判据只有一条: **这台手机现在是不是别人的**。锁空着、锁是自己的、
-/// 或者持锁方心跳已经超期 (那把锁本来就可以被接管了) —— 这三种情况才走完整档。
-pub fn depth_for(lock: Option<&Lock>, own_label: Option<&str>, force: bool) -> &'static str {
-    if force {
-        return "full";
+pub fn collect(opts: &Opts) -> Result<Fleet, String> {
+    let storage = opts.lock_dir.as_deref().map(crate::lease_storage::Storage::custom)
+        .unwrap_or_else(crate::lease_storage::resolve);
+    let lease = crate::devlease::storage_status(&storage);
+    if lease["status"] != "clear" {
+        return Err(format!("lease {}: {}; no device probes performed",
+            lease["status"].as_str().unwrap_or("unknown"),
+            lease["error"].as_str().unwrap_or("host device domain is occupied or requires recovery")));
     }
-    match lock.and_then(|l| l.held_by.as_deref().map(|h| (h, l.stale))) {
-        Some((holder, false)) if Some(holder) != own_label => "light",
-        _ => "full",
-    }
-}
-
-pub fn collect(opts: &Opts) -> Fleet {
     let adb = crate::device::locate_adb();
     let mut notes = Vec::new();
     if adb.is_none() {
@@ -979,7 +955,7 @@ pub fn collect(opts: &Opts) -> Fleet {
     if !hdc_ok {
         notes.push("没找到 hdc, 鸿蒙这一族整族跳过".to_string());
     }
-    let lock = read_lock(&opts.lock_dir);
+    let lock = storage.devlock_dir.as_deref().and_then(read_lock);
 
     let tmp = std::env::temp_dir()
         .join(format!("phonefarm-fleet-{}", std::process::id()))
@@ -988,14 +964,7 @@ pub fn collect(opts: &Opts) -> Fleet {
     let _ = std::fs::create_dir_all(&tmp);
 
     let want = |s: &str| opts.serial.as_deref().is_none_or(|w| w == s);
-    let depth = depth_for(lock.as_ref(), opts.own_label.as_deref(), opts.probe_while_locked);
-    if depth == "light" {
-        notes.push(
-            "设备锁被别人持有: 这一轮只读了 sysfs (温度/电量/风扇/uptime), \
-没跑 dumpsys —— 跑了会给对面正在做的测量添噪声。--probe-while-locked 可强制完整档。"
-                .to_string(),
-        );
-    }
+    let depth = "full";
     let mut devices = Vec::new();
 
     for (serial, state, model_hint) in android.into_iter().filter(|(s, _, _)| want(s)) {
@@ -1035,7 +1004,7 @@ pub fn collect(opts: &Opts) -> Fleet {
         devices.push(card_from_oh(&serial, &raw, t0.elapsed().as_millis() as u64));
     }
 
-    Fleet {
+    Ok(Fleet {
         schema: "phonefarm/fleet@1",
         tool: "phonefarm",
         version: env!("CARGO_PKG_VERSION"),
@@ -1047,7 +1016,7 @@ pub fn collect(opts: &Opts) -> Fleet {
         lock,
         devices,
         notes,
-    }
+    })
 }
 
 fn offline_card(serial: &str, transport: &'static str, state: &str, model: Option<String>) -> Card {
@@ -1084,9 +1053,9 @@ fn usage() -> &'static str {
      \x20            [--lock-dir 目录] [--screenshot-dir 目录] [--screenshot-every 秒] [--lock-label 标签]\n\
      \x20            [--probe-while-locked]\n\
      \x20  只读: 一趟 shell 把每台手机的在线/型号/电量/温度/风扇/亮屏/前台应用读齐。\n\
-     \x20  别人占着手机时自动降成轻量档 (只 cat sysfs, 不跑 dumpsys), 免得给对面的测量添噪声。\n\
-     \x20  截图默认关闭; 开了也受设备锁与最小间隔约束 (别人占着手机时不截)。\n\
-     \x20  退出码 0=至少读到一台 / 1=一台都没有 / 2=参数错。"
+     \x20  租约域必须明确空闲; 持锁、恢复待处理、未知或未初始化时不探测设备。\n\
+     \x20  截图默认关闭; 开了也受租约状态与最小间隔约束。标签/强制参数不绕过租约检查。\n\
+     \x20  退出码 0=至少读到一台 / 1=一台都没有 / 2=参数错 / 3=租约域不可探测。"
 }
 
 pub fn run_fleet(args: &[String]) -> i32 {
@@ -1116,7 +1085,7 @@ pub fn run_fleet(args: &[String]) -> i32 {
                     eprintln!("--lock-dir 需要一个目录\n{}", usage());
                     return 2;
                 };
-                opts.lock_dir = PathBuf::from(v);
+                opts.lock_dir = Some(PathBuf::from(v));
             }
             "--screenshot-dir" => screenshot_dir = it.next().map(PathBuf::from),
             "--screenshot-every" => {
@@ -1139,7 +1108,10 @@ pub fn run_fleet(args: &[String]) -> i32 {
         });
     }
 
-    let fleet = collect(&opts);
+    let fleet = match collect(&opts) {
+        Ok(fleet) => fleet,
+        Err(e) => { eprintln!("fleet: {e}"); return 3; }
+    };
     if json {
         match serde_json::to_string(&fleet) {
             Ok(s) => println!("{s}"),
@@ -1416,30 +1388,21 @@ mod tests {
         assert!(screens.may_shoot(Some(&free), Some(9999)).is_ok());
     }
 
-    /// 别人占着手机时不许跑 dumpsys —— 一次 `dumpsys window` 就够给
-    /// 对面那轮 30 秒帧时测量多出一帧 jank。
     #[test]
-    fn a_lock_held_by_someone_else_downgrades_the_probe() {
-        let held = |by: &str, stale: bool| Lock {
-            dir: "/x".into(), held_by: Some(by.into()), since: None,
-            heartbeat_age_s: Some(1), stale, queue: vec![], recent: vec![],
-        };
-        let other = held("wb-vksamples", false);
-        assert_eq!(depth_for(Some(&other), None, false), "light");
-        assert_eq!(depth_for(Some(&other), Some("gol-panel"), false), "light");
-        assert_eq!(
-            depth_for(Some(&other), None, true),
-            "full",
-            "--probe-while-locked 要能强制, 但那是明知会干扰"
-        );
-
-        // 自己持锁、锁空着、心跳超期(本来就可接管) —— 这三种才是完整档
-        assert_eq!(depth_for(Some(&held("gol-panel", false)), Some("gol-panel"), false), "full");
-        assert_eq!(depth_for(Some(&held("someone", true)), None, false), "full");
-        let free = Lock { dir: "/x".into(), held_by: None, since: None,
-                          heartbeat_age_s: None, stale: false, queue: vec![], recent: vec![] };
-        assert_eq!(depth_for(Some(&free), None, false), "full");
-        assert_eq!(depth_for(None, None, false), "full", "没配锁目录就照常读");
+    fn occupied_or_unknown_domain_refuses_before_device_probes() {
+        let root = std::env::temp_dir().join(format!("fleet-domain-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        let opts = Opts { lock_dir: Some(root.clone()), own_label: Some("mine".into()),
+            probe_while_locked: true, ..Opts::default() };
+        let bridge = std::fs::File::create(root.join("phonefarm-bridge.lock")).unwrap();
+        bridge.try_lock().unwrap();
+        assert!(collect(&opts).unwrap_err().contains("lease held"));
+        drop(bridge);
+        std::fs::create_dir(root.join("phonefarm-lease.d")).unwrap();
+        std::fs::write(root.join("phonefarm-lease.d/phonefarm-lease.json"), b"invalid").unwrap();
+        assert!(collect(&opts).unwrap_err().contains("lease unknown"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
