@@ -1,0 +1,194 @@
+//! Actual host processes and CLI; the explicit fake serial never resolves a device.
+#![cfg(unix)]
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
+
+struct Fixture {
+    dir: PathBuf,
+    retain: bool,
+}
+impl Fixture {
+    fn new(label: &str) -> Self {
+        let root = std::env::var_os("PHONEFARM_BACKPORT_FIXTURE_ROOT");
+        let retain = root.is_some();
+        let dir = root
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "lease-backport-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self { dir, retain }
+    }
+    fn marker(&self) -> PathBuf {
+        self.dir.join("legacy/devlock.d/phonefarm-lease.json")
+    }
+    fn cmd(&self) -> Command {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_phonefarm"));
+        c.current_dir(&self.dir)
+            .env("PHONEFARM_LEASE_DIR", self.dir.join("leases"))
+            .env("DEVLOCK_DIR", self.dir.join("legacy"))
+            .env("ADB_BIN", self.dir.join("NO_DEVICE_TRANSPORT"));
+        c.args(["lease", "--serial", "fake-device", "--timeout-ms", "50"]);
+        c
+    }
+    fn recover(&self) -> Output {
+        self.cmd()
+            .args(["--recover-abandoned", "--confirm-device-idle"])
+            .output()
+            .unwrap()
+    }
+    fn save(&self, name: &str, r: &Output) {
+        std::fs::write(
+            self.dir.join(format!("{name}.json")),
+            json!({
+                "exit":r.status.code(), "stdout":String::from_utf8_lossy(&r.stdout),
+                "stderr":String::from_utf8_lossy(&r.stderr), "device_called":false
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if !self.retain {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+struct OwnedGroup(i32);
+impl Drop for OwnedGroup {
+    fn drop(&mut self) {
+        // This PGID comes only from our launched deterministic helper, never a caller ledger.
+        assert!(self.0 > 0 && self.0 != unsafe { libc::getpgrp() });
+        unsafe {
+            libc::kill(-self.0, libc::SIGKILL);
+        }
+    }
+}
+
+#[test]
+fn normal_leader_exit_cannot_release_or_manual_recover_a_live_owned_grandchild() {
+    let f = Fixture::new("grandchild");
+    let script = "import subprocess,os,pathlib,sys; p=subprocess.Popen(['sleep','30'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); pathlib.Path(sys.argv[1]).write_text(str(p.pid)+' '+str(os.getpgrp()));";
+    let r = f
+        .cmd()
+        .args(["--", "python3", "-c", script])
+        .arg(f.dir.join("child.identity"))
+        .output()
+        .unwrap();
+    f.save("wrapper", &r);
+    let identity = std::fs::read_to_string(f.dir.join("child.identity")).unwrap();
+    let mut ids = identity
+        .split_whitespace()
+        .map(|s| s.parse::<i32>().unwrap());
+    let pid = ids.next().unwrap();
+    let group = ids.next().unwrap();
+    let _owned = OwnedGroup(group);
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "the actual grandchild must remain live"
+    );
+    assert_eq!(r.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("process group remains live/unknown"));
+    let before = std::fs::read(f.marker()).unwrap();
+    let m: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(m["child_pid"], group);
+    assert_eq!(m["child_pgid"], group);
+    assert_eq!(m["command_pending"], false);
+    let denied = f.recover();
+    f.save("manual-recover", &denied);
+    assert_eq!(denied.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("group live/unknown"));
+    let next = f.cmd().args(["--", "/bin/true"]).output().unwrap();
+    f.save("next-admission", &next);
+    assert_eq!(next.status.code(), Some(2));
+    assert_eq!(std::fs::read(f.marker()).unwrap(), before);
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    std::fs::write(
+        f.dir.join("verified.json"),
+        json!({"leader_exited":true,
+        "owned_grandchild_alive":true,"pid":pid,"pgid":group,"marker_retained":true,
+        "hardware_verified":false})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn dead_owner_marker(f: &Fixture) -> Value {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    let path = f.marker();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path.parent().unwrap().join("owner"), "owned-test\n").unwrap();
+    json!({"format":1,"producer":"phonefarm","pid":pid,"token":"test-token",
+        "serial":"fake-device","owner":"owned-test\n"})
+}
+
+#[test]
+fn true_malformed_and_newer_barriers_block_both_entry_and_manual_idle_without_mutation() {
+    for (name, key, value) in [
+        ("pending", "command_pending", json!(true)),
+        ("recovery", "recovery_required", json!(true)),
+        ("stringpending", "command_pending", json!("true")),
+        ("stringrecovery", "recovery_required", json!("true")),
+        ("nullpending", "command_pending", Value::Null),
+        ("pidonly", "child_pid", json!(123)),
+        ("pgidonly", "child_pgid", json!(123)),
+        ("future", "future_recovery_gate", json!(false)),
+        ("version", "format", json!(2)),
+    ] {
+        let f = Fixture::new(name);
+        let mut m = dead_owner_marker(&f);
+        m[key] = value;
+        let bytes = m.to_string().into_bytes();
+        std::fs::write(f.marker(), &bytes).unwrap();
+        let next = f.cmd().args(["--", "/bin/true"]).output().unwrap();
+        f.save("admission", &next);
+        assert_eq!(next.status.code(), Some(2), "{name}");
+        assert_eq!(std::fs::read(f.marker()).unwrap(), bytes, "{name}");
+        let recovery = f.recover();
+        f.save("manual-recover", &recovery);
+        assert_eq!(recovery.status.code(), Some(2), "{name}");
+        assert_eq!(std::fs::read(f.marker()).unwrap(), bytes, "{name}");
+        if name == "future" {
+            assert!(
+                String::from_utf8_lossy(&recovery.stderr).contains("unknown lease marker field")
+            );
+        }
+    }
+}
+
+#[test]
+fn old_idle_format_one_without_extensions_remains_manual_assertion_only_compatible() {
+    let f = Fixture::new("legacy-idle");
+    let m = dead_owner_marker(&f);
+    std::fs::write(f.marker(), m.to_string()).unwrap();
+    let recovery = f.recover();
+    f.save("manual-recover", &recovery);
+    assert_eq!(recovery.status.code(), Some(0));
+    assert!(!f.marker().exists());
+    let record: Value = serde_json::from_str(
+        std::fs::read_to_string(f.dir.join("legacy/phonefarm-recovery.jsonl"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(record["device_verified"], false);
+    assert_eq!(record["device_idle_confirmation"], "operator_assertion");
+}
