@@ -5,7 +5,7 @@ name: code-only
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'verify/**']
 permissions:
   contents: read
 jobs:
@@ -20,6 +20,9 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/heads/verify/* ]]; then
+            BASE=$(git merge-base origin/main HEAD)
+          fi
           changed=$(git -c core.quotepath=off diff --name-only --diff-filter=AMR "$BASE"...HEAD)
           bad=$(printf '%s\n' "$changed" \
             | grep -iE '\.(md|png|jpe?g|gif|svg|pdf|pptx?|docx?|drawio|mp4|mov|xlsx?)$' \
