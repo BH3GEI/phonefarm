@@ -105,6 +105,12 @@ acquire(){
   qappend $L; qunlock
   echo "busy: $(owner) (heartbeat ${a}s ago); queued as $L"; return 1
 }
+stop_heartbeat(){
+  [[ -n "$HB" ]] || return 0
+  kill -TERM "$HB" 2>/dev/null
+  wait "$HB" 2>/dev/null
+  HB=
+}
 case $1 in
   status)
     [[ -d $D ]] && echo "held: $(owner) (heartbeat $(age)s ago)" || echo free
@@ -113,8 +119,21 @@ case $1 in
   renew) renew "$2" "$PPID" ;;
   release) release "$2" ;;
   queue) shift; qlock; : > $Q; for l in "$@"; do echo $l >> $Q; seen $l; done; qunlock; echo "$(ts) queue set: $*" >> $LOG ;;
-  run) L=$2; shift 3; acquire $L || exit 1
-       ( while renew "$L" "$$"; do sleep 60; done ) & HB=$!
-       DEVLOCK_LABEL=$L "$@"; rc=$?; kill $HB 2>/dev/null; release "$L"; exit $rc ;;
+  run) L=$2; shift 3
+       zmodload zsh/zselect || exit 2
+       acquire $L || exit 1
+       HB=
+       trap stop_heartbeat EXIT
+       # A cancelled wrapper cannot claim its command restored the device. Keep
+       # the lock records, but always reap the one heartbeat process we created.
+       trap 'exit 130' INT
+       trap 'exit 143' TERM
+       trap 'exit 129' HUP
+       ( trap 'exit 0' INT TERM HUP
+         while renew "$L" "$$"; do zselect -t 6000; done
+       ) & HB=$!
+       # zselect waits inside the heartbeat shell: there is no external sleep
+       # child left holding stdout/stderr after this shell has been reaped.
+       DEVLOCK_LABEL=$L "$@"; rc=$?; stop_heartbeat; release "$L"; exit $rc ;;
   *) sed -n 2,10p $0 ;;
 esac

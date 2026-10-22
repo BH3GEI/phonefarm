@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,63 @@ class DevlockBridgeTests(unittest.TestCase):
         self.assertEqual(self.call("renew", "other").returncode, 0)
         self.assertEqual(self.call("release", "other").returncode, 0)
 
+    def assert_processes_gone(self, pids):
+        self.assertTrue(pids, "fixture did not observe its heartbeat sibling")
+        for pid in pids:
+            found = subprocess.run(["ps", "-p", str(pid), "-o", "pid="], capture_output=True, text=True)
+            self.assertEqual(found.returncode, 1, f"heartbeat {pid} still exists: {found.stdout}")
+
+    def test_quick_command_closes_pipes_and_reaps_heartbeat(self):
+        command = """
+import json, os, subprocess, sys
+rows = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True).splitlines()
+siblings = [int(p) for row in rows for p,parent in [row.split()]
+            if int(parent) == os.getppid() and int(p) != os.getpid()]
+print(json.dumps(siblings), flush=True)
+print('host stderr', file=sys.stderr, flush=True)
+sys.exit(7)
+"""
+        result = self.call("run", "outer", "--", sys.executable, "-c", command)
+        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+        self.assertIn("host stderr", result.stderr)
+        self.assert_processes_gone(json.loads(result.stdout))
+        self.assertFalse((self.root / "devlock.d").exists())
+
+    def test_cancellation_reaps_heartbeat_without_clearing_lock_records(self):
+        command = """
+import json, os, pathlib, signal, subprocess, sys
+for sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, lambda sig, _: sys.exit(128 + sig))
+rows = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True).splitlines()
+siblings = [int(p) for row in rows for p,parent in [row.split()]
+            if int(parent) == os.getppid() and int(p) != os.getpid()]
+pathlib.Path(sys.argv[1]).write_text(json.dumps(siblings))
+while True:
+    signal.pause()
+"""
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=sig.name):
+                ready = self.root / f"ready-{sig.name}.json"
+                process = subprocess.Popen(
+                    ["zsh", str(DEVLOCK), "run", "outer", "--", sys.executable, "-c", command, str(ready)],
+                    env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue(ready.exists(), "isolated command did not become ready")
+                    heartbeat_pids = json.loads(ready.read_text())
+                    os.killpg(process.pid, sig)  # Only the isolated session this fixture just created.
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, 128 + sig, stdout + stderr)
+                    self.assert_processes_gone(heartbeat_pids)
+                    self.assertTrue((self.root / "devlock.d/owner").exists())
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=5)
+                self.assertEqual(self.call("release", "outer").returncode, 0)
+
     @unittest.skipUnless(BINARY.is_file(), "set PHONEFARM_TEST_BINARY to an existing signed test build")
     def test_real_nested_lease_allows_child_and_outer_ancestor_renew_only(self):
         ready, finish = self.root / "ready.json", self.root / "finish"
@@ -92,12 +150,10 @@ pathlib.Path(ready).write_text(json.dumps({'code':r.returncode,'out':r.stdout,'e
 while not pathlib.Path(finish).exists():
     time.sleep(0.02)
 """
-        log = self.root / "run.log"
-        with log.open("w") as output:
-            process = subprocess.Popen(
-                ["zsh", str(DEVLOCK), "run", "outer", "--", str(BINARY), "lease", "--serial", "fixture-device",
-                 "--timeout-ms", "500", "--", sys.executable, "-c", command, str(DEVLOCK), str(ready), str(finish)],
-                env=self.env, stdout=output, stderr=subprocess.STDOUT, text=True)
+        process = subprocess.Popen(
+            ["zsh", str(DEVLOCK), "run", "outer", "--", str(BINARY), "lease", "--serial", "fixture-device",
+             "--timeout-ms", "500", "--", sys.executable, "-c", command, str(DEVLOCK), str(ready), str(finish)],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 5
             while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
@@ -117,8 +173,8 @@ while not pathlib.Path(finish).exists():
             self.assertNotEqual(self.call("acquire", "other").returncode, 0)
         finally:
             finish.touch()
-            process.wait(timeout=5)
-        self.assertEqual(process.returncode, 0, log.read_text())
+            stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0, stdout + stderr)
         self.assertFalse((self.root / "phonefarm-lease.d").exists())
         self.assertFalse((self.root / "devlock.d").exists())
 
