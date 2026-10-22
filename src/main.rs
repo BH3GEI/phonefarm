@@ -58,6 +58,7 @@ mod preflight;
 mod grayab;
 mod graylayer;
 mod gray_session;
+mod gray_eval_session;
 mod grayartifact;
 mod upopabi;
 mod storageadapter;
@@ -238,6 +239,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 资格:  qualify --from evidence.json --json (纯离线资格评估；通过不等于优化成功)
        confirmation-observation --bundle B.json --out R.json (单轮原始记录验收，始终不授优化结论)
 评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
+       eval recover --session DIR --serial S [--json]
        (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
         shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
 接入:  onboard --package <包名> [--serial S] [--out 目录] [--rounds 5] [--seconds 30] [--enter-only]

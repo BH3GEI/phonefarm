@@ -7,8 +7,11 @@ use crate::{
 use serde_json::{json, Map, Value};
 use std::{cell::RefCell, collections::HashSet, fs, path::{Path, PathBuf}, time::Duration};
 
-const SCHEMA: &str = "phonefarm/gray-capture-session@1";
+const LEGACY_SCHEMA: &str = "phonefarm/gray-capture-session@1";
+const SCHEMA: &str = "phonefarm/gray-capture-session@2";
 const SCOPE: &str = "gray_capture_owned_installation_properties_target_stopped";
+const EVAL_OWNER: &str = "gray_eval_launch";
+const EVAL_SCOPE: &str = "gray_eval_launch_owned_resources";
 const CAP: u64 = 8 * 1024 * 1024;
 
 pub(crate) struct Session {
@@ -24,9 +27,18 @@ pub(crate) struct Session {
 
 impl Session {
     pub fn new(lease: Lease, out: &Path, pkg: &str, origin: &str) -> Result<Self, String> {
+        Self::new_owned(lease, out, pkg, origin, "standalone", None)
+    }
+
+    pub fn new_eval(lease: Lease, out: &Path, pkg: &str, origin: &str, marker: Option<&str>) -> Result<Self, String> {
+        Self::new_owned(lease, out, pkg, origin, EVAL_OWNER, marker)
+    }
+
+    fn new_owned(lease: Lease, out: &Path, pkg: &str, origin: &str, owner: &str, marker: Option<&str>) -> Result<Self, String> {
         if !graylayer::valid_package(pkg) || !matches!(origin, "device" | "synthetic") {
             return Err("invalid gray capture package or evidence origin".into());
         }
+        if marker.is_some_and(|name| !valid_marker(name)) { return Err("launch marker must be a safe, distinct filename in the target files directory".into()); }
         fs::create_dir_all(out).map_err(|e| e.to_string())?;
         let token = lease.token().to_owned();
         let dir = out.canonicalize().map_err(|e| e.to_string())?.join(format!("gray-{token}"));
@@ -35,6 +47,7 @@ impl Session {
             fs::File::open(parent).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
         }
         let state = json!({"schema":SCHEMA,"serial":lease.serial,"token":token,"package":pkg,
+            "completion_owner":owner,"launch_marker":marker,"generation":0,"round_label":null,"base_recovery":null,
             "stage":"new","boot_id":null,"native_dir":null,"properties":{},"files":[],
             "remote":format!("/data/local/tmp/phonefarm-gray-{token}"),
             "staging_created":false,"installation_owned":false,"state_owned":false,
@@ -47,9 +60,18 @@ impl Session {
     }
 
     pub fn resume(dir: &Path, serial: &str) -> Result<Self, String> {
+        Self::resume_owned(dir, serial, "standalone")
+    }
+
+    pub fn resume_eval(dir: &Path, serial: &str) -> Result<Self, String> {
+        Self::resume_owned(dir, serial, EVAL_OWNER)
+    }
+
+    fn resume_owned(dir: &Path, serial: &str, owner: &str) -> Result<Self, String> {
         let dir = dir.canonicalize().map_err(|e| e.to_string())?;
         let state: Value = serde_json::from_slice(&bounded(&dir.join("session.json"), 1024 * 1024)?).map_err(|e| e.to_string())?;
         validate(&state, &dir, serial)?;
+        require_owner(&state, owner)?;
         pending_clear(&state)?;
         let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
         let lease = Lease::acquire_recovery(&root, &legacy, serial, &dir, Duration::from_secs(1))?;
@@ -61,6 +83,7 @@ impl Session {
         durable_replace(&self.dir.join("session.json"), &serde_json::to_vec_pretty(&*self.state.borrow()).map_err(|e| e.to_string())?)
     }
     fn hold(&self) -> Result<(), String> { self.lease.borrow_mut().hold_for_recovery(&self.dir) }
+    fn require_eval(&self) -> Result<(), String> { require_owner(&self.state.borrow(), EVAL_OWNER) }
     fn package(&self) -> String { self.state.borrow()["package"].as_str().unwrap().into() }
     fn remote(&self) -> String { self.state.borrow()["remote"].as_str().unwrap().into() }
     fn ready(&self) -> Result<(), String> {
@@ -103,12 +126,19 @@ impl Session {
         self.read(operation, &format!("su -c {}", q(command)))
     }
     fn write_update(&self, operation: &str, args: &[String], update: impl FnOnce(&mut Value)) -> Result<(), String> {
+        self.mutate(operation, args, 120_000, update).map(|_| ())
+    }
+    fn mutate(&self, operation: &str, args: &[String], timeout: u64, update: impl FnOnce(&mut Value)) -> Result<crate::lease_command::Output, String> {
         self.ready()?;
         self.hold()?;
         let pending = json!({"operation":operation,"args":args});
-        self.state.borrow_mut()["write_pending"] = pending.clone();
+        {
+            let mut state = self.state.borrow_mut();
+            state["write_pending"] = pending.clone();
+            if state["schema"] == SCHEMA { state["base_recovery"] = Value::Null; }
+        }
         self.save()?;
-        self.command(operation, args, 120_000)?;
+        let output = self.command(operation, args, timeout)?;
         {
             let mut state = self.state.borrow_mut();
             update(&mut state);
@@ -118,7 +148,7 @@ impl Session {
             self.state.borrow_mut()["write_pending"] = pending;
             return self.stop(format!("write completion persistence failed: {error}"));
         }
-        Ok(())
+        Ok(output)
     }
     fn write(&self, operation: &str, command: &str) -> Result<(), String> {
         self.write_update(operation, &["shell".into(), command.into()], |_| {})
@@ -128,6 +158,38 @@ impl Session {
     }
     fn root_update(&self, operation: &str, command: &str, update: impl FnOnce(&mut Value)) -> Result<(), String> {
         self.write_update(operation, &["shell".into(), format!("su -c {}", q(command))], update)
+    }
+
+    pub fn eval_identity(&self) -> Result<Value, String> {
+        self.require_eval()?;
+        let state = self.state.borrow();
+        Ok(json!({"serial":state["serial"],"token":state["token"],"boot_id":state["boot_id"],
+            "native_dir":state["native_dir"],"package":state["package"],"session":self.dir,
+            "evidence_origin":state["evidence_origin"],"base_recovery":state["base_recovery"]}))
+    }
+    pub fn eval_ready(&self) -> Result<(), String> { self.require_eval()?; self.ready() }
+    pub fn eval_transport(&self, operation: &str, args: &[String], timeout_ms: u64, mutation: bool) -> Result<crate::lease_command::Output, String> {
+        self.eval_ready()?;
+        if mutation {
+            if self.state.borrow()["stage"] != "active" { return Err("eval mutations require an active gray installation session".into()); }
+            self.mutate(operation, args, timeout_ms, |_| {})
+        } else {
+            self.command(operation, args, timeout_ms)
+        }
+    }
+    pub fn eval_present(&self, path: &str) -> Result<bool, String> { self.eval_ready()?; self.present(path) }
+    pub fn eval_stop_target(&self) -> Result<(), String> {
+        self.eval_ready()?;
+        if self.state.borrow()["stage"] != "active" { return Err("eval target stop requires an active gray installation session".into()); }
+        self.stop_target()
+    }
+    pub fn eval_launch_marker(&self) -> Result<Option<String>, String> {
+        self.eval_ready()?;
+        let marker = self.state.borrow()["launch_marker"].as_str().map(str::to_owned);
+        let Some(marker) = marker else { return Ok(None); };
+        let path = launch_marker_path(&self.package(), &marker);
+        if !self.present(&path)? { return Ok(None); }
+        self.root_read("launch_marker", &format!("cat {}", q(&path))).map(Some)
     }
 
     // A missing directory is proved through a successful ancestor listing, not
@@ -221,7 +283,8 @@ impl Session {
         }
         let token = self.state.borrow()["token"].as_str().unwrap().to_owned();
         let mut files = Vec::new();
-        for path in output_paths(&self.package()) {
+        let paths = session_output_paths(&self.state.borrow())?;
+        for path in paths {
             let (parent, name) = split_path(&path)?;
             let backup = format!("{parent}/.phonefarm-gray-{token}-{name}.bak");
             if self.present(&backup)? { return self.stop(format!("backup already exists: {backup}")); }
@@ -253,12 +316,7 @@ impl Session {
         let metadata = fs::metadata(&local).map_err(|e| e.to_string())?;
         if !metadata.is_file() || metadata.len() == 0 { return Err("layer SO must be a nonempty regular file".into()); }
         let extras = intent_extras(extras.unwrap_or(""))?;
-        let activity = self.read("resolve_activity", &format!("cmd package resolve-activity --brief {}", q(&self.package())))?;
-        let component = activity.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-        if component.split_once('/').is_none_or(|(pkg, class)| pkg != self.package() || class.is_empty()
-            || !class.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'$'))) {
-            return Err("could not resolve a launch component for the target package".into());
-        }
+        let component = self.launch_component()?;
         self.hold()?;
         self.state.borrow_mut()["stage"] = json!("active");
         if let Err(error) = self.save() { return self.stop(format!("active intent persistence failed: {error}")); }
@@ -313,8 +371,74 @@ impl Session {
             self.set_property(property, value)?;
         }
         self.set_property("debug.vulkan.layers", LAYER_NAME)?;
+        self.launch_target(&component, &extras)
+    }
+
+    fn launch_component(&self) -> Result<String, String> {
+        let activity = self.read("resolve_activity", &format!("cmd package resolve-activity --brief {}", q(&self.package())))?;
+        let component = activity.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+        if component.split_once('/').is_none_or(|(pkg, class)| pkg != self.package() || class.is_empty()
+            || !class.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'$'))) {
+            return Err("could not resolve a launch component for the target package".into());
+        }
+        Ok(component.into())
+    }
+    fn launch_target(&self, component: &str, extras: &[String]) -> Result<(), String> {
         let extras = extras.iter().map(|arg| q(arg)).collect::<Vec<_>>().join(" ");
         self.write("launch_target", &format!("am start -n {} {extras}", q(component)))
+    }
+
+    pub fn restart_eval(&self, label: &str, rule: Option<&str>, extras: &str) -> Result<(), String> {
+        self.eval_ready()?;
+        if !valid_label(label) { return Err("invalid eval round label".into()); }
+        let rule = rule.map(storeop_rule).transpose()?;
+        let extras = intent_extras(extras)?;
+        let state = self.state.borrow();
+        if state["stage"] != "active" || state["installation_owned"] != true || state["state_owned"] != true
+            || state["files"].as_array().is_none_or(|files| files.iter().any(|f| f["acquired"] != true || f["restored"] == true)) {
+            return Err("eval restart requires the original active installation and owned outputs".into());
+        }
+        let generation = state["generation"].as_u64().ok_or("missing eval generation")?.checked_add(1).ok_or("eval generation overflow")?;
+        let expected_boot = state["boot_id"].as_str().unwrap().to_owned();
+        let expected_native = state["native_dir"].as_str().unwrap().to_owned();
+        drop(state);
+        if self.read("restart_boot", "cat /proc/sys/kernel/random/boot_id")?.trim() != expected_boot {
+            return self.stop("device boot changed before eval restart".into());
+        }
+        if self.native_dir()? != expected_native { return self.stop("target installation changed before eval restart".into()); }
+        self.check_registration()?;
+        self.expect_presence(&format!("{expected_native}/{SO}"), true)?;
+        let component = self.launch_component()?;
+        self.stop_target()?;
+        self.narrow()?;
+        let files = self.state.borrow()["files"].as_array().unwrap().clone();
+        for (index, file) in files.iter().enumerate() {
+            let path = file["path"].as_str().unwrap();
+            self.expect_presence(file["backup"].as_str().unwrap(), file["original_present"] == true)?;
+            if self.present(path)? {
+                self.archive(index, path)?;
+                self.root_update("clear_round_output", &format!("rm -f -- {}", q(path)), |s| s["files"][index]["archive"] = Value::Null)?;
+                self.expect_presence(path, false)?;
+            }
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            for file in state["files"].as_array_mut().unwrap() { file["archive"] = Value::Null; }
+            state["generation"] = json!(generation);
+            state["round_label"] = json!(label);
+        }
+        if let Err(error) = self.save() { return self.stop(format!("round transition persistence failed: {error}")); }
+        journal(&self.dir, json!({"event":"eval_round","generation":generation,"label":label,"rule":rule}))?;
+        for property in LAYER_PROPERTIES.into_iter().filter(|p| *p != "debug.vulkan.layers") {
+            let value = match property {
+                "debug.knobs.passdump" if rule.is_some() => "1",
+                graylayer::STOREOP_PROP => rule.as_deref().unwrap_or("0"),
+                _ => "0",
+            };
+            self.set_property(property, value)?;
+        }
+        self.set_property("debug.vulkan.layers", if rule.is_some() { LAYER_NAME } else { "" })?;
+        self.launch_target(&component, &extras)
     }
 
     pub fn narrow(&self) -> Result<(), String> { self.set_property("debug.vulkan.layers", "") }
@@ -350,9 +474,11 @@ impl Session {
             return Ok(());
         }
         let output = self.command("archive_output", &["shell".into(), format!("su -c {}", q(&format!("cat {}", q(path))))], 30_000)?;
-        let name = format!("output-{index}-{}-{}.raw", std::process::id(), stamp()?);
+        let generation = self.state.borrow()["generation"].as_u64().unwrap_or(0);
+        let name = format!("output-g{generation}-{index}-{}-{}.raw", std::process::id(), stamp()?);
         let destination = self.dir.join(name);
         new_file(&destination, &bounded(&output.stdout_path, CAP)?)?;
+        journal(&self.dir, json!({"event":"output_archived","generation":generation,"index":index,"remote":path,"archive":destination}))?;
         self.state.borrow_mut()["files"][index]["archive"] = json!(destination);
         self.save()
     }
@@ -443,20 +569,65 @@ impl Session {
     }
 
     pub fn finish(&self, error: Option<&str>) -> Result<Value, String> {
+        require_owner(&self.state.borrow(), "standalone")?;
+        let mut value = self.restore_report(error)?;
+        if value["status"] == "verified" {
+            let report_path = PathBuf::from(value["report_path"].as_str().ok_or("missing recovery report path")?);
+            self.lease.borrow_mut().complete_recovery(value["scope"].as_str().unwrap(), self.state.borrow()["evidence_origin"].as_str().unwrap(), &[&report_path])?;
+            value["status"] = json!("reported_complete");
+        }
+        Ok(value)
+    }
+
+    pub fn restore_for_eval(&self, error: Option<&str>) -> Result<Value, String> {
+        self.require_eval()?;
+        self.state.borrow_mut()["base_recovery"] = Value::Null;
+        self.save()?;
+        let value = self.restore_report(error)?;
+        if value["status"] == "verified" {
+            self.state.borrow_mut()["base_recovery"] = value["report_path"].clone();
+            if let Err(error) = self.save() {
+                self.state.borrow_mut()["base_recovery"] = Value::Null;
+                self.hold()?;
+                return Err(format!("base recovery evidence persistence failed: {error}"));
+            }
+        }
+        Ok(value)
+    }
+
+    pub fn complete_eval(&self, parent_report: &Path) -> Result<(), String> {
+        self.require_eval()?;
+        pending_clear(&self.state.borrow())?;
+        let state = self.state.borrow().clone();
+        let base_path = PathBuf::from(state["base_recovery"].as_str().ok_or("gray base has not been verified since the last mutation")?);
+        let base = read_local_report(&base_path, &self.dir)?;
+        if base["schema"] != "phonefarm/gray-capture-recovery@1" || base["status"] != "verified"
+            || !matches!(base["scope"].as_str(), Some(SCOPE | "no_device_mutations"))
+            || !report_matches(&base, &state, &self.dir) {
+            return Err("current base recovery report is not verified for this session".into());
+        }
+        if base["scope"] != "no_device_mutations" { self.ready()?; }
+        let parent = read_local_report(parent_report, &self.dir)?;
+        if parent["schema"] != "phonefarm/gray-eval-launch-recovery@1" || parent["status"] != "verified"
+            || parent["scope"] != EVAL_SCOPE || parent["base_recovery"] != state["base_recovery"]
+            || !report_matches(&parent, &state, &self.dir) {
+            return Err("parent recovery report is not verified for this gray eval session".into());
+        }
+        self.lease.borrow_mut().complete_recovery(EVAL_SCOPE, state["evidence_origin"].as_str().unwrap(), &[parent_report, &base_path])
+    }
+
+    fn restore_report(&self, error: Option<&str>) -> Result<Value, String> {
         let checks = self.restore();
         let scope = checks.as_ref().ok().and_then(|v| v["scope"].as_str()).unwrap_or(SCOPE).to_owned();
         let report_path = self.dir.join(format!("recovery-{}-{}.json", std::process::id(), stamp()?));
-        let mut value = json!({"schema":"phonefarm/gray-capture-recovery@1","status":if checks.is_ok(){"verified"}else{"required"},
-            "scope":scope,"serial":self.lease.borrow().serial,"package":self.package(),"session":self.dir,
+        let value = json!({"schema":"phonefarm/gray-capture-recovery@1","status":if checks.is_ok(){"verified"}else{"required"},
+            "scope":scope,"serial":self.lease.borrow().serial,"token":self.state.borrow()["token"],
+            "completion_owner":completion_owner(&self.state.borrow())?,"package":self.package(),"session":self.dir,
             "checks":checks.as_ref().ok(),"error":checks.as_ref().err(),"experiment_error":error,
             "evidence_origin":self.state.borrow()["evidence_origin"],"game_state_restored":false,
             "report_path":report_path,"at":chrono::Utc::now().to_rfc3339()});
         if checks.is_err() { self.hold()?; }
         new_file(&report_path, &serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?)?;
-        if checks.is_ok() {
-            self.lease.borrow_mut().complete_recovery(&scope, self.state.borrow()["evidence_origin"].as_str().unwrap(), &[&report_path])?;
-            value["status"] = json!("reported_complete");
-        }
         Ok(value)
     }
 }
@@ -474,6 +645,51 @@ fn output_paths(package: &str) -> Vec<String> {
         format!("/data/data/{package}/{name}.json"),
         format!("/data/local/tmp/{name}.{package}.json"),
     ]).collect()
+}
+fn valid_label(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
+fn valid_marker(name: &str) -> bool {
+    valid_label(name) && name.as_bytes().first().is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        && !matches!(name, "knobs_layer_out.json" | "knobs_frameaudit.json")
+}
+fn launch_marker_path(package: &str, marker: &str) -> String {
+    format!("/storage/emulated/0/Android/data/{package}/files/{marker}")
+}
+fn session_output_paths(state: &Value) -> Result<Vec<String>, String> {
+    let package = state["package"].as_str().ok_or("missing gray package")?;
+    let mut paths = output_paths(package);
+    if let Some(marker) = state["launch_marker"].as_str() {
+        if !valid_marker(marker) { return Err("invalid gray launch marker filename".into()); }
+        paths.push(launch_marker_path(package, marker));
+    }
+    Ok(paths)
+}
+fn completion_owner(state: &Value) -> Result<&str, String> {
+    match state["schema"].as_str() {
+        Some(LEGACY_SCHEMA) if state.get("completion_owner").is_none() || state["completion_owner"] == "standalone" => Ok("standalone"),
+        Some(SCHEMA) => match state["completion_owner"].as_str() {
+            Some(owner @ ("standalone" | EVAL_OWNER)) => Ok(owner),
+            _ => Err("gray session has no recognized completion owner".into()),
+        },
+        _ => Err("unsupported gray session schema or completion owner".into()),
+    }
+}
+fn require_owner(state: &Value, expected: &str) -> Result<(), String> {
+    let owner = completion_owner(state)?;
+    if owner != expected { return Err(format!("gray session belongs to {owner}; use its dedicated recovery entry point")); }
+    Ok(())
+}
+fn read_local_report(path: &Path, dir: &Path) -> Result<Value, String> {
+    if path.parent() != Some(dir) { return Err("recovery report must be directly within the session directory".into()); }
+    let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !metadata.is_file() { return Err("recovery report is not a regular file".into()); }
+    serde_json::from_slice(&bounded(path, 1024 * 1024)?).map_err(|e| format!("invalid recovery report: {e}"))
+}
+fn report_matches(report: &Value, state: &Value, dir: &Path) -> bool {
+    ["serial", "token", "evidence_origin"].iter().all(|key| report[*key] == state[*key])
+        && report["session"].as_str().is_some_and(|path| Path::new(path) == dir)
+        && report["game_state_restored"] == false
 }
 fn pending_clear(state: &Value) -> Result<(), String> {
     if state["transport_uncertain"] != false || state.get("write_pending") != Some(&Value::Null) {
@@ -499,9 +715,10 @@ fn storeop_rule(rule: &str) -> Result<String, String> {
 }
 
 fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
+    let owner = completion_owner(state)?;
     let token = state["token"].as_str().ok_or("missing gray session token")?;
     let package = state["package"].as_str().ok_or("missing gray session package")?;
-    if state["schema"] != SCHEMA || state["serial"] != serial || !graylayer::valid_package(package)
+    if state["serial"] != serial || !graylayer::valid_package(package)
         || token.is_empty() || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         || dir.file_name().and_then(|s| s.to_str()) != Some(format!("gray-{token}").as_str())
         || state["remote"] != format!("/data/local/tmp/phonefarm-gray-{token}")
@@ -511,6 +728,18 @@ fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
         || !state["transport_uncertain"].is_boolean()
         || ["staging_created", "installation_owned", "state_owned"].iter().any(|key| !state[*key].is_boolean()) {
         return Err("invalid or mismatched gray session identity".into());
+    }
+    if state["schema"] == SCHEMA {
+        if state.get("launch_marker").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|s| !valid_marker(s)))
+            || state["generation"].as_u64().is_none()
+            || state.get("round_label").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|s| !valid_label(s)))
+            || state.get("base_recovery").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|p| Path::new(p).parent() != Some(dir)))
+            || (owner == "standalone" && (!state["launch_marker"].is_null() || state["generation"] != 0 || !state["round_label"].is_null() || !state["base_recovery"].is_null()))
+            || (state["stage"] != "active" && (state["generation"] != 0 || !state["round_label"].is_null())) {
+            return Err("invalid gray session generation, marker or recovery evidence".into());
+        }
+    } else if !state["launch_marker"].is_null() {
+        return Err("legacy gray sessions cannot own a launch marker".into());
     }
     if state["stage"] != "active" && ["staging_created", "installation_owned", "state_owned"].iter().any(|key| state[*key] == true) {
         return Err("nonactive gray session contains device mutations".into());
@@ -529,7 +758,7 @@ fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
             return Err("invalid gray session original values".into());
         }
         let files = state["files"].as_array().ok_or("missing gray session files")?;
-        let paths = output_paths(package);
+        let paths = session_output_paths(state)?;
         if files.len() != paths.len() { return Err("invalid gray session file inventory".into()); }
         for (file, path) in files.iter().zip(paths) {
             let (parent, name) = split_path(&path)?;
@@ -614,5 +843,18 @@ mod tests {
         assert!(target_in_process_list("NAME\ncom.example.fixture:worker\n", "com.example.fixture").unwrap());
         assert!(!target_in_process_list("NAME\ncom.example.fixture2\n", "com.example.fixture").unwrap());
         assert!(target_in_process_list("", "com.example.fixture").is_err());
+    }
+    #[test]
+    fn parent_completion_and_marker_ownership_are_explicit() {
+        assert!(require_owner(&json!({"schema":LEGACY_SCHEMA}), "standalone").is_ok());
+        assert!(completion_owner(&json!({"schema":LEGACY_SCHEMA,"completion_owner":EVAL_OWNER})).is_err());
+        assert!(completion_owner(&json!({"schema":SCHEMA})).is_err());
+        let parent = json!({"schema":SCHEMA,"completion_owner":EVAL_OWNER,"package":"com.example.fixture","launch_marker":"megacity_started"});
+        assert!(require_owner(&parent, "standalone").is_err());
+        assert!(require_owner(&parent, EVAL_OWNER).is_ok());
+        let paths = session_output_paths(&parent).unwrap();
+        assert_eq!(paths.len(), 7);
+        assert_eq!(paths[6], "/storage/emulated/0/Android/data/com.example.fixture/files/megacity_started");
+        for name in ["../started", "/tmp/started", "knobs_layer_out.json", "", ".", "started;id"] { assert!(!valid_marker(name)); }
     }
 }

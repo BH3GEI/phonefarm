@@ -369,16 +369,23 @@ fn statistically_reachable(policy: &Policy) -> bool {
 
 /// Pure, deterministic: no devices, clock, random numbers or fallbacks for unknown facts.
 pub fn evaluate(e: &Evidence) -> Result<Report, String> {
-    evaluate_with_pending_control(e, false)
+    evaluate_with_pending_control(e, false, false)
 }
 
 /// A gray candidate must run before its layer-hit evidence exists. Admit that
 /// collection only at Experiment; keep the unknown check and all conclusion gates.
 pub fn evaluate_gray_collection(e: &Evidence) -> Result<Report, String> {
-    evaluate_with_pending_control(e, e.stage == Stage::Experiment)
+    evaluate_with_pending_control(e, e.stage == Stage::Experiment, false)
 }
 
-fn evaluate_with_pending_control(e: &Evidence, collect_control: bool) -> Result<Report, String> {
+/// An owned parent may collect while final restoration is pending. The caller
+/// must verify its lease, pending journal and completed child lifecycles first.
+/// This grants no conclusion and never accepts known recovery failure.
+pub(crate) fn evaluate_gray_session_collection(e: &Evidence) -> Result<Report, String> {
+    evaluate_with_pending_control(e, e.stage == Stage::Experiment, e.stage == Stage::Experiment)
+}
+
+fn evaluate_with_pending_control(e: &Evidence, collect_control: bool, pending_recovery: bool) -> Result<Report, String> {
     if !matches!(e.version, 1 | 2) || e.version != e.policy.version {
         return Err("资格证据版本必须与冻结规则一致".into());
     }
@@ -511,7 +518,7 @@ fn evaluate_with_pending_control(e: &Evidence, collect_control: bool) -> Result<
     }
     let all_pass = checks.iter().all(|c| c.state == "pass");
     let experiment_ready = checks.iter().all(|c| {
-        c.state == "pass" || (collect_control && c.id == "control" && c.state == "unknown")
+        c.state == "pass" || (c.state == "unknown" && ((collect_control && c.id == "control") || (pending_recovery && c.id == "restored")))
     });
     let failed = checks.iter().any(|c| c.state == "fail");
     let status = if e.device.root == Some(false) && e.device.measurement_available == Some(true) {
@@ -786,13 +793,21 @@ mod tests {
         assert!(q.claim_scope.starts_with("none"));
         // Ordinary sysparam/confirmation admission remains unchanged.
         assert!(!evaluate(&e).unwrap().experiment_allowed);
+        e.restored = None;
+        let owned = evaluate_gray_session_collection(&e).unwrap();
+        assert!(owned.experiment_allowed && !owned.conclusion_allowed && !owned.eligible);
+        assert!(!evaluate_gray_collection(&e).unwrap().experiment_allowed);
         e.restored = Some(false);
+        assert!(!evaluate_gray_session_collection(&e).unwrap().experiment_allowed);
         assert!(!evaluate_gray_collection(&e).unwrap().experiment_allowed);
         e.restored = Some(true);
         e.device.control_verified = Some(false);
         assert!(!evaluate_gray_collection(&e).unwrap().experiment_allowed);
         e.device.control_verified = None;
         e.stage = Stage::Conclusion;
+        e.restored = None;
+        assert!(!evaluate_gray_session_collection(&e).unwrap().conclusion_allowed);
+        e.restored = Some(true);
         assert!(!evaluate_gray_collection(&e).unwrap().conclusion_allowed);
         e.device.control_verified = Some(true);
         assert!(!evaluate(&e).unwrap().conclusion_allowed);

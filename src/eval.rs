@@ -45,9 +45,9 @@ const DEFAULT_DENY_KEYWORDS: [&str; 7] = [
 
 /// gray 收端目前实现的受控开关。层的开关集合是有限且已实现的, 上层发明新开关
 /// 或请求收端没实现的开关, 整份拒绝。
-const GRAY_SUPPORTED_KNOBS: [&str; 1] = ["loadop_dont_care"];
+const GRAY_SUPPORTED_KNOBS: [&str; 2] = ["loadop_dont_care", "storeop_dont_care"];
 
-const USAGE: &str = "用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--json]";
+const USAGE: &str = "恢复: phonefarm eval recover --session DIR --serial S [--json]\n用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--evidence-origin device|synthetic] [--json]";
 
 /// PyVal → serde_json 值 (同一个桥的反向)。经 dumps 走文本, 非有限值
 /// (Infinity/NaN) 会被 serde_json 拒掉, 这里如实落 null。
@@ -89,6 +89,7 @@ struct EvalArgs {
     /// 确定性截断 (src/curtail.rs): 缺省开。`--no-curtail` 跑满全部轮次。
     curtail: bool,
     qualify_from: Option<String>,
+    evidence_origin: String,
 }
 
 fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
@@ -96,6 +97,7 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
     let (mut request, mut serial, mut power_rail, mut out) = (None, None, None, None);
     let mut curtail = true;
     let mut qualify_from = None;
+    let mut evidence_origin = "device".to_string();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--request" => request = it.next().cloned(),
@@ -104,10 +106,12 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
             "--out" => out = it.next().cloned(),
             "--no-curtail" => curtail = false,
             "--qualify-from" => qualify_from = it.next().cloned(),
+            "--evidence-origin" => evidence_origin = it.next().ok_or("missing evidence origin")?.clone(),
             "--json" => {} // eval 的回包恒为 JSON, 收下这个旗子仅为兼容接口形状
             other => return Err(format!("不认识的参数 {other}\n{USAGE}")),
         }
     }
+    if !matches!(evidence_origin.as_str(),"device"|"synthetic") {return Err("invalid evidence origin".into());}
     Ok(EvalArgs {
         request: request.ok_or(format!("缺少 --request\n\n{USAGE}"))?,
         serial,
@@ -115,10 +119,12 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
         out,
         curtail,
         qualify_from,
+        evidence_origin,
     })
 }
 
 pub fn run_eval(args: &[String]) -> i32 {
+    if args.first().is_some_and(|a|a=="recover") {return recover_gray_eval(&args[1..]);}
     let a = match parse_args(args) {
         Ok(v) => v,
         Err(e) => {
@@ -201,6 +207,13 @@ pub fn run_eval(args: &[String]) -> i32 {
         }
     };
     let serial = Some(_lease.serial.clone());
+    if kind=="gray" && launch_spec(&req).is_some() {
+        return match gray_eval_launch(&req, _lease, Path::new(&evidence), &a.evidence_origin) {
+            Ok(r)=>{ let code=if r["recovery"]["status"]!="reported_complete" || !r["report_error"].is_null() || !r["qualification_error"].is_null() {2} else if r["status"]=="ABORT" {1} else {0}; println!("{}",serde_json::to_string_pretty(&r).unwrap()); code },
+            Err(e)=>{eprintln!("{e}");2}
+        };
+    }
+    if a.evidence_origin!="device" {eprintln!("--evidence-origin is supported for gray workload.launch only");return 2;}
     let report = match kind {
         "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail),
         "gray" => gray_eval(&req, serial.as_deref(), Path::new(&evidence)),
@@ -2176,6 +2189,155 @@ fn save_png(path: &Path, shot: &(u32, u32, Vec<u8>)) {
     }
 }
 
+fn recover_gray_eval(args:&[String])->i32 {
+    let result=(||->Result<Value,String>{
+        let (mut dir,mut serial)=(None,None);let mut it=args.iter();
+        while let Some(a)=it.next(){match a.as_str(){"--session"=>dir=it.next(),"--serial"=>serial=it.next(),"--json"=>{},_=>return Err(format!("unknown eval recover argument: {a}"))}}
+        let parent=crate::gray_eval_session::Parent::resume(Path::new(dir.ok_or("missing --session")?),serial.ok_or("missing --serial")?)?;
+        parent.finish(Some("explicit same-context recovery; original experiment report is unchanged"))
+    })();
+    match result {Ok(r)=>{println!("{}",serde_json::to_string_pretty(&r).unwrap());if r["status"]=="reported_complete"{0}else{2}},Err(e)=>{eprintln!("{e}");2}}
+}
+
+fn wait_owned_launch(parent:&crate::gray_eval_session::Parent, launch:&LaunchSpec, layered:bool)->Result<(),String> {
+    let start=std::time::Instant::now();
+    loop {
+        if !parent.base.target_alive()? {return Err("target exited before the launch window".into());}
+        let ready=if launch.marker.is_some() {parent.base.eval_launch_marker()?.is_some_and(|v|!v.trim().is_empty())}
+            else {start.elapsed().as_secs()>=LAUNCH_SETTLE_S};
+        let loaded=!layered || parent.base.marker()?.is_some_and(|v|v["frames"].as_u64().is_some());
+        if ready&&loaded {if layered{parent.base.narrow()?;}return Ok(());}
+        if start.elapsed().as_secs()>=LAUNCH_MARKER_TIMEOUT_S {return Err("launch marker or current layer evidence timed out".into());}
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+fn run_owned_gray(parent:&crate::gray_eval_session::Parent, label:&str, out:&Path, seconds:u64, comm:Option<&str>)->Result<Value,String> {
+    let (workload_ok,sampler_ok)=parent.sample(label,seconds,out)?;
+    let alive=parent.base.target_alive()?;
+    parent.base.eval_stop_target()?;
+    if !workload_ok {return Err(format!("{label}: trace workload failed; raw exit and log retained"));}
+    let trace=std::fs::read_to_string(out.join("trace.txt")).map_err(|e|e.to_string())?;
+    let parsed=crate::looptrace::parse(&trace,comm.filter(|c|!c.is_empty()).unwrap_or(crate::looptrace::DEFAULT_RENDER_COMM));
+    let summary=py_dumps(&parsed.summarize());
+    crate::confirmation_transport::new_file(&out.join("summary.json"),summary.as_bytes())?;
+    let env_path=out.join("env.txt");
+    let env=std::fs::read_to_string(&env_path).map_err(|e|e.to_string())?;
+    let mut result=json!({"label":label,"run_once_rc":0,"launch":true,"summary":serde_json::from_str::<Value>(&summary).map_err(|e|e.to_string())?,
+        "env":to_serde(&sysparam::env_stats(&env))});
+    bind_run_evidence(&mut result,label,out,&env_path,sampler_ok,seconds+4,seconds,Some(if alive {0}else{1}))?;
+    crate::confirmation_transport::new_file(&out.join("run.json"),&serde_json::to_vec_pretty(&result).unwrap())?;
+    Ok(result)
+}
+
+fn effective_gray_hits(marker:&Value)->u64 {
+    marker["effective"].as_array().map(|xs|xs.iter().filter_map(|e|e["begins"].as_u64()).sum()).unwrap_or(0)
+}
+
+fn gray_eval_launch(req:&Value, lease:crate::devlease::Lease, evidence:&Path, origin:&str)->Result<Value,String> {
+    let launch=launch_spec(req).ok_or("missing workload.launch")?;
+    let knobs=parse_gray_rewrites(&req["payload"])?;
+    if knobs.loadop {return Err("gray workload.launch supports storeop only".into());}
+    if req["workload"]["enter"].as_str()==Some("onboard") {return Err("owned launch eval requires a self-driven scene; onboard/script input is a separate route".into());}
+    let seconds=req["workload"]["seconds"].as_u64().unwrap_or(30);
+    if !(1..=86400).contains(&seconds) {return Err("workload.seconds must be 1..86400".into());}
+    let policy=policy_for_request(req)?;
+    let rounds=policy.required_pairs;let alpha=policy.alpha;let cap=policy.temp_cap_c;let cool=policy.cool_c;
+    let pkg=req["package"].as_str().ok_or("missing package")?;
+    let base=crate::gray_session::Session::new_eval(lease,evidence,pkg,origin,launch.marker.as_deref())?;
+    let parent=crate::gray_eval_session::Parent::new(base,req)?;
+    let dir=parent.base.dir.clone();
+    let mut report=base_report(req,"gray");
+    report["session"]=json!(dir);report["evidence_dir"]=json!(dir);report["evidence_origin"]=json!(origin);
+    let mut facts=Evidence::new(Stage::Probe,policy,qualification::Capabilities::default());
+    if origin=="synthetic" {facts.evidence_origin="synthetic".into();}
+    let mut ctrl=Vec::new();let mut candidate=Vec::new();let mut cool_log=Vec::new();let mut frames=Vec::new();let mut live=Value::Null;
+    let result=(||->Result<(),String>{
+        parent.stage("capability")?;
+        facts.device=parent.capabilities()?;
+        if !record_qualification(&mut report,&dir,&facts)?.probe_allowed {return Err("root/trace prerequisites not verified".into());}
+        parent.base.prepare()?;
+        parent.stage("image_check")?;
+        let static_extras=launch.static_extras.as_deref().unwrap_or(&launch.extras);
+        parent.base.install_storeop(req["payload"]["layer_so"].as_str(),&knobs.storeop,Some(static_extras))?;
+        let image_dir=dir.join("image_check");std::fs::create_dir(&image_dir).map_err(|e|e.to_string())?;
+        live=crate::frameaudit::collect_storeop(&parent.base,&image_dir,&knobs.storeop,2,pkg,&[],STATIC_SETTLE_S,&mut frames)?;
+        crate::confirmation_transport::new_file(&image_dir.join("result.json"),&serde_json::to_vec_pretty(&live).unwrap())?;
+        live_check_verdict(&live)?;facts.quality_verified=Some(true);
+        parent.base.eval_stop_target()?;
+        parent.stage("qualification")?;parent.deploy()?;
+        let fan=parent.fan_off()?;
+        let cold=parent.wait_cool(cool,420)?;facts.cold_ok=cold["ok"].as_bool();
+        report["baseline_conditions"]=json!({"fan":fan,"cold":cold});
+        if facts.cold_ok!=Some(true) {return Err("baseline cold condition not verified".into());}
+        parent.base.restart_eval("workload_check",None,&launch.extras)?;
+        wait_owned_launch(&parent,&launch,false)?;
+        let motion_dir=dir.join("workload_check");std::fs::create_dir(&motion_dir).map_err(|e|e.to_string())?;
+        let a=motion_dir.join("frame_a.png");let b=motion_dir.join("frame_b.png");
+        parent.base.screenshot(&a)?;
+        std::thread::sleep(std::time::Duration::from_secs(5));parent.base.screenshot(&b)?;
+        let motion=to_serde(&crate::framecheck::verdict(&crate::frameaudit::png_raw(&a)?,&crate::frameaudit::png_raw(&b)?));
+        let alive=parent.base.target_alive()?;parent.base.eval_stop_target()?;
+        facts.workload_verified=Some(alive&&motion["spinning"]==true);
+        let check=json!({"verified":facts.workload_verified,"app_alive":alive,"motion":motion,"frames":[a,b],"launch":true});
+        crate::confirmation_transport::new_file(&motion_dir.join("workload_check.json"),&serde_json::to_vec_pretty(&check).unwrap())?;
+        if facts.workload_verified!=Some(true) {return Err("self-driven workload motion not verified".into());}
+        for i in 1..=3 {
+            let label=format!("baseline{i}");parent.stage(&label)?;
+            parent.base.restart_eval(&label,None,&launch.extras)?;wait_owned_launch(&parent,&launch,false)?;
+            facts.baseline.push(run_owned_gray(&parent,&label,&dir.join(&label),seconds,req["workload"]["render_comm"].as_str())?);
+        }
+        // The parent still owns active restoration obligations. Keep them unknown
+        // while collecting, then require the final complete receipt for a conclusion.
+        parent.admission_ready()?;facts.restored=None;facts.stage=Stage::Experiment;
+        let q=qualification::evaluate_gray_session_collection(&facts)?;
+        if !write_qualification(&mut report,&dir,&facts,q)?.experiment_allowed {return Err("gray baseline/workload/power qualification did not admit candidate collection".into());}
+        for i in 1..=rounds {
+            for arm in if i%2==1 {["knob","ctrl"]}else{["ctrl","knob"]} {
+                let label=format!("{arm}{i}");parent.stage(&label)?;
+                let fan=parent.fan_off()?;let mut cold=parent.wait_cool(cool,arm_cool_timeout(&cool_log))?;
+                cold["arm"]=json!(label);cold["fan"]=fan;cool_log.push(cold);
+                parent.base.restart_eval(&label,Some(if arm=="knob" {&knobs.storeop}else{"0"}),&launch.extras)?;
+                wait_owned_launch(&parent,&launch,true)?;
+                let out=dir.join(&label);
+                let mut run=run_owned_gray(&parent,&label,&out,seconds,req["workload"]["render_comm"].as_str())?;
+                if let (Some(t),Some(limit))=(run_soc_temp_max(&run),cap) {if t>limit{return Err(format!("{label}: SoC temperature {t} exceeds {limit}"));}}
+                if arm=="knob" {
+                    let marker=parent.base.marker()?.ok_or("candidate marker missing")?;
+                    crate::confirmation_transport::new_file(&out.join("layer_marker.json"),&serde_json::to_vec_pretty(&marker).unwrap())?;
+                    run["layer_hits"]=json!(effective_gray_hits(&marker));
+                    candidate.push(run);
+                } else {ctrl.push(run);}
+            }
+        }
+        Ok(())
+    })();
+    let mut error=result.err();
+    let collection=json!({"schema":"phonefarm/gray-eval-launch-collection@1","session":dir,"evidence_origin":origin,
+        "baseline":facts.baseline,"control":ctrl,"candidate":candidate,"image_check":live,"frames":frames,"cool_per_arm":cool_log,"error":error});
+    if let Err(e)=crate::confirmation_transport::new_file(&dir.join("eval-collection.json"),&serde_json::to_vec_pretty(&collection).unwrap()) {
+        error=Some(format!("{}; collection report: {e}",error.as_deref().unwrap_or("collection completed")));
+    }
+    let recovery=parent.finish(error.as_deref()).unwrap_or_else(|e|json!({"status":"required","error":e,"session":dir}));
+    let complete=recovery["status"]=="reported_complete";
+    let hits=candidate.iter().filter_map(|v|v["layer_hits"].as_u64()).max().unwrap_or(0);
+    facts.stage=Stage::Conclusion;facts.control=ctrl.clone();facts.candidate=candidate.clone();facts.restored=Some(complete);facts.device.control_verified=Some(hits>0);
+    report["recovery"]=recovery;
+    let (reached,timed_out)=cool_summary(&cool_log);
+    report["conditions_observed"]=json!({"cool_c_target":cool,"cool_reached_c":reached,"cool_timeout":timed_out,"cool_per_arm":cool_log,
+        "hits":hits,"apply_ok":hits>0,"restored":complete,"game_state_restored":false,"image_check":{"method":"storeop_check_live","result":live}});
+    let qualified=record_qualification(&mut report,&dir,&facts);
+    if let Some(e)=error {report["verdict"]["reason"]=json!(e);}
+    else if !complete {report["verdict"]["reason"]=json!("owned gray eval recovery not complete; evidence retained");}
+    else if !qualified.as_ref().is_ok_and(|q|q.conclusion_allowed) {report["verdict"]["reason"]=json!("conclusion qualification not satisfied");}
+    else if req["payload"]["require_hit"].as_bool().unwrap_or(true)&&hits==0 {report["verdict"]["reason"]=json!("candidate rewrite never hit");}
+    else {finish_gray_statistics(&mut report,&candidate,&ctrl,alpha,rounds,None,Some(&facts.policy.required_metrics))?;}
+    if let Err(e)=qualified {report["qualification_error"]=json!(e);}
+    let path=dir.join("eval-report.json");report["report_path"]=json!(path);
+    if let Err(e)=crate::confirmation_transport::new_file(&path,&serde_json::to_vec_pretty(&report).unwrap()) {report["report_error"]=json!(e);}
+    Ok(report)
+}
+
 fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
     let kind = "gray";
     let mut report = base_report(req, kind);
@@ -2568,16 +2730,22 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
+    finish_gray_statistics(&mut report, &knob_runs, &ctrl_runs, alpha, rounds, min_of(&psnr_knob_vs_ctrl), None)?;
+    Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_gray_statistics(report:&mut Value, knob_runs:&[Value], ctrl_runs:&[Value], alpha:f64, rounds:u32, psnr:Option<f64>, required:Option<&[String]>)->Result<(),String> {
     if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
         report["verdict"]["reason"] = json!(e);
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+        return Ok(());
     }
     // 画面过了门槛: 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
-    let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
+    let (verdict, keep, on_battery_all) = judge_runs_with(ctrl_runs, knob_runs, alpha, rounds, required);
     report["verdict"] = verdict;
     let mut m = report["metrics"].take();
     let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
-    m["psnr_db"] = json!(min_of(&psnr_knob_vs_ctrl));
+    m["psnr_db"] = json!(psnr);
     if power.is_none() {
         unavailable(&mut m, "power_watt", "非放电态 (或功耗采样缺失): 整机功耗量不准, 如实 null");
     }
@@ -2586,7 +2754,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     }
     report["metrics"] = m;
     report["status"] = json!(if keep { "PASS" } else { "REJECT" });
-    Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
+    Ok(())
 }
 
 /// 层自报的改写命中数 (契约 verdict 口径: "改写被绑定的次数")。
@@ -2693,6 +2861,7 @@ mod tests {
 
     #[test]
     fn gray_rejects_unimplemented_knobs() {
+        assert!(validate_ok(&v2_req("gray",json!({"rewrites":[{"knob":"storeop_dont_care","scope":"15a51a87:0"}]}))));
         let mut r = v2_req("gray", json!({"rewrites": [{"knob": "render_scale", "args": {"scale": 0.75}}]}));
         assert!(validate_err(&r).contains("render_scale"));
         assert!(validate_err(&r).contains("收端已实现"));
@@ -2950,6 +3119,8 @@ mod path_tests {
 
     #[test]
     fn gray_rewrites_map_to_layer_properties() {
+        assert_eq!(effective_gray_hits(&json!({"effective":[{"begins":0}],"readonly_stats":{"render_pass_begins":100}})),0);
+        assert_eq!(effective_gray_hits(&json!({"effective":[{"begins":2},{"begins":3}]})),5);
         let k = parse_gray_rewrites(&json!({"rewrites": [
             {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"},
             {"knob": "storeop_dont_care", "scope": "9d0b4db80bf552b8:0"},
@@ -2960,6 +3131,20 @@ mod path_tests {
         let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "loadop_dont_care"}]})).unwrap();
         assert!(k.loadop);
         assert_eq!(k.storeop, "0");
+    }
+
+    #[test]
+    fn gray_cadence_does_not_win_from_power_outside_its_frozen_goal() {
+        let arm=|power:f64| (0..6).map(|i|json!({"label":format!("r{i}"),"summary":{"frame_p95":16.0,"fps_mean":60.0},
+            "env":{"power_w_mean":power+i as f64*0.01,"on_battery":true}})).collect::<Vec<_>>();
+        let (ctrl,knob)=(arm(6.0),arm(3.0));
+        assert!(judge_runs(&ctrl,&knob,0.05,6).1); // old adaptive metric list would accept this
+        let required=Goal::RenderCadence.metrics();
+        let mut report=base_report(&json!({}),"gray");
+        finish_gray_statistics(&mut report,&knob,&ctrl,0.05,6,None,Some(&required)).unwrap();
+        assert_eq!(report["status"],"REJECT");
+        assert_eq!(report["verdict"]["alpha_win"],0.025);
+        assert!(report["verdict"]["per_metric"].get("power_w_mean").is_none());
     }
 
     /// 不认识的开关、缺范围、范围写错, 都在碰设备之前拒收。

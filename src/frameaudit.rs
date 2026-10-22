@@ -1218,6 +1218,18 @@ impl StoreopFrame {
     }
 }
 
+/// Decode lossless PNG through the same bounded path used by storeop, then
+/// expose the existing framecheck 12-byte raw header followed by RGBA8 pixels.
+pub(crate) fn png_raw(path: &Path) -> Result<Vec<u8>, String> {
+    let frame = StoreopFrame::from_png(path)?;
+    let mut raw = Vec::with_capacity(12 + frame.rgba.len());
+    raw.extend_from_slice(&(frame.width as u32).to_le_bytes());
+    raw.extend_from_slice(&(frame.height as u32).to_le_bytes());
+    raw.extend_from_slice(&1u32.to_le_bytes());
+    raw.extend_from_slice(&frame.rgba);
+    Ok(raw)
+}
+
 // Both acquisition paths use the same pixel calculation and UI exclusion policy.
 fn storeop_diffs(phases: &[(bool, Vec<StoreopFrame>)]) -> Result<(usize, usize, Vec<Value>), String> {
     let first = phases.first().and_then(|p| p.1.first()).ok_or("no storeop frames")?;
@@ -1241,61 +1253,71 @@ fn storeop_diffs(phases: &[(bool, Vec<StoreopFrame>)]) -> Result<(usize, usize, 
     Ok((w, h, rows))
 }
 
+/// Collect using the caller's prepared and installed session. Lease ownership
+/// and recovery remain with the caller; appended frame records survive errors.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn collect_storeop(session: &crate::gray_session::Session, out: &Path, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, frames: &mut Vec<Value>) -> Result<Value, String> {
+    if rounds == 0 { return Err("storeop rounds must be at least one".into()); }
+    let phase_count = rounds.checked_mul(2).and_then(|n| n.checked_add(1)).ok_or("round count overflow")?;
+    let first_frame = frames.len();
+    capture_scene(session, pkg, taps, settle)?;
+    let set_on = |on| -> Result<(), String> {
+        session.set_storeop(on)?;
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        Ok(())
+    };
+    let mut phases = Vec::new();
+    for phase in 0..phase_count {
+        let on = phase % 2 == 1;
+        set_on(on)?;
+        let mut shots = Vec::new();
+        for index in 0..3 {
+            let path = out.join(format!("phase-{phase}-{index}.png"));
+            session.screenshot(&path)?;
+            frames.push(json!({"phase":phase,"on":on,"index":index,"image":path,"wall":chrono::Utc::now().to_rfc3339()}));
+            shots.push(StoreopFrame::from_png(&path)?);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        phases.push((on, shots));
+    }
+    set_on(true)?;
+    session.trigger(1)?;
+    let mut audit = None;
+    for attempt in 0..45 {
+        if let Some(value) = session.audit(1)? { audit = Some(value); break; }
+        if attempt < 44 { std::thread::sleep(std::time::Duration::from_secs(2)); }
+    }
+    let audit = audit.ok_or("enabled storeop trigger produced no matching audit")?;
+    let audit_path = out.join("fa_on.json");
+    crate::confirmation_transport::new_file(&audit_path, &serde_json::to_vec_pretty(&audit).map_err(|e| e.to_string())?)?;
+    set_on(false)?;
+    let alive = session.target_alive()?;
+    let marker = session.marker()?.ok_or("layer marker disappeared after storeop capture")?;
+    let marker_path = out.join("layer_marker.json");
+    crate::confirmation_transport::new_file(&marker_path, &serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?)?;
+    let crash = session.crash_log()?;
+    let crash_path = out.join("crash.log");
+    crate::confirmation_transport::new_file(&crash_path, crash.as_bytes())?;
+    let (w, h, rows) = storeop_diffs(&phases)?;
+    let effective = marker["effective"].as_array().cloned().unwrap_or_default();
+    let hit = effective.iter().filter(|e| e["begins"].as_u64().unwrap_or(0) > 0).count();
+    Ok(json!({"rule":rule,"screen":[w,h],"rounds":rounds,"effective":effective,"effective_hit":hit,
+        "game_alive":alive,"crash_log_lines":crash.lines().filter(|l| l.contains(pkg)).count(),
+        "frameaudit_on_captured":true,"diffs":rows,"audit":audit_path,"marker":marker_path,"crash_log":crash_path,
+        "shot_off":frames[first_frame + 1]["image"],"shot_on":frames[first_frame + 4]["image"],
+        "pixel_source":"lossless_png_decoded_rgba8","ui_exclusion":"existing_frameaudit_proportional_regions"}))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>, origin: &str) -> Result<Value, String> {
-    let phase_count = rounds.checked_mul(2).and_then(|n| n.checked_add(1)).ok_or("round count overflow")?;
+    rounds.checked_mul(2).and_then(|n| n.checked_add(1)).ok_or("round count overflow")?;
     let lease = crate::devlease::Lease::target(Some(serial), "frame-audit-storeop")?;
     let session = crate::gray_session::Session::new(lease, out, pkg, origin)?;
     let mut frames = Vec::new();
     let collected: Result<Value, String> = (|| {
         session.prepare()?;
         session.install_storeop(so.as_deref(), rule, extras.as_deref())?;
-        capture_scene(&session, pkg, taps, settle)?;
-        let set_on = |on| -> Result<(), String> {
-            session.set_storeop(on)?;
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            Ok(())
-        };
-        let mut phases = Vec::new();
-        for phase in 0..phase_count {
-            let on = phase % 2 == 1;
-            set_on(on)?;
-            let mut shots = Vec::new();
-            for index in 0..3 {
-                let path = session.dir.join(format!("phase-{phase}-{index}.png"));
-                session.screenshot(&path)?;
-                frames.push(json!({"phase":phase,"on":on,"index":index,"image":path,"wall":chrono::Utc::now().to_rfc3339()}));
-                shots.push(StoreopFrame::from_png(&path)?);
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-            phases.push((on, shots));
-        }
-        set_on(true)?;
-        session.trigger(1)?;
-        let mut audit = None;
-        for attempt in 0..45 {
-            if let Some(value) = session.audit(1)? { audit = Some(value); break; }
-            if attempt < 44 { std::thread::sleep(std::time::Duration::from_secs(2)); }
-        }
-        let audit = audit.ok_or("enabled storeop trigger produced no matching audit")?;
-        let audit_path = session.dir.join("fa_on.json");
-        crate::confirmation_transport::new_file(&audit_path, &serde_json::to_vec_pretty(&audit).map_err(|e| e.to_string())?)?;
-        set_on(false)?;
-        let alive = session.target_alive()?;
-        let marker = session.marker()?.ok_or("layer marker disappeared after storeop capture")?;
-        let marker_path = session.dir.join("layer_marker.json");
-        crate::confirmation_transport::new_file(&marker_path, &serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?)?;
-        let crash = session.crash_log()?;
-        let crash_path = session.dir.join("crash.log");
-        crate::confirmation_transport::new_file(&crash_path, crash.as_bytes())?;
-        let (w, h, rows) = storeop_diffs(&phases)?;
-        let effective = marker["effective"].as_array().cloned().unwrap_or_default();
-        let hit = effective.iter().filter(|e| e["begins"].as_u64().unwrap_or(0) > 0).count();
-        Ok(json!({"rule":rule,"screen":[w,h],"rounds":rounds,"effective":effective,"effective_hit":hit,
-            "game_alive":alive,"crash_log_lines":crash.lines().filter(|l| l.contains(pkg)).count(),
-            "frameaudit_on_captured":true,"diffs":rows,"audit":audit_path,"marker":marker_path,"crash_log":crash_path,
-            "shot_off":frames[1]["image"],"shot_on":frames[4]["image"],
-            "pixel_source":"lossless_png_decoded_rgba8","ui_exclusion":"existing_frameaudit_proportional_regions"}))
+        collect_storeop(&session, &session.dir, rule, rounds, pkg, taps, settle, &mut frames)
     })();
     let (result, mut error) = match collected { Ok(v)=>(v,None), Err(e)=>(Value::Null,Some(e)) };
     let collection_path = session.dir.join("collection.json");
