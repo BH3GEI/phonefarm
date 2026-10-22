@@ -1,0 +1,3 @@
+#!/bin/sh
+# farm 垫片: 放在 PATH 最前 (并设 ADB_BIN=<本目录>/adb), 所有 adb 调用先过 farm guard。
+exec python3 -I "$(dirname "$0")/../farm.py" guard adb "$@"
