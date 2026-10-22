@@ -53,6 +53,7 @@ UPOP_PROP="debug.knobs.upop"              # 1 = 真超分算子 (gen1_loc3), dst
 SO="libVkLayer_refknobs.so"
 STATE="/data/local/tmp/knobs_layer_state"       # 存"把 .so 推进了哪个包", 供 off 精确回滚
 OUT="$(cd "$(dirname "$0")" && pwd)/build/out"
+. "$(dirname "$0")/gray_mode_admission.sh" || exit 2
 ashell() { adb -s "$SERIAL" shell "$@" </dev/null; }
 
 # 解析一个包的 nativeLibraryDir —— 加载器真正会搜的那个目录
@@ -181,19 +182,8 @@ case "${1:-}" in
   target)
     [ -n "${2:-}" ] || { echo "target 要给包名" >&2; exit 2; }
     ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 0; setprop $CP_PROP 0; setprop $UPOP_PROP 0'"; mount_layer "$2" "$KEEP" ;;
-  # 拷贝探针档: 1:1 拷贝算子把"建 pipeline/建 image/换描述符"全走一遍, 画面应逐像素不变。
-  # 是**改写**, 不是只读 —— 探的就是反作弊对这种侵入放不放行。
-  copyprobe)
-    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 1; setprop $UPOP_PROP 0'"
-    [ "$(ashell "getprop $CP_PROP" | tr -d '\r')" = "1" ] \
-      || { echo "setprop $CP_PROP 没生效, 拒绝按探针档继续" >&2; exit 1; }
-    mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
-  # 真超分算子档: gen1_loc3 (2x2 bilinear), dst=送显分辨率
-  upop)
-    ashell "su -c 'setprop $LOADOP_PROP 0; setprop $DUMP_PROP 1; setprop $CP_PROP 0; setprop $UPOP_PROP 1'"
-    [ "$(ashell "getprop $UPOP_PROP" | tr -d '\r')" = "1" ] \
-      || { echo "setprop $UPOP_PROP 没生效, 拒绝按算子档继续" >&2; exit 1; }
-    mount_layer "${2:-com.miHoYo.Yuanshen}" "$KEEP" ;;
+  # Loading the layer is not proof that these production injection paths exist.
+  copyprobe|upop) gray_mode_admission "$1"; exit $? ;;
   status)
     echo "debug.vulkan.layers = [$(ashell 'getprop debug.vulkan.layers' | tr -d '\r')]"
     echo "$LOADOP_PROP  = [$(ashell "getprop $LOADOP_PROP" | tr -d '\r')]"

@@ -252,16 +252,16 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
-灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop|frameaudit|frameaudit-ts [pkg] | target <pkg> | status | off} [--keep-prop] [--so 层.so]
-       (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
+灰档:  gray-layer {probe|loadop|passdump|frameaudit|frameaudit-ts [pkg] | target <pkg> | status | off} [--keep-prop] [--so 层.so]
+       (Vulkan 层挂/摘/查; copyprobe/upop 当前不支持执行，包括自定义 SO；历史证据可离线分析)
        frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 层.so]   (只读层抓原神一帧步骤清单)
        frame-audit recover --session <会话目录> --serial S [--json]   (核验并恢复本次灰层抓帧范围)
        frame-audit analyze <knobs_frameaudit.json>... [--md F] [--json F]           (离线: 步骤总览 + 白存/白读/白清/白画)
 工件:  gray-artifact {build (--source sampled.comp | --adapted-artifact DIR) --out DIR [--ndk DIR] [--timeout-seconds 1..120] [--process-supervision own-helper-groups|inherited-group] | inspect --spirv FILE | verify --artifact DIR | adapt-storage --source original.comp --spirv original.spv --out DIR | verify-adaptation --artifact DIR} [--json]
        (离线编译/ABI/摘要门禁; deployable=false, 不构成真机部署资格)
-       gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
+       gray-ab [--pairs N] [--mode loadop] [--serial S] --out <目录>
        gray-ab recover --session DIR --serial S [--json]
-       (loadop 支持 --json / --evidence-origin device|synthetic；完整会话停充与恢复，copyprobe 尚未迁移)
+       (loadop 支持 --json / --evidence-origin device|synthetic；完整会话停充与恢复，copyprobe 当前不支持执行)
        (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)
 画质:  sequence-quality --reference R.json --candidate C.json --rules frozen.json [--out tasks/quality/report.json]
        (配对连续帧 RGB PSNR/色偏/残差变化, 零 Token 离线; PASS 只覆盖冻结指标, 不证明无鬼影)
@@ -398,7 +398,22 @@ fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // 碰设备的子命令先过设备锁 (src/devlock.rs): 没拿到锁不碰设备
     if let Some(sub) = args.first().cloned() {
-        if devlock::needs_lock(&sub, &args[1..]) {
+        let gray = matches!(sub.as_str(), "gray-layer" | "gray-ab");
+        if gray {
+            match graylayer::cli_admission(&sub, &args[1..]) {
+                Ok(graylayer::GrayCliAdmission::Help) => { println!("{USAGE}"); return; }
+                Ok(graylayer::GrayCliAdmission::Reject(rejection)) => {
+                    println!("{rejection}");
+                    std::process::exit(2);
+                }
+                Err(error) => { eprintln!("{error}"); std::process::exit(2); }
+                Ok(graylayer::GrayCliAdmission::Proceed) => {},
+            }
+        }
+        // True help was handled above. A gray option's value named --help must
+        // not trigger the legacy gate's token-based help exemption.
+        let gray_execution = gray && !(sub == "gray-ab" && args.get(1).is_some_and(|a| a == "recover"));
+        if gray_execution || devlock::needs_lock(&sub, &args[1..]) {
             if let devlock::Gate::Exit(code) = devlock::gate(&mut args) {
                 std::process::exit(code);
             }

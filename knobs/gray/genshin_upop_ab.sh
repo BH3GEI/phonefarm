@@ -10,6 +10,8 @@
 #     + 进大世界站定截帧 (画质比对用, UID 区域比对时排除)。
 # 另有一个 ref 臂: 渲染精度极高 + passdump, 取原生参考帧 (需先把设置调回极高再跑,
 # 由 REF_ARM=1 单独调用)。
+# 当前生产 upop 不支持执行，默认 A/B 在任何实验动作前拒绝。
+# REF_ARM=1 保留旧参考臂；它尚未迁移到 owned session。
 set -uo pipefail
 
 SERIAL="${SERIAL:-91253241019A}"
@@ -19,6 +21,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${OUT:-$ROOT/loop_v1/runs_graylayer/upop_$(date +%H%M%S)}"
 PAIRS="${PAIRS:-5}"
 REF_ARM="${REF_ARM:-0}"
+. "$HERE/gray_mode_admission.sh" || exit 2
+if [ "$REF_ARM" != "1" ]; then
+  gray_mode_admission upop
+  exit $?
+fi
 GATE_X="${GATE_X:-1342}"; GATE_Y="${GATE_Y:-651}"
 MARK=/storage/emulated/0/Android/data/$PKG/files/knobs_layer_out.json
 ashell() { adb -s "$SERIAL" shell "$@" </dev/null; }

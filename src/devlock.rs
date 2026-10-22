@@ -144,10 +144,21 @@ pub fn strip_lock_args(args: &mut Vec<String>) -> Result<LockOpts, String> {
     };
     let mut kept = Vec::with_capacity(args.len());
     let mut it = std::mem::take(args).into_iter();
-    if let Some(sub) = it.next() {
-        kept.push(sub);
-    }
+    let sub = it.next().unwrap_or_default();
+    if !sub.is_empty() { kept.push(sub.clone()); }
     while let Some(a) = it.next() {
+        // Gray admission and execution must see the same option values. A
+        // serial/path named --no-devlock must not disable the queue gate.
+        let gray_value = match sub.as_str() {
+            "gray-layer" => matches!(a.as_str(), "--serial" | "--so"),
+            "gray-ab" => matches!(a.as_str(), "--serial" | "--out" | "--pairs" | "--mode" | "--evidence-origin"),
+            _ => false,
+        };
+        if gray_value {
+            let value = it.next().ok_or_else(|| format!("{a} requires a value"))?;
+            kept.extend([a, value]);
+            continue;
+        }
         match a.as_str() {
             "--lock-label" => {
                 o.label = Some(it.next().ok_or("--lock-label 要一个名字")?);
@@ -344,6 +355,16 @@ mod tests {
         assert_eq!(o.label.as_deref(), Some("core"));
         assert_eq!(o.wait, Duration::from_secs(600));
         assert!(!o.disabled);
+        for sub in ["gray-layer", "gray-ab"] {
+            let mut gray = v(&[sub, "--serial", "--no-devlock", "--lock-label", "--help"]);
+            let options = strip_lock_args(&mut gray).unwrap();
+            assert_eq!(gray, v(&[sub, "--serial", "--no-devlock"]));
+            assert!(!options.disabled);
+            assert_eq!(options.label.as_deref(), Some("--help"));
+        }
+        let mut gray = v(&["gray-ab", "--out", "--lock-wait", "--mode", "loadop", "--no-devlock"]);
+        assert!(strip_lock_args(&mut gray).unwrap().disabled);
+        assert_eq!(gray, v(&["gray-ab", "--out", "--lock-wait", "--mode", "loadop"]));
     }
 
     #[test]

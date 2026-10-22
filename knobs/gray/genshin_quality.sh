@@ -3,12 +3,14 @@
 # 用法:
 #   bash genshin_quality.sh begin <passdump|upop> <label>   # 挂层重启进大世界, 打开时钟面板, 截图读当前时辰
 #   SWIPE="x1 y1 x2 y2" bash genshin_quality.sh finish <label>  # 拖到12:00, 确认, 关菜单, 截世界帧
+# begin upop/copyprobe 当前拒绝；passdump/finish 保留旧路径，尚未迁移 owned session。
 set -uo pipefail
 SERIAL="${SERIAL:-91253241019A}"
 PKG=com.miHoYo.Yuanshen
 ROOT="${ROOT:-/Users/mac/projects/phonefarm}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="${OUT:-$ROOT/loop_v1/runs_graylayer/upop_141624/quality}"
+. "$HERE/gray_mode_admission.sh" || exit 2
 GATE_X="${GATE_X:-1342}"; GATE_Y="${GATE_Y:-651}"
 MARK=/storage/emulated/0/Android/data/$PKG/files/knobs_layer_out.json
 ashell() { adb -s "$SERIAL" shell "$@" </dev/null; }
@@ -66,6 +68,7 @@ PY
 shot() { adb -s "$SERIAL" exec-out screencap > "$1" 2>/dev/null; }
 
 begin() { # $1=mode $2=label
+  gray_mode_admission "$1" || return $?
   local dir="$OUT/$2"; mkdir -p "$dir"
   echo "── 画质臂 $2 ($1) ──"
   bash "$HERE/enable_layer.sh" off >/dev/null 2>&1

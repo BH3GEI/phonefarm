@@ -1,4 +1,4 @@
-//! 灰档 A/B 采集编排 (knobs/gray/genshin_loadop_ab.sh 与 genshin_copyprobe_ab.sh 的移植)。
+//! 灰档 loadop A/B 采集；未支持的 copyprobe 在设备动作前拒绝。
 //!
 //! 两臂**都挂层**, 唯一差别是属性: ctrl = 层+改写关 (只读档), knob = 层+改写开。
 //! 要判的是**这条改写**值不值, 不是"挂层这件事"值不值; 两臂都挂层才能把层本身的
@@ -9,9 +9,7 @@
 //!
 //! 原神里**不按 A 键、不按 BACK**: 全程只在登录页点一次"门", 负载只在画面空白处拖视角。
 
-use crate::eval::{adb, adb_ok, run_one, su};
-use crate::graylayer::GrayLayer;
-use crate::shotdiff;
+use crate::eval::{adb, su};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -84,79 +82,6 @@ pub(crate) fn launch_to_world_layered(serial: &str) -> Result<(), String> {
     Err("等不到大世界, 本臂作废".into())
 }
 
-/// 无层臂: 不推 .so 干净基线。进世界判定用截帧亮度差 (与"门"页比, >40% 判离开)。
-fn arm_none(serial: &str, label: &str, outdir: &Path, workload: &Path, pf_bin: &str) -> Result<(), String> {
-    let _ = std::fs::create_dir_all(outdir);
-    eprintln!("── 臂 {label} (无层) ──");
-    let act = adb(serial, &["shell", "cmd package resolve-activity --brief com.miHoYo.Yuanshen"], 30);
-    let act = act.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).unwrap_or_default();
-    if act.contains('/') {
-        let _ = adb(serial, &["shell", &format!("am start -n {act}")], 30);
-    }
-    // 等渲染起稳
-    for _ in 0..30 {
-        let p = adb(serial, &["shell", "pidof com.miHoYo.Yuanshen"], 15);
-        if adb_ok(&p) && !crate::graylayer::GrayLayer::adb_stdout(&p).trim().is_empty() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-    std::thread::sleep(std::time::Duration::from_secs(25));
-    // 记"门"页参考帧
-    let gate_ref = outdir.join("gate_ref.raw");
-    std::fs::write(&gate_ref, screencap_raw_bin(serial)).map_err(|e| e.to_string())?;
-    let _ = adb(serial, &["shell", &format!("input tap {GATE_X} {GATE_Y}")], 30);
-    eprintln!("    已点门, 等进大世界...");
-    for _ in 0..24 {
-        if left_gate(serial, &gate_ref) {
-            eprintln!("    已离开登录页, 固等 60s 进大世界");
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(5));
-    }
-    run_workload_and_shots(serial, label, outdir, workload, pf_bin)
-}
-
-
-/// 与"门"页参考帧比像素差, >40% = 已离开登录页 (采样步长 61, 阈值 16/通道)。
-fn left_gate(serial: &str, gate_ref: &Path) -> bool {
-    let Ok(a) = std::fs::read(gate_ref) else { return false };
-    let cur = screencap_raw_bin(serial);
-    if a.len() < 12 || cur.len() < 12 {
-        return false;
-    }
-    let (aw, ah) = (
-        u32::from_le_bytes(a[0..4].try_into().unwrap()) as usize,
-        u32::from_le_bytes(a[4..8].try_into().unwrap()) as usize,
-    );
-    let (cw, ch) = (
-        u32::from_le_bytes(cur[0..4].try_into().unwrap()) as usize,
-        u32::from_le_bytes(cur[4..8].try_into().unwrap()) as usize,
-    );
-    if (aw, ah) != (cw, ch) {
-        return false;
-    }
-    let (pa, pc) = (&a[12..], &cur[12..]);
-    let n = pa.len().min(pc.len()) / 4;
-    let (mut diff, mut tot) = (0usize, 0usize);
-    let mut i = 0usize;
-    while i < n {
-        let o = i * 4;
-        if (0..3).any(|c| (pa[o + c] as i32 - pc[o + c] as i32).abs() > 16) {
-            diff += 1;
-        }
-        tot += 1;
-        i += 61;
-    }
-    if tot == 0 {
-        return false;
-    }
-    let r = diff as f64 / tot as f64;
-    eprintln!("    与门页面差异={:.1}% (>40 判为已离开)", r * 100.0);
-    r > 0.40
-}
-
 /// 二进制安全的 `adb exec-out screencap` (PNG 之外的原始 RGBA)。
 pub(crate) fn screencap_raw_bin(serial: &str) -> Vec<u8> {
     std::process::Command::new(crate::eval::adb_path())
@@ -164,66 +89,6 @@ pub(crate) fn screencap_raw_bin(serial: &str) -> Vec<u8> {
         .output()
         .map(|o| o.stdout)
         .unwrap_or_default()
-}
-
-/// copyprobe 臂: 挂探针层 → 进大世界 → 负载 → 三张截帧 (离线比对用中间那张)。
-fn arm_copyprobe(
-    serial: &str,
-    gl: &GrayLayer,
-    label: &str,
-    outdir: &Path,
-    workload: &Path,
-    pf_bin: &str,
-) -> Result<(), String> {
-    let _ = std::fs::create_dir_all(outdir);
-    eprintln!("── 臂 {label} (copyprobe) ──");
-    let _ = su(
-        serial,
-        "rm -f /storage/emulated/0/Android/data/com.miHoYo.Yuanshen/files/knobs_layer_out.json",
-        15,
-    );
-    gl.mount_mode("copyprobe", "com.miHoYo.Yuanshen", false)?;
-    launch_to_world_layered(serial)?;
-    run_one(serial, label, outdir, 30, workload, "com.miHoYo.Yuanshen")?;
-    // 负载结束人物站定后连拍三张, 离线比对用中间那张
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    for k in 1..=3 {
-        let f = outdir.join(format!("shot{k}.raw"));
-        std::fs::write(&f, screencap_raw_bin(serial)).ok();
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-    if let Ok(marker) = std::fs::read_to_string(outdir.join("knobs_layer_out.json")) {
-        if let Ok(v) = serde_json::from_str::<Value>(&marker) {
-            eprintln!(
-                "  层自报: frames={} copyprobe={}",
-                v["readonly_stats"]["frames"],
-                serde_json::to_string(&v["copyprobe"]).unwrap_or_default()
-            );
-        }
-    } else {
-        eprintln!("  层自报: 解析失败");
-    }
-    let _ = pf_bin;
-    Ok(())
-}
-
-/// 无层臂的负载 + 三张截帧。
-fn run_workload_and_shots(
-    serial: &str,
-    label: &str,
-    outdir: &Path,
-    workload: &Path,
-    pf_bin: &str,
-) -> Result<(), String> {
-    run_one(serial, label, outdir, 30, workload, "com.miHoYo.Yuanshen")?;
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    for k in 1..=3 {
-        let f = outdir.join(format!("shot{k}.raw"));
-        std::fs::write(&f, screencap_raw_bin(serial)).ok();
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-    let _ = pf_bin;
-    Ok(())
 }
 
 const LOADOP_PROTOCOL: &str = "gray_ab_loadop_whole_round_charge_v1";
@@ -439,7 +304,6 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
     let mut serial = std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into());
     let mut out = PathBuf::new();
     let mut origin = "device".to_string();
-    let mut owned_options = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -450,94 +314,30 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
             "--mode" => mode = it.next().cloned().unwrap_or_else(|| "loadop".into()),
             "--serial" => serial = it.next().cloned().unwrap_or(serial),
             "--out" => out = it.next().map(PathBuf::from).unwrap_or_default(),
-            "--json" => owned_options = true,
-            "--evidence-origin" => { owned_options = true; origin = it.next().cloned().unwrap_or_default(); },
+            "--json" => {},
+            "--evidence-origin" => origin = it.next().cloned().unwrap_or_default(),
             other => {
-                eprintln!("不认识的参数 {other}\n用法: phonefarm gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>");
+                eprintln!("不认识的参数 {other}\n用法: phonefarm gray-ab [--pairs N] [--mode loadop] [--serial S] --out <目录>\ncopyprobe 当前不支持执行。");
                 return 2;
             }
         }
     }
     if !matches!(mode.as_str(), "loadop" | "copyprobe") {
-        eprintln!("--mode 只认 loadop|copyprobe");
+        eprintln!("--mode 仅 loadop 可执行；copyprobe 当前不支持，其他模式未知");
+        return 2;
+    }
+    if let Some(rejection) = crate::graylayer::mode_admission_rejection(&mode, false) {
+        println!("{}", rejection);
         return 2;
     }
     if out.as_os_str().is_empty() || pairs == 0 || !matches!(origin.as_str(), "device" | "synthetic") {
         eprintln!("gray-ab requires --out, positive --pairs and valid --evidence-origin"); return 2;
     }
-    if mode == "copyprobe" && owned_options {
-        eprintln!("copyprobe has not migrated to the owned loadop protocol; --json/--evidence-origin are loadop-only"); return 2;
-    }
-    if mode == "loadop" {
-        return emit_owned((|| {
-            let path = crate::eval::resolve_path("knobs/gray/workload_spin_touch_v1.json").ok_or("finite spin-touch workload unavailable")?;
-            let input: Value = serde_json::from_slice(&crate::confirmation_transport::bounded(&path, 1024*1024)?).map_err(|e| e.to_string())?;
-            let plan = crate::gray_script::parse(&input, LOADOP_SECONDS)?;
-            let lease = crate::devlease::Lease::target(Some(&serial), "gray-ab")?;
-            collect_loadop(lease, &out, pairs, &plan, &origin)
-        })());
-    }
-    let _lease = match crate::devlease::Lease::target(Some(&serial), "gray-ab") {
-        Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
-    };
-    serial = _lease.serial.clone();
-    let probes = std::env::var("PROBES").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
-    let gl = GrayLayer::new(&serial);
-    let workload = match crate::eval::resolve_path("knobs/gray/workload_spin_touch_v1.json") {
-        Some(p) => p,
-        None => {
-            eprintln!("找不到触控负载 knobs/gray/workload_spin_touch_v1.json");
-            return 2;
-        }
-    };
-    let pf_bin = std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("phonefarm"))
-        .to_string_lossy()
-        .into_owned();
-    if out.as_os_str().is_empty() || pairs == 0 || probes == 0 {
-        eprintln!("gray-ab requires --out and positive --pairs/PROBES"); return 2;
-    }
-    if let Err(e)=std::fs::create_dir_all(&out) {eprintln!("{e}");return 2;}
-    let mut arms:Vec<(String,bool)>=Vec::new();
-    arms.extend([("none1".into(),false),("none2".into(),false)]);
-    for i in 1..=probes {arms.push((format!("probe{i}"),true));}
-    let mut records=Vec::new();
-    let mut code=0;
-    for (label,rewrite) in arms {
-        let arm_dir=out.join(&label);
-        if let Err(e)=std::fs::create_dir_all(&arm_dir) {eprintln!("{e}");code=2;break;}
-        let before=gl.off(Some(crate::plugins::genshin::PACKAGE));
-        let before_record=match crate::graylayer::record_deactivation(&arm_dir,"before",&before) {
-            Ok(v)=>v,Err(e)=>{eprintln!("{e}");code=2;break;}
-        };
-        if let Err(e)=before {
-            eprintln!("{label} 前置摘层失败，停止后续操作: {e}");
-            records.push(json!({"arm":label,"status":"not_started","deactivation_before":before_record}));
-            code=2;break;
-        }
-        let measured=if rewrite {arm_copyprobe(&serial,&gl,&label,&arm_dir,&workload,&pf_bin)}
-        else {arm_none(&serial,&label,&arm_dir,&workload,&pf_bin)};
-        // A failed experiment still retires its target. A retirement failure
-        // ends this loop; no extra force-stop or next-arm writes follow it.
-        let after=gl.off(Some(crate::plugins::genshin::PACKAGE));
-        let after_record=match crate::graylayer::record_deactivation(&arm_dir,"after",&after) {
-            Ok(v)=>v,Err(e)=>{eprintln!("{e}");code=2;break;}
-        };
-        records.push(json!({"arm":label,"status":if measured.is_ok(){"collected"}else{"failed"},
-            "error":measured.as_ref().err(),"deactivation_before":before_record,"deactivation_after":after_record}));
-        if let Err(e)=after {eprintln!("{label} 摘层失败，停止后续操作: {e}");code=2;break;}
-        if let Err(e)=measured {eprintln!("{label} 作废，停止后续臂: {e}");code=1;break;}
-    }
-    if code==0 && mode=="copyprobe" {
-        match shotdiff::report(&out) {Ok(t)=>println!("{t}"),Err(e)=>{eprintln!("{e}");code=1;}}
-    }
-    if let Err(e)=_lease.check() {eprintln!("{e}");code=2;}
-    let report=json!({"schema":"phonefarm/gray-ab-collection@1","serial":serial,"mode":mode,
-        "collection_ok":code==0,"arms":records,"job_recovery_complete":false,
-        "game_state_restored":false,"recovery_status":"not_verified",
-        "recovery_note":"Layer deactivation does not verify sampler, input, ftrace or charging recovery."});
-    let path=out.join(format!("gray-ab-{}-{}.json",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap()));
-    if let Err(e)=crate::confirmation_transport::new_file(&path,report.to_string().as_bytes()) {eprintln!("{e}");code=2;}
-    println!("采集结束: exit={code}, 完整恢复尚未核验；证据 {}",path.display());
-    code
+    emit_owned((|| {
+        let path = crate::eval::resolve_path("knobs/gray/workload_spin_touch_v1.json").ok_or("finite spin-touch workload unavailable")?;
+        let input: Value = serde_json::from_slice(&crate::confirmation_transport::bounded(&path, 1024*1024)?).map_err(|e| e.to_string())?;
+        let plan = crate::gray_script::parse(&input, LOADOP_SECONDS)?;
+        let lease = crate::devlease::Lease::target(Some(&serial), "gray-ab")?;
+        collect_loadop(lease, &out, pairs, &plan, &origin)
+    })())
 }

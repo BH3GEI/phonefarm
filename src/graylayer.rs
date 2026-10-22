@@ -41,7 +41,25 @@ pub(crate) const LAYER_PROPERTIES: [&str; 12] = [
     FA_PROP, FA_TS_PROP, FA_GO_PROP, STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP,
 ];
 
-const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off [pkg] [--json]} [--serial S] [--keep-prop] [--so 本机.so]";
+const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off [pkg] [--json]} [--serial S] [--keep-prop] [--so 本机.so]\ncopyprobe/upop 当前不支持执行（包括自定义 SO）；工件与历史证据仍可离线分析。";
+
+/// Capability rejection is independent of a device, lock or artifact path.
+pub(crate) fn mode_admission_rejection(mode: &str, custom: bool) -> Option<Value> {
+    if !matches!(mode, "copyprobe" | "upop") { return None; }
+    Some(json!({
+        "schema":"phonefarm/gray-mode-admission@1",
+        "requested_mode":mode,
+        "artifact_source":if custom { "custom" } else { "default" },
+        "status":"unsupported",
+        "reason":if custom { "artifact_capability_unverified" } else { "missing_source_layout_target_compute_contract" },
+        "execution_started":false,
+        "device_commands_started":false,
+        "collection_ok":false,
+        "recovery_status":"not_started",
+        "job_recovery_complete":false,
+        "game_state_restored":false
+    }))
+}
 
 const DEACTIVATION_SCOPE: &str = "known_target_layer_deactivated";
 
@@ -387,6 +405,9 @@ impl GrayLayer {
     }
 
     pub fn mount_mode(&self, mode: &str, pkg: &str, keep_prop: bool) -> Result<(), String> {
+        if let Some(rejection) = mode_admission_rejection(mode, self.so.is_some()) {
+            return Err(rejection.to_string());
+        }
         match mode {
             "probe" => {
                 self.setprops("0", "0", "0", "0");
@@ -407,19 +428,6 @@ impl GrayLayer {
             }
             "target" => {
                 self.setprops("0", "0", "0", "0");
-                self.mount_layer(pkg, keep_prop)
-            }
-            // 拷贝探针档: 1:1 拷贝算子把建 pipeline/建 image/换描述符全走一遍,
-            // 画面应逐像素不变。是**改写**, 探的就是反作弊对这种侵入放不放行。
-            "copyprobe" => {
-                self.setprops("0", "1", "1", "0");
-                self.require_prop(CP_PROP, "1", "探针")?;
-                self.mount_layer(pkg, keep_prop)
-            }
-            // 真超分算子档: gen1_loc3 (2x2 bilinear), dst=送显分辨率
-            "upop" => {
-                self.setprops("0", "1", "0", "1");
-                self.require_prop(UPOP_PROP, "1", "算子")?;
                 self.mount_layer(pkg, keep_prop)
             }
             // 一帧步骤清单 (只读): 层按提交顺序记 pass/拷贝/清屏/dispatch, 由
@@ -606,31 +614,104 @@ pub(crate) fn layer_so_path() -> String {
     }
 }
 
-pub fn run_gray_layer(args: &[String]) -> i32 {
-    let mut positional: Vec<String> = Vec::new();
-    let mut serial = std::env::var("REFBENCH_SERIAL")
-        .unwrap_or_else(|_| std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into()));
-    let mut keep_prop = false;
-    let mut json_output = false;
-    let mut so: Option<String> = None;
+#[derive(Debug, PartialEq)]
+pub(crate) enum GrayCliAdmission { Proceed, Help, Reject(Value) }
+
+#[derive(Default)]
+struct LayerArgs {
+    positional: Vec<String>,
+    serial: Option<String>,
+    so: Option<String>,
+    keep_prop: bool,
+    json: bool,
+    help: bool,
+}
+
+fn layer_args(args: &[String]) -> Result<LayerArgs, String> {
+    let mut parsed = LayerArgs::default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--serial" => serial = it.next().cloned().unwrap_or(serial),
-            "--so" => so = it.next().cloned(),
-            "--keep-prop" => keep_prop = true,
-            "--json" => json_output = true,
-            other => positional.push(other.to_string()),
+            "--serial" | "--so" => {
+                let value = it.next().ok_or_else(|| format!("{a} requires a value"))?.clone();
+                if a == "--serial" { parsed.serial = Some(value); } else { parsed.so = Some(value); }
+            }
+            "--keep-prop" => parsed.keep_prop = true,
+            "--json" => parsed.json = true,
+            "--help" | "-h" => parsed.help = true,
+            other if other.starts_with('-') => return Err(format!("unknown gray-layer option {other}")),
+            _ => parsed.positional.push(a.clone()),
         }
     }
-    let Some(mode) = positional.first().cloned() else {
-        eprintln!("{USAGE}");
-        return 2;
+    if parsed.positional.len() > 2 { return Err("gray-layer accepts one mode and at most one package".into()); }
+    if let Some(mode) = parsed.positional.first() {
+        if !matches!(mode.as_str(), "probe" | "loadop" | "passdump" | "copyprobe" | "upop" | "frameaudit" | "frameaudit-ts" | "target" | "status" | "off") {
+            return Err(format!("unknown gray-layer mode {mode}"));
+        }
+        if mode == "status" && parsed.positional.len() > 1 { return Err("status does not accept a package".into()); }
+        if !parsed.help && mode == "target" && parsed.positional.len() < 2 { return Err("target requires a package".into()); }
+    } else if !parsed.help { return Err("gray-layer requires a mode".into()); }
+    Ok(parsed)
+}
+
+/// Pure argument admission before the legacy queue gate. Consume values exactly
+/// as execution does, including values named --help or --no-devlock.
+pub(crate) fn cli_admission(sub: &str, args: &[String]) -> Result<GrayCliAdmission, String> {
+    if sub == "gray-ab" && args.first().is_some_and(|a| a == "recover") {
+        return Ok(GrayCliAdmission::Proceed); // recovery has its own parser and Lease
+    }
+    let mut stripped = vec![sub.to_owned()];
+    stripped.extend_from_slice(args);
+    crate::devlock::strip_lock_args(&mut stripped)?;
+    let args = &stripped[1..];
+    if sub == "gray-layer" {
+        let parsed = layer_args(args)?;
+        if parsed.help { return Ok(GrayCliAdmission::Help); }
+        return Ok(mode_admission_rejection(&parsed.positional[0], parsed.so.is_some())
+            .map_or(GrayCliAdmission::Proceed, GrayCliAdmission::Reject));
+    }
+    let mut mode = "loadop";
+    let mut help = false;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--mode" | "--serial" | "--out" | "--pairs" | "--evidence-origin" => {
+                let value = it.next().ok_or_else(|| format!("{a} requires a value"))?;
+                match a.as_str() {
+                    "--mode" => mode = value,
+                    "--out" => out = Some(value),
+                    "--pairs" if value.parse::<u32>().ok().filter(|n| *n > 0).is_none() => return Err("--pairs requires a positive integer".into()),
+                    "--evidence-origin" if !matches!(value.as_str(), "device" | "synthetic") => return Err("--evidence-origin requires device or synthetic".into()),
+                    _ => {},
+                }
+            }
+            "--json" => {},
+            "--help" | "-h" => help = true,
+            other => return Err(format!("unknown gray-ab option {other}")),
+        }
+    }
+    if !matches!(mode, "loadop" | "copyprobe") { return Err(format!("unknown gray-ab mode {mode}")); }
+    if help { return Ok(GrayCliAdmission::Help); }
+    if let Some(rejection) = mode_admission_rejection(mode, false) { return Ok(GrayCliAdmission::Reject(rejection)); }
+    if out.is_none_or(|v| v.is_empty()) { return Err("gray-ab requires --out".into()); }
+    Ok(GrayCliAdmission::Proceed)
+}
+
+pub fn run_gray_layer(args: &[String]) -> i32 {
+    let parsed = match layer_args(args) {
+        Ok(parsed) => parsed,
+        Err(error) => { eprintln!("{error}\n{USAGE}"); return 2; }
     };
-    if mode == "off" && positional.len() > 2 {
-        eprintln!("off 只接受一个可选目标包名\n{USAGE}");
+    if parsed.help { println!("{USAGE}"); return 0; }
+    let LayerArgs { positional, serial, so, keep_prop, json: json_output, .. } = parsed;
+    let mode = positional[0].clone();
+    if let Some(rejection) = mode_admission_rejection(&mode, so.is_some()) {
+        println!("{rejection}");
         return 2;
     }
+    let mut serial = serial.unwrap_or_else(|| std::env::var("REFBENCH_SERIAL")
+        .unwrap_or_else(|_| std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into())));
     // Status is a read-only plan/status path and does not interrupt the lease owner.
     let _lease = if mode == "status" { None } else {
         match crate::devlease::Lease::target(Some(&serial), "gray-layer") {
@@ -660,7 +741,7 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
             }
             if result.is_ok() { 0 } else { 1 }
         }
-        "probe" | "loadop" | "passdump" | "copyprobe" | "upop" | "frameaudit" | "frameaudit-ts" | "target" => {
+        "probe" | "loadop" | "passdump" | "frameaudit" | "frameaudit-ts" | "target" => {
             let default_pkg = if mode == "probe" || mode == "loadop" {
                 "io.github.hgamey.refbench"
             } else {
@@ -686,6 +767,52 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
             eprintln!("不认识的模式 {other:?}\n{USAGE}");
             2
         }
+    }
+}
+
+#[cfg(test)]
+mod mode_admission_tests {
+    use super::*;
+
+    fn admission(sub: &str, args: &[&str]) -> Result<GrayCliAdmission, String> {
+        cli_admission(sub, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn gray_admission_consumes_values_and_uses_last_mode() {
+        assert_eq!(admission("gray-ab", &["--mode", "copyprobe", "--mode", "loadop", "--out", "upop", "--serial", "--help"]).unwrap(), GrayCliAdmission::Proceed);
+        let GrayCliAdmission::Reject(rejected) = admission("gray-ab", &["--mode", "loadop", "--mode", "copyprobe", "--serial", "--no-devlock", "--lock-label", "--help", "--lock-wait", "0s"]).unwrap() else { panic!("last mode was not rejected"); };
+        assert_eq!(rejected["requested_mode"], "copyprobe");
+        assert_eq!(admission("gray-layer", &["loadop", "--serial", "copyprobe", "--so", "--help"]).unwrap(), GrayCliAdmission::Proceed);
+        assert_eq!(admission("gray-layer", &["loadop", "--serial", "--help"]).unwrap(), GrayCliAdmission::Proceed);
+        assert_eq!(admission("gray-layer", &["copyprobe", "--help"]).unwrap(), GrayCliAdmission::Help);
+        assert_eq!(admission("gray-ab", &["--mode", "copyprobe", "--help"]).unwrap(), GrayCliAdmission::Help);
+        assert_eq!(admission("gray-ab", &["recover", "--session", "old", "--serial", "S"]).unwrap(), GrayCliAdmission::Proceed);
+        for (sub, args) in [
+            ("gray-layer", vec!["upop", "--so"]),
+            ("gray-layer", vec!["copyprobe", "--unknown"]),
+            ("gray-ab", vec!["--mode", "copyprobe", "--out"]),
+            ("gray-ab", vec!["--mode", "copyprobe", "--so", "custom.so"]),
+        ] { assert!(admission(sub, &args).is_err(), "accepted {sub} {args:?}"); }
+    }
+
+    #[test]
+    fn unsupported_public_mount_rejects_before_device_or_artifact_access() {
+        for mode in ["copyprobe", "upop"] {
+            for custom in [false, true] {
+                let layer = GrayLayer::new("nonexistent-admission-device")
+                    .with_so(custom.then(|| "/nonexistent/admission.so".into()));
+                let error = layer.mount_mode(mode, "com.example.fixture", false).unwrap_err();
+                let actual: Value = serde_json::from_str(&error).unwrap();
+                assert_eq!(actual, mode_admission_rejection(mode, custom).unwrap());
+                assert_eq!(actual["schema"], "phonefarm/gray-mode-admission@1");
+                assert_eq!(actual["artifact_source"], if custom { "custom" } else { "default" });
+                assert_eq!(actual["reason"], if custom { "artifact_capability_unverified" } else { "missing_source_layout_target_compute_contract" });
+                assert_eq!(actual["device_commands_started"], false);
+                assert_eq!(actual["recovery_status"], "not_started");
+            }
+        }
+        assert!(mode_admission_rejection("loadop", false).is_none());
     }
 }
 
