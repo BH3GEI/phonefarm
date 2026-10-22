@@ -155,7 +155,10 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 人工接管只改变控制 epoch，lease 仍归原 owner；stop/SIGINT 在有界动作结束后恢复。
 失败使用 `gray-layer session-recover --session DIR --serial S --json` 接续原上下文。
 局部恢复收据不自动解除整个 job，沿用 fresh lease clear + 核查说明释放流程。
-性能采样与旧 gray-layer/reference 脚本迁移仍待完成；合同见
+`sample` 动作可在当前场景采1至120秒，保持同一 owner；不自动重启、触控或改充电/风扇/频率。
+可选 render_comm 必须显式给出；留空仍保留 raw/env，帧指标为未知，不套 Unity 默认。
+GPU submit proxy 不等于显示 FPS，首批不按不同窗口推算每帧能耗。采样资源先恢复，之后才完成灰层范围。
+有限输入采样、显式停充与旧 gray-layer/reference 脚本迁移仍待完成；合同见
 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
 
 **Compute Shader 算子标尺**（零 Token，需 root）

@@ -9,6 +9,8 @@ use std::{cell::RefCell, collections::HashSet, fs, path::{Path, PathBuf}, time::
 
 const LEGACY_SCHEMA: &str = "phonefarm/gray-capture-session@1";
 const SCHEMA: &str = "phonefarm/gray-capture-session@2";
+const CONTROL_RESOURCE_SCHEMA: &str = "phonefarm/gray-capture-session@3";
+pub(crate) const CONTROL_PARENT_SCHEMA: &str = "phonefarm/gray-control-resources@1";
 const SCOPE: &str = "gray_capture_owned_installation_properties_target_stopped";
 const EVAL_OWNER: &str = "gray_eval_launch";
 const EVAL_SCOPE: &str = "gray_eval_launch_owned_resources";
@@ -73,7 +75,11 @@ impl Session {
             "staging_created":false,"installation_owned":false,"state_owned":false,
             "write_pending":null,"transport_uncertain":false,"evidence_origin":origin,
             "created_at":chrono::Utc::now().to_rfc3339()});
-        if owner == CONTROL_OWNER { state["control_session_id"] = json!(dir.file_name().and_then(|s| s.to_str()).ok_or("invalid control session directory")?); }
+        if owner == CONTROL_OWNER {
+            state["schema"] = json!(CONTROL_RESOURCE_SCHEMA);
+            state["control_session_id"] = json!(dir.file_name().and_then(|s| s.to_str()).ok_or("invalid control session directory")?);
+            state["control_resources"] = json!({"path":"eval-session.json","schema":CONTROL_PARENT_SCHEMA});
+        }
         let session = Self { lease:RefCell::new(lease), adb:adb_path()?, dir,
             state:RefCell::new(state), stopped:RefCell::new(None), known_dirs:RefCell::new(HashSet::new()) };
         session.save()?;
@@ -164,7 +170,7 @@ impl Session {
         {
             let mut state = self.state.borrow_mut();
             state["write_pending"] = pending.clone();
-            if state["schema"] == SCHEMA { state["base_recovery"] = Value::Null; }
+            if state["schema"] == SCHEMA || state["schema"] == CONTROL_RESOURCE_SCHEMA { state["base_recovery"] = Value::Null; }
         }
         self.save()?;
         let output = self.command(operation, args, timeout)?;
@@ -204,6 +210,11 @@ impl Session {
         self.ready()?;
         let result = self.lease.borrow().check();
         result.or_else(|error| self.stop(error))
+    }
+
+    pub fn control_has_resources(&self) -> Result<bool, String> {
+        require_owner(&self.state.borrow(), CONTROL_OWNER)?;
+        Ok(self.state.borrow()["schema"] == CONTROL_RESOURCE_SCHEMA)
     }
 
     pub fn eval_identity(&self) -> Result<Value, String> {
@@ -667,7 +678,7 @@ impl Session {
     }
 
     fn finish_owned(&self, error: Option<&str>, owner: &str) -> Result<Value, String> {
-        require_owner(&self.state.borrow(), owner)?;
+        require_local_completion(&self.state.borrow(), owner)?;
         let mut value = self.restore_report(error)?;
         if value["status"] == "verified" {
             let report_path = PathBuf::from(value["report_path"].as_str().ok_or("missing recovery report path")?);
@@ -699,8 +710,11 @@ impl Session {
         let state = self.state.borrow().clone();
         let base_path = PathBuf::from(state["base_recovery"].as_str().ok_or("gray base has not been verified since the last mutation")?);
         let base = read_local_report(&base_path, &self.dir)?;
-        if base["schema"] != "phonefarm/gray-capture-recovery@1" || base["status"] != "verified"
-            || !matches!(base["scope"].as_str(), Some(SCOPE | "no_device_mutations"))
+        let control = completion_owner(&state)? == CONTROL_OWNER;
+        let base_schema = if control { "phonefarm/gray-control-recovery@1" } else { "phonefarm/gray-capture-recovery@1" };
+        let base_scope = if control { CONTROL_SCOPE } else { SCOPE };
+        if base["schema"] != base_schema || base["status"] != "verified"
+            || (base["scope"] != base_scope && base["scope"] != "no_device_mutations")
             || !report_matches(&base, &state, &self.dir) {
             return Err("current base recovery report is not verified for this session".into());
         }
@@ -772,6 +786,8 @@ fn completion_owner(state: &Value) -> Result<&str, String> {
             Some(owner @ ("standalone" | EVAL_OWNER | SCRIPT_OWNER | LOADOP_OWNER | CONTROL_OWNER)) => Ok(owner),
             _ => Err("gray session has no recognized completion owner".into()),
         },
+        Some(CONTROL_RESOURCE_SCHEMA) if state["completion_owner"] == CONTROL_OWNER
+            && state["control_resources"] == json!({"path":"eval-session.json","schema":CONTROL_PARENT_SCHEMA}) => Ok(CONTROL_OWNER),
         _ => Err("unsupported gray session schema or completion owner".into()),
     }
 }
@@ -781,13 +797,22 @@ fn require_owner(state: &Value, expected: &str) -> Result<(), String> {
     Ok(())
 }
 fn require_parent(state: &Value) -> Result<(), String> {
+    if completion_owner(state)? == CONTROL_OWNER && state["schema"] != CONTROL_RESOURCE_SCHEMA {
+        return Err("legacy control session has no resource parent".into());
+    }
     parent_recovery_contract(completion_owner(state)?).map(|_| ())
+}
+fn require_local_completion(state:&Value,owner:&str)->Result<(),String> {
+    require_owner(state,owner)?;
+    if state["schema"]==CONTROL_RESOURCE_SCHEMA {return Err("control session requires its bound resource parent before completion".into());}
+    Ok(())
 }
 pub(crate) fn parent_recovery_contract(owner: &str) -> Result<(&'static str, &'static str), String> {
     match owner {
         EVAL_OWNER => Ok(("phonefarm/gray-eval-launch-recovery@1", EVAL_SCOPE)),
         SCRIPT_OWNER => Ok(("phonefarm/gray-eval-script-recovery@1", "gray_eval_script_owned_resources")),
         LOADOP_OWNER => Ok(("phonefarm/gray-ab-loadop-recovery@1", "gray_ab_loadop_owned_resources")),
+        CONTROL_OWNER => Ok(("phonefarm/gray-control-resources-recovery@1", "gray_control_owned_resources_installation_properties_target_stopped")),
         _ => Err("gray session is not owned by an eval parent".into()),
     }
 }
@@ -877,12 +902,12 @@ fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
         || ["staging_created", "installation_owned", "state_owned"].iter().any(|key| !state[*key].is_boolean()) {
         return Err("invalid or mismatched gray session identity".into());
     }
-    if state["schema"] == SCHEMA {
+    if state["schema"] == SCHEMA || state["schema"] == CONTROL_RESOURCE_SCHEMA {
         if state.get("launch_marker").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|s| !valid_marker(s)))
             || state["generation"].as_u64().is_none()
             || state.get("round_label").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|s| !valid_label(s)))
             || state.get("base_recovery").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|p| Path::new(p).parent() != Some(dir)))
-            || (matches!(owner, "standalone" | CONTROL_OWNER) && (!state["launch_marker"].is_null() || state["generation"] != 0 || !state["round_label"].is_null() || !state["base_recovery"].is_null()))
+            || (matches!(owner, "standalone" | CONTROL_OWNER) && (!state["launch_marker"].is_null() || state["generation"] != 0 || !state["round_label"].is_null() || (state["schema"] != CONTROL_RESOURCE_SCHEMA && !state["base_recovery"].is_null())))
             || (matches!(owner,SCRIPT_OWNER|LOADOP_OWNER) && !state["launch_marker"].is_null())
             || (state["stage"] != "active" && (state["generation"] != 0 || !state["round_label"].is_null())) {
             return Err("invalid gray session generation, marker or recovery evidence".into());
@@ -1042,6 +1067,12 @@ mod tests {
         let control = json!({"schema":SCHEMA,"completion_owner":CONTROL_OWNER});
         assert!(require_owner(&control, CONTROL_OWNER).is_ok());
         assert!(require_parent(&control).is_err());
+        assert!(require_local_completion(&control, CONTROL_OWNER).is_ok());
+        let mut resources=json!({"schema":CONTROL_RESOURCE_SCHEMA,"completion_owner":CONTROL_OWNER,"control_resources":{"path":"eval-session.json","schema":CONTROL_PARENT_SCHEMA}});
+        assert!(require_parent(&resources).is_ok());
+        assert!(require_local_completion(&resources, CONTROL_OWNER).is_err());
+        resources["control_resources"]=Value::Null;
+        assert!(require_owner(&resources,CONTROL_OWNER).is_err());
         for owner in ["standalone", EVAL_OWNER, SCRIPT_OWNER, LOADOP_OWNER] {
             assert!(require_owner(&control, owner).is_err());
             assert!(!valid_session_directory(Path::new("gray-session-42-123456"), owner, "secret-token"));

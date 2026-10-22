@@ -14,8 +14,8 @@ if [ -e "$D/thermal-purpose.txt" ]; then
 fi
 R="$D/$RUN"
 # Gray sampling owns one trace instance; it never falls back to global tracing.
-if [ "$MODE" = gray_sample ] || [ "$MODE" = gray_script_sample ]; then
-  if [ "$MODE" = gray_script_sample ]; then
+if [ "$MODE" = gray_sample ] || [ "$MODE" = gray_script_sample ] || [ "$MODE" = gray_control_sample ]; then
+  if [ "$MODE" = gray_script_sample ] || [ "$MODE" = gray_control_sample ]; then
     [ "$#" = 8 ] || exit 70
     gray_qualify=$8
     case "$gray_qualify" in 0|1) ;; *) exit 70 ;; esac
@@ -24,6 +24,10 @@ if [ "$MODE" = gray_sample ] || [ "$MODE" = gray_script_sample ]; then
   case "$gray_seconds" in ''|*[!0-9]*) exit 70 ;; esac
   [ "$gray_seconds" -ge 1 ] && [ "$gray_seconds" -le 86400 ] || exit 70
   [ "$MODE" != gray_script_sample ] || [ "$gray_seconds" -le 594 ] || exit 70
+  if [ "$MODE" = gray_control_sample ]; then
+    [ "$gray_seconds" -le 120 ] && [ "$gray_qualify" = 0 ] || exit 70
+    [ -f "$D/workload-$RUN.sh" ] && [ ! -L "$D/workload-$RUN.sh" ] || exit 70
+  fi
   [ "$gray_instance" = "/sys/kernel/tracing/instances/phonefarm_gray_$TOKEN" ] || exit 70
   [ -d "$gray_instance" ] && [ ! -L "$gray_instance" ] || exit 70
 fi
@@ -189,14 +193,20 @@ ledger_complete() {
 children_valid() {
   CHILD_ROWS=0
   GRAY_SCRIPT_ROUND=0
+  GRAY_WORKLOAD="$D/workload.sh"
   if [ -e "$R/round-kind.txt" ] || [ -L "$R/round-kind.txt" ]; then
-    ledger_complete "$R/round-kind.txt" && [ "$(cat "$R/round-kind.txt")" = gray_script_v1 ] || return 1
+    ledger_complete "$R/round-kind.txt" || return 1
+    case "$(cat "$R/round-kind.txt")" in
+      gray_script_v1) ;;
+      gray_control_v1) GRAY_WORKLOAD="$D/workload-${R##*/}.sh" ;;
+      *) return 1 ;;
+    esac
     GRAY_SCRIPT_ROUND=1
   fi
   [ -e "$R/children.tsv" ] || [ -L "$R/children.tsv" ] || return 0
   ledger_complete "$R/children.tsv" || return 1
-  CHILD_ROWS=$(awk -F '\t' -v w="$D/workload.sh" -v s="$D/sample_env.sh" -v tr="$D/trace.sh" -v scripted="$GRAY_SCRIPT_ROUND" -v th="$D/thermal_sampler.sh" -v rr="$D/render_ownership.sh" -v mode="$MODE" '
-    BEGIN {bench=(mode=="bench" || mode=="gray_sample" || mode=="gray_script_sample" || mode=="verify_gray_idle" || mode=="verify_gray_groups" || mode=="reconcile_bench" || mode=="verify_bench")}
+  CHILD_ROWS=$(awk -F '\t' -v w="$GRAY_WORKLOAD" -v s="$D/sample_env.sh" -v tr="$D/trace.sh" -v scripted="$GRAY_SCRIPT_ROUND" -v th="$D/thermal_sampler.sh" -v rr="$D/render_ownership.sh" -v mode="$MODE" '
+    BEGIN {bench=(mode=="bench" || mode=="gray_sample" || mode=="gray_script_sample" || mode=="gray_control_sample" || mode=="verify_gray_idle" || mode=="verify_gray_groups" || mode=="reconcile_bench" || mode=="verify_bench")}
     scripted && (!bench || mode=="bench" || mode=="gray_sample") {bad=1}
     bench && $1!="workload" && $1!="sampler" && !(scripted && $1=="trace") {bad=1}
     ((mode=="render_readonly" || mode=="reconcile_render") && $1!="render_reader") ||
@@ -214,7 +224,7 @@ pending_known() {
     ledger_complete "$pending" || return 1
     [ -f "$R/children.tsv" ] || return 1
     expected=${pending##*/}; expected=${expected#launch-}; expected=${expected%.pending}
-    case "$expected" in workload) script_expected="$D/workload.sh" ;; sampler) script_expected="$D/sample_env.sh" ;; trace) [ "$GRAY_SCRIPT_ROUND" = 1 ] || return 1; script_expected="$D/trace.sh" ;; thermal_sampler) script_expected="$D/thermal_sampler.sh" ;; render_reader) script_expected="$D/render_ownership.sh" ;; *) return 1 ;; esac
+    case "$expected" in workload) script_expected="$GRAY_WORKLOAD" ;; sampler) script_expected="$D/sample_env.sh" ;; trace) [ "$GRAY_SCRIPT_ROUND" = 1 ] || return 1; script_expected="$D/trace.sh" ;; thermal_sampler) script_expected="$D/thermal_sampler.sh" ;; render_reader) script_expected="$D/render_ownership.sh" ;; *) return 1 ;; esac
     awk -F '\t' -v t="$expected" -v s="$script_expected" '
       NF!=2 || $1!=t || $2!=s {bad=1} END {exit (bad || NR!=1)}' "$pending" || return 1
     consumed_pending=0
@@ -229,7 +239,7 @@ pending_known() {
 group_absent_remote() {
   expected=$1
   case "$MODE" in
-    bench|gray_sample|gray_script_sample|verify_gray_idle|verify_gray_groups|reconcile_bench|verify_bench)
+    bench|gray_sample|gray_script_sample|gray_control_sample|verify_gray_idle|verify_gray_groups|reconcile_bench|verify_bench)
       # Rootless bench cannot inspect unrelated root processes. ESRCH for the
       # exact negative PGID proves absence; EPERM and unknown errors do not.
       ;;
@@ -334,7 +344,7 @@ cleanup_failure() {
   trap - EXIT INT TERM
   # The absence of an attributable child/group is required before any restore write.
   if stop_owned; then
-    case "$MODE" in bench|gray_sample|gray_script_sample|reconcile_bench|render_readonly|reconcile_render) : ;; control_probe|reconcile_controls) restore_controls || true ;; *) restore_trace && restore_controls || true ;; esac
+    case "$MODE" in bench|gray_sample|gray_script_sample|gray_control_sample|reconcile_bench|render_readonly|reconcile_render) : ;; control_probe|reconcile_controls) restore_controls || true ;; *) restore_trace && restore_controls || true ;; esac
   fi
 }
 acquire_master() {
@@ -437,10 +447,12 @@ fi
 # The host invokes this worker through setsid, so master and its synchronous children own one group.
 acquire_master || exit 85
 case "$MODE" in
-  gray_script_sample)
+  gray_script_sample|gray_control_sample)
     intent mkdir "$R" ''; mkdir "$R"
     printf '%s\n' "$MASTER" > "$R/master.tsv"
-    printf 'gray_script_v1\n' > "$R/round-kind.txt"; sync
+    gray_workload="$D/workload.sh"; gray_kind=gray_script_v1
+    if [ "$MODE" = gray_control_sample ]; then gray_workload="$D/workload-$RUN.sh"; gray_kind=gray_control_v1; fi
+    printf '%s\n' "$gray_kind" > "$R/round-kind.txt"; sync
     trap 'cleanup_failure' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -452,7 +464,7 @@ case "$MODE" in
     done
     [ "$(cat "$R/trace-ready.txt")" = TRACE_READY ] || exit 76
     start_child sampler "$D/sample_env.sh" "$((gray_seconds+10))" 2 "$R" "$TOKEN" "$BOOT"; sampler_pid=$CHILD_PID
-    start_child workload "$D/workload.sh" "$R" "$TOKEN" "$BOOT"; workload_pid=$CHILD_PID
+    start_child workload "$gray_workload" "$R" "$TOKEN" "$BOOT"; workload_pid=$CHILD_PID
     if wait "$workload_pid"; then echo 0 > "$R/workload_exit.txt"; else code=$?; echo "$code" > "$R/workload_exit.txt"; fi
     if wait "$trace_pid"; then echo 0 > "$R/trace_exit.txt"; else code=$?; echo "$code" > "$R/trace_exit.txt"; fi
     if wait "$sampler_pid"; then echo 0 > "$R/sampler_exit.txt"; else code=$?; echo "$code" > "$R/sampler_exit.txt"; fi

@@ -1,4 +1,5 @@
 //! One live gray-layer owner; host-only clients publish bounded, immutable actions.
+use crate::gray_eval_session::Parent;
 use crate::gray_session::Session;
 use crate::graylayer::GrayCliAdmission;
 use serde_json::{json, Value};
@@ -22,6 +23,7 @@ const MAX_REQUESTS: usize = 1024;
 const FRAME_AGE_SECONDS: i64 = 30;
 const ACTIONS: &[&str] = &[
     "capture",
+    "sample",
     "tap",
     "swipe",
     "marker",
@@ -162,14 +164,20 @@ impl Store {
         Ok(file)
     }
     fn read(&self, rel: &str) -> Result<Value> {
+        self.read_limit(rel, LIMIT)
+    }
+    fn read_limit(&self, rel: &str, limit: usize) -> Result<Value> {
         let file = self.open_file(rel, libc::O_RDONLY)?;
-        if file.metadata()?.len() > LIMIT as u64 {
-            return Err(err("invalid_request", "control record exceeds 64 KiB"));
+        if file.metadata()?.len() > limit as u64 {
+            return Err(err("invalid_request", "control record exceeds read limit"));
         }
         let mut bytes = Vec::new();
-        file.take((LIMIT + 1) as u64).read_to_end(&mut bytes)?;
-        if bytes.len() > LIMIT {
-            return Err(err("invalid_request", "control record grew beyond 64 KiB"));
+        file.take((limit + 1) as u64).read_to_end(&mut bytes)?;
+        if bytes.len() > limit {
+            return Err(err(
+                "invalid_request",
+                "control record grew beyond read limit",
+            ));
         }
         serde_json::from_slice(&bytes)
             .map_err(|e| err("invalid_request", format!("invalid control JSON: {e}")))
@@ -551,8 +559,10 @@ fn descriptor(store: &Store) -> Result<Value> {
         return Err(err("invalid_request", "invalid session identity/path"));
     }
     let m = store.read(&format!("{rel}/session.json"))?;
-    if m["schema"] != "phonefarm/gray-capture-session@2"
-        || m["completion_owner"] != "gray_layer_control"
+    if !matches!(
+        m["schema"].as_str(),
+        Some("phonefarm/gray-capture-session@2" | "phonefarm/gray-capture-session@3")
+    ) || m["completion_owner"] != "gray_layer_control"
         || m["control_session_id"] != sid
         || m["serial"] != d["serial"]
         || m["package"] != d["package"]
@@ -561,6 +571,24 @@ fn descriptor(store: &Store) -> Result<Value> {
             "invalid_request",
             "descriptor does not match its control session",
         ));
+    }
+    if m["schema"] == "phonefarm/gray-capture-session@3" {
+        if m["control_resources"]
+            != json!({"path":"eval-session.json","schema":crate::gray_session::CONTROL_PARENT_SCHEMA})
+        {
+            return Err(err("invalid_request", "control resource binding differs"));
+        }
+        let parent = store.read_limit(&format!("{rel}/eval-session.json"), 8 * 1024 * 1024)?;
+        if parent["schema"] != crate::gray_session::CONTROL_PARENT_SCHEMA
+            || ["token", "serial", "completion_owner"]
+                .iter()
+                .any(|k| parent["identity"][*k] != m[*k])
+        {
+            return Err(err(
+                "invalid_request",
+                "control resource parent is missing or mismatched",
+            ));
+        }
     }
     if !d["job_id"].is_null()
         && !d["job_id"]
@@ -638,6 +666,27 @@ fn validate_request(r: &Value) -> Result<()> {
     let p = &r["params"];
     match string(r, "action")? {
         "capture" | "marker" | "narrow" | "release_control" | "stop" => exact(p, &[])?,
+        "sample" => {
+            if p.get("render_comm").is_some() {
+                exact(p, &["seconds", "render_comm"])?;
+            } else {
+                exact(p, &["seconds"])?;
+            }
+            if !(1..=120).contains(&number(p, "seconds")?) {
+                return Err(err("invalid_request", "sample seconds must be 1..120"));
+            }
+            if let Some(comm) = p.get("render_comm") {
+                let comm = comm
+                    .as_str()
+                    .ok_or_else(|| err("invalid_request", "render_comm must be a string"))?;
+                if comm.is_empty() || comm.len() > 64 || comm.chars().any(char::is_control) {
+                    return Err(err(
+                        "invalid_request",
+                        "render_comm must be 1..64 bytes without control characters",
+                    ));
+                }
+            }
+        }
         "tap" => {
             exact(p, &["x", "y", "frame_id"])?;
             coordinates(p, &["x", "y"])?;
@@ -737,6 +786,16 @@ fn publish(store: &Store, r: &Value) -> Result<Value> {
     }
     if d["accepting"] != true {
         return Err(err("session_closed", "session is not accepting actions"));
+    }
+    if r["action"] == "sample"
+        && !d["allowed_actions"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v == "sample"))
+    {
+        return Err(err(
+            "invalid_request",
+            "this session does not support sampling",
+        ));
     }
     let pending = store.requests()?;
     if pending.iter().any(|e| e["request"]["action"] == "stop") {
@@ -879,6 +938,8 @@ fn start(a: &Args) -> Result<(Value, i32)> {
         .map_err(device)?;
     let base = Session::new_control(lease, &store.path, a.package.as_ref().unwrap(), &a.origin)
         .map_err(device)?;
+    let parent = Parent::new_control(base).map_err(device)?;
+    let base = &parent.base;
     let sid = base
         .dir
         .file_name()
@@ -926,7 +987,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
             d["phase"] = json!("ready");
             d["accepting"] = json!(true);
             save_descriptor(&store, &mut d)?;
-            serve(&store, &base, &mut d, deadline, &a.actor)
+            serve(&store, &parent, &mut d, deadline, &a.actor)
         }
         Err(e) => {
             let message = public_text(&base, &e.message);
@@ -944,6 +1005,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
     finish(
         &store,
         &base,
+        Some(&parent),
         &mut d,
         stop_request.as_ref(),
         failure.as_deref(),
@@ -954,11 +1016,12 @@ fn start(a: &Args) -> Result<(Value, i32)> {
 /// supervised transport process group; that bounded call must report first.
 fn serve(
     store: &Store,
-    base: &Session,
+    parent: &Parent,
     d: &mut Value,
     deadline: Instant,
     original_actor: &str,
 ) -> (Option<Value>, Option<String>) {
+    let base = &parent.base;
     let mut used_go = HashSet::new();
     loop {
         if STOP.load(Ordering::SeqCst) || Instant::now() >= deadline {
@@ -1017,13 +1080,41 @@ fn serve(
                 }
                 d["phase"] = json!("executing");
                 save_descriptor(store, d)?;
-                let answer = execute(store, base, d, r, original_actor, &mut used_go);
-                let health = base.control_ready();
+                let answer = execute(
+                    store,
+                    parent,
+                    d,
+                    r,
+                    original_actor,
+                    &mut used_go,
+                    deadline,
+                    number(&envelope, "sequence")?,
+                );
+                let health = base.control_ready().and_then(|_| {
+                    if r["action"] == "sample" && d["phase"] == "measuring" {
+                        parent.control_health()
+                    } else {
+                        Ok(())
+                    }
+                });
                 record["finished_at"] = json!(now());
                 match answer {
                     Ok(value) => {
-                        record["status"] = json!("completed");
+                        record["status"] = json!(if health.is_err() {
+                            "unknown"
+                        } else if value
+                            .get("collection")
+                            .is_some_and(|c| c["status"] == "failed")
+                        {
+                            "failed"
+                        } else {
+                            "completed"
+                        });
                         record["result"] = value;
+                        if r["action"] == "sample" {
+                            record["result"]["resource_health"] = json!({"status":if health.is_ok(){"ready"}else{"required"},"error":health.as_ref().err().map(|e|public_text(base,e))});
+                            d["latest_sample"] = record["result"].clone();
+                        }
                     }
                     Err(e) => {
                         record["status"] = json!(if health.is_ok() { "failed" } else { "unknown" });
@@ -1032,6 +1123,9 @@ fn serve(
                     }
                 }
                 store.write(&receipt_path(id, "results"), &record, false)?;
+                if r["action"] == "sample" {
+                    d["active_sample"] = Value::Null;
+                }
                 if let Err(error) = health {
                     return Err(device(error));
                 }
@@ -1086,12 +1180,15 @@ fn require_controller(d: &Value, r: &Value) -> Result<()> {
 }
 fn execute(
     store: &Store,
-    base: &Session,
+    parent: &Parent,
     d: &mut Value,
     r: &Value,
     original: &str,
     used_go: &mut HashSet<u32>,
+    deadline: Instant,
+    sequence: u64,
 ) -> Result<Value> {
+    let base = &parent.base;
     if r["session_id"] != d["session_id"] {
         return Err(err("conflict", "request session mismatch"));
     }
@@ -1101,11 +1198,73 @@ fn execute(
     let p = &r["params"];
     if matches!(
         action,
-        "tap" | "swipe" | "trigger" | "narrow" | "release_control"
+        "tap" | "swipe" | "trigger" | "narrow" | "release_control" | "sample"
     ) {
         require_controller(d, r)?;
     }
     match action {
+        "sample" => {
+            let seconds = number(p, "seconds")?;
+            if deadline.saturating_duration_since(Instant::now())
+                < Duration::from_secs(seconds + 10)
+            {
+                return Err(err(
+                    "budget_exhausted",
+                    "remaining session budget does not cover sample seconds plus 10 seconds",
+                ));
+            }
+            let label = format!("sample_{sequence}");
+            let relative = format!("{CONTROL}/artifacts/{label}");
+            let out = store.path.join(&relative);
+            fs::create_dir(&out)?;
+            d["phase"] = json!("measuring");
+            d["active_sample"] =
+                json!({"request_id":id,"seconds":seconds,"started_at":now(),"path":relative});
+            save_descriptor(store, d)?;
+            let collection = parent.sample_current(&label, seconds, &out);
+            let (trace_ok, sampler_ok, input) = match collection {
+                Ok(result) => result,
+                Err(error) => {
+                    store.write(
+                        &format!("{relative}/collection-error.json"),
+                        &json!({"error":public_text(base,&error)}),
+                        false,
+                    )?;
+                    (false, false, Value::Null)
+                }
+            };
+            // Observation only: the target is not stopped or restarted here.
+            let alive = base.target_alive().unwrap_or(false);
+            let origin = base.control_identity().map_err(device)?["evidence_origin"]
+                .as_str()
+                .ok_or_else(|| device("missing evidence origin".into()))?
+                .to_owned();
+            let run = crate::eval::summarize_control_sample(
+                &out,
+                &label,
+                seconds,
+                trace_ok,
+                sampler_ok,
+                input,
+                alive,
+                &origin,
+                p["render_comm"].as_str(),
+            )
+            .map_err(device)?;
+            let artifacts=run["artifacts"].as_array().ok_or_else(||device("sample result has no artifacts".into()))?.iter().map(|a|json!({"name":a["name"],"path":format!("{relative}/{}",a["path"].as_str().unwrap_or(""))})).collect::<Vec<_>>();
+            let mut collection = run["collection"].clone();
+            if let Some(error) = collection["error"].as_str() {
+                collection["error"] = json!(
+                    public_text(base, error).replace(&format!("{}/", store.path.display()), "")
+                );
+            }
+            let result = json!({"path":format!("{relative}/run.json"),"collection":collection,"requested_seconds":run["requested_seconds"],
+                "metrics":run["metrics"],"metric_provenance":run["metric_provenance"],"limitations":run["limitations"],"artifacts":artifacts});
+            d["latest_sample"] = result.clone();
+            d["active_sample"] = Value::Null;
+            save_descriptor(store, d)?;
+            Ok(result)
+        }
         "take_control" => {
             if d["controller"]["epoch"] != r["control_epoch"] {
                 return Err(err("conflict", "control epoch changed"));
@@ -1385,6 +1544,7 @@ fn public_recovery(
 fn finish(
     store: &Store,
     base: &Session,
+    parent: Option<&Parent>,
     d: &mut Value,
     stop: Option<&Value>,
     failure: Option<&str>,
@@ -1393,7 +1553,12 @@ fn finish(
     let failure = failure
         .map(str::to_owned)
         .or_else(|| mailbox.as_ref().err().map(|e| e.message.clone()));
-    d["recovery"] = public_recovery(store, base, d, base.finish_control(failure.as_deref()));
+    let report = if let Some(parent) = parent {
+        parent.finish(failure.as_deref())
+    } else {
+        base.finish_control(failure.as_deref())
+    };
+    d["recovery"] = public_recovery(store, base, d, report);
     let done = d["recovery"]["status"] == "reported_complete";
     d["phase"] = json!(if done { "closed" } else { "recovery_required" });
     d["accepting"] = json!(false);
@@ -1448,7 +1613,12 @@ fn recover(a: &Args) -> Result<(Value, i32)> {
     }
     let base = Session::resume_control(&session, a.serial.as_ref().unwrap()).map_err(device)?;
     d["stop_reason"] = json!("recovery_requested");
-    finish(&store, &base, &mut d, None, None)
+    if base.control_has_resources().map_err(device)? {
+        let parent = Parent::resume_control(base).map_err(device)?;
+        finish(&store, &parent.base, Some(&parent), &mut d, None, None)
+    } else {
+        finish(&store, &base, None, &mut d, None, None)
+    }
 }
 
 #[cfg(test)]
@@ -1491,6 +1661,28 @@ mod tests {
         let r = request("same");
         assert_eq!(publish(&store, &r).unwrap()["status"], "accepted");
         assert_eq!(publish(&store, &r).unwrap()["sequence"], 1);
+        // Old C1 descriptors remain readable; the newer helper must not enqueue
+        // unsupported sample requests into their live mailbox.
+        let mut sample = request("sample");
+        sample["action"] = json!("sample");
+        sample["params"] = json!({"seconds":1});
+        assert_eq!(
+            publish(&store, &sample).unwrap_err().code,
+            "invalid_request"
+        );
+        let mut manifest = store.read("gray-session-test/session.json").unwrap();
+        manifest["schema"] = json!("phonefarm/gray-capture-session@3");
+        manifest["control_resources"] =
+            json!({"path":"eval-session.json","schema":crate::gray_session::CONTROL_PARENT_SCHEMA});
+        store
+            .write("gray-session-test/session.json", &manifest, true)
+            .unwrap();
+        assert!(descriptor(&store).is_err()); // No parent: never fall back to C1.
+        manifest["schema"] = json!("phonefarm/gray-capture-session@2");
+        store
+            .write("gray-session-test/session.json", &manifest, true)
+            .unwrap();
+        assert!(descriptor(&store).is_ok());
         let mut changed = r.clone();
         changed["action"] = json!("marker");
         assert_eq!(publish(&store, &changed).unwrap_err().code, "conflict");

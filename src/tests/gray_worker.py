@@ -124,15 +124,16 @@ while [ ! -f "$R/workload-start.txt" ]; do sleep .05; done
 sleep .2
 gray_child_finish 0
 """)
-        def sample(run, interrupted):
+        def sample(run, interrupted, control=False):
             # Production guard, real PGID. Only the finite command/budget is a fixture.
             workload = (bench_worker.REPO / "loop_v1/tools/gray_input_workload.sh").read_text()
             budget = 1 if interrupted else 5
             workload = workload.replace("# GRAY_PLAN_CONSTANTS", f"GRAY_BUDGET={budget}\nSTEPS=1; DECLARED_MS=10000")
             workload = workload.replace("# GRAY_PLAN_ACTIONS", "sleep 30" if interrupted else "sleep .3")
-            (host.d / "workload.sh").write_text(workload)
+            workload_name = f"workload-{run}.sh" if control else "workload.sh"
+            (host.d / workload_name).write_text(workload)
             argv = [str(host.bin / "setsid"), "/bin/sh", str(host.worker), str(host.d),
-                    "fixture-token", "fixture-boot", "gray_script_sample", run, "1", str(self.instance), "0"]
+                    "fixture-token", "fixture-boot", "gray_control_sample" if control else "gray_script_sample", run, "1", str(self.instance), "0"]
             child = subprocess.Popen(argv, env=host.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 stdout, stderr = child.communicate(timeout=12)
@@ -144,6 +145,8 @@ gray_child_finish 0
             r = host.d / run
             self.assertEqual({line.split("\t")[0] for line in (r / "children.tsv").read_text().splitlines()},
                              {"workload", "trace", "sampler"})
+            workload_row = next(line.split("\t") for line in (r / "children.tsv").read_text().splitlines() if line.startswith("workload\t"))
+            self.assertEqual(workload_row[3], str(host.d / workload_name))
             self.assertEqual((r / "quiescence.txt").read_text().strip(), "OWNED_GROUPS_ABSENT")
             for line in (r / "children.tsv").read_text().splitlines():
                 with self.assertRaises(ProcessLookupError):
@@ -157,6 +160,8 @@ gray_child_finish 0
         r = sample("script_normal", False)
         self.assertEqual((r / "workload_exit.txt").read_text().strip(), "0")
         self.assertEqual(json.loads((r / "input-complete.json").read_text())["run"], "script_normal")
+        control = sample("control_normal", False, control=True)
+        self.assertEqual((control / "round-kind.txt").read_text().strip(), "gray_control_v1")
         before = host.files()
         self.assertEqual(host.call("verify_gray_idle", "verify")[:2], (0, "GRAY_IDLE_QUIESCENT\n"))
         self.assertEqual(host.call("verify_gray_groups", "verify")[:2], (0, "GRAY_GROUPS_QUIESCENT\n"))

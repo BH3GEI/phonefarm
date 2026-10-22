@@ -230,6 +230,18 @@ pub(crate) fn parse(input: &Value, seconds: u64) -> Result<Plan, String> {
     Ok(plan)
 }
 impl Plan {
+    /// Current-scene sampling owns a finite idle workload, never input.
+    pub fn idle(seconds: u64) -> Result<Self, String> {
+        if !(1..=120).contains(&seconds) { return Err("control sample seconds must be 1..120".into()); }
+        let mut remaining = (seconds + 10) * 1000;
+        let mut steps = Vec::new();
+        while remaining > 0 {
+            let ms = remaining.min(60000);
+            steps.push(Step::Sleep { ms });
+            remaining -= ms;
+        }
+        Ok(Self { seconds, total_ms: (seconds + 10) * 1000, steps })
+    }
     pub fn duration_ms(&self) -> u64 {
         self.total_ms
     }

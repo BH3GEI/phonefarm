@@ -6,6 +6,7 @@ use std::{cell::RefCell, fs, path::Path, time::{Duration, Instant}};
 const SCHEMA: &str = "phonefarm/gray-eval-launch-session@1";
 const SCRIPT_SCHEMA: &str = "phonefarm/gray-eval-script-session@1";
 const LOADOP_SCHEMA: &str = "phonefarm/gray-ab-loadop-session@1";
+const CONTROL_SCHEMA: &str = crate::gray_session::CONTROL_PARENT_SCHEMA;
 const CHILD_GUARD: &str = include_str!("../loop_v1/tools/gray_child_guard.sh");
 const FAN: &str = "/sys/kernel/fan/fan_enable";
 const WORKER: &str = include_str!("../loop_v1/tools/confirmation_worker.sh");
@@ -30,9 +31,18 @@ impl Parent {
         if base.eval_identity()?["completion_owner"]!="gray_ab_loadop" {return Err("loadop parent owner differs".into());}
         Self::new_with_plan(base,request,Some(plan))
     }
+    pub fn new_control(base:Session)->Result<Self,String> {
+        if !base.control_has_resources()? {return Err("control resource binding is missing".into());}
+        Self::new_with_plan(base,&json!({"protocol":"current_scene_idle"}),None)
+    }
+    pub fn resume_control(base:Session)->Result<Self,String> {
+        if !base.control_has_resources()? {return Err("legacy control session has no resource parent".into());}
+        Self::resume_base(base)
+    }
     fn new_with_plan(base: Session, request: &Value, plan: Option<&crate::gray_script::Plan>) -> Result<Self,String> {
         let id = base.eval_identity()?;
         let loadop=id["completion_owner"]=="gray_ab_loadop";
+        let control=id["completion_owner"]=="gray_layer_control";
         if (loadop || id["completion_owner"]=="gray_eval_script") != plan.is_some() {return Err("parent plan/owner mismatch".into());}
         // Foreign/legacy/partial charging records are refused before any device write.
         let charging=if loadop {
@@ -41,7 +51,7 @@ impl Parent {
             json!({"stage":"not_started","record_path":path,"binding":null,"history":[],"initial":null,"last_observation":null})
         }else{Value::Null};
         let token = id["token"].as_str().ok_or("missing token")?;
-        let state = json!({"schema":if loadop{LOADOP_SCHEMA}else if plan.is_some(){SCRIPT_SCHEMA}else{SCHEMA},"identity":id,"stage":"created","request":request,"input_plan":plan.map(|p|p.to_value()),
+        let state = json!({"schema":if control{CONTROL_SCHEMA}else if loadop{LOADOP_SCHEMA}else if plan.is_some(){SCRIPT_SCHEMA}else{SCHEMA},"identity":id,"stage":"created","request":request,"input_plan":plan.map(|p|p.to_value()),
             "remote":format!("/data/local/tmp/phonefarm-confirmation-gray-{token}"),
             "trace":format!("/sys/kernel/tracing/instances/phonefarm_gray_{token}"),
             "deployment":"not_started","tools_created":false,"trace_state":"not_started","fan":null,"pending":null,"rounds":[],"charging":charging});
@@ -73,7 +83,7 @@ impl Parent {
         if !state["fan"].is_null() && (!matches!(state["fan"]["original"].as_str(),Some("0"|"1")) || !state["fan"]["changed"].is_boolean()) {
             return Err("invalid original fan state".into());
         }
-        if scripted(&state) {script_plan(&state)?;}
+        if state["schema"]==CONTROL_SCHEMA {validate_control_rounds(&state)?;} else if scripted(&state) {script_plan(&state)?;}
         if state["schema"]==LOADOP_SCHEMA {validate_charging(&state["charging"],&id)?;if !state["fan"].is_null(){return Err("loadop session cannot own fan conditioning".into());}}
         Ok(Self {base,state:RefCell::new(state),charge:RefCell::new(None)})
     }
@@ -123,12 +133,14 @@ impl Parent {
         self.update(|s|{s["identity"]=id.clone();s["deployment"]=json!("installing");})?;
         let owner=format!("{} {}",id["token"].as_str().unwrap(),id["boot_id"].as_str().ok_or("missing boot")?);
         self.mutate("eval_tools_directory",&["shell".into(),format!("set -eu; command -v setsid; test ! -e {d}; mkdir {d}; printf '%s\\n' {owner} > {d}/owner; sync",d=q(&remote),owner=q(&owner))],30_000,|s|s["tools_created"]=json!(true))?;
-        let script = if scripted(&self.state.borrow()) {Some(script_plan(&self.state.borrow())?)} else {None};
+        let control=self.state.borrow()["schema"]==CONTROL_SCHEMA;
+        let script = if !control && scripted(&self.state.borrow()) {Some(script_plan(&self.state.borrow())?)} else {None};
         let input = script.as_ref().map(|p|p.shell());
-        let sampler = script.as_ref().map(|_|crate::gray_script::sampler_shell());
+        let sampler = if control || script.is_some() {Some(crate::gray_script::sampler_shell())} else {None};
         let mut tools = vec![("worker.sh",WORKER),("bootstrap.sh",BOOTSTRAP),
-            ("workload.sh",input.as_deref().unwrap_or(TRACE)),("sample_env.sh",sampler.as_deref().unwrap_or(SAMPLER))];
-        if script.is_some() {tools.extend([("trace.sh",TRACE),("gray_child_guard.sh",CHILD_GUARD)]);}
+            ("sample_env.sh",sampler.as_deref().unwrap_or(SAMPLER))];
+        if !control {tools.push(("workload.sh",input.as_deref().unwrap_or(TRACE)));}
+        if control || script.is_some() {tools.extend([("trace.sh",TRACE),("gray_child_guard.sh",CHILD_GUARD)]);}
         for (name,text) in tools {
             let local=self.base.dir.join(name);new_file(&local,text.as_bytes())?;
             self.mutate("eval_push_tool",&["push".into(),local.to_string_lossy().into(),format!("{remote}/{name}")],30_000,|_|{})?;
@@ -145,7 +157,7 @@ impl Parent {
         let id=self.base.eval_identity()?;
         let mut extra=seconds.map(|s|format!(" {s} {}",q(&self.trace()))).unwrap_or_default();
         if let Some(qualify)=qualify {extra.push_str(if qualify {" 1"} else {" 0"});}
-        let timeout=if qualify.is_some() {script_plan(&self.state.borrow())?.duration_ms().max((seconds.unwrap_or(0)+10)*1000)+120_000} else {(seconds.unwrap_or(0)+120)*1000};
+        let timeout=if qualify.is_some() {round_plan(&self.state.borrow(),run)?.duration_ms().max((seconds.unwrap_or(0)+10)*1000)+120_000} else {(seconds.unwrap_or(0)+120)*1000};
         let cmd=format!("setsid sh {d}/worker.sh {d} {token} {boot} {mode} {run}{extra}",d=q(&self.remote()),
             token=q(id["token"].as_str().unwrap()),boot=q(id["boot_id"].as_str().ok_or("missing boot")?),mode=q(mode),run=q(run));
         let args=["shell".into(),format!("su -c {}",q(&cmd))];
@@ -173,7 +185,7 @@ impl Parent {
         Ok((wc==Some(true),sc==Some(true)))
     }
     fn round_text(&self,label:&str,name:&str)->Result<String,String> {
-        if self.state.borrow()["schema"]==LOADOP_SCHEMA && !self.base.eval_present(&format!("{}/{label}/{name}",self.remote()))? {
+        if matches!(self.state.borrow()["schema"].as_str(),Some(LOADOP_SCHEMA|CONTROL_SCHEMA)) && !self.base.eval_present(&format!("{}/{label}/{name}",self.remote()))? {
             return Err(format!("{label}/{name}: expected collection evidence absent; original remote ledger retained"));
         }
         self.read("eval_sample_evidence",&format!("{} && cat {}/{}/{}",self.owned()?,q(&self.remote()),q(label),q(name)))
@@ -189,7 +201,43 @@ impl Parent {
         if seconds!=plan.seconds || label.is_empty() || !label.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_') {return Err("invalid finite gray sample".into());}
         fs::create_dir_all(out).map_err(|e|e.to_string())?;
         self.update(|s|s["rounds"].as_array_mut().unwrap().push(json!({"label":label,"seconds":seconds,"out":out,"qualify":qualify})))?;
-        let result=self.worker_with_qualification("gray_script_sample",label,Some(seconds),true,Some(qualify))?;
+        self.collect_script(label,seconds,out,qualify,&plan,"gray_script_sample")
+    }
+    pub fn control_health(&self)->Result<(),String> {
+        self.clear()?;
+        let deployment=self.state.borrow()["deployment"].as_str().map(str::to_owned);
+        match deployment.as_deref() {
+            Some("not_started")=>Ok(()),
+            Some("ready")=>self.admission_ready(),
+            _=>Err("control resource deployment is incomplete".into()),
+        }
+    }
+    pub fn sample_current(&self,label:&str,seconds:u64,out:&Path)->Result<(bool,bool,Value),String> {
+        if self.state.borrow()["schema"]!=CONTROL_SCHEMA || !valid_round(label) {return Err("invalid control sampling parent/round".into());}
+        let plan=crate::gray_script::Plan::idle(seconds)?;
+        self.control_health()?;
+        if self.state.borrow()["deployment"]=="not_started" {
+            let caps=self.capabilities()?;
+            if caps.root!=Some(true) || caps.trace_available!=Some(true) {return Err("current-scene sampling requires root and owned KGSL trace support".into());}
+            self.deploy()?;
+        }
+        fs::create_dir_all(out).map_err(|e|e.to_string())?;
+        let script_name=format!("workload-{label}.sh");
+        if self.state.borrow()["rounds"].as_array().unwrap().iter().any(|r|r["label"]==label) {return Err("control sample round already exists; refusing replay".into());}
+        // Record this exact plan before any upload. R remains absent for the
+        // worker's exclusive mkdir; scripts are flat files outside round dirs.
+        self.update(|s|s["rounds"].as_array_mut().unwrap().push(json!({"label":label,"seconds":seconds,"out":out,"qualify":false,"input_plan":plan.to_value(),"workload":script_name,"deployment":"recorded"})))?;
+        new_file(&out.join("input-plan.json"),&serde_json::to_vec_pretty(&plan.to_value()).unwrap())?;
+        let local=out.join(&script_name);new_file(&local,plan.shell().as_bytes())?;
+        let remote=format!("{}/{script_name}",self.remote());
+        if self.base.eval_present(&remote)? {return Err("control round workload path already exists".into());}
+        self.mutate("control_push_workload",&["push".into(),local.to_string_lossy().into(),remote],30_000,|s| {
+            s["rounds"].as_array_mut().unwrap().iter_mut().find(|r|r["label"]==label).unwrap()["deployment"]=json!("ready");
+        })?;
+        self.collect_script(label,seconds,out,false,&plan,"gray_control_sample")
+    }
+    fn collect_script(&self,label:&str,seconds:u64,out:&Path,qualify:bool,plan:&crate::gray_script::Plan,mode:&str)->Result<(bool,bool,Value),String> {
+        let result=self.worker_with_qualification(mode,label,Some(seconds),true,Some(qualify))?;
         new_file(&out.join("capture.log"),result.as_bytes())?;
         if result.trim()!="GRAY_SCRIPT_SAMPLE_COMPLETE" {return Err("gray script lifecycle receipt missing".into());}
         let mut data=serde_json::Map::new();
@@ -199,7 +247,7 @@ impl Parent {
             let text=self.round_text(label,name)?;new_file(&out.join(local),text.as_bytes())?;
             data.insert(name.into(),if name.ends_with(".json"){serde_json::from_str(&text).map_err(|e|format!("{name}: {e}"))?}else{json!(text.trim())});
         }
-        let receipt=self.natural_input(label,&plan,Some(&out.join("input-complete.json")))?;
+        let receipt=self.natural_input(label,plan,Some(&out.join("input-complete.json")))?;
         if data["quiescence.txt"]!="OWNED_GROUPS_ABSENT" {return Err("script sample groups not absent".into());}
         let trace_ok=data["trace_exit.txt"]=="0";
         let sampler_ok=data["sampler_exit.txt"]=="0";
@@ -226,9 +274,9 @@ impl Parent {
     fn verify_inputs(&self)->Result<(),String> {
         let state=self.state.borrow().clone();
         if !scripted(&state) {return Ok(());}
-        let plan=script_plan(&state)?;
         for round in state["rounds"].as_array().ok_or("missing input rounds")? {
             let label=round["label"].as_str().filter(|s|!s.is_empty()&&s.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_')).ok_or("invalid input round label")?;
+            let plan=round_plan(&state,label)?;
             // Called only after the worker has verified every current ledger and
             // group. Its protocol admits input only through this durable permit;
             // trace preparation may have failed before input was admitted.
@@ -333,7 +381,7 @@ impl Parent {
         self.charge_restored("session_finish")
     }
     pub fn fan_off(&self)->Result<Value,String> {
-        if self.state.borrow()["schema"]==LOADOP_SCHEMA {return Err("loadop session does not own fan conditioning".into());}
+        if matches!(self.state.borrow()["schema"].as_str(),Some(LOADOP_SCHEMA|CONTROL_SCHEMA)) {return Err("this parent does not own fan conditioning".into());}
         if self.state.borrow()["deployment"]!="ready" {return Err("fan conditioning requires deployed eval resources".into());}
         self.identity()?;
         if !self.base.eval_present(FAN)? {return Ok(json!({"before":null,"after":null,"forced":false}));}
@@ -506,11 +554,31 @@ fn validate_parent_kind(state:&Value,id:&Value)->Result<(),String> {
         Some("gray_eval_launch")=>state["schema"]==SCHEMA && (state["identity"]["completion_owner"].is_null()||state["identity"]["completion_owner"]=="gray_eval_launch"),
         Some("gray_eval_script")=>state["schema"]==SCRIPT_SCHEMA && state["identity"]["completion_owner"]=="gray_eval_script",
         Some("gray_ab_loadop")=>state["schema"]==LOADOP_SCHEMA && state["identity"]["completion_owner"]=="gray_ab_loadop",
+        Some("gray_layer_control")=>state["schema"]==CONTROL_SCHEMA && state["identity"]["completion_owner"]=="gray_layer_control",
         _=>false,
     };
     if valid {Ok(())}else{Err("parent schema/completion owner mismatch".into())}
 }
-fn scripted(state:&Value)->bool {state["schema"]==SCRIPT_SCHEMA || state["schema"]==LOADOP_SCHEMA}
+fn scripted(state:&Value)->bool {state["schema"]==SCRIPT_SCHEMA || state["schema"]==LOADOP_SCHEMA || state["schema"]==CONTROL_SCHEMA}
+fn valid_round(label:&str)->bool {!label.is_empty() && label.len()<=64 && label.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_')}
+fn round_plan(state:&Value,label:&str)->Result<crate::gray_script::Plan,String> {
+    if state["schema"]!=CONTROL_SCHEMA {return script_plan(state);}
+    let round=state["rounds"].as_array().ok_or("missing control rounds")?.iter().find(|r|r["label"]==label).ok_or("control round not recorded")?;
+    let plan=crate::gray_script::Plan::idle(round["seconds"].as_u64().ok_or("missing control seconds")?)?;
+    if round["input_plan"]!=plan.to_value() || round["workload"]!=format!("workload-{label}.sh") || round["qualify"]!=false
+        || !matches!(round["deployment"].as_str(),Some("recorded"|"ready")) {return Err("control round plan/path differs from the frozen idle plan".into());}
+    Ok(plan)
+}
+fn validate_control_rounds(state:&Value)->Result<(),String> {
+    if !state["input_plan"].is_null() || !state["fan"].is_null() || !state["charging"].is_null() {return Err("control session cannot own fixed input or hardware conditioning".into());}
+    let mut labels=std::collections::HashSet::new();
+    for round in state["rounds"].as_array().ok_or("missing control rounds")? {
+        let label=round["label"].as_str().filter(|s|valid_round(s)).ok_or("invalid control round")?;
+        if !labels.insert(label) {return Err("duplicate control round".into());}
+        round_plan(state,label)?;
+    }
+    Ok(())
+}
 fn script_plan(state:&Value)->Result<crate::gray_script::Plan,String> {
     if !scripted(state) {return Err("finite input requires script parent".into());}
     let value=&state["input_plan"];
@@ -560,6 +628,21 @@ mod tests {
         let loadop=json!({"completion_owner":"gray_ab_loadop"});
         assert!(validate_parent_kind(&json!({"schema":LOADOP_SCHEMA,"identity":loadop}),&loadop).is_ok());
         assert!(validate_parent_kind(&new,&loadop).is_err());
+        let control=json!({"completion_owner":"gray_layer_control"});
+        let mut current=json!({"schema":CONTROL_SCHEMA,"identity":control,"input_plan":null,"fan":null,"charging":null,"rounds":[]});
+        assert!(validate_parent_kind(&current,&control).is_ok());
+        assert!(validate_parent_kind(&new,&control).is_err());
+        for (label,seconds) in [("sample_1",1),("sample_2",120)] {
+            let plan=crate::gray_script::Plan::idle(seconds).unwrap();
+            assert_eq!(plan.duration_ms(),(seconds+10)*1000);
+            assert!(!plan.shell().contains("input tap"));assert!(!plan.shell().contains("input swipe"));
+            assert_eq!(crate::gray_script::parse(&plan.to_value()["steps"],seconds).unwrap(),plan);
+            current["rounds"].as_array_mut().unwrap().push(json!({"label":label,"seconds":seconds,"input_plan":plan.to_value(),"workload":format!("workload-{label}.sh"),"qualify":false,"deployment":"ready"}));
+        }
+        assert!(validate_control_rounds(&current).is_ok());
+        assert_eq!(round_plan(&current,"sample_1").unwrap().seconds,1);
+        current["rounds"][0]["input_plan"]=current["rounds"][1]["input_plan"].clone();
+        assert!(validate_control_rounds(&current).is_err());
         let window=|child,start,end|json!({"schema":"phonefarm/gray-child-time@1","child":child,"exit_code":0,"start":start,"end":end});
         let mut evidence=json!({"natural_completion":{"schema":"phonefarm/gray-input-complete@1","start":100.0,"end":112.0},"actual":{
             "workload-time.json":window("workload",100.0,112.0),"trace-time.json":window("trace",106.0,109.0),"sampler-time.json":window("sampler",99.0,114.0),

@@ -2254,6 +2254,115 @@ pub(crate) fn run_owned_gray_script(parent:&crate::gray_eval_session::Parent,pla
     run_owned_gray(parent,&OwnedGrayWorkload::Script(plan.clone()),label,out,plan.seconds,None)
 }
 
+/// Archive a current-scene sample without restarting/stopping the target or
+/// applying the eval qualification/decision policy. Collection errors are data;
+/// only an inability to persist the result returns Err to the owner.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn summarize_control_sample(
+    out: &Path,
+    label: &str,
+    seconds: u64,
+    trace_ok: bool,
+    sampler_ok: bool,
+    input: Value,
+    target_alive: bool,
+    evidence_origin: &str,
+    render_comm: Option<&str>,
+) -> Result<Value, String> {
+    let mut errors = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(out.join("collection-error.json")) {
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            if let Some(error) = value["error"].as_str() { errors.push(error.to_owned()); }
+        }
+    }
+    let trace = std::fs::read_to_string(out.join("trace.txt"));
+    let env_text = std::fs::read_to_string(out.join("env.txt"));
+    if !trace_ok { errors.push("trace child failed; inspect its exit code and log".to_owned()); }
+    if !sampler_ok { errors.push("environment sampler failed; inspect its exit code and log".to_owned()); }
+    if let Err(error) = &trace { errors.push(format!("trace evidence unavailable: {error}")); }
+    if let Err(error) = &env_text { errors.push(format!("environment evidence unavailable: {error}")); }
+    let summary = if trace_ok {
+        render_comm.zip(trace.as_ref().ok()).map(|(comm, text)| {
+            to_serde(&crate::looptrace::parse(text, comm).summarize())
+        })
+    } else { None };
+    if let Some(summary) = &summary {
+        crate::confirmation_transport::new_file(&out.join("summary.json"), &serde_json::to_vec_pretty(summary).unwrap())?;
+    }
+    let mut run = json!({"schema":"phonefarm/gray-control-sample@1", "label":label,
+        "requested_seconds":seconds,"evidence_origin":evidence_origin,"target_alive_after":target_alive,
+        "input_window":input,"summary":summary.clone().unwrap_or_else(||json!({})),
+        "env":env_text.as_ref().map(|text|to_serde(&sysparam::env_stats(text))).unwrap_or_else(|_|json!({}))});
+    if trace_ok && trace.is_ok() && env_text.is_ok() {
+        if let Err(error) = bind_run_evidence(&mut run,label,out,&out.join("env.txt"),sampler_ok,seconds+10,seconds,Some(if target_alive{0}else{1})) {
+            errors.push(error);
+        }
+    } else {
+        run["env"]["trace_window_verified"] = json!(false);
+        run["env"]["sampler_exit_success"] = json!(sampler_ok);
+        if !target_alive { errors.push("target was not alive after collection".into()); }
+    }
+    // No implicit Unity filter and no claim that a comm filter proves process
+    // ownership. Keep the original parser semantics available for later audit.
+    if summary.is_none() { run["summary"] = Value::Null; }
+    let mut limitations = vec![
+        "GPU submit proxy; target process/context ownership and display FPS are not verified".to_owned(),
+        "power covers the whole sampler window including lead/tail, not only the trace window".to_owned(),
+        "energy per frame is not calculated from these different windows".to_owned(),
+    ];
+    if render_comm.is_none() {
+        limitations.push("no render thread filter selected; raw trace is retained and frame metrics are unknown".into());
+    } else if summary.as_ref().is_some_and(|s|s["n_frames"].as_u64().unwrap_or(0)==0) {
+        limitations.push("no frame intervals matched the requested render thread filter".into());
+    }
+    if evidence_origin != "device" {
+        limitations.push("synthetic evidence is not a real device performance measurement".into());
+    }
+    // An old charge-suspend/bypass file is not an ownership or power-window
+    // proof for this session. This first control route only admits observed
+    // battery discharge throughout a verified sampler/trace window.
+    let power_ok = sampler_ok && run["env"]["trace_window_verified"] == true
+        && run["env"]["power_window_verified"] == true && run["env"]["on_battery"] == true
+        && run["env"]["power_source"] == "battery";
+    if !power_ok {
+        let reason = if run["env"]["trace_window_verified"] != true {
+            "sampler/trace window coverage was not verified".to_owned()
+        } else if run["env"]["power_source"] == "usb_bypass" {
+            "legacy bypass marker does not establish battery discharge for this control sample".to_owned()
+        } else {
+            run["env"]["power_usable_reason"].as_str().unwrap_or("battery discharge throughout the sampling window was not verified").to_owned()
+        };
+        run["env"]["power_w_mean"] = Value::Null;
+        run["env"]["power_w_median"] = Value::Null;
+        run["env"]["power_valid"] = json!(false);
+        run["env"]["power_cross_run_comparable"] = json!(false);
+        run["env"]["power_usable_reason"] = json!(reason);
+        limitations.push(format!("power unavailable: {reason}"));
+    }
+    run["metrics"] = json!({"gpu_submit_fps":run["summary"]["fps_mean"],
+        "frame_p95_ms":run["summary"]["frame_p95"],"gpu_active_mean_ms":run["summary"]["gpu_active_mean"],
+        "queue_p95_ms":run["summary"]["queue_p95"],"power_w_mean":run["env"]["power_w_mean"],"energy_per_frame_mj":null});
+    run["metric_provenance"] = json!({"frame":{"semantics":"gpu_submit_proxy","render_comm":render_comm,
+        "grouping":"existing auto submits-per-frame parser","target_ownership_verified":false,"display_verified":false},
+        "power":{"rail":run["env"]["power_rail"],"window_verified":power_ok,
+            "scope":"whole sampler window including lead/tail"},"energy_per_frame":{"available":false,"reason":"different windows"}});
+    run["collection"] = json!({"status":if errors.is_empty(){"complete"}else{"failed"},
+        "error":if errors.is_empty(){Value::Null}else{json!(errors.join("; "))}});
+    run["limitations"] = json!(limitations);
+    let names = ["trace.txt","summary.json","env.txt","capture.log","collection-error.json","input-plan.json","workload_exit.txt","trace_exit.txt","sampler_exit.txt",
+        "quiescence.txt","workload.log","trace.log","workload-time.json","trace-time.json","sampler-time.json",
+        "input-complete.json","input-window.json"];
+    run["artifact_path_base"] = json!("run_directory");
+    run["artifacts"] = json!(names.into_iter().filter(|name|out.join(name).is_file())
+        .map(|name|json!({"name":name,"path":name})).collect::<Vec<_>>());
+    let workload = format!("workload-{label}.sh");
+    if out.join(&workload).is_file() {
+        run["artifacts"].as_array_mut().unwrap().push(json!({"name":workload,"path":workload}));
+    }
+    crate::confirmation_transport::new_file(&out.join("run.json"),&serde_json::to_vec_pretty(&run).unwrap())?;
+    Ok(run)
+}
+
 fn effective_gray_hits(marker:&Value)->u64 {
     marker["effective"].as_array().map(|xs|xs.iter().filter_map(|e|e["begins"].as_u64()).sum()).unwrap_or(0)
 }
@@ -2718,6 +2827,30 @@ bus.DDR.boost_freq.effect=live\n";
 #[cfg(test)]
 mod path_tests {
     use super::*;
+
+    #[test]
+    fn control_sample_keeps_unknown_filter_and_power_separate_from_raw_collection() {
+        let root = std::env::temp_dir().join(format!("control-sample-{}-{}",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        for (name,status,current,trace_present) in [("legacy_bypass","Charging",0,true),("battery","Discharging",-1_000_000,true),("failed","Discharging",-1_000_000,false)] {
+            let out = root.join(name);std::fs::create_dir(&out).unwrap();
+            let mut env = format!("#sample_env v1 dur=13 interval=2\n#battery_status={status}\n#charge_suspended=yes\n#charge_mode=bypass\n");
+            for t in (100..=112).step_by(2) {env.push_str(&format!("ENV {t} 3800000 {current} NA 5000000 1000000 gpuss 40000\n"));}
+            env.push_str(&format!("#battery_status_after={status}\n#sample_env done\n"));
+            std::fs::write(out.join("env.txt"),env).unwrap();
+            if trace_present {std::fs::write(out.join("trace.txt"),"#loop_v1_meta capture_start_uptime=106 capture_end_uptime=109 duration_req=3\n").unwrap();}
+            let result = summarize_control_sample(&out,name,3,trace_present,true,Value::Null,true,"synthetic",None).unwrap();
+            assert!(result["summary"].is_null());
+            assert!(result["metrics"]["gpu_submit_fps"].is_null());
+            assert!(result["metrics"]["energy_per_frame_mj"].is_null());
+            assert_eq!(result["metric_provenance"]["frame"]["target_ownership_verified"],false);
+            if name=="battery" {assert_eq!(result["metrics"]["power_w_mean"],3.8);}
+            else {assert!(result["metrics"]["power_w_mean"].is_null());}
+            assert_eq!(result["collection"]["status"],if trace_present{"complete"}else{"failed"});
+            assert!(out.join("run.json").is_file());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// game_opt_loop 的 workload.script 是**调用方视角**的相对路径
     /// ("../phonefarm/knobs/gray/workload_spin_touch_v1.json"): 在 game_opt_loop
