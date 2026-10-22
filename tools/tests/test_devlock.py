@@ -35,6 +35,29 @@ class DevlockBridgeTests(unittest.TestCase):
         os.utime(owner, (1, 1))
         return owner
 
+    def test_default_follows_selected_resolver_without_read_side_creation_or_fallback(self):
+        self.env.pop("DEVLOCK_DIR")
+        target = self.root / "selected persistent locks"
+        response = self.root / "storage.json"
+        resolver = self.root / "selected-phonefarm"
+        resolver.write_text("#!/bin/sh\n[ \"$*\" = 'lease status --json' ] || exit 2\ncat \"$(dirname \"$0\")/storage.json\"\n")
+        resolver.chmod(0o755)
+        self.env["PHONEFARM_BIN"] = str(resolver)
+        response.write_text(json.dumps({"storage": {"schema_version": 1, "readiness": "migration_required",
+                                                    "devlock_dir": str(target), "error": "stop old participants"}}))
+        refused = self.call("acquire", "outer")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("stop old participants", refused.stderr)
+        self.assertFalse(target.exists())
+        response.write_text(json.dumps({"storage": {"schema_version": 1, "readiness": "ready", "devlock_dir": str(target)}}))
+        self.assertEqual(self.call("status").stdout.strip(), "free")
+        self.assertFalse(target.exists())
+        self.assertEqual(self.call("run", "outer", "--", "/usr/bin/true").returncode, 0)
+        self.assertTrue((target / "devlock.log").exists())
+        self.assertFalse((self.root / "devlock.log").exists())
+        response.write_text('{"status":"clear"}')
+        self.assertEqual(self.call("acquire", "outer").returncode, 2)
+
     def test_strong_records_block_missing_owner_stale_take_and_same_label_bypass(self):
         for variant in ("corrupt", "unknown", "missing-owner", "dangling-marker", "token-owner"):
             with self.subTest(variant=variant):
@@ -74,6 +97,7 @@ class DevlockBridgeTests(unittest.TestCase):
         self.assertEqual(self.call("release", "outer").returncode, 0)
         self.assertFalse(owner.parent.exists())
         self.assertEqual(marker.read_bytes(), before)
+        self.assertIn("lease protected", self.call("status").stdout)
         self.assertNotEqual(self.call("acquire", "other").returncode, 0)
         marker.unlink()  # Even an empty leftover directory still blocks old acquisition.
         self.assertNotEqual(self.call("acquire", "other").returncode, 0)

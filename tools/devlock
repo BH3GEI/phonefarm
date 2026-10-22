@@ -10,7 +10,29 @@
 # 文件格式与 phonefarm/src/fleet.rs 只读的三个文件一致: devlock.d/owner, devlock.queue, devlock.log。
 # run 会把 DEVLOCK_LABEL=<label> 传给命令: 里面再调 phonefarm / game_opt_loop 时它们认得这把锁是自己这一侧的,
 # 不会再去排一次队 (否则自己等自己)。phonefarm 与 game_opt_loop 碰设备的入口会自己拿锁, 一般不必再包 run。
-B=${DEVLOCK_DIR:-/private/tmp/claude-501}; mkdir -p $B
+if (( ${+DEVLOCK_DIR} )); then
+  B=$DEVLOCK_DIR
+  [[ "$B" == /* ]] || { print -u2 'DEVLOCK_DIR must be an absolute path'; exit 2; }
+else
+  PF=${PHONEFARM_BIN:-${0:A:h:h}/phonefarm}
+  lease_status=$("$PF" lease status --json) || { print -u2 'phonefarm lease storage unavailable'; exit 2; }
+  B=$(print -r -- "$lease_status" | python3 -c '
+import json, os, sys
+try:
+    storage = json.load(sys.stdin)["storage"]
+    if storage.get("schema_version") != 1 or storage.get("readiness") != "ready":
+        raise ValueError(storage.get("error") or "lease storage requires explicit initialization")
+    path = storage["devlock_dir"]
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise ValueError("phonefarm returned an invalid lease path")
+    print(path)
+except (ValueError, KeyError, TypeError) as error:
+    print("lease storage unavailable: " + str(error), file=sys.stderr)
+    sys.exit(2)
+') || exit 2
+fi
+# Observation must not initialize a new lock domain. Only mutations create it.
+[[ "$1" == status ]] || mkdir -p -- "$B" || exit 2
 D=$B/devlock.d; LOG=$B/devlock.log; Q=$B/devlock.queue; SEEN=$B/devlock.seen; M=$B/devlock.qmutex
 N=$B/phonefarm-lease.d
 STALE=${DEVLOCK_STALE:-600}
@@ -113,7 +135,13 @@ stop_heartbeat(){
 }
 case $1 in
   status)
-    [[ -d $D ]] && echo "held: $(owner) (heartbeat $(age)s ago)" || echo free
+    if barrier; then
+      echo 'lease protected: inspect phonefarm lease status --json'
+    elif [[ -d $D ]]; then
+      [[ -f "$D/owner" ]] && echo "held: $(owner) (heartbeat $(age)s ago)" || echo 'unknown: owner unavailable'
+    else
+      echo free
+    fi
     [[ -s $Q ]] && echo "queue: $(grep -v '^[[:space:]]*$' $Q | tr '\n' ' ')"; true ;;
   acquire) acquire $2 ;;
   renew) renew "$2" "$PPID" ;;
