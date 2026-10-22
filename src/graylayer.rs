@@ -1,4 +1,4 @@
-//! 灰档 Vulkan 层的挂/摘/查 (knobs/gray/enable_layer.sh 的 Rust 移植)。
+//! 灰层共享合同、诊断与指定目标停用；安装由持久 Session 管理。
 //!
 //! 机制 (2026-09-23 在 NX809J / Android 16 / user 版 + Magisk root 上逐条实测):
 //! 生效只需要两件事, 缺一不可:
@@ -12,8 +12,8 @@
 //! ⚠ debug.vulkan.layers 是**全局**属性, 会误伤别的应用: 属性置上之后启动的、
 //! 自己 lib 目录里没有这个 .so 的 Vulkan 应用 vkCreateInstance 直接失败
 //! (实测 cn.nubia.gameassist RenderThread SIGABRT 每 ~2 秒崩溃重启一次)。
-//! 所以 target/probe/loadop 挂完等目标进程真的加载上层, 然后**立刻清掉全局属性**
-//! 收窄暴露窗口; 无论怎么用, 收尾都要跑 [`off`]。
+//! 持续会话在目标加载后收窄全局属性，并由同一 owner 恢复原值。
+//! 旧的挂层后退出入口已退役；`off` 仅处理已登记的历史遗留，不等于恢复会话。
 
 use crate::eval::{adb, adb_ok, adb_path, resolve_path};
 use serde::Serialize;
@@ -41,7 +41,23 @@ pub(crate) const LAYER_PROPERTIES: [&str; 12] = [
     FA_PROP, FA_TS_PROP, FA_GO_PROP, STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP,
 ];
 
-const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off [pkg] [--json]} [--serial S] [--keep-prop] [--so 本机.so]\ncopyprobe/upop 当前不支持执行（包括自定义 SO）；工件与历史证据仍可离线分析。";
+const USAGE: &str = "用法: phonefarm gray-layer {status|off [pkg] [--json]} [--serial S]\n挂层使用: phonefarm gray-layer session --mode MODE --package PKG --serial S --out DIR --max-seconds N\n旧 probe/loadop/passdump/frameaudit/frameaudit-ts/target 已退役；旧 --keep-prop 的仅安装不启动语义不再提供，新 session 始终启动目标。\ncopyprobe/upop 当前不支持执行（包括自定义 SO）；工件与历史证据仍可离线分析。";
+
+/// Only the old install-and-exit commands are retired. The same mode names
+/// remain available to the persistent control Session.
+fn legacy_mount_rejection(mode: &str) -> Option<Value> {
+    if !matches!(mode, "probe" | "loadop" | "passdump" | "frameaudit" | "frameaudit-ts" | "target") { return None; }
+    Some(json!({
+        "schema":"phonefarm/gray-legacy-mount-retirement@1",
+        "requested_mode":mode,
+        "status":"retired",
+        "reason":"persistent_owner_required",
+        "execution_started":false,
+        "device_commands_started":false,
+        "replacement":"phonefarm gray-layer session --mode MODE --package PKG --serial S --out DIR --max-seconds N",
+        "keep_prop_compatibility":"legacy_install_without_launch_is_not_supported"
+    }))
+}
 
 /// Capability rejection is independent of a device, lock or artifact path.
 pub(crate) fn mode_admission_rejection(mode: &str, custom: bool) -> Option<Value> {
@@ -170,39 +186,11 @@ pub fn storeop_spec(items: &[(String, u32)]) -> Result<String, String> {
 
 pub struct GrayLayer {
     serial: String,
-    /// 显式指定的层 .so (测未合并的层; 缺省用 knobs/gray/build/out/ 下的产物)
-    so: Option<String>,
-    /// storeop 改写规则与是否现场切换; None = 显式关掉 (每一档都写一遍, 不留上一轮的残值)
-    storeop: Option<(String, bool)>,
-    /// 启动目标时附加的 intent extras (例: Megacity 的 `--es scene city_static ...`)。
-    /// 层只在挂层后**第一次**启动时载入 (随后全局属性就清了), 所以 extras 必须在这次启动里带上。
-    launch_extras: Option<String>,
 }
 
 impl GrayLayer {
     pub fn new(serial: &str) -> Self {
-        Self {
-            serial: serial.to_string(),
-            so: None,
-            storeop: None,
-            launch_extras: None,
-        }
-    }
-
-    pub fn with_so(mut self, so: Option<String>) -> Self {
-        self.so = so;
-        self
-    }
-
-    pub fn with_launch_extras(mut self, extras: Option<String>) -> Self {
-        self.launch_extras = extras.filter(|e| !e.trim().is_empty());
-        self
-    }
-
-    /// storeop 改写规则 (见层里 parse_storeop_prop); live = 孪生 pass 现场切换, 初始为关
-    pub fn with_storeop(mut self, rule: Option<String>, live: bool) -> Self {
-        self.storeop = rule.map(|r| (r, live));
-        self
+        Self { serial: serial.to_string() }
     }
 
     fn ashell(&self, cmd: &str, timeout: u64) -> String {
@@ -224,223 +212,6 @@ impl GrayLayer {
             .trim_end_matches("#adb_exit=0")
             .trim()
             .to_string()
-    }
-
-    /// 解析一个包的 nativeLibraryDir —— 加载器真正会搜的那个目录。
-    /// 加载器搜的是 <legacyNativeLibraryDir>/<abi 子目录>; 没有 arm64 子目录说明
-    /// 这个包没有 64 位原生库 —— 如实失败, 不退回一个加载器根本不搜的路径。
-    fn native_lib_dir(&self, pkg: &str) -> Result<String, String> {
-        let out = self.ashell(
-            &format!("dumpsys package {pkg} | grep -m1 legacyNativeLibraryDir"),
-            30,
-        );
-        let legacy = out
-            .lines()
-            .find_map(|l| l.split_once("legacyNativeLibraryDir=").map(|(_, v)| v.trim().to_string()))
-            .unwrap_or_default();
-        if legacy.is_empty() {
-            return Err(format!("解析不到 {pkg} 的 legacyNativeLibraryDir"));
-        }
-        let probe = self.ashell(
-            &format!("su -c 'test -d \"{legacy}/arm64\"'"),
-            15,
-        );
-        if adb_ok(&probe) {
-            Ok(format!("{legacy}/arm64"))
-        } else {
-            Err(format!(
-                "{pkg} 没有 arm64 原生库目录 ({legacy}/arm64 不存在); 本机制要求目标是 arm64-v8a 应用"
-            ))
-        }
-    }
-
-    /// 挂层: 推 .so → 对齐属主/SELinux 上下文 (每步回读核验) → 写 state →
-    /// 重启目标 (已在跑的进程不会凭空挂上层) → 清旧 marker → 置属性 (回读核验)。
-    fn mount_layer(&self, pkg: &str, keep_prop: bool) -> Result<(), String> {
-        let so_path = self.so.clone().unwrap_or_else(layer_so_path);
-        let Some(so) = resolve_path(&so_path) else {
-            return Err(format!(
-                "先跑 knobs/gray/build/build_layer.sh 出 {SO} (按 cwd 与仓库根都找不到: {so_path})"
-            ));
-        };
-        let dir = self.native_lib_dir(pkg)?;
-        let push = adb(
-            &self.serial,
-            &["push", &so.to_string_lossy(), DEV_TMP_SO],
-            120,
-        );
-        if !adb_ok(&push) {
-            return Err(format!("push 失败: {push}"));
-        }
-        // 属主与 SELinux 上下文对齐同目录既有 .so, 否则应用读不到。
-        self.ashell(
-            &format!(
-                "su -c 'cp {DEV_TMP_SO} \"{dir}/\" && chmod 755 \"{dir}/{SO}\" && chown system:system \"{dir}/{SO}\" && chcon u:object_r:apk_data_file:s0 \"{dir}/{SO}\"'"
-            ),
-            60,
-        );
-        if !adb_ok(&self.ashell(&format!("su -c 'test -f \"{dir}/{SO}\"'"), 15)) {
-            return Err(format!("安装 .so 失败: {dir}/{SO} 不存在"));
-        }
-        self.ashell(&format!("su -c 'echo \"{pkg}|{dir}\" > {STATE}'"), 15);
-        if self
-            .ashell(&format!("su -c 'cat {STATE} 2>/dev/null'"), 15)
-            .trim_end_matches("#adb_exit=0")
-            .trim()
-            .is_empty()
-        {
-            return Err("写 state 失败, off 将无法精确回滚".into());
-        }
-
-        // 目标必须重启才会走到加载器; 旧 marker 必须清掉, 否则分不清新旧
-        self.ashell(&format!("am force-stop {pkg}"), 30);
-        self.ashell(
-            &format!(
-                "su -c 'rm -f /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json /data/data/{pkg}/knobs_layer_out.json /data/local/tmp/knobs_layer_out.{pkg}.json /storage/emulated/0/Android/data/{pkg}/files/knobs_frameaudit.json /data/data/{pkg}/knobs_frameaudit.json /data/local/tmp/knobs_frameaudit.{pkg}.json'"
-            ),
-            15,
-        );
-        self.ashell(&format!("su -c 'setprop debug.vulkan.layers {LAYER_NAME}'"), 15);
-        if self.getprop("debug.vulkan.layers") != LAYER_NAME {
-            return Err("setprop debug.vulkan.layers 没生效".into());
-        }
-        self.ashell(&format!("su -c 'ls -laZ \"{dir}/{SO}\"'"), 15);
-        println!("已挂层于 {pkg}\n  .so:  {dir}/{SO}\n  prop: debug.vulkan.layers = {LAYER_NAME}");
-        if keep_prop {
-            println!(
-                "  ⚠ --keep-prop: 属性会一直留着。这期间启动的、lib 目录里没有本 .so 的\n     Vulkan 应用可能崩溃重启 (实测 cn.nubia.gameassist 会)。用完务必跑 off。"
-            );
-        } else {
-            println!("  正在启动 {pkg}; 一旦检测到层加载成功就自动清掉全局属性, 收窄误伤窗口。");
-            self.launch_pkg(pkg);
-            self.wait_and_narrow(pkg);
-        }
-        println!("查证据:");
-        println!("  adb -s {} shell su -c 'cat /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json'", self.serial);
-        println!("  adb -s {} shell su -c 'logcat -b main -d' | grep refknobs", self.serial);
-        Ok(())
-    }
-
-    /// 启动目标应用。用 `am start -n <解析出的 activity>`, **不要用 monkey**:
-    /// 无层对照实测 monkey 会把 refbench 的运行搅坏 (注入事件 = 与被测对象无关的扰动源)。
-    fn launch_pkg(&self, pkg: &str) {
-        let act = self.ashell(&format!("cmd package resolve-activity --brief {pkg}"), 30);
-        // 必须先剥掉尾部的 `#adb_exit=N`: 它单独占最后一行, 不剥的话「最后一个非空行」
-        // 永远是这个标记而不是 activity, 启动恒失败 (2026-10-11 真机实测)
-        let act = Self::adb_stdout(&act)
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string())
-            .unwrap_or_default();
-        if act.contains('/') {
-            let cmd = match &self.launch_extras {
-                Some(x) => format!("am start -n {act} {x}"),
-                None => format!("am start -n {act}"),
-            };
-            let _ = adb(&self.serial, &["shell", &cmd], 30);
-        } else {
-            eprintln!("  解析不到 {pkg} 的启动 activity, 请手动启动它");
-        }
-    }
-
-    /// 等目标进程真的把层加载进去 (marker 出现), 然后立刻清掉全局属性。
-    /// 层已在目标进程里, 清属性不影响它; 但新起的应用不会再找这个层。
-    fn wait_and_narrow(&self, pkg: &str) {
-        for i in 1..=40 {
-            let marker = self.ashell(
-                &format!(
-                    "su -c 'cat /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json 2>/dev/null; cat /data/data/{pkg}/knobs_layer_out.json 2>/dev/null'"
-                ),
-                30,
-            );
-            if !Self::adb_stdout(&marker).trim().is_empty() {
-                self.ashell("su -c 'setprop debug.vulkan.layers \"\"'", 15);
-                println!("  层已加载, 全局属性已清 (属性暴露窗口约 {} 秒)", i * 2);
-                println!("  marker: {}", marker.trim());
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        }
-        self.ashell("su -c 'setprop debug.vulkan.layers \"\"'", 15);
-        println!("  等不到 {pkg} 的 marker; 已保险起见清掉全局属性。");
-        println!(
-            "  排查: adb -s {} shell su -c 'logcat -b main -d' | grep -iE 'vulkan|refknobs'",
-            self.serial
-        );
-    }
-
-    /// 每一档都把**全部**开关显式写一遍: 上一轮留下的 frameaudit=1 会给别的臂凭空加观测开销。
-    fn setprops(&self, loadop: &str, dump: &str, cp: &str, upop: &str) {
-        self.setprops_fa(loadop, dump, cp, upop, "0", "0");
-    }
-
-    fn setprops_fa(&self, loadop: &str, dump: &str, cp: &str, upop: &str, fa: &str, fa_ts: &str) {
-        let (rule, live) = match &self.storeop {
-            Some((r, l)) => (r.as_str(), if *l { "1" } else { "0" }),
-            None => ("0", "0"),
-        };
-        self.ashell(
-            &format!("su -c 'setprop {LOADOP_PROP} {loadop}; setprop {DUMP_PROP} {dump}; setprop {CP_PROP} {cp}; setprop {UPOP_PROP} {upop}; setprop {FA_PROP} {fa}; setprop {FA_TS_PROP} {fa_ts}; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} \"{rule}\"; setprop {STOREOP_LIVE_PROP} {live}; setprop {STOREOP_ON_PROP} 0'"),
-            15,
-        );
-    }
-
-
-    /// 挂层之后核对 storeop 规则真的写进了属性。写不进 (例如超长) 时层读到的是关,
-    /// 那一臂就成了对照臂 —— 拿 A 去和 A 比。
-    pub fn require_storeop(&self) -> Result<(), String> {
-        match &self.storeop {
-            Some((rule, _)) => self.require_prop(STOREOP_PROP, rule, "写回改写"),
-            None => Ok(()),
-        }
-    }
-
-    /// 某个属性档的回读核验: 写不进就拒绝按那一档继续 (静默退化会让自报失真)。
-    fn require_prop(&self, prop: &str, want: &str, label: &str) -> Result<(), String> {
-        if self.getprop(prop) != want {
-            return Err(format!("setprop {prop} 没生效, 拒绝按{label}档继续"));
-        }
-        Ok(())
-    }
-
-    pub fn mount_mode(&self, mode: &str, pkg: &str, keep_prop: bool) -> Result<(), String> {
-        if let Some(rejection) = mode_admission_rejection(mode, self.so.is_some()) {
-            return Err(rejection.to_string());
-        }
-        match mode {
-            "probe" => {
-                self.setprops("0", "0", "0", "0");
-                self.mount_layer(pkg, keep_prop)
-            }
-            // 观测档: 只读 + 导出 pass 形状表 (定位"低分辨率->放大"那一步)
-            "passdump" => {
-                self.setprops("0", "1", "0", "0");
-                self.require_prop(DUMP_PROP, "1", "观测")?;
-                self.mount_layer(pkg, keep_prop)
-            }
-            // 改写档: 与 probe 唯一的差别就是这一个属性, A/B 两臂只切它一个。
-            // 必须显式关 passdump: 上一轮留下的 1 会给对照组凭空加观测开销
-            "loadop" => {
-                self.setprops("1", "0", "0", "0");
-                self.require_prop(LOADOP_PROP, "1", "改写")?;
-                self.mount_layer(pkg, keep_prop)
-            }
-            "target" => {
-                self.setprops("0", "0", "0", "0");
-                self.mount_layer(pkg, keep_prop)
-            }
-            // 一帧步骤清单 (只读): 层按提交顺序记 pass/拷贝/清屏/dispatch, 由
-            // `debug.knobs.frameaudit_go` 触发抓帧; -ts 档另在 pass 前后写 GPU 时间戳
-            "frameaudit" | "frameaudit-ts" => {
-                let ts = if mode == "frameaudit-ts" { "1" } else { "0" };
-                self.setprops_fa("0", "1", "0", "0", "1", ts);
-                self.require_prop(FA_PROP, "1", "步骤清单")?;
-                self.require_prop(FA_TS_PROP, ts, "步骤清单时间戳")?;
-                self.mount_layer(pkg, keep_prop)
-            }
-            other => Err(format!("不认识的挂层模式 {other:?}")),
-        }
     }
 
     pub fn status(&self) -> String {
@@ -604,8 +375,6 @@ fn deactivate(
     }
 }
 
-const DEV_TMP_SO: &str = "/data/local/tmp/libVkLayer_refknobs.so";
-
 /// 层 .so 的解析: knobs/gray/build/out/ (build_layer.sh 的产物位)。
 pub(crate) fn layer_so_path() -> String {
     match resolve_path("knobs/gray/build/out/libVkLayer_refknobs.so") {
@@ -622,7 +391,6 @@ struct LayerArgs {
     positional: Vec<String>,
     serial: Option<String>,
     so: Option<String>,
-    keep_prop: bool,
     json: bool,
     help: bool,
 }
@@ -636,7 +404,7 @@ fn layer_args(args: &[String]) -> Result<LayerArgs, String> {
                 let value = it.next().ok_or_else(|| format!("{a} requires a value"))?.clone();
                 if a == "--serial" { parsed.serial = Some(value); } else { parsed.so = Some(value); }
             }
-            "--keep-prop" => parsed.keep_prop = true,
+            "--keep-prop" => {}, // Accepted only to explain the retired entry point.
             "--json" => parsed.json = true,
             "--help" | "-h" => parsed.help = true,
             other if other.starts_with('-') => return Err(format!("unknown gray-layer option {other}")),
@@ -670,6 +438,7 @@ pub(crate) fn cli_admission(sub: &str, args: &[String]) -> Result<GrayCliAdmissi
         let parsed = layer_args(args)?;
         if parsed.help { return Ok(GrayCliAdmission::Help); }
         return Ok(mode_admission_rejection(&parsed.positional[0], parsed.so.is_some())
+            .or_else(|| legacy_mount_rejection(&parsed.positional[0]))
             .map_or(GrayCliAdmission::Proceed, GrayCliAdmission::Reject));
     }
     let mut mode = "loadop";
@@ -708,9 +477,9 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
         Err(error) => { eprintln!("{error}\n{USAGE}"); return 2; }
     };
     if parsed.help { println!("{USAGE}"); return 0; }
-    let LayerArgs { positional, serial, so, keep_prop, json: json_output, .. } = parsed;
+    let LayerArgs { positional, serial, so, json: json_output, .. } = parsed;
     let mode = positional[0].clone();
-    if let Some(rejection) = mode_admission_rejection(&mode, so.is_some()) {
+    if let Some(rejection) = mode_admission_rejection(&mode, so.is_some()).or_else(|| legacy_mount_rejection(&mode)) {
         println!("{rejection}");
         return 2;
     }
@@ -727,7 +496,7 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
         eprintln!("找不到 adb");
         return 2;
     }
-    let gl = GrayLayer::new(&serial).with_so(so);
+    let gl = GrayLayer::new(&serial);
     match mode.as_str() {
         "status" => {
             println!("{}", gl.status());
@@ -744,28 +513,6 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
                 }
             }
             if result.is_ok() { 0 } else { 1 }
-        }
-        "probe" | "loadop" | "passdump" | "frameaudit" | "frameaudit-ts" | "target" => {
-            let default_pkg = if mode == "probe" || mode == "loadop" {
-                "io.github.hgamey.refbench"
-            } else {
-                "com.miHoYo.Yuanshen"
-            };
-            if mode == "target" && positional.len() < 2 {
-                eprintln!("target 要给包名");
-                return 2;
-            }
-            let pkg = positional
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| default_pkg.to_string());
-            match gl.mount_mode(&mode, &pkg, keep_prop) {
-                Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("{e}");
-                    1
-                }
-            }
         }
         other => {
             eprintln!("不认识的模式 {other:?}\n{USAGE}");
@@ -798,8 +545,10 @@ mod mode_admission_tests {
         assert_eq!(admission("gray-ab", &["--mode", "copyprobe", "--mode", "loadop", "--out", "upop", "--serial", "--help"]).unwrap(), GrayCliAdmission::Proceed);
         let GrayCliAdmission::Reject(rejected) = admission("gray-ab", &["--mode", "loadop", "--mode", "copyprobe", "--serial", "--no-devlock", "--lock-label", "--help", "--lock-wait", "0s"]).unwrap() else { panic!("last mode was not rejected"); };
         assert_eq!(rejected["requested_mode"], "copyprobe");
-        assert_eq!(admission("gray-layer", &["loadop", "--serial", "copyprobe", "--so", "--help"]).unwrap(), GrayCliAdmission::Proceed);
-        assert_eq!(admission("gray-layer", &["loadop", "--serial", "--help"]).unwrap(), GrayCliAdmission::Proceed);
+        for args in [vec!["loadop", "--serial", "copyprobe", "--so", "--help"], vec!["loadop", "--serial", "--help"]] {
+            let GrayCliAdmission::Reject(rejected) = admission("gray-layer", &args).unwrap() else { panic!("value was treated as help"); };
+            assert_eq!(rejected["status"], "retired");
+        }
         assert_eq!(admission("gray-layer", &["copyprobe", "--help"]).unwrap(), GrayCliAdmission::Help);
         assert_eq!(admission("gray-ab", &["--mode", "copyprobe", "--help"]).unwrap(), GrayCliAdmission::Help);
         assert_eq!(admission("gray-ab", &["recover", "--session", "old", "--serial", "S"]).unwrap(), GrayCliAdmission::Proceed);
@@ -812,13 +561,12 @@ mod mode_admission_tests {
     }
 
     #[test]
-    fn unsupported_public_mount_rejects_before_device_or_artifact_access() {
+    fn unsupported_modes_reject_before_device_or_artifact_access() {
         for mode in ["copyprobe", "upop"] {
             for custom in [false, true] {
-                let layer = GrayLayer::new("nonexistent-admission-device")
-                    .with_so(custom.then(|| "/nonexistent/admission.so".into()));
-                let error = layer.mount_mode(mode, "com.example.fixture", false).unwrap_err();
-                let actual: Value = serde_json::from_str(&error).unwrap();
+                let mut args = vec![mode, "--serial", "nonexistent-admission-device"];
+                if custom { args.extend(["--so", "/nonexistent/admission.so"]); }
+                let GrayCliAdmission::Reject(actual) = admission("gray-layer", &args).unwrap() else { panic!("unsupported mode accepted"); };
                 assert_eq!(actual, mode_admission_rejection(mode, custom).unwrap());
                 assert_eq!(actual["schema"], "phonefarm/gray-mode-admission@1");
                 assert_eq!(actual["artifact_source"], if custom { "custom" } else { "default" });
@@ -828,6 +576,21 @@ mod mode_admission_tests {
             }
         }
         assert!(mode_admission_rejection("loadop", false).is_none());
+    }
+
+    #[test]
+    fn legacy_mount_retirement_does_not_disable_owned_sessions() {
+        for mode in ["probe", "loadop", "passdump", "frameaudit", "frameaudit-ts", "target"] {
+            let GrayCliAdmission::Reject(rejected) = admission("gray-layer", &[mode, "com.example.fixture", "--keep-prop", "--so", "/unavailable.so"]).unwrap() else { panic!("legacy mount accepted"); };
+            assert_eq!(rejected, legacy_mount_rejection(mode).unwrap());
+            assert_eq!(rejected["status"], "retired");
+            assert_eq!(rejected["device_commands_started"], false);
+            assert!(mode_admission_rejection(mode, true).is_none());
+            assert_eq!(admission("gray-layer", &["session", "--mode", mode, "--package", "com.example.fixture", "--serial", "S", "--out", "unused", "--keep-prop"]).unwrap(), GrayCliAdmission::Proceed);
+        }
+        assert_eq!(admission("gray-layer", &["status", "--serial", "S"]).unwrap(), GrayCliAdmission::Proceed);
+        assert_eq!(admission("gray-layer", &["off", "com.example.fixture", "--serial", "S", "--json"]).unwrap(), GrayCliAdmission::Proceed);
+        assert_eq!(admission("gray-layer", &["refbench-loadop", "--serial", "S", "--out", "unused"]).unwrap(), GrayCliAdmission::Proceed);
     }
 
     #[test]

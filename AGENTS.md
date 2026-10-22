@@ -180,7 +180,10 @@ A/B确实未安装层，C/D才安装改写；所有extras为字符串，八份�
 自然退出、应用自报、改写预期及资源恢复分开；D的创建期effective可以非空，实际begins必须为0。
 不测FPS/功耗；恢复入口`gray-layer refbench-recover --session DIR --serial S --json`仅接续原上下文。
 实现合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-REFBENCH-SESSION.md。
-旧gray-layer挂层入口迁移仍待完成；合同见
+旧gray-layer挂层后退出入口已退役（源码与零设备拦截验证），旧keep-prop仅安装不启动语义不能直接alias为session。
+typed off/status和历史/离线分析保留；shell off改为同一typed入口，去掉全盘删SO/settings私链。
+合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-LEGACY-MOUNT-RETIREMENT.md。
+持续会话合同见
 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
 
 **Compute Shader 算子标尺**（零 Token，需 root）

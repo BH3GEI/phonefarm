@@ -255,13 +255,15 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
-灰档:  gray-layer {probe|loadop|passdump|frameaudit|frameaudit-ts [pkg] | target <pkg> | status | off} [--keep-prop] [--so 层.so]
+灰档:  gray-layer status [--serial S] | off [pkg] [--serial S] [--json]
        gray-layer session --mode MODE --package PKG --serial S --out DIR [--max-seconds 900] [--power-policy observe|battery] [--actor-id agent] [--so 层.so] [--keep-prop]
        gray-layer session-status --out DIR [--request-id ID] --json
        gray-layer session-action --out DIR --request REQUEST.json|- --json
        gray-layer session-recover --session DIR --serial S --json
        gray-layer refbench-loadop --serial S --out DIR [--frames 1800] [--intensity 8] [--timeout-seconds 150] [--so 层.so] [--evidence-origin device|synthetic] [--json]
        gray-layer refbench-recover --session DIR --serial S --json
+       旧 probe/loadop/passdump/frameaudit/frameaudit-ts/target 挂层后退出入口已退役；须显式使用 session。
+       旧 --keep-prop 仅安装不启动流程不自动迁移；session 始终启动目标，--keep-prop 仅控制 marker 等待/收窄。
        (Vulkan 层挂/摘/查; copyprobe/upop 当前不支持执行，包括自定义 SO；历史证据可离线分析)
        frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 层.so]   (只读层抓原神一帧步骤清单)
        frame-audit recover --session <会话目录> --serial S [--json]   (核验并恢复本次灰层抓帧范围)
