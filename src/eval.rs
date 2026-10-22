@@ -2277,6 +2277,21 @@ pub(crate) fn summarize_control_sample(
     }
     let sample_request = std::fs::read_to_string(out.join("sample-request.json")).ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok()).unwrap_or(Value::Null);
+    let requested_power = sample_request["power_policy"].as_str().unwrap_or("observe");
+    let power_path = out.join("power.json");
+    // The returned snapshot also carries a final evidence-save failure; an
+    // earlier on-disk snapshot must not hide that failure from qualification.
+    let power = input.get("power").filter(|v|v.is_object()).cloned().or_else(||
+        std::fs::read_to_string(&power_path).ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok()).filter(Value::is_object))
+        .unwrap_or_else(||json!({"policy":requested_power,"before":null,"after":null,
+            "error":if power_path.exists(){json!("power evidence could not be read")}else{Value::Null}}));
+    let power_condition_ok = power["error"].is_null() && power["policy"] == requested_power
+        && (requested_power == "observe" || (requested_power == "battery"
+            && power["before"]["on_battery"] == true && power["after"]["on_battery"] == true));
+    if !power_condition_ok {
+        errors.push(power["error"].as_str().unwrap_or("requested battery policy lacks verified before/after discharge observations").to_owned());
+    }
     let trace = std::fs::read_to_string(out.join("trace.txt"));
     let env_text = std::fs::read_to_string(out.join("env.txt"));
     if !trace_ok { errors.push("trace child failed; inspect its exit code and log".to_owned()); }
@@ -2293,7 +2308,7 @@ pub(crate) fn summarize_control_sample(
     }
     let mut run = json!({"schema":"phonefarm/gray-control-sample@1", "label":label,
         "requested_seconds":seconds,"evidence_origin":evidence_origin,"target_alive_after":target_alive,
-        "input_kind":sample_request["input_kind"],"planned_input_ms":sample_request["planned_input_ms"],"initial_frame":sample_request["initial_frame"],
+        "input_kind":sample_request["input_kind"],"planned_input_ms":sample_request["planned_input_ms"],"initial_frame":sample_request["initial_frame"],"power":power,
         "input_window":input,"summary":summary.clone().unwrap_or_else(||json!({})),
         "env":env_text.as_ref().map(|text|to_serde(&sysparam::env_stats(text))).unwrap_or_else(|_|json!({}))});
     if trace_ok && trace.is_ok() && env_text.is_ok() {
@@ -2311,7 +2326,7 @@ pub(crate) fn summarize_control_sample(
     let mut limitations = vec![
         "GPU submit proxy; target process/context ownership and display FPS are not verified".to_owned(),
         "power covers the whole sampler window including lead/tail, not only the trace window".to_owned(),
-        "energy per frame is not calculated from these different windows".to_owned(),
+        "energy per frame requires the complete GPU-submit group window and verified frame semantics".to_owned(),
     ];
     if sample_request["input_kind"] == "finite" {
         limitations.push("input geometry is verified at launch only; natural completion does not restore game state".into());
@@ -2325,13 +2340,15 @@ pub(crate) fn summarize_control_sample(
         limitations.push("synthetic evidence is not a real device performance measurement".into());
     }
     // An old charge-suspend/bypass file is not an ownership or power-window
-    // proof for this session. This first control route only admits observed
-    // battery discharge throughout a verified sampler/trace window.
-    let power_ok = sampler_ok && run["env"]["trace_window_verified"] == true
+    // proof for this session. Battery discharge must be observed throughout a
+    // verified sampler/trace window, including any requested power conditions.
+    let power_ok = power_condition_ok && sampler_ok && run["env"]["trace_window_verified"] == true
         && run["env"]["power_window_verified"] == true && run["env"]["on_battery"] == true
         && run["env"]["power_source"] == "battery";
     if !power_ok {
-        let reason = if run["env"]["trace_window_verified"] != true {
+        let reason = if !power_condition_ok {
+            power["error"].as_str().unwrap_or("requested battery policy was not verified before and after this sample").to_owned()
+        } else if run["env"]["trace_window_verified"] != true {
             "sampler/trace window coverage was not verified".to_owned()
         } else if run["env"]["power_source"] == "usb_bypass" {
             "legacy bypass marker does not establish battery discharge for this control sample".to_owned()
@@ -2345,19 +2362,28 @@ pub(crate) fn summarize_control_sample(
         run["env"]["power_usable_reason"] = json!(reason);
         limitations.push(format!("power unavailable: {reason}"));
     }
+    let energy = if power_ok {
+        crate::sysparam::battery_energy_in_capture(env_text.as_ref().unwrap(),trace.as_ref().unwrap(),seconds)
+    } else {
+        Err(run["env"]["power_usable_reason"].as_str().unwrap_or("battery power window is not qualified").to_owned())
+    };
+    let energy = energy.unwrap_or_else(|reason|json!({"available":false,"estimated":true,"reason":reason,
+        "energy_j":null,"power_w_mean":null,"rail":"battery","window":null}));
     run["metrics"] = json!({"gpu_submit_fps":run["summary"]["fps_mean"],
         "frame_p95_ms":run["summary"]["frame_p95"],"gpu_active_mean_ms":run["summary"]["gpu_active_mean"],
-        "queue_p95_ms":run["summary"]["queue_p95"],"power_w_mean":run["env"]["power_w_mean"],"energy_per_frame_mj":null});
+        "queue_p95_ms":run["summary"]["queue_p95"],"power_w_mean":run["env"]["power_w_mean"],
+        "trace_energy_j":energy["energy_j"],"trace_power_w_mean":energy["power_w_mean"],"energy_per_frame_mj":null});
     run["metric_provenance"] = json!({"frame":{"semantics":"gpu_submit_proxy","render_comm":render_comm,
         "grouping":"existing auto submits-per-frame parser","target_ownership_verified":false,"display_verified":false},
         "power":{"rail":run["env"]["power_rail"],"window_verified":power_ok,
-            "scope":"whole sampler window including lead/tail"},"energy_per_frame":{"available":false,"reason":"different windows"}});
+            "scope":"whole sampler window including lead/tail"},"trace_energy":energy,
+        "energy_per_frame":{"available":false,"reason":"complete GPU-submit group window and frame ownership are not verified"}});
     run["collection"] = json!({"status":if errors.is_empty(){"complete"}else{"failed"},
         "error":if errors.is_empty(){Value::Null}else{json!(errors.join("; "))}});
     run["limitations"] = json!(limitations);
     let names = ["trace.txt","summary.json","env.txt","capture.log","collection-error.json","input-plan.json","workload_exit.txt","trace_exit.txt","sampler_exit.txt",
         "quiescence.txt","workload.log","trace.log","workload-time.json","trace-time.json","sampler-time.json",
-        "input-complete.json","input-window.json","sample-request.json","input-frame.json","input-check.png"];
+        "input-complete.json","input-window.json","sample-request.json","input-frame.json","input-check.png","power.json","power-before.json","power-after.json"];
     run["artifact_path_base"] = json!("run_directory");
     run["artifacts"] = json!(names.into_iter().filter(|name|out.join(name).is_file())
         .map(|name|json!({"name":name,"path":name})).collect::<Vec<_>>());
@@ -2838,21 +2864,37 @@ mod path_tests {
     fn control_sample_keeps_unknown_filter_and_power_separate_from_raw_collection() {
         let root = std::env::temp_dir().join(format!("control-sample-{}-{}",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap()));
         std::fs::create_dir(&root).unwrap();
-        for (name,status,current,trace_present) in [("legacy_bypass","Charging",0,true),("battery","Discharging",-1_000_000,true),("failed","Discharging",-1_000_000,false)] {
+        for (name,status,current,trace_present) in [("legacy_bypass","Charging",0,true),("battery","Discharging",-1_000_000,true),("failed","Discharging",-1_000_000,false),("battery_policy_failed","Discharging",-1_000_000,true)] {
             let out = root.join(name);std::fs::create_dir(&out).unwrap();
             let mut env = format!("#sample_env v1 dur=13 interval=2\n#battery_status={status}\n#charge_suspended=yes\n#charge_mode=bypass\n");
             for t in (100..=112).step_by(2) {env.push_str(&format!("ENV {t} 3800000 {current} NA 5000000 1000000 gpuss 40000\n"));}
             env.push_str(&format!("#battery_status_after={status}\n#sample_env done\n"));
             std::fs::write(out.join("env.txt"),env).unwrap();
             if trace_present {std::fs::write(out.join("trace.txt"),"#loop_v1_meta capture_start_uptime=106 capture_end_uptime=109 duration_req=3\n").unwrap();}
-            let result = summarize_control_sample(&out,name,3,trace_present,true,Value::Null,true,"synthetic",None).unwrap();
+            if name=="battery_policy_failed" {
+                std::fs::write(out.join("sample-request.json"),r#"{"power_policy":"battery"}"#).unwrap();
+                std::fs::write(out.join("power.json"),r#"{"policy":"battery","before":{"on_battery":true},"after":{"on_battery":false},"error":"supply changed after collection"}"#).unwrap();
+            }
+            let input = if name=="battery_policy_failed" {
+                // Final save failed: the latest returned failure takes priority
+                // over the earlier durable before/after snapshot.
+                json!({"power":{"policy":"battery","before":{"on_battery":true},"after":{"on_battery":false},"error":"supply changed after collection; power evidence save failed"}})
+            } else {Value::Null};
+            let result = summarize_control_sample(&out,name,3,trace_present,true,input,true,"synthetic",None).unwrap();
             assert!(result["summary"].is_null());
             assert!(result["metrics"]["gpu_submit_fps"].is_null());
             assert!(result["metrics"]["energy_per_frame_mj"].is_null());
             assert_eq!(result["metric_provenance"]["frame"]["target_ownership_verified"],false);
-            if name=="battery" {assert_eq!(result["metrics"]["power_w_mean"],3.8);}
-            else {assert!(result["metrics"]["power_w_mean"].is_null());}
-            assert_eq!(result["collection"]["status"],if trace_present{"complete"}else{"failed"});
+            if name=="battery" {
+                assert_eq!(result["metrics"]["power_w_mean"],3.8);
+                assert!((result["metrics"]["trace_energy_j"].as_f64().unwrap()-11.4).abs()<1e-9);
+                assert_eq!(result["metric_provenance"]["trace_energy"]["available"],true);
+            } else {
+                assert!(result["metrics"]["power_w_mean"].is_null());
+                assert!(result["metrics"]["trace_energy_j"].is_null());
+            }
+            assert_eq!(result["collection"]["status"],if trace_present && name!="battery_policy_failed"{"complete"}else{"failed"});
+            if name=="battery_policy_failed" {assert!(out.join("trace.txt").is_file());assert!(result["collection"]["error"].as_str().unwrap().contains("power evidence save failed"));}
             assert!(out.join("run.json").is_file());
         }
         std::fs::remove_dir_all(root).unwrap();

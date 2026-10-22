@@ -155,13 +155,16 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 人工接管只改变控制 epoch，lease 仍归原 owner；stop/SIGINT 在有界动作结束后恢复。
 失败使用 `gray-layer session-recover --session DIR --serial S --json` 接续原上下文。
 局部恢复收据不自动解除整个 job，沿用 fresh lease clear + 核查说明释放流程。
-`sample` 动作可在当前场景采1至120秒，保持同一 owner；不自动重启、触控或改充电/风扇/频率。
+`sample` 动作可在当前场景采1至120秒，保持同一 owner；不自动重启，供电遵循创建时固定政策，风扇/频率不变。
 可选 input + frame_id 在同一采样中执行有限计划；无 input 保持 idle。计划必须覆盖 seconds+10、最多600秒，
 依最新真实截图核坐标，并在部署后放行前再核图龄/方向；不自动补输入。旧owner缺 sample v2 能力时明确拒绝。
-每轮plan和自然完成原件保留，新资源父@2仍可恢复旧C1/C2A会话。
+每轮plan和自然完成原件保留，新资源父@3仍可恢复旧C1/C2A/B1会话。
 可选 render_comm 必须显式给出；留空仍保留 raw/env，帧指标为未知，不套 Unity 默认。
 GPU submit proxy 不等于显示 FPS，首批不按不同窗口推算每帧能耗。采样资源先恢复，之后才完成灰层范围。
-显式停充与旧 gray-layer/reference 脚本迁移仍待完成；合同见
+会话可在创建时显式选择 --power-policy observe|battery，默认只观察；battery首次采样准备一次并跨轮保持，
+原记录绑定当前context。独立恢复供电不代表自然输入/整个会话已恢复；未知时保留屏障及原件。
+同期trace电池能量/平均功率是V×I采样积分估计，缺覆盖或放电资格时null；每帧能耗仍待完整分组窗口。
+旧 gray-layer/reference 脚本迁移仍待完成；合同见
 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
 
 **Compute Shader 算子标尺**（零 Token，需 root）

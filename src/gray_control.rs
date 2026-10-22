@@ -339,6 +339,7 @@ struct Args {
     so: Option<String>,
     actor: String,
     origin: String,
+    power_policy: String,
     seconds: u64,
     request: Option<String>,
     request_id: Option<String>,
@@ -361,6 +362,7 @@ fn parse(args: &[String]) -> Result<Args> {
         command: args[0].clone(),
         actor: "agent".into(),
         origin: "device".into(),
+        power_policy: "observe".into(),
         seconds: 900,
         ..Args::default()
     };
@@ -392,6 +394,7 @@ fn parse(args: &[String]) -> Result<Args> {
                     | "--actor-id"
                     | "--evidence-origin"
                     | "--max-seconds"
+                    | "--power-policy"
             ),
             "session-status" => matches!(key, "--out" | "--request-id"),
             "session-action" => matches!(key, "--out" | "--request"),
@@ -414,6 +417,7 @@ fn parse(args: &[String]) -> Result<Args> {
             "--so" => a.so = Some(value.clone()),
             "--actor-id" => a.actor = value.clone(),
             "--evidence-origin" => a.origin = value.clone(),
+            "--power-policy" => a.power_policy = value.clone(),
             "--request" => a.request = Some(value.clone()),
             "--request-id" => a.request_id = Some(value.clone()),
             "--max-seconds" => {
@@ -452,10 +456,11 @@ fn parse(args: &[String]) -> Result<Args> {
         if !(1..=3600).contains(&a.seconds)
             || !safe_id(&a.actor)
             || !matches!(a.origin.as_str(), "device" | "synthetic")
+            || !matches!(a.power_policy.as_str(), "observe" | "battery")
         {
             return Err(err(
                 "invalid_request",
-                "invalid budget, actor or evidence origin",
+                "invalid budget, actor, evidence origin or power policy",
             ));
         }
         if !matches!(
@@ -501,7 +506,7 @@ pub fn run(args: &[String]) -> i32 {
         let a = parse(args)?;
         if a.help {
             return Ok((
-                json!({"usage":"gray-layer session --mode MODE --package PKG --serial S --out DIR [--max-seconds 900]; session-status --out DIR [--request-id ID] --json; session-action --out DIR --request FILE|- --json; session-recover --session DIR --serial S --json"}),
+                json!({"usage":"gray-layer session --mode MODE --package PKG --serial S --out DIR [--max-seconds 900] [--power-policy observe|battery]; session-status --out DIR [--request-id ID] --json; session-action --out DIR --request FILE|- --json; session-recover --session DIR --serial S --json"}),
                 0,
             ));
         }
@@ -549,7 +554,7 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 fn descriptor(store: &Store) -> Result<Value> {
-    let d = store.read(DESCRIPTOR)?;
+    let mut d = store.read(DESCRIPTOR)?;
     if d["schema"] != SCHEMA || d["producer"] != "phonefarm" {
         return Err(err("invalid_request", "unrecognized control descriptor"));
     }
@@ -583,7 +588,7 @@ fn descriptor(store: &Store) -> Result<Value> {
         let parent_schema = crate::gray_session::control_parent_schema(&m["control_resources"])
             .map_err(|e| err("invalid_request", e))?;
         if d["action_capabilities"]["sample"] == 2
-            && parent_schema != crate::gray_session::CONTROL_PARENT_SCHEMA
+            && !crate::gray_session::control_parent_supports_input(parent_schema)
         {
             return Err(err(
                 "invalid_request",
@@ -600,6 +605,10 @@ fn descriptor(store: &Store) -> Result<Value> {
                 "invalid_request",
                 "control resource parent is missing or mismatched",
             ));
+        }
+        if d.get("power").is_some() {
+            d["power"] = crate::gray_eval_session::control_power_snapshot(&parent)
+                .map_err(|e| err("invalid_request", e))?;
         }
     }
     if !d["job_id"].is_null()
@@ -963,6 +972,8 @@ fn save_descriptor(store: &Store, d: &mut Value) -> Result<()> {
     store.write(DESCRIPTOR, d, true)
 }
 fn start(a: &Args) -> Result<(Value, i32)> {
+    crate::gray_eval_session::admit_control_power(a.serial.as_ref().unwrap(), &a.power_policy)
+        .map_err(device)?;
     let out = a.out.as_ref().unwrap();
     fs::create_dir_all(out)?;
     let store = Store::open(out)?;
@@ -977,7 +988,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
         .map_err(device)?;
     let base = Session::new_control(lease, &store.path, a.package.as_ref().unwrap(), &a.origin)
         .map_err(device)?;
-    let parent = Parent::new_control(base).map_err(device)?;
+    let parent = Parent::new_control(base, &a.power_policy).map_err(device)?;
     let base = &parent.base;
     let sid = base
         .dir
@@ -989,7 +1000,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
     let mut d = json!({"schema":SCHEMA,"producer":"phonefarm","session_id":sid,"session_path":sid,"job_id":job,
         "serial":a.serial,"package":a.package,"mode":a.mode,"phase":"starting","accepting":false,
         "controller":{"actor_id":a.actor,"kind":"agent","epoch":1,"expires_at":null},"allowed_actions":allowed(&a.mode),"action_capabilities":{"sample":2},
-        "latest_image":null,"recovery":{"status":"not_reported","session_path":sid,"reports":[],"error":null},
+        "power":parent.control_power_state().map_err(device)?,"latest_image":null,"recovery":{"status":"not_reported","session_path":sid,"reports":[],"error":null},
         "created_at":now(),"updated_at":now(),"deadline_at":(chrono::Utc::now()+chrono::Duration::seconds(a.seconds as i64)).to_rfc3339(),
         "max_seconds":a.seconds,"frame_max_age_seconds":FRAME_AGE_SECONDS,"keep_prop":a.keep,"stop_reason":null});
     store.write(DESCRIPTOR, &d, false)?;
@@ -1273,7 +1284,7 @@ fn execute(
             d["active_sample"] = json!({"request_id":id,"seconds":seconds,"input_kind":input_kind,"planned_input_ms":plan.duration_ms(),"started_at":now(),"path":relative});
             save_descriptor(store, d)?;
             store.write(&format!("{relative}/sample-request.json"), &json!({
-                "schema":"phonefarm/gray-control-sample-request@1", "request_id":id,
+                "schema":"phonefarm/gray-control-sample-request@1", "request_id":id,"power_policy":d["power"]["policy"],
                 "input_kind":input_kind,"planned_input_ms":plan.duration_ms(),"initial_frame":initial_frame,
             }), false)?;
             let collection = parent.sample_current(&label, &plan, input_kind, &out, || {
@@ -1300,6 +1311,7 @@ fn execute(
                     (false, false, Value::Null)
                 }
             };
+            d["power"] = parent.control_power_state().map_err(device)?;
             // Observation only: the target is not stopped or restarted here.
             let alive = base.target_alive().unwrap_or(false);
             let origin = base.control_identity().map_err(device)?["evidence_origin"]
@@ -1325,8 +1337,12 @@ fn execute(
                     public_text(base, error).replace(&format!("{}/", store.path.display()), "")
                 );
             }
+            let mut power = run["power"].clone();
+            if let Some(error) = power["error"].as_str() {
+                power["error"] = json!(public_text(base, error));
+            }
             let result = json!({"path":format!("{relative}/run.json"),"collection":collection,"requested_seconds":run["requested_seconds"],
-                "input_kind":input_kind,"planned_input_ms":plan.duration_ms(),"initial_frame":initial_frame,
+                "input_kind":input_kind,"planned_input_ms":plan.duration_ms(),"initial_frame":initial_frame,"power":power,
                 "metrics":run["metrics"],"metric_provenance":run["metric_provenance"],"limitations":run["limitations"],"artifacts":artifacts});
             d["latest_sample"] = result.clone();
             d["active_sample"] = Value::Null;
@@ -1648,6 +1664,9 @@ fn finish(
         base.finish_control(failure.as_deref())
     };
     d["recovery"] = public_recovery(store, base, d, report);
+    if let Some(parent) = parent {
+        d["power"] = parent.control_power_state().map_err(device)?;
+    }
     let done = d["recovery"]["status"] == "reported_complete";
     d["phase"] = json!(if done { "closed" } else { "recovery_required" });
     d["accepting"] = json!(false);

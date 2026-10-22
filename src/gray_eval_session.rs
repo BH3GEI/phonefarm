@@ -7,6 +7,7 @@ const SCHEMA: &str = "phonefarm/gray-eval-launch-session@1";
 const SCRIPT_SCHEMA: &str = "phonefarm/gray-eval-script-session@1";
 const LOADOP_SCHEMA: &str = "phonefarm/gray-ab-loadop-session@1";
 const CONTROL_SCHEMA: &str = crate::gray_session::CONTROL_PARENT_SCHEMA;
+const INPUT_CONTROL_SCHEMA: &str = crate::gray_session::INPUT_CONTROL_PARENT_SCHEMA;
 const LEGACY_CONTROL_SCHEMA: &str = crate::gray_session::LEGACY_CONTROL_PARENT_SCHEMA;
 const CHILD_GUARD: &str = include_str!("../loop_v1/tools/gray_child_guard.sh");
 const FAN: &str = "/sys/kernel/fan/fan_enable";
@@ -14,6 +15,19 @@ const WORKER: &str = include_str!("../loop_v1/tools/confirmation_worker.sh");
 const BOOTSTRAP: &str = include_str!("../loop_v1/tools/confirmation_bootstrap.sh");
 const TRACE: &str = include_str!("../loop_v1/tools/gray_trace_workload.sh");
 const SAMPLER: &str = include_str!("../loop_v1/auto/sample_env.sh");
+
+/// Host-only admission; the same check is repeated under the actual lease.
+pub(crate) fn admit_control_power(serial:&str,policy:&str)->Result<(),String> {
+    match policy {
+        "observe"=>Ok(()),
+        "battery"=>{
+            let path=crate::hwcond::lock_state_path("charge",&Some(serial.into()))?;
+            if crate::hwcond::charge_record(&path)?.is_some() {return Err("existing charging record is not owned by this new control session".into());}
+            Ok(())
+        },
+        _=>Err("power policy must be observe or battery".into()),
+    }
+}
 
 pub(crate) struct Parent {
     pub base: Session,
@@ -32,9 +46,10 @@ impl Parent {
         if base.eval_identity()?["completion_owner"]!="gray_ab_loadop" {return Err("loadop parent owner differs".into());}
         Self::new_with_plan(base,request,Some(plan))
     }
-    pub fn new_control(base:Session)->Result<Self,String> {
+    pub fn new_control(base:Session,power_policy:&str)->Result<Self,String> {
         if base.control_identity()?["control_parent_schema"]!=CONTROL_SCHEMA {return Err("new control parent requires the current resource binding".into());}
-        Self::new_with_plan(base,&json!({"protocol":"current_scene"}),None)
+        if !matches!(power_policy,"observe"|"battery") {return Err("power policy must be observe or battery".into());}
+        Self::new_with_plan(base,&json!({"protocol":"current_scene","power_policy":power_policy}),None)
     }
     pub fn resume_control(base:Session)->Result<Self,String> {
         if !base.control_has_resources()? {return Err("legacy control session has no resource parent".into());}
@@ -46,7 +61,7 @@ impl Parent {
         let control=id["completion_owner"]=="gray_layer_control";
         if (loadop || id["completion_owner"]=="gray_eval_script") != plan.is_some() {return Err("parent plan/owner mismatch".into());}
         // Foreign/legacy/partial charging records are refused before any device write.
-        let charging=if loadop {
+        let charging=if loadop || (control && request["power_policy"]=="battery") {
             let path=crate::hwcond::lock_state_path("charge",&Some(id["serial"].as_str().ok_or("missing serial")?.into()))?;
             if crate::hwcond::charge_record(&path)?.is_some() {return Err(format!("charging record {} is not owned by this new session",path.display()));}
             json!({"stage":"not_started","record_path":path,"binding":null,"history":[],"initial":null,"last_observation":null})
@@ -55,7 +70,7 @@ impl Parent {
         let state = json!({"schema":if control{CONTROL_SCHEMA}else if loadop{LOADOP_SCHEMA}else if plan.is_some(){SCRIPT_SCHEMA}else{SCHEMA},"identity":id,"stage":"created","request":request,"input_plan":plan.map(|p|p.to_value()),
             "remote":format!("/data/local/tmp/phonefarm-confirmation-gray-{token}"),
             "trace":format!("/sys/kernel/tracing/instances/phonefarm_gray_{token}"),
-            "deployment":"not_started","tools_created":false,"trace_state":"not_started","fan":null,"pending":null,"rounds":[],"charging":charging});
+            "deployment":"not_started","tools_created":false,"trace_state":"not_started","fan":null,"pending":null,"rounds":[],"charging":charging,"power_policy":if control{request["power_policy"].clone()}else{Value::Null}});
         new_file(&base.dir.join("eval-session.json"), &serde_json::to_vec_pretty(&state).unwrap())?;
         Ok(Self {base, state:RefCell::new(state),charge:RefCell::new(None)})
     }
@@ -85,7 +100,7 @@ impl Parent {
             return Err("invalid original fan state".into());
         }
         if control_parent(&state) {validate_control_rounds(&state)?;} else if scripted(&state) {script_plan(&state)?;}
-        if state["schema"]==LOADOP_SCHEMA {validate_charging(&state["charging"],&id)?;if !state["fan"].is_null(){return Err("loadop session cannot own fan conditioning".into());}}
+        if owns_charging(&state) {validate_charging(&state["charging"],&id)?;if !state["fan"].is_null(){return Err("charge-conditioned session cannot own fan conditioning".into());}}
         Ok(Self {base,state:RefCell::new(state),charge:RefCell::new(None)})
     }
 
@@ -186,7 +201,7 @@ impl Parent {
         Ok((wc==Some(true),sc==Some(true)))
     }
     fn round_text(&self,label:&str,name:&str)->Result<String,String> {
-        if matches!(self.state.borrow()["schema"].as_str(),Some(LOADOP_SCHEMA|CONTROL_SCHEMA|LEGACY_CONTROL_SCHEMA)) && !self.base.eval_present(&format!("{}/{label}/{name}",self.remote()))? {
+        if matches!(self.state.borrow()["schema"].as_str(),Some(LOADOP_SCHEMA|CONTROL_SCHEMA|INPUT_CONTROL_SCHEMA|LEGACY_CONTROL_SCHEMA)) && !self.base.eval_present(&format!("{}/{label}/{name}",self.remote()))? {
             return Err(format!("{label}/{name}: expected collection evidence absent; original remote ledger retained"));
         }
         self.read("eval_sample_evidence",&format!("{} && cat {}/{}/{}",self.owned()?,q(&self.remote()),q(label),q(name)))
@@ -206,6 +221,7 @@ impl Parent {
     }
     pub fn control_health(&self)->Result<(),String> {
         self.clear()?;
+        if owns_charging(&self.state.borrow()) {self.owned_charge()?;}
         let deployment=self.state.borrow()["deployment"].as_str().map(str::to_owned);
         match deployment.as_deref() {
             Some("not_started")=>Ok(()),
@@ -222,13 +238,19 @@ impl Parent {
             _=>return Err("unknown control input kind".into()),
         };
         if normalized!=*plan {return Err("control input plan is not normalized for its declared kind".into());}
+        fs::create_dir_all(out).map_err(|e|e.to_string())?;
+        let policy=control_power_policy(&self.state.borrow())?;
+        let mut power=json!({"policy":policy,"before":null,"after":null,"error":null});
+        let power_path=out.join("power.json");
+        new_file(&power_path,&serde_json::to_vec_pretty(&power).unwrap())?;
+        let mut attempted=false;
+        let result=(|| {
         self.control_health()?;
         if self.state.borrow()["deployment"]=="not_started" {
             let caps=self.capabilities()?;
             if caps.root!=Some(true) || caps.trace_available!=Some(true) {return Err("current-scene sampling requires root and owned KGSL trace support".into());}
             self.deploy()?;
         }
-        fs::create_dir_all(out).map_err(|e|e.to_string())?;
         let script_name=format!("workload-{label}.sh");
         if self.state.borrow()["rounds"].as_array().unwrap().iter().any(|r|r["label"]==label) {return Err("control sample round already exists; refusing replay".into());}
         // Record this exact plan before any upload. R remains absent for the
@@ -241,11 +263,64 @@ impl Parent {
         self.mutate("control_push_workload",&["push".into(),local.to_string_lossy().into(),remote],30_000,|s| {
             s["rounds"].as_array_mut().unwrap().iter_mut().find(|r|r["label"]==label).unwrap()["deployment"]=json!("ready");
         })?;
+        if policy=="battery" {
+            let fresh=self.state.borrow()["charging"]["stage"]=="not_started";
+            let previous=self.state.borrow()["charging"]["last_observation"].clone();
+            let before=if fresh {self.prepare_charging()}else{self.charging_observation()};
+            // Retain the observed battery state even when it failed admission.
+            match before {
+                Ok(value)=>power["before"]=public_charge_observation(&value),
+                Err(error)=>{
+                    let value=self.state.borrow()["charging"]["last_observation"].clone();
+                    if value!=previous {power["before"]=public_charge_observation(&value);}
+                    return Err(format!("power before: {error}"));
+                },
+            }
+        }
+        crate::devlease::durable_replace(&power_path,&serde_json::to_vec_pretty(&power).unwrap())?;
         // Deployment may take longer than the image freshness window. Image
         // geometry and remaining budget must be rechecked at this boundary.
         // A rejected admission leaves only an uploaded script, never a permit.
         before_launch()?;
+        attempted=true;
         self.collect_script(label,seconds,out,false,plan,"gray_control_sample")
+        })();
+        let mut errors=Vec::new();
+        if let Err(error)=&result {errors.push(self.public_power_error(error));}
+        if policy=="battery" && attempted {
+            // This uses the existing pending/sticky checks. An uncertain worker
+            // is never followed by an unguarded read or restoration attempt.
+            let previous=self.state.borrow()["charging"]["last_observation"].clone();
+            let after=self.charging_observation();
+            if let Ok(value)=&after {power["after"]=public_charge_observation(value);}
+            else if let Err(error)=after {
+                let value=self.state.borrow()["charging"]["last_observation"].clone();
+                if value!=previous {power["after"]=public_charge_observation(&value);}
+                errors.push(format!("power after: {}",self.public_power_error(&error)));
+            }
+        }
+        if !errors.is_empty() {power["error"]=json!(errors.join("; "));}
+        if let Err(error)=crate::devlease::durable_replace(&power_path,&serde_json::to_vec_pretty(&power).unwrap()) {
+            errors.push(format!("power evidence save failed: {}",self.public_power_error(&error)));
+            power["error"]=json!(errors.join("; "));
+        }
+        // A failed post-observation must not discard successfully collected
+        // trace/sampler/input evidence. The result and file expose its failure.
+        match result {
+            Ok((trace,sampler,mut input))=>{input["power"]=power;Ok((trace,sampler,input))},
+            Err(error)=>Err(error),
+        }
+    }
+    pub fn control_power_state(&self)->Result<Value,String> {
+        control_power_snapshot(&self.state.borrow())
+    }
+    fn public_power_error(&self,error:&str)->String {
+        let state=self.state.borrow();
+        let mut text=error.replace(&self.base.dir.to_string_lossy().to_string(),"<session>");
+        for value in [&state["remote"],&state["trace"],&state["charging"]["record_path"],&state["identity"]["token"]] {
+            if let Some(secret)=value.as_str().filter(|v|!v.is_empty()) {text=text.replace(secret,"<owned>");}
+        }
+        text
     }
     fn collect_script(&self,label:&str,seconds:u64,out:&Path,qualify:bool,plan:&crate::gray_script::Plan,mode:&str)->Result<(bool,bool,Value),String> {
         let result=self.worker_with_qualification(mode,label,Some(seconds),true,Some(qualify))?;
@@ -304,8 +379,8 @@ impl Parent {
         if self.read("eval_resource_identity","cat /proc/sys/kernel/random/boot_id")?.trim()!=boot {return Err("device boot changed; parent resource restoration refused".into());}
         Ok(())
     }
-    fn loadop_charge(&self)->Result<Value,String> {
-        if self.state.borrow()["schema"]!=LOADOP_SCHEMA {return Err("charging is only owned by gray-ab loadop".into());}
+    fn owned_charge(&self)->Result<Value,String> {
+        if !owns_charging(&self.state.borrow()) {return Err("this parent does not own charging conditioning".into());}
         let charge=self.state.borrow()["charging"].clone();validate_charging(&charge,&self.base.eval_identity()?)?;Ok(charge)
     }
     fn battery(&self)->Result<crate::hwcond::BatteryState,String> {
@@ -318,8 +393,8 @@ impl Parent {
         Ok(crate::hwcond::BatteryState{status:fields[0].into(),current_ua:Some(current),capacity_pct:Some(capacity)})
     }
     pub fn prepare_charging(&self)->Result<Value,String> {
-        let charge=self.loadop_charge()?;self.identity()?;
-        if charge["stage"]!="not_started" || self.state.borrow()["deployment"]!="ready" {return Err("charging preparation requires a fresh deployed loadop session".into());}
+        let charge=self.owned_charge()?;self.identity()?;
+        if charge["stage"]!="not_started" || self.state.borrow()["deployment"]!="ready" {return Err("charging preparation requires a fresh deployed charge-conditioned session".into());}
         let path=Path::new(charge["record_path"].as_str().unwrap());
         if crate::hwcond::charge_record(path)?.is_some() {return Err("foreign charging record appeared before conditioning".into());}
         let initial=self.battery()?;
@@ -347,8 +422,8 @@ impl Parent {
         self.update(|s|{s["charging"]["binding"]=binding;s["charging"]["stage"]=json!("recorded");})
     }
     pub fn charging_observation(&self)->Result<Value,String> {
-        let charge=self.loadop_charge()?;self.identity()?;
-        if !matches!(charge["stage"].as_str(),Some("suspended"|"observed_no_mutation")) {return Err("loadop charging is not prepared for collection".into());}
+        let charge=self.owned_charge()?;self.identity()?;
+        if !matches!(charge["stage"].as_str(),Some("suspended"|"observed_no_mutation")) {return Err("owned charging is not prepared for collection".into());}
         let path=Path::new(charge["record_path"].as_str().unwrap());
         let control=if charge["stage"]=="suspended" {
             let binding=&charge["binding"];
@@ -364,7 +439,7 @@ impl Parent {
         let value=json!({"stage":charge["stage"],"control_modified_by_session":charge["stage"]=="suspended","control":control,
             "battery":battery_value(&battery),"on_battery":battery.on_battery(),"observed_at":chrono::Utc::now().to_rfc3339(),"record_path":path});
         self.update(|s|s["charging"]["last_observation"]=value.clone())?;
-        if !battery.on_battery() {return Err(format!("loadop requires actual discharging before sampling: {}",battery.why_not_on_battery()));}
+        if !battery.on_battery() {return Err(format!("battery policy requires actual discharging for sampling: {}",battery.why_not_on_battery()));}
         Ok(value)
     }
     fn charge_restored(&self,reason:&str)->Result<(),String> {
@@ -375,7 +450,7 @@ impl Parent {
         })
     }
     fn restore_charging(&self)->Result<(),String> {
-        let charge=self.loadop_charge()?;
+        let charge=self.owned_charge()?;
         let path=Path::new(charge["record_path"].as_str().unwrap());
         match charge["stage"].as_str() {
             Some("not_started"|"observed_no_mutation"|"unmodified"|"restored")=>{
@@ -385,7 +460,7 @@ impl Parent {
             _=>return Err("unknown charging recovery stage".into()),
         }
         let binding=&charge["binding"];
-        // loadop_charge validated the persisted original record before reuse.
+        // owned_charge validated the persisted original record before reuse.
         let mut guard=match self.charge.borrow_mut().take() {
             Some(guard)=>guard,
             None=>crate::hwcond::ChargeSuspend::from_bound_record(path,binding["node"].as_str().unwrap(),binding["original"].as_str().unwrap(),charge["stage"]=="restoring")?,
@@ -395,7 +470,7 @@ impl Parent {
         self.charge_restored("session_finish")
     }
     pub fn fan_off(&self)->Result<Value,String> {
-        if matches!(self.state.borrow()["schema"].as_str(),Some(LOADOP_SCHEMA|CONTROL_SCHEMA|LEGACY_CONTROL_SCHEMA)) {return Err("this parent does not own fan conditioning".into());}
+        if matches!(self.state.borrow()["schema"].as_str(),Some(LOADOP_SCHEMA|CONTROL_SCHEMA|INPUT_CONTROL_SCHEMA|LEGACY_CONTROL_SCHEMA)) {return Err("this parent does not own fan conditioning".into());}
         if self.state.borrow()["deployment"]!="ready" {return Err("fan conditioning requires deployed eval resources".into());}
         self.identity()?;
         if !self.base.eval_present(FAN)? {return Ok(json!({"before":null,"after":null,"forced":false}));}
@@ -429,13 +504,14 @@ impl Parent {
     fn close_resources(&self)->Result<Value,String> {
         let state=self.state.borrow().clone();
         if state["deployment"]=="not_started" && state["trace_state"]=="not_started" && state["fan"].is_null() && state["pending"].is_null() {
+            if owns_charging(&state) {self.restore_charging()?;}
             return Ok(json!({"no_parent_device_mutations":true,"remote_session_closed":null,"fan_restored":null}));
         }
         self.clear()?;self.identity()?;
-        if state["schema"]==LOADOP_SCHEMA && state["deployment"]=="ready" {
+        if owns_charging(&state) && state["deployment"]=="ready" {
             // Group proof is independent of input natural completion. Restore
             // charging before the stronger closure check can fail on input.
-            if self.worker("verify_gray_groups","verify",None,false)?.trim()!="GRAY_GROUPS_QUIESCENT" {return Err("loadop groups not currently quiescent; charging retained".into());}
+            if self.worker("verify_gray_groups","verify",None,false)?.trim()!="GRAY_GROUPS_QUIESCENT" {return Err("owned groups not currently quiescent; charging retained".into());}
             self.restore_charging()?;
         }
         match state["deployment"].as_str() {
@@ -474,7 +550,7 @@ impl Parent {
             if self.read("eval_fan_restore_readback",&format!("cat {FAN}"))?.trim()!=original {return Err("fan restoration readback differs".into());}
         }
         Ok(json!({"remote_session_closed":state["tools_created"]==true,"owned_trace_absent":true,"fan_restored":true,
-            "remote":self.remote(),"tool_policy":"retain closed ownership ledger, scripts and round evidence","charging_or_frequency_changed":if state["schema"]==LOADOP_SCHEMA{Value::Null}else{json!(false)},"frequency_changed":false,"charging":self.state.borrow()["charging"]}))
+            "remote":self.remote(),"tool_policy":"retain closed ownership ledger, scripts and round evidence","charging_or_frequency_changed":if owns_charging(&state){Value::Null}else{json!(false)},"frequency_changed":false,"charging":self.state.borrow()["charging"]}))
     }
     pub fn finish(&self,error:Option<&str>)->Result<Value,String> {
         let resources=self.close_resources();
@@ -576,7 +652,53 @@ fn validate_parent_kind(state:&Value,id:&Value)->Result<(),String> {
     };
     if valid {Ok(())}else{Err("parent schema/completion owner mismatch".into())}
 }
-fn control_parent(state:&Value)->bool {matches!(state["schema"].as_str(),Some(CONTROL_SCHEMA|LEGACY_CONTROL_SCHEMA))}
+fn control_parent(state:&Value)->bool {matches!(state["schema"].as_str(),Some(CONTROL_SCHEMA|INPUT_CONTROL_SCHEMA|LEGACY_CONTROL_SCHEMA))}
+fn control_power_policy(state:&Value)->Result<&'static str,String> {
+    match state["schema"].as_str() {
+        Some(CONTROL_SCHEMA)=>match state["power_policy"].as_str() {
+            Some("observe")=>Ok("observe"),Some("battery")=>Ok("battery"),
+            _=>Err("control parent has no recognized fixed power policy".into()),
+        },
+        Some(INPUT_CONTROL_SCHEMA|LEGACY_CONTROL_SCHEMA) if state["power_policy"].is_null()=>Ok("observe"),
+        _=>Err("control parent power policy/schema mismatch".into()),
+    }
+}
+fn owns_charging(state:&Value)->bool {
+    state["schema"]==LOADOP_SCHEMA || (state["schema"]==CONTROL_SCHEMA && state["power_policy"]=="battery")
+}
+fn charge_stage(value:&Value)->Option<&str> {
+    value.as_str().filter(|v|matches!(*v,"not_started"|"recorded"|"suspended"|"restoring"|"restored"|"unmodified"|"observed_no_mutation"))
+}
+fn public_battery(value:&Value)->Value {
+    if value.is_null() {return Value::Null;}
+    json!({"status":value["status"].as_str().filter(|v|matches!(*v,"Charging"|"Discharging"|"Not charging"|"Full")),
+        "current_ua":value["current_now_ua"].as_i64(),"capacity_pct":value["capacity_pct"].as_i64().filter(|v|(0..=100).contains(v)),
+        "on_battery":value["on_battery"].as_bool()})
+}
+fn public_charge_observation(value:&Value)->Value {
+    if value.is_null() {return Value::Null;}
+    json!({"stage":charge_stage(&value["stage"]),"control_modified_by_session":value["control_modified_by_session"].as_bool(),
+        "battery":public_battery(&value["battery"]),"on_battery":value["on_battery"].as_bool(),"observed_at":value["observed_at"].as_str()})
+}
+/// Host-only projection: recovery failures must remain visible even when the
+/// device, live lease or original charge record cannot currently be checked.
+pub(crate) fn control_power_snapshot(state:&Value)->Result<Value,String> {
+    let policy=control_power_policy(state)?;
+    let charge=&state["charging"];
+    if policy=="observe" {
+        if !charge.is_null() {return Err("observe policy cannot own a charging record".into());}
+        return Ok(json!({"policy":policy,"stage":"unmodified","control_modified_by_session":false,"initial":null,"last_observation":null}));
+    }
+    let stage=charge_stage(&charge["stage"]).ok_or("invalid control charging stage")?;
+    let history=charge["history"].as_array().ok_or("missing charging history")?;
+    let modified=match stage {
+        "recorded"|"restoring"=>Value::Null,
+        "suspended"=>json!(true),
+        _=>json!(!history.is_empty()),
+    };
+    Ok(json!({"policy":policy,"stage":stage,"control_modified_by_session":modified,
+        "initial":public_battery(&charge["initial"]),"last_observation":public_charge_observation(&charge["last_observation"])}))
+}
 fn scripted(state:&Value)->bool {state["schema"]==SCRIPT_SCHEMA || state["schema"]==LOADOP_SCHEMA || control_parent(state)}
 fn valid_round(label:&str)->bool {!label.is_empty() && label.len()<=64 && label.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_')}
 fn round_plan(state:&Value,label:&str)->Result<crate::gray_script::Plan,String> {
@@ -596,7 +718,12 @@ fn round_plan(state:&Value,label:&str)->Result<crate::gray_script::Plan,String> 
     Ok(plan)
 }
 fn validate_control_rounds(state:&Value)->Result<(),String> {
-    if !state["input_plan"].is_null() || !state["fan"].is_null() || !state["charging"].is_null() {return Err("control session cannot own fixed input or hardware conditioning".into());}
+    if !state["input_plan"].is_null() || !state["fan"].is_null() {return Err("control session cannot own fixed input or fan conditioning".into());}
+    match control_power_policy(state)? {
+        "observe" if !state["charging"].is_null()=>return Err("observe control session cannot own charging".into()),
+        "battery" if !state["charging"].is_object()=>return Err("battery control session is missing its charging obligation".into()),
+        _=>{},
+    }
     let mut labels=std::collections::HashSet::new();
     for round in state["rounds"].as_array().ok_or("missing control rounds")? {
         let label=round["label"].as_str().filter(|s|valid_round(s)).ok_or("invalid control round")?;
@@ -655,7 +782,7 @@ mod tests {
         assert!(validate_parent_kind(&json!({"schema":LOADOP_SCHEMA,"identity":loadop}),&loadop).is_ok());
         assert!(validate_parent_kind(&new,&loadop).is_err());
         let control=json!({"completion_owner":"gray_layer_control","control_parent_schema":CONTROL_SCHEMA});
-        let mut current=json!({"schema":CONTROL_SCHEMA,"identity":control,"input_plan":null,"fan":null,"charging":null,"rounds":[]});
+        let mut current=json!({"schema":CONTROL_SCHEMA,"identity":control,"power_policy":"observe","input_plan":null,"fan":null,"charging":null,"rounds":[]});
         assert!(validate_parent_kind(&current,&control).is_ok());
         assert!(validate_parent_kind(&new,&control).is_err());
         for (label,seconds) in [("sample_1",1),("sample_2",120)] {
@@ -668,6 +795,7 @@ mod tests {
         assert!(validate_control_rounds(&current).is_ok());
         assert_eq!(round_plan(&current,"sample_1").unwrap().seconds,1);
         let mut legacy=current.clone();legacy["schema"]=json!(LEGACY_CONTROL_SCHEMA);
+        legacy.as_object_mut().unwrap().remove("power_policy");
         legacy["identity"].as_object_mut().unwrap().remove("control_parent_schema");
         for round in legacy["rounds"].as_array_mut().unwrap() {round.as_object_mut().unwrap().remove("input_kind");}
         let legacy_id=json!({"completion_owner":"gray_layer_control","control_parent_schema":LEGACY_CONTROL_SCHEMA});
@@ -679,6 +807,32 @@ mod tests {
         current["rounds"][0]["input_kind"]=json!("finite");current["rounds"][0]["input_plan"]=finite.to_value();
         assert!(validate_control_rounds(&current).is_ok());
         assert_eq!(round_plan(&current,"sample_1").unwrap(),finite);
+        let mut input_parent=current.clone();input_parent["schema"]=json!(INPUT_CONTROL_SCHEMA);
+        input_parent["identity"]["control_parent_schema"]=json!(INPUT_CONTROL_SCHEMA);
+        input_parent.as_object_mut().unwrap().remove("power_policy");
+        assert!(validate_parent_kind(&input_parent,&input_parent["identity"]).is_ok());
+        assert!(validate_control_rounds(&input_parent).is_ok());
+        assert_eq!(control_power_snapshot(&input_parent).unwrap()["policy"],"observe");
+        input_parent["power_policy"]=json!("battery");
+        assert!(validate_control_rounds(&input_parent).is_err());
+        let mut battery=current.clone();battery["power_policy"]=json!("battery");
+        assert!(validate_control_rounds(&battery).is_err());
+        battery["charging"]=json!({"stage":"suspended","history":[],"record_path":"SECRET_PATH","binding":{"token":"SECRET_TOKEN"},
+            "initial":{"status":"Charging","current_now_ua":100,"capacity_pct":80},
+            "last_observation":{"stage":"suspended","control_modified_by_session":true,"on_battery":true,"observed_at":"2026-10-23T00:00:00Z",
+                "control":{"node":"SECRET_NODE"},"record_path":"SECRET_PATH","battery":{"status":"Discharging","current_now_ua":-1000000,"capacity_pct":80,"on_battery":true}}});
+        assert!(validate_control_rounds(&battery).is_ok());
+        let public=control_power_snapshot(&battery).unwrap();
+        assert_eq!(public["control_modified_by_session"],true);
+        assert_eq!(public["last_observation"]["battery"]["current_ua"],-1000000);
+        assert!(!public.to_string().contains("SECRET"));
+        battery["charging"]["stage"]=json!("restoring");
+        assert_eq!(control_power_snapshot(&battery).unwrap()["stage"],"restoring");
+        assert!(control_power_snapshot(&battery).unwrap()["control_modified_by_session"].is_null());
+        battery["charging"]["stage"]=json!("restored");battery["charging"]["history"]=json!([{"token":"SECRET_TOKEN"}]);
+        assert_eq!(control_power_snapshot(&battery).unwrap()["control_modified_by_session"],true);
+        battery["power_policy"]=json!("observe");assert!(validate_control_rounds(&battery).is_err());
+        battery["power_policy"]=Value::Null;assert!(control_power_snapshot(&battery).is_err());
         legacy["rounds"][0]=current["rounds"][0].clone();
         assert!(validate_control_rounds(&legacy).is_err());
         current["rounds"][0]["input_plan"]=current["rounds"][1]["input_plan"].clone();

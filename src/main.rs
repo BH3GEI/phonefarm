@@ -254,7 +254,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
 灰档:  gray-layer {probe|loadop|passdump|frameaudit|frameaudit-ts [pkg] | target <pkg> | status | off} [--keep-prop] [--so 层.so]
-       gray-layer session --mode MODE --package PKG --serial S --out DIR [--max-seconds 900] [--actor-id agent] [--so 层.so] [--keep-prop]
+       gray-layer session --mode MODE --package PKG --serial S --out DIR [--max-seconds 900] [--power-policy observe|battery] [--actor-id agent] [--so 层.so] [--keep-prop]
        gray-layer session-status --out DIR [--request-id ID] --json
        gray-layer session-action --out DIR --request REQUEST.json|- --json
        gray-layer session-recover --session DIR --serial S --json

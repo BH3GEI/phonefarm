@@ -155,7 +155,7 @@ pub fn strip_lock_args(args: &mut Vec<String>) -> Result<LockOpts, String> {
         // serial/path named --no-devlock must not disable the queue gate.
         let gray_value = match sub.as_str() {
             "gray-layer" => matches!(a.as_str(), "--serial" | "--so" | "--mode" | "--package" |
-                "--out" | "--max-seconds" | "--actor-id" | "--evidence-origin" |
+                "--out" | "--max-seconds" | "--actor-id" | "--evidence-origin" | "--power-policy" |
                 "--request-id" | "--request" | "--session"),
             "gray-ab" => matches!(a.as_str(), "--serial" | "--out" | "--pairs" | "--mode" | "--evidence-origin"),
             _ => false,

@@ -11,7 +11,8 @@ const LEGACY_SCHEMA: &str = "phonefarm/gray-capture-session@1";
 const SCHEMA: &str = "phonefarm/gray-capture-session@2";
 const CONTROL_RESOURCE_SCHEMA: &str = "phonefarm/gray-capture-session@3";
 pub(crate) const LEGACY_CONTROL_PARENT_SCHEMA: &str = "phonefarm/gray-control-resources@1";
-pub(crate) const CONTROL_PARENT_SCHEMA: &str = "phonefarm/gray-control-resources@2";
+pub(crate) const INPUT_CONTROL_PARENT_SCHEMA: &str = "phonefarm/gray-control-resources@2";
+pub(crate) const CONTROL_PARENT_SCHEMA: &str = "phonefarm/gray-control-resources@3";
 const SCOPE: &str = "gray_capture_owned_installation_properties_target_stopped";
 const EVAL_OWNER: &str = "gray_eval_launch";
 const EVAL_SCOPE: &str = "gray_eval_launch_owned_resources";
@@ -797,10 +798,13 @@ fn completion_owner(state: &Value) -> Result<&str, String> {
 /// Validates the base's durable binding, rather than inferring capabilities from
 /// the currently installed binary. C2A parents remain idle-only on recovery.
 pub(crate) fn control_parent_schema(binding:&Value)->Result<&'static str,String> {
-    for schema in [LEGACY_CONTROL_PARENT_SCHEMA,CONTROL_PARENT_SCHEMA] {
+    for schema in [LEGACY_CONTROL_PARENT_SCHEMA,INPUT_CONTROL_PARENT_SCHEMA,CONTROL_PARENT_SCHEMA] {
         if *binding==json!({"path":"eval-session.json","schema":schema}) {return Ok(schema);}
     }
     Err("unrecognized control resource parent binding".into())
+}
+pub(crate) fn control_parent_supports_input(schema:&str)->bool {
+    matches!(schema,INPUT_CONTROL_PARENT_SCHEMA|CONTROL_PARENT_SCHEMA)
 }
 fn require_owner(state: &Value, expected: &str) -> Result<(), String> {
     let owner = completion_owner(state)?;
@@ -1083,10 +1087,18 @@ mod tests {
         assert!(require_parent(&resources).is_ok());
         assert!(require_local_completion(&resources, CONTROL_OWNER).is_err());
         assert_eq!(control_parent_schema(&resources["control_resources"]).unwrap(),CONTROL_PARENT_SCHEMA);
+        assert!(control_parent_supports_input(CONTROL_PARENT_SCHEMA));
+        resources["control_resources"]["schema"]=json!(INPUT_CONTROL_PARENT_SCHEMA);
+        assert!(require_parent(&resources).is_ok());
+        assert!(require_local_completion(&resources, CONTROL_OWNER).is_err());
+        assert_eq!(control_parent_schema(&resources["control_resources"]).unwrap(),INPUT_CONTROL_PARENT_SCHEMA);
+        assert!(control_parent_supports_input(INPUT_CONTROL_PARENT_SCHEMA));
         resources["control_resources"]["schema"]=json!(LEGACY_CONTROL_PARENT_SCHEMA);
         assert!(require_parent(&resources).is_ok());
         assert!(require_local_completion(&resources, CONTROL_OWNER).is_err());
         assert_eq!(control_parent_schema(&resources["control_resources"]).unwrap(),LEGACY_CONTROL_PARENT_SCHEMA);
+        assert!(!control_parent_supports_input(LEGACY_CONTROL_PARENT_SCHEMA));
+        assert!(!control_parent_supports_input("phonefarm/gray-control-resources@4"));
         resources["control_resources"]=Value::Null;
         assert!(require_owner(&resources,CONTROL_OWNER).is_err());
         for owner in ["standalone", EVAL_OWNER, SCRIPT_OWNER, LOADOP_OWNER] {

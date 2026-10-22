@@ -838,6 +838,10 @@ mod mode_admission_tests {
         let mut original = args(&["gray-layer", "session-action", "--request", "--no-devlock", "--out", "--help"]);
         assert!(!crate::devlock::strip_lock_args(&mut original).unwrap().disabled);
         assert_eq!(original, args(&["gray-layer", "session-action", "--request", "--no-devlock", "--out", "--help"]));
+        let mut power = args(&["gray-layer", "session", "--power-policy", "--no-devlock"]);
+        assert!(!crate::devlock::strip_lock_args(&mut power).unwrap().disabled);
+        assert_eq!(power, args(&["gray-layer", "session", "--power-policy", "--no-devlock"]));
+        assert!(crate::gray_control::admission(&args(&["session", "--mode", "frameaudit", "--serial", "S", "--package", "com.example.fixture", "--out", "unused", "--power-policy", "unknown"])).is_err());
     }
 }
 
