@@ -409,6 +409,10 @@ fn offline_qualification(req: &Value, path: &Path) -> Result<Value, String> {
 
 fn record_qualification(report: &mut Value, evidence: &Path, facts: &Evidence) -> Result<qualification::Report,String> {
     let q = qualification::evaluate(facts)?;
+    write_qualification(report, evidence, facts, q)
+}
+
+fn write_qualification(report: &mut Value, evidence: &Path, facts: &Evidence, q: qualification::Report) -> Result<qualification::Report,String> {
     std::fs::create_dir_all(evidence).map_err(|e|e.to_string())?;
     qualification::write(&evidence.join("qualification.json"), &q)?;
     std::fs::write(evidence.join("qualification_evidence.json"),serde_json::to_string_pretty(facts).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
@@ -2300,10 +2304,11 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
             }
         }}
     }
-    facts.device.control_verified=None; // layer effectiveness remains unverified before mount; no assumed capability
+    facts.device.control_verified=None; // Candidate collection will supply layer-hit evidence.
     facts.restored=Some(snapshots_identical(&baseline_before,&snapshot(serial)));
     facts.stage=Stage::Experiment;
-    let experiment=record_qualification(&mut report,evidence,&facts)?;
+    let experiment=qualification::evaluate_gray_collection(&facts)?;
+    let experiment=write_qualification(&mut report,evidence,&facts,experiment)?;
     if !experiment.experiment_allowed {
         report["verdict"]["reason"]=json!("灰档基线/冷机/负载/供电资格未通过，禁止挂层候选实验");
         return Ok(serde_json::to_string_pretty(&report).unwrap());

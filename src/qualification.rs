@@ -369,6 +369,16 @@ fn statistically_reachable(policy: &Policy) -> bool {
 
 /// Pure, deterministic: no devices, clock, random numbers or fallbacks for unknown facts.
 pub fn evaluate(e: &Evidence) -> Result<Report, String> {
+    evaluate_with_pending_control(e, false)
+}
+
+/// A gray candidate must run before its layer-hit evidence exists. Admit that
+/// collection only at Experiment; keep the unknown check and all conclusion gates.
+pub fn evaluate_gray_collection(e: &Evidence) -> Result<Report, String> {
+    evaluate_with_pending_control(e, e.stage == Stage::Experiment)
+}
+
+fn evaluate_with_pending_control(e: &Evidence, collect_control: bool) -> Result<Report, String> {
     if !matches!(e.version, 1 | 2) || e.version != e.policy.version {
         return Err("资格证据版本必须与冻结规则一致".into());
     }
@@ -500,6 +510,9 @@ pub fn evaluate(e: &Evidence) -> Result<Report, String> {
         }
     }
     let all_pass = checks.iter().all(|c| c.state == "pass");
+    let experiment_ready = checks.iter().all(|c| {
+        c.state == "pass" || (collect_control && c.id == "control" && c.state == "unknown")
+    });
     let failed = checks.iter().any(|c| c.state == "fail");
     let status = if e.device.root == Some(false) && e.device.measurement_available == Some(true) {
         "measure_only"
@@ -522,15 +535,18 @@ pub fn evaluate(e: &Evidence) -> Result<Report, String> {
         stage: e.stage,
         status: status.into(),
         probe_allowed,
-        experiment_allowed: all_pass && e.stage != Stage::Probe,
+        experiment_allowed: experiment_ready && e.stage != Stage::Probe,
         conclusion_allowed: all_pass && e.stage == Stage::Conclusion,
         eligible: all_pass && e.stage == Stage::Conclusion,
         policy: e.policy.clone(),
         checks,
         frame_evidence: frames,
         evidence_origin: e.evidence_origin.clone(),
-        control_validation_scope:
-            "probe/apply readback only; continuous control effectiveness not measured".into(),
+        control_validation_scope: if collect_control && e.device.control_verified.is_none() {
+            "layer-hit evidence pending; permission to collect is not proof of control".into()
+        } else {
+            "probe/apply readback only; continuous control effectiveness not measured".into()
+        },
         claim_scope: if !all_pass || e.stage != Stage::Conclusion {
             "none; evidence does not qualify a conclusion".into()
         } else {
@@ -754,6 +770,34 @@ mod tests {
             r["frame_evidence"]["source"] = json!("raw_ftrace_kgsl");
         }
         e
+    }
+    #[test]
+    fn gray_collection_can_measure_unknown_control_without_qualifying_a_conclusion() {
+        let mut e = ready();
+        e.policy.require_quality = true;
+        e.stage = Stage::Experiment;
+        e.device.control_verified = None;
+        e.quality_verified = None;
+        let q = evaluate_gray_collection(&e).unwrap();
+        assert!(q.experiment_allowed);
+        assert_eq!(q.status, "unverified");
+        assert!(q.checks.iter().any(|c| c.id == "control" && c.state == "unknown"));
+        assert!(!q.eligible && !q.conclusion_allowed);
+        assert!(q.claim_scope.starts_with("none"));
+        // Ordinary sysparam/confirmation admission remains unchanged.
+        assert!(!evaluate(&e).unwrap().experiment_allowed);
+        e.restored = Some(false);
+        assert!(!evaluate_gray_collection(&e).unwrap().experiment_allowed);
+        e.restored = Some(true);
+        e.device.control_verified = Some(false);
+        assert!(!evaluate_gray_collection(&e).unwrap().experiment_allowed);
+        e.device.control_verified = None;
+        e.stage = Stage::Conclusion;
+        assert!(!evaluate_gray_collection(&e).unwrap().conclusion_allowed);
+        e.device.control_verified = Some(true);
+        assert!(!evaluate(&e).unwrap().conclusion_allowed);
+        e.quality_verified = Some(true);
+        assert!(evaluate(&e).unwrap().conclusion_allowed);
     }
     #[test]
     fn synthetic_and_unknown_sources_are_not_real_experiment_eligible() {
