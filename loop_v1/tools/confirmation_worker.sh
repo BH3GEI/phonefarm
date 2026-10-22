@@ -6,7 +6,7 @@ case "$D" in /data/local/tmp/phonefarm-confirmation-*) ;; *) exit 70 ;; esac
 case "$TOKEN:$RUN" in *[!a-zA-Z0-9_:-]*) exit 70 ;; esac
 [ "$(cat "$D/owner")" = "$TOKEN $BOOT" ] || exit 71
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT" ] || exit 72
-[ ! -e "$D/session.closed" ] || exit 86
+[ "$MODE" = verify_bench ] || [ ! -e "$D/session.closed" ] || exit 86
 # A capability diagnostic session cannot enter any performance sampling mode.
 if [ -e "$D/thermal-purpose.txt" ]; then
   [ -f "$D/thermal-purpose.txt" ] && [ "$(cat "$D/thermal-purpose.txt")" = capability_absolute_v1 ] || exit 87
@@ -177,13 +177,15 @@ children_valid() {
   [ -e "$R/children.tsv" ] || [ -L "$R/children.tsv" ] || return 0
   ledger_complete "$R/children.tsv" || return 1
   CHILD_ROWS=$(awk -F '\t' -v w="$D/workload.sh" -v s="$D/sample_env.sh" -v th="$D/thermal_sampler.sh" -v rr="$D/render_ownership.sh" -v mode="$MODE" '
+    BEGIN {bench=(mode=="bench" || mode=="reconcile_bench" || mode=="verify_bench")}
+    bench && $1!="workload" && $1!="sampler" {bad=1}
     ((mode=="render_readonly" || mode=="reconcile_render") && $1!="render_reader") ||
     ((mode!="render_readonly" && mode!="reconcile_render") && $1=="render_reader") ||
     NF!=4 || ($1!="workload" && $1!="sampler" && $1!="thermal_sampler" && $1!="render_reader") || $2!~/^[0-9]+$/ ||
     $2+0<=0 || $2+0>2147483647 || $3!~/^[0-9]+$/ || $3+0<=0 ||
     ($1=="workload" && $4!=w) || ($1=="sampler" && $4!=s) || ($1=="thermal_sampler" && $4!=th) || ($1=="render_reader" && $4!=rr) {bad=1}
     ++tags[$1]>1 || ++pids[$2]>1 {bad=1}
-    END {if (bad || NR<1 || NR>((mode=="render_readonly" || mode=="reconcile_render")?1:3)) exit 1; print NR}' "$R/children.tsv") || return 1
+    END {if (bad || NR<1 || NR>((mode=="render_readonly" || mode=="reconcile_render")?1:(bench?2:3))) exit 1; print NR}' "$R/children.tsv") || return 1
 }
 pending_known() {
   children_valid || return 1
@@ -206,13 +208,21 @@ pending_known() {
 }
 group_absent_remote() {
   expected=$1
-  for proc in /proc/[0-9]*; do
-    [ -d "$proc" ] || continue
-    pg=$(group_id "${proc##*/}")
-    if [ -z "$pg" ]; then [ ! -d "$proc" ] || return 1; continue; fi
-    [ "$pg" != "$expected" ] || return 1
-  done
-  if error=$(/system/bin/kill -0 -- "-$expected" 2>&1); then return 1; fi
+  case "$MODE" in
+    bench|reconcile_bench|verify_bench)
+      # Rootless bench cannot inspect unrelated root processes. ESRCH for the
+      # exact negative PGID proves absence; EPERM and unknown errors do not.
+      ;;
+    *)
+      for proc in /proc/[0-9]*; do
+        [ -d "$proc" ] || continue
+        pg=$(group_id "${proc##*/}")
+        if [ -z "$pg" ]; then [ ! -d "$proc" ] || return 1; continue; fi
+        [ "$pg" != "$expected" ] || return 1
+      done
+      ;;
+  esac
+  if error=$(LC_ALL=C /system/bin/kill -0 -- "-$expected" 2>&1); then return 1; fi
   case "$error" in *"No such process"*) ;; *) return 1 ;; esac
 }
 quiescent() {
@@ -304,14 +314,14 @@ cleanup_failure() {
   trap - EXIT INT TERM
   # The absence of an attributable child/group is required before any restore write.
   if stop_owned; then
-    case "$MODE" in render_readonly|reconcile_render) : ;; control_probe|reconcile_controls) restore_controls || true ;; *) restore_trace && restore_controls || true ;; esac
+    case "$MODE" in bench|reconcile_bench|render_readonly|reconcile_render) : ;; control_probe|reconcile_controls) restore_controls || true ;; *) restore_trace && restore_controls || true ;; esac
   fi
 }
 acquire_master() {
   [ ! -e "$D/session.closed" ] || return 1
   L="$D/worker.lock"
   if [ -d "$L" ]; then
-    case "$MODE" in reconcile|reconcile_controls|reconcile_render) ;; *) return 1 ;; esac
+    case "$MODE" in reconcile|reconcile_controls|reconcile_render|reconcile_bench) ;; *) return 1 ;; esac
     ledger_complete "$L/owner" || return 1
     awk -v t="$TOKEN" -v b="$BOOT" 'NF!=5 || $1!=t || $2!=b {bad=1} END {exit (bad || NR!=1)}' "$L/owner" || return 1
     IFS=' ' read -r oldtoken oldboot oldpid oldticks oldrun < "$L/owner" || return 1
@@ -337,7 +347,7 @@ release_master() {
   [ "$(cat "$D/worker.lock/owner")" = "$MASTER" ] || return 1
   if [ -e "$D/session.closed" ]; then
     # Closure forbids all normal intents. Only this matching terminal reconcile may unlock.
-    case "$MODE" in reconcile|reconcile_controls|reconcile_render) ;; *) return 1 ;; esac
+    case "$MODE" in reconcile|reconcile_controls|reconcile_render|reconcile_bench) ;; *) return 1 ;; esac
     [ "$(cat "$D/session.closed/owner")" = "$TOKEN $BOOT $RUN" ] || return 1
     [ "$(cat "$D/owner")" = "$TOKEN $BOOT" ] && [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT" ] || return 1
     printf '%s\tterminal_release_master\t%s\t%s\n' "$TOKEN" "$D/worker.lock" "$$" >> "$D/journal.tsv"
@@ -358,9 +368,53 @@ close_session() {
   printf 'SESSION_REVOKED %s %s %s\n' "$TOKEN" "$BOOT" "$RUN" > "$R/session_closed.txt" || return 1
   sync || return 1
 }
+# Closed bench verification is read-only and cannot reacquire or clear a lock.
+if [ "$MODE" = verify_bench ]; then
+  [ -d "$D/session.closed" ] && [ ! -L "$D/session.closed" ] || exit 86
+  ledger_complete "$D/session.closed/owner" || exit 86
+  awk -v t="$TOKEN" -v b="$BOOT" 'NF!=3 || $1!=t || $2!=b || $3!~/^[a-zA-Z0-9_:-]+$/ {bad=1} END {exit (bad || NR!=1)}' "$D/session.closed/owner" || exit 86
+  [ ! -e "$D/worker.lock" ] && [ ! -L "$D/worker.lock" ] || exit 85
+  for prior in "$D"/*; do
+    [ -d "$prior" ] || continue
+    [ "$prior" != "$D/session.closed" ] || continue
+    R=$prior; quiescent || exit 77
+  done
+  echo BENCH_CLOSED_QUIESCENT
+  exit 0
+fi
 # The host invokes this worker through setsid, so master and its synchronous children own one group.
 acquire_master || exit 85
 case "$MODE" in
+  bench)
+    intent mkdir "$R" ''; mkdir "$R"
+    printf '%s\n' "$MASTER" > "$R/master.tsv"; sync
+    trap 'cleanup_failure' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    start_child sampler "$D/sample_env.sh"
+    start_child workload "$D/workload.sh"; workload_pid=$CHILD_PID
+    if wait "$workload_pid"; then echo 0 > "$R/workload_exit.txt"; else code=$?; echo "$code" > "$R/workload_exit.txt"; fi
+    stop_owned || exit 76
+    quiescent || exit 76
+    echo OWNED_GROUPS_ABSENT > "$R/quiescence.txt"; sync
+    trap - EXIT INT TERM
+    release_master
+    # Lifecycle completion is independent of the workload's recorded exit code.
+    echo BENCH_COMPLETE
+    ;;
+  reconcile_bench)
+    for prior in "$D"/*; do
+      [ -d "$prior" ] || continue
+      [ "$prior" != "$D/worker.lock" ] || continue
+      R=$prior; stop_owned || exit 77
+    done
+    R="$D/$RUN"; intent mkdir "$R" ''; mkdir "$R"
+    printf '%s\n' "$MASTER" > "$R/master.tsv"; sync
+    echo OWNED_GROUPS_ABSENT > "$R/quiescence.txt"
+    close_session
+    release_master
+    echo BENCH_RECONCILE_COMPLETE
+    ;;
   render_readonly)
     intent mkdir "$R" ''; mkdir "$R"
     printf '%s\n' "$MASTER" > "$R/master.tsv"; sync

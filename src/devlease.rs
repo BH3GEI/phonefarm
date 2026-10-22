@@ -401,6 +401,9 @@ impl Lease {
     pub(crate) fn record_command_pending(&self, operation: &str) -> Result<(), String> {
         self.check()?;
         let mut m = marker(&self.legacy).ok_or("lease marker unavailable")?;
+        if m["command_pending"] == true || m.get("child_pid").is_some() || m.get("child_pgid").is_some() {
+            return Err("previous transport launch/child remains unresolved; refusing to replace its identity".into());
+        }
         m["command_pending"] = json!(true);
         m["pending_operation"] = json!(operation);
         durable_replace(
@@ -1144,6 +1147,8 @@ mod tests {
         assert_eq!(observed["entries"][0]["lease_id"], read_receipt(&path)["lease_id"]);
         lease.record_command_pending("host-only").unwrap();
         assert_eq!(read_receipt(&path)["recovery"]["reason"], "command_pending");
+        assert!(lease.record_command_pending("replacement").is_err());
+        assert_eq!(marker(&lease.legacy).unwrap()["pending_operation"], "host-only");
         lease.cancel_unspawned_command("host-only").unwrap();
         drop(lease);
         let r = read_receipt(&path);

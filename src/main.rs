@@ -5,6 +5,8 @@
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod autoloop;
 mod bench;
+mod bench_session;
+mod lease_command;
 mod ftrace;
 mod gpuop;
 mod shaderplan;

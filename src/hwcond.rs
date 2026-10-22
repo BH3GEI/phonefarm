@@ -21,6 +21,18 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+/// Minimal transport boundary for hardware conditioning under a caller-owned lease.
+pub(crate) trait Shell {
+    fn shell(&self, cmd: &str, ms: u64) -> String;
+    fn shell_write(&self, cmd: &str, ms: u64) -> String { self.shell(cmd, ms) }
+}
+
+impl Shell for crate::device::Device {
+    fn shell(&self, cmd: &str, ms: u64) -> String {
+        crate::device::Device::shell(self, cmd, ms)
+    }
+}
+
 pub const KGSL: &str = "/sys/class/kgsl/kgsl-3d0";
 pub const CPUFREQ: &str = "/sys/devices/system/cpu/cpufreq";
 /// 内存总线 DCVS (Qualcomm bus_dcvs): DDR 与 LLCC 的用户态下限 boost_freq 在跑测期间钉到 hw_max_freq
@@ -584,7 +596,7 @@ pub fn parse_battery_state(text: &str) -> Option<BatteryState> {
     })
 }
 
-pub fn read_battery_state(phone: &crate::device::Device) -> BatteryState {
+pub fn read_battery_state(phone: &impl Shell) -> BatteryState {
     parse_battery_state(&phone.shell(&battery_state_cmd(), 8_000)).unwrap_or_default()
 }
 
@@ -690,7 +702,7 @@ impl ChargeSuspend {
     /// `state_path` 用 `lock_state_path("charge", serial)`, 与锁频的状态文件分开放 ——
     /// 两者互不相干, 混在一份文件里会互相覆盖。
     pub fn apply(
-        phone: &crate::device::Device,
+        phone: &impl Shell,
         state_path: &std::path::Path,
     ) -> Result<ChargeSuspend, String> {
         let bat = read_battery_state(phone);
@@ -724,7 +736,7 @@ impl ChargeSuspend {
             }
             save_state(state_path, &text)?;
 
-            phone.shell(&format!("su -c 'echo {want} > {}'", node.path), 8_000);
+            phone.shell_write(&format!("su -c 'echo {want} > {}'", node.path), 8_000);
 
             // 回读确认**停充真的生效** —— 写进去不代表内核认。
             // 本机 charge_control_end_threshold 出厂就是 80 而电量 91% 照充不误, 就是活例。
@@ -763,11 +775,11 @@ impl ChargeSuspend {
     }
 
     /// 恢复充电并清掉状态文件; 返回是否确认恢复。
-    pub fn restore(&mut self, phone: &crate::device::Device) -> bool {
+    pub fn restore(&mut self, phone: &impl Shell) -> bool {
         if self.restored {
             return true;
         }
-        phone.shell(&format!("su -c 'echo {} > {}'", self.saved, self.path), 8_000);
+        phone.shell_write(&format!("su -c 'echo {} > {}'", self.saved, self.path), 8_000);
         let back = phone.shell(&format!("su -c 'cat {} 2>/dev/null'", self.path), 8_000);
         let ok = back.trim() == self.saved;
         if ok {
@@ -806,14 +818,14 @@ impl Drop for ChargeSuspend {
 
 /// 回滚上次遗留的停充状态 (进程被杀没来得及还原)。返回 `None` 表示没有遗留。
 pub fn recover_stale_charge_ctl(
-    phone: &crate::device::Device,
+    phone: &impl Shell,
     state_path: &std::path::Path,
 ) -> Result<Option<bool>, String> {
     let Some(text) = read_state(state_path)? else { return Ok(None) };
     let (path, saved) = parse_charge_ctl_state(&text)
         .ok_or_else(|| format!("invalid charge recovery record {}; preserved", state_path.display()))?;
     progress("charge", &format!("发现上次遗留的停充状态 {path}, 先恢复充电"));
-    phone.shell(&format!("su -c 'echo {saved} > {path}'", ), 8_000);
+    phone.shell_write(&format!("su -c 'echo {saved} > {path}'", ), 8_000);
     let back = phone.shell(&format!("su -c 'cat {path} 2>/dev/null'"), 8_000);
     let ok = back.trim() == saved;
     if ok {
@@ -824,22 +836,22 @@ pub fn recover_stale_charge_ctl(
 
 // ══════════════ 设备操作 ══════════════
 
-pub fn root_ok(phone: &crate::device::Device) -> bool {
+pub fn root_ok(phone: &impl Shell) -> bool {
     phone.shell("su -c id", 8000).contains("uid=0(")
 }
 
-pub fn read_snapshot(phone: &crate::device::Device) -> Snapshot {
+pub fn read_snapshot(phone: &impl Shell) -> Snapshot {
     parse_snapshot(&phone.shell(&snapshot_cmd(), 15000))
 }
 
-pub fn read_thermal(phone: &crate::device::Device) -> Vec<(String, i64)> {
+pub fn read_thermal(phone: &impl Shell) -> Vec<(String, i64)> {
     parse_thermal(&phone.shell(
         "for z in /sys/class/thermal/thermal_zone*; do echo \"$(cat $z/type) $(cat $z/temp)\"; done 2>/dev/null",
         15000,
     ))
 }
 
-pub fn read_power(phone: &crate::device::Device, rail: PowerRail) -> Option<PowerSample> {
+pub fn read_power(phone: &impl Shell, rail: PowerRail) -> Option<PowerSample> {
     parse_power_samples(&phone.shell(&power_sample_cmd(rail), 8000))
         .into_iter()
         .next()
@@ -848,7 +860,7 @@ pub fn read_power(phone: &crate::device::Device, rail: PowerRail) -> Option<Powe
 /// 冷机门禁: SoC 结温最高热区 < cool_c 才放行; 超时即报错(安全阀, 不是时间预设)
 pub fn wait_cool(
     tag: &str,
-    phone: &crate::device::Device,
+    phone: &impl Shell,
     cool_c: f64,
     timeout_s: u64,
 ) -> Result<(String, f64, u64), String> {
@@ -962,7 +974,7 @@ fn restored_text_matches(before: &Snapshot, text: &str) -> bool {
 }
 
 /// 把快照里的调速器与 kgsl 档位写回设备; 返回回读是否一致
-pub fn restore_snapshot(phone: &crate::device::Device, before: &Snapshot) -> bool {
+pub fn restore_snapshot(phone: &impl Shell, before: &Snapshot) -> bool {
     let mut cmd = String::from("su -c '");
     for p in &before.cpu {
         cmd.push_str(&format!("echo {} > {}/scaling_governor; ", p.governor, p.path));
@@ -980,7 +992,7 @@ pub fn restore_snapshot(phone: &crate::device::Device, before: &Snapshot) -> boo
         ));
     }
     cmd.push_str("echo RESTORED'");
-    let out = phone.shell(&cmd, 15000);
+    let out = phone.shell_write(&cmd, 15000);
     if !out.contains("RESTORED") {
         return false;
     }
@@ -990,7 +1002,7 @@ pub fn restore_snapshot(phone: &crate::device::Device, before: &Snapshot) -> boo
 /// 上次异常退出遗留的锁态: 状态文件在就按它回滚。返回 Some(是否回滚成功); 无遗留 None
 pub fn recover_stale_lock(
     tag: &str,
-    phone: &crate::device::Device,
+    phone: &impl Shell,
     state_path: &std::path::Path,
 ) -> Result<Option<bool>, String> {
     let Some(text) = read_state(state_path)? else { return Ok(None) };
@@ -1009,7 +1021,7 @@ pub fn recover_stale_lock(
 
 impl Lock {
     pub fn apply(
-        phone: &crate::device::Device,
+        phone: &impl Shell,
         state_path: &std::path::Path,
         before: Snapshot,
         level: u32,
@@ -1034,7 +1046,7 @@ impl Lock {
             ));
         }
         cmd.push_str("echo LOCKED'");
-        let out = phone.shell(&cmd, 15000);
+        let out = phone.shell_write(&cmd, 15000);
         let lock = Lock {
             before,
             state_path: state_path.to_path_buf(),
@@ -1064,7 +1076,7 @@ impl Lock {
     }
 
     /// 恢复原值并清掉状态文件; 返回回读是否与锁前一致
-    pub fn restore(&self, phone: &crate::device::Device) -> bool {
+    pub fn restore(&self, phone: &impl Shell) -> bool {
         if !self.applied {
             return true;
         }

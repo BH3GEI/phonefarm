@@ -81,6 +81,11 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
     if rest.iter().any(|a| a == "-h" || a == "--help") {
         return false;
     }
+    // Recovery enters the matching retained strong lease directly; ordinary
+    // acquisition would wait behind the very barrier it needs to reconcile.
+    if sub == "bench" && rest.iter().any(|a| a == "--recover") {
+        return false;
+    }
     // preflight: 只读核查不拿锁; --fix 要写风扇/音量，跟测量一样排队
     if sub == "preflight" {
         return rest.iter().any(|a| a == "--fix");
@@ -351,6 +356,8 @@ mod tests {
 
     #[test]
     fn only_device_touching_subcommands_take_the_lock() {
+        assert!(!needs_lock("bench", &v(&["--serial", "S", "--recover", "session"])));
+        assert!(needs_lock("bench", &v(&["--serial", "S", "--model", "m"])));
         assert!(needs_lock("gray-layer", &v(&["off"])));
         assert!(needs_lock("perf", &v(&["--serial", "S"])));
         assert!(needs_lock("selftest", &v(&["run", "--out", "d"])));
