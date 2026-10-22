@@ -36,6 +36,7 @@ mod device;
 mod platform;
 mod devlock;
 mod devlease;
+mod observation;
 mod lease_receipt;
 mod lease_storage;
 mod eval;
@@ -393,6 +394,9 @@ fn main() {
         }
     }
     match args.first().map(|s| s.as_str()) {
+        Some("__observe-worker") => {
+            std::process::exit(observation::run_worker(&args[1..]));
+        }
         Some("lease") => {
             std::process::exit(devlease::run_lease(&args[1..]));
         }
@@ -890,7 +894,7 @@ fn main() {
         }
         Some("screen") => {
             // 设备屏幕观战窗口(SPEC_SCREEN_WIDGET): 零 Token 只读。
-            // 语义移自 iPhone-use 的实时屏幕 widget。不拿设备锁 —— 拿锁就没法观战。
+            // 每帧短时 ownership，不能让看屏干扰已占有设备的测量。
             std::process::exit(screen::run_screen(&args[1..]));
         }
         Some("test-batch") => {

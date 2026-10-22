@@ -193,6 +193,28 @@ fn remove_owned(path: &Path, token: &str) {
     }
 }
 
+fn observation_queue_empty(root: &Path) -> Result<(), String> {
+    if root.join("devlock.qmutex").symlink_metadata().is_ok() {
+        return Err("writer queue is being updated".into());
+    }
+    match fs::read_to_string(root.join("devlock.queue")) {
+        Ok(q) if !q.trim().is_empty() => Err("queued device work takes priority over observation".into()),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("cannot read writer queue: {e}")),
+    }
+}
+
+fn observation_available(root: &Path) -> Result<(), String> {
+    for name in ["devlock.d", NESTED_DIR] {
+        match fs::symlink_metadata(root.join(name)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            _ => return Err(format!("device domain occupied or unknown: {name}")),
+        }
+    }
+    observation_queue_empty(root)
+}
+
 impl Lease {
     pub fn acquire(
         root: &Path,
@@ -200,6 +222,19 @@ impl Lease {
         serial: &str,
         label: &str,
         timeout: Duration,
+    ) -> Result<Self, String> {
+        Self::acquire_inner(root, legacy_root, serial, label, timeout, false)
+    }
+
+    /// Observation is domain-wide, never borrows a label, and yields to waiting writers.
+    pub(crate) fn observe(storage: &crate::lease_storage::Storage, label: &str) -> Result<Self, String> {
+        let (root, legacy) = storage.require_ready()?;
+        Self::acquire_inner(&root, &legacy, "@observation", label, Duration::ZERO, true)
+    }
+
+    fn acquire_inner(
+        root: &Path, legacy_root: &Path, serial: &str, label: &str,
+        timeout: Duration, observation: bool,
     ) -> Result<Self, String> {
         if serial.trim().is_empty() {
             return Err("lease requires a resolved device serial".into());
@@ -212,7 +247,10 @@ impl Lease {
         let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
         // Legacy devlock is global. Same order for every participant, no ABBA deadlock.
         let bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
-        let legacy = lease_dir(legacy_root);
+        let legacy = if observation {
+            observation_available(legacy_root)?;
+            legacy_root.join("devlock.d")
+        } else { lease_dir(legacy_root) };
         // 另一个目录里残留的租约 (崩溃/恢复屏障) 同样阻断, 不因换了目录而被忽略
         for other in [legacy_root.join("devlock.d"), legacy_root.join(NESTED_DIR)] {
             if other == legacy {
@@ -321,6 +359,9 @@ impl Lease {
             serial: serial.into(),
         };
         lease.publish_receipt(&info, "active", None)?;
+        // A writer may have joined between our first queue check and atomic mkdir.
+        // Yield before any transport is launched, without leaving a queue entry.
+        if observation { observation_queue_empty(legacy_root)?; }
         Ok(lease)
     }
 
@@ -383,7 +424,7 @@ impl Lease {
     }
 
     /// Only for a definite spawn Err: no child was established for this pending launch.
-    fn cancel_unspawned_command(&mut self, operation: &str) -> Result<(), String> {
+    pub(crate) fn cancel_unspawned_command(&mut self, operation: &str) -> Result<(), String> {
         // A failed fsync may follow a published rename; retain the barrier on any error.
         let previously_preserved = self.preserve_marker;
         self.preserve_marker = true;
@@ -410,6 +451,11 @@ impl Lease {
         self.publish_receipt(&m, "active", None)?;
         self.preserve_marker = false;
         Ok(())
+    }
+
+    pub(crate) fn authorize_observation_worker(&self, cmd: &mut std::process::Command) {
+        cmd.env("PHONEFARM_OBSERVATION_MARKER", self.legacy.join("phonefarm-lease.json"))
+            .env("PHONEFARM_OBSERVATION_TOKEN", &self.token);
     }
 
     pub(crate) fn clear_child(&self) -> Result<(), String> {

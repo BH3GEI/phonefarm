@@ -106,6 +106,14 @@ class DevlockBridgeTests(unittest.TestCase):
         self.assertEqual(self.call("renew", "other").returncode, 0)
         self.assertEqual(self.call("release", "other").returncode, 0)
 
+    def test_unpublished_owner_is_not_stolen(self):
+        directory = self.root / "devlock.d"
+        directory.mkdir()
+        result = self.call("acquire", "writer")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unknown", result.stdout)
+        self.assertFalse((directory / "owner").exists())
+
     def assert_processes_gone(self, pids):
         self.assertTrue(pids, "fixture did not observe its heartbeat sibling")
         for pid in pids:

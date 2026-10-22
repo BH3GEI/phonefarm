@@ -15,7 +15,7 @@
 //! 3. **读不到就留空**。每个字段都是 `Option`, 采不到记 `None` 并在 `unknown` 里写清楚
 //!    是哪一项、为什么。不拿 0 或空串冒充读数 —— 面板据此显示「未知」。
 //!
-//! 探测前读取同一宿主租约域的只读状态；只有明确 clear 才枚举或读取设备。
+//! 探测全程占有同一宿主租约域；短时 worker 覆盖枚举、shell 与截图。
 //! held / blocked / unknown 或存储未初始化时返回暂不可用，不把缓存或空列表当新快照。
 //! 标签和兼容参数 `--probe-while-locked` 不提供所有权，也不能绕过这个入口检查。
 
@@ -42,6 +42,7 @@ const DEFAULT_SCREENSHOT_EVERY_S: u64 = 300;
 #[derive(Debug, Serialize)]
 pub struct Fleet {
     pub schema: &'static str,
+    pub observation: &'static str,
     pub tool: &'static str,
     pub version: &'static str,
     pub generated_at: String,
@@ -935,7 +936,7 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     let storage = opts.lock_dir.as_deref().map(crate::lease_storage::Storage::custom)
         .unwrap_or_else(crate::lease_storage::resolve);
     let lease = crate::devlease::storage_status(&storage);
-    if lease["status"] != "clear" {
+    if !crate::observation::in_worker() {
         return Err(format!("lease {}: {}; no device probes performed",
             lease["status"].as_str().unwrap_or("unknown"),
             lease["error"].as_str().unwrap_or("host device domain is occupied or requires recovery")));
@@ -987,7 +988,9 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
             card.model = model_hint;
         }
         if let Some(screens) = &opts.screens {
-            let (shot, why) = shoot(&phone, &serial, screens, lock.as_ref());
+            // The worker already holds the domain lease; its own marker is not a
+            // competing owner. Screenshot rate limiting still applies.
+            let (shot, why) = shoot(&phone, &serial, screens, None);
             card.screenshot = shot;
             if let Some(w) = why {
                 card.unknown.push(w);
@@ -1006,6 +1009,7 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
 
     Ok(Fleet {
         schema: "phonefarm/fleet@1",
+        observation: "sampled",
         tool: "phonefarm",
         version: env!("CARGO_PKG_VERSION"),
         generated_at: now_rfc3339(),
@@ -1100,6 +1104,25 @@ pub fn run_fleet(args: &[String]) -> i32 {
         }
     }
     opts.own_label = own_label.clone();
+    if !crate::observation::in_worker() {
+        let storage = opts.lock_dir.as_deref().map(crate::lease_storage::Storage::custom)
+            .unwrap_or_else(crate::lease_storage::resolve);
+        return match crate::observation::run("fleet", args, &storage, std::time::Duration::from_secs(30)) {
+            Ok(output) => {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&output.stdout);
+                let _ = std::io::stderr().write_all(&output.stderr);
+                output.status.code().unwrap_or(3)
+            }
+            Err(e) => {
+                if json {
+                    println!("{}", serde_json::json!({"schema":"phonefarm/fleet@1",
+                        "observation":e.state,"reason":e.reason,"devices":null}));
+                } else { eprintln!("fleet {}: {}", e.state, e.reason); }
+                3
+            }
+        };
+    }
     if let Some(dir) = screenshot_dir {
         opts.screens = Some(Screens {
             dir,
@@ -1474,6 +1497,7 @@ mod tests {
     fn text_render_marks_unknowns_with_question_marks() {
         let fleet = Fleet {
             schema: "phonefarm/fleet@1",
+            observation: "sampled",
             tool: "phonefarm",
             version: "0.2.0",
             generated_at: "now".into(),
@@ -1573,6 +1597,7 @@ mod tests {
     fn text_render_prints_the_layer_line() {
         let fleet = Fleet {
             schema: "phonefarm/fleet@1",
+            observation: "sampled",
             tool: "phonefarm",
             version: "0.2.0",
             generated_at: "now".into(),

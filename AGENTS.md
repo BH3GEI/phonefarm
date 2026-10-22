@@ -143,9 +143,9 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ```
 
 一个 std-only 的本地 HTTP 服务 + 一份自包含 HTML（无外链、无构建）。
-它**不拿设备锁** —— 拿锁就没法在别人跑局时观战，而观战正是它的用途；
-代价写在 `--help` 与页面上：**每秒一次 screencap 会影响帧时与功耗，做判定性测量时别开着它**。
-契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_SCREEN_WIDGET.md`。
+有效观看订阅触发短时采样；每帧在同一设备域强租约内完成，测量占用、排队或恢复待核时暂缓并保留旧图年龄。
+服务本身与缓存读取不持锁。子进程超时/退出不确定时保留屏障，不能自动推断设备端空闲。
+当前合同见 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/OBSERVATION-OWNERSHIP.md`。
 
 **Compute Shader 算子标尺**（零 Token，需 root）
 
@@ -298,7 +298,7 @@ src/                   Rust 内核源码
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
   ios.rs               iOS 设备后端（经 WebDriverAgent）+ ios-probe 真机体检
   collect.rs           有界滚动采集（组合动作原语，零 Token）：有界滚动 / 重叠去重 / 覆盖边界
-  screen.rs            设备屏幕观战窗口（零 Token，只读；不拿设备锁）+ screen_widget.html
+  screen.rs            设备屏幕窗口（零 Token，每帧短时租约；忙时保留旧图）+ screen_widget.html
   decision.rs          决策原语通路（零 Token 降级档 + 侧车协议 + 资产校验）；仓库不含训练权重
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
   hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测

@@ -121,7 +121,9 @@ acquire(){
   done
   if [[ -n $h && $h != $L ]]; then qappend $L; qunlock; echo "not your turn (已自动排进队尾): head=$h"; return 1; fi
   if mkdir "$D" 2>/dev/null; then take $L; rc=$?; qunlock; return $rc; fi
-  [[ -f "$D/owner" ]] || { sleep 1; [[ -f "$D/owner" ]] || { take $L; rc=$?; qunlock; return $rc; }; }
+  # mkdir publishes ownership before its owner file. Never steal that publication
+  # window (or an abandoned, unidentified directory) from a strong participant.
+  [[ -f "$D/owner" ]] || { qappend $L; qunlock; echo 'busy: owner not published or unknown'; return 1; }
   a=$(age)
   if (( a > STALE )); then echo "$(ts) steal by $L from [$(owner)] idle ${a}s" >> $LOG; take $L; rc=$?; qunlock; return $rc; fi
   qappend $L; qunlock

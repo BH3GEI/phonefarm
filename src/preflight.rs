@@ -73,6 +73,22 @@ pub fn run_preflight(args: &[String]) -> i32 {
         }
     }
 
+    if !fix && !crate::observation::in_worker() {
+        return match crate::observation::run("preflight", args,
+            &crate::lease_storage::resolve(), std::time::Duration::from_secs(45)) {
+            Ok(output) => {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&output.stdout);
+                let _ = std::io::stderr().write_all(&output.stderr);
+                output.status.code().unwrap_or(3)
+            }
+            Err(e) => {
+                if json { println!("{}", serde_json::json!({"observation":e.state,"reason":e.reason})); }
+                eprintln!("preflight {}: {}", e.state, e.reason);
+                3
+            }
+        };
+    }
     // main's outer devlock is coordination; the actual strong lease protects --fix.
     let _lease = if fix {
         match crate::devlease::Lease::target(serial.as_deref(), "preflight-fix") {
@@ -80,13 +96,6 @@ pub fn run_preflight(args: &[String]) -> i32 {
             Err(e) => { eprintln!("preflight: {e}"); return 3; }
         }
     } else {
-        let lease = crate::devlease::storage_status(&crate::lease_storage::resolve());
-        if lease["status"] != "clear" {
-            eprintln!("preflight: lease {}: {}; no device probes performed",
-                lease["status"].as_str().unwrap_or("unknown"),
-                lease["error"].as_str().unwrap_or("host device domain is occupied or requires recovery"));
-            return 3;
-        }
         None
     };
     let Some(serial) = _lease.as_ref().map(|l| l.serial.clone())
