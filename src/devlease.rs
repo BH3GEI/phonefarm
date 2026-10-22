@@ -461,6 +461,70 @@ impl Lease {
             .env("PHONEFARM_OBSERVATION_TOKEN", &self.token);
     }
 
+    /// A worker may start only after record_child publishes its exact identity.
+    /// The deadline includes time spent waiting at the parent's startup gate.
+    pub(crate) fn authorize_worker(
+        &self,
+        cmd: &mut std::process::Command,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        self.check()?;
+        let deadline = std::time::SystemTime::now()
+            .checked_add(timeout)
+            .ok_or("worker deadline is too large")?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis();
+        let deadline = u64::try_from(deadline).map_err(|_| "worker deadline is too large")?;
+        let path = self.legacy.join("phonefarm-lease.json").canonicalize()
+            .map_err(|e| format!("worker lease marker: {e}"))?;
+        cmd.env("PHONEFARM_WORKER_MARKER", path)
+            .env("PHONEFARM_WORKER_TOKEN", &self.token)
+            .env("PHONEFARM_WORKER_SERIAL", &self.serial)
+            .env("PHONEFARM_WORKER_PARENT_PID", std::process::id().to_string())
+            .env("PHONEFARM_WORKER_DEADLINE_MS", deadline.to_string());
+        Ok(())
+    }
+
+    pub(crate) fn verify_worker_authority() -> Result<Duration, String> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let env = |key| std::env::var(key).map_err(|_| format!("missing worker authority: {key}"));
+        let path = PathBuf::from(env("PHONEFARM_WORKER_MARKER")?);
+        let token = env("PHONEFARM_WORKER_TOKEN")?;
+        let serial = env("PHONEFARM_WORKER_SERIAL")?;
+        let parent: i32 = env("PHONEFARM_WORKER_PARENT_PID")?.parse()
+            .map_err(|_| "invalid worker parent PID")?;
+        let deadline_ms: u64 = env("PHONEFARM_WORKER_DEADLINE_MS")?.parse()
+            .map_err(|_| "invalid worker deadline")?;
+        if !path.is_absolute() || token.is_empty() || serial.is_empty() || parent <= 1 {
+            return Err("invalid worker lease authority".into());
+        }
+        let file = File::options().read(true).custom_flags(libc::O_NOFOLLOW).open(path)
+            .map_err(|e| format!("worker lease marker: {e}"))?;
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file() || metadata.len() > 65536 {
+            return Err("worker lease marker is not a bounded regular file".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(65537).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        if bytes.len() > 65536 { return Err("worker lease marker is too large".into()); }
+        let marker: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid worker lease marker")?;
+        marker_state(&marker)?;
+        let pid = std::process::id();
+        if marker["token"] != token || marker["serial"] != serial
+            || marker["pid"] != parent || unsafe { libc::getppid() } != parent
+            || marker["child_pid"] != pid || marker["child_pgid"] != pid
+            || unsafe { libc::getpgrp() } != pid as i32 || marker["command_pending"] != false
+        {
+            return Err("worker lease identity mismatch".into());
+        }
+        std::time::UNIX_EPOCH.checked_add(Duration::from_millis(deadline_ms))
+            .ok_or("worker deadline is too large")?
+            .duration_since(std::time::SystemTime::now())
+            .map_err(|_| "worker deadline already elapsed".into())
+    }
+
     pub(crate) fn clear_child(&self) -> Result<(), String> {
         self.check()?;
         let mut m = marker(&self.legacy).ok_or("lease marker unavailable")?;

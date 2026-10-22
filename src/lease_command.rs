@@ -20,6 +20,8 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 // execution. Positional arguments keep the program and argv out of shell syntax.
 const GATE: &str =
     "IFS= read -r permit || exit 91; [ -z \"$permit\" ] || exit 92; exec \"$@\" </dev/null";
+const WORKER_GATE: &str =
+    "IFS= read -r permit || exit 91; [ -z \"$permit\" ] || exit 92; exec \"$@\"";
 
 #[derive(Debug)]
 pub(crate) struct Output {
@@ -101,6 +103,31 @@ pub(crate) fn run(
     operation: &str,
     timeout: Duration,
 ) -> Result<Output, String> {
+    supervise(lease, program, args, dir, operation, timeout, false)
+}
+
+/// Same-executable workers must call worker_guard before doing any device work.
+/// Their inherited stdin is only a parent-liveness pipe, never application input.
+pub(crate) fn run_worker(
+    lease: &Lease,
+    program: &Path,
+    args: &[String],
+    dir: &Path,
+    operation: &str,
+    timeout: Duration,
+) -> Result<Output, String> {
+    supervise(lease, program, args, dir, operation, timeout, true)
+}
+
+fn supervise(
+    lease: &Lease,
+    program: &Path,
+    args: &[String],
+    dir: &Path,
+    operation: &str,
+    timeout: Duration,
+    worker: bool,
+) -> Result<Output, String> {
     lease.check()?;
     fs::create_dir_all(dir).map_err(|e| format!("command output directory: {e}"))?;
     let stem = format!(
@@ -112,7 +139,11 @@ pub(crate) fn run(
     let err = output_file(&dir.join(format!("{stem}.stderr")))?;
     let mut command = Command::new("/bin/sh");
     command
-        .args(["-c", GATE, "phonefarm-command-gate"])
+        .args([
+            "-c",
+            if worker { WORKER_GATE } else { GATE },
+            "phonefarm-command-gate",
+        ])
         .arg(program)
         .args(args)
         .stdin(Stdio::piped())
@@ -122,6 +153,9 @@ pub(crate) fn run(
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or("command timeout is too large")?;
+    if worker {
+        lease.authorize_worker(&mut command, timeout)?;
+    }
     lease.record_command_pending(operation)?;
     let mut child = command.spawn().map_err(|e| {
         format!("{operation}: command could not spawn; pending lease retained: {e}")
@@ -135,11 +169,16 @@ pub(crate) fn run(
             }
             child
                 .stdin
-                .take()
+                .as_mut()
                 .ok_or("command gate pipe unavailable".to_string())?
                 .write_all(b"\n")
                 .map_err(|e| format!("command gate: {e}"))
         });
+    // Worker stdin remains open until the child exits. Ordinary commands retain
+    // the old EOF/null-input behavior immediately after the startup permit.
+    if !worker {
+        drop(child.stdin.take());
+    }
     if let Err(e) = start {
         // A failed marker publication may have reached disk. Never clear this
         // uncertain launch even when the unopened gate has now been killed.
@@ -193,6 +232,33 @@ pub(crate) fn run(
     })
 }
 
+/// Called once by the internal worker entry point, before opening transports.
+/// A dead or suspended parent cannot leave the verified worker group unbounded.
+pub(crate) fn worker_guard() -> Result<(), String> {
+    let remaining = Lease::verify_worker_authority()?;
+    let group = std::process::id() as i32;
+    let stop = move || unsafe {
+        libc::kill(-group, libc::SIGKILL);
+        libc::_exit(137);
+    };
+    std::thread::Builder::new()
+        .name("lease-worker-lifeline".into())
+        .spawn(move || {
+            let mut byte = [0];
+            let _ = std::io::stdin().read(&mut byte);
+            stop();
+        })
+        .map_err(|e| format!("worker lifeline guard: {e}"))?;
+    std::thread::Builder::new()
+        .name("lease-worker-deadline".into())
+        .spawn(move || {
+            std::thread::sleep(remaining);
+            stop();
+        })
+        .map_err(|e| format!("worker deadline guard: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,9 +302,13 @@ mod tests {
     fn gate_refuses_eof_and_invalid_permission_then_command_preserves_output() {
         let scratch = Scratch::new();
         let sentinel = scratch.0.join("executed");
-        for permission in [b"".as_slice(), b"invalid\n".as_slice()] {
+        for (gate, permission) in [GATE, WORKER_GATE].into_iter().flat_map(|gate| {
+            [b"".as_slice(), b"invalid\n".as_slice()]
+                .into_iter()
+                .map(move |permission| (gate, permission))
+        }) {
             let mut child = Command::new("/bin/sh")
-                .args(["-c", GATE, "test-gate", "/usr/bin/touch"])
+                .args(["-c", gate, "test-gate", "/usr/bin/touch"])
                 .arg(&sentinel)
                 .stdin(Stdio::piped())
                 .spawn()
@@ -266,6 +336,27 @@ mod tests {
         );
         assert!(scratch.marker().get("child_pid").is_none());
         assert_eq!(scratch.marker()["command_pending"], false);
+    }
+
+    #[test]
+    fn worker_keeps_liveness_pipe_until_timeout() {
+        let scratch = Scratch::new();
+        let lease = scratch.lease();
+        let error = run_worker(
+            &lease,
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "test -n \"$PHONEFARM_WORKER_SERIAL\" || exit 3; IFS= read -r unused; exit 4"
+                    .into(),
+            ],
+            &scratch.0.join("commands"),
+            "worker-pipe",
+            Duration::from_millis(250),
+        )
+        .unwrap_err();
+        assert!(error.contains("deadline exceeded"), "{error}");
+        assert!(scratch.marker().get("child_pid").is_none(), "{error}");
     }
 
     #[test]

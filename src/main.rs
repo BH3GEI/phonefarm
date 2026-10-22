@@ -14,6 +14,8 @@ mod gpustat;
 mod hwcond;
 mod brain;
 mod capture;
+mod capture_session;
+mod capture_worker;
 mod cli;
 mod collect;
 mod decision;
@@ -396,6 +398,9 @@ fn main() {
         }
     }
     match args.first().map(|s| s.as_str()) {
+        Some("__capture-worker") => {
+            std::process::exit(capture::run_worker(&args[1..]));
+        }
         Some("__observe-worker") => {
             std::process::exit(observation::run_worker(&args[1..]));
         }
