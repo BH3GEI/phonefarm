@@ -1222,14 +1222,18 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     let apply_ok = checks.as_object().map(|o| o.values().all(|v| v == &json!(true))).unwrap_or(false);
     let sm = pv(&summary);
     let span = sm["span_s"].as_f64().unwrap_or(0.0);
-    // 采集窗 10s, 跑满也常落在 8.0–8.9s。 0.9 把这些有帧的臂整组判废
-    // (2026-10-14 better1_1 重考：20 臂里 13 臂 span 8.0–8.9 且 n_frames>2300，三轮 ABORT)。
-    // 改到 0.8。真正没采到 (n_frames=0 或 span 远低于谱) 仍然不算。
-    let capture_ok = sm["n_frames"].as_u64().unwrap_or(0) > 0 && span >= c.capdur_s as f64 * 0.8;
+    let (capture_ok, expected_s) = capture_window(
+        span,
+        sm["n_frames"].as_u64().unwrap_or(0),
+        sm["fps_mean"].as_f64().unwrap_or(0.0),
+        c.frames,
+        c.capdur_s,
+    );
     let arm = json!({
         "label": label, "load": load.to_json(), "remote_spv": remote_spv,
         "started_at": started_at, "cool": cool, "cool_s": py_round(cool_s, 1),
         "checks": checks, "capture_ok": capture_ok, "span_s": span,
+        "expected_s": py_round(expected_s, 2),
         "apply_ok": apply_ok && capture_ok,
         "seconds_total": py_round(t0.elapsed().as_secs_f64(), 1),
         "lock_freq": c.lock_freq,
@@ -1244,6 +1248,26 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
         if apply_ok && capture_ok { String::new() } else { format!(" [未量成: {checks} capture_ok={capture_ok}]") }
     ));
     Ok(json!({ "summary": sm, "env": pv(&env), "arm": arm }))
+}
+
+/// 采集窗够不够长 —— 分母取这一臂自己的实际时长, 不取配置的采集上限。
+///
+/// 采集窗 `capdur` 只是个上限: 负载按帧数结束, 实际时长 = frames / fps。
+/// 以前一律要求 span ≥ capdur × 0.8 (10s → 8s), 而高帧率负载 (refbench wg0 跑到 344 fps)
+/// 跑满 3000 帧只用了 6.5 秒 —— 于是每一臂都被判「未量成」, 标定一个有效点都拟合不出来,
+/// 已知答案的考题一道也判不成。真没采到 (n_frames=0, 或 span 远低于应有时长) 仍然不算。
+///
+/// 返回 (是否算量成, 应有时长)。
+fn capture_window(span_s: f64, n_frames: u64, fps: f64, frames: u32, capdur_s: u64) -> (bool, f64) {
+    let cap = capdur_s as f64;
+    let expected = if fps > 0.0 && frames > 0 {
+        (frames as f64 / fps).min(cap)
+    } else {
+        cap
+    };
+    let enough_samples = n_frames >= 120 && span_s >= 1.0;
+    let covered_run = n_frames as f64 * 2.0 >= frames as f64 || span_s >= cap * 0.8;
+    (enough_samples && covered_run, expected)
 }
 
 /// GPU 频率档位的现值: max/min/thermal pwrlevel 与当前频率。
@@ -1587,6 +1611,24 @@ fn cmd_run(mut a: Args) -> Result<(), String> {
         .filter(|cs| !out.join(&cs.id).join("case_done.json").is_file())
         .collect();
     log(&format!("考题 {} 道, 待跑 {} 道, 每道 {}v{}, frames={}", cases.len(), todo.len(), a.pairs, a.pairs, c.frames));
+    // 结构性防护: 样本量不够时精确置换检验的最小可达 p 就比 alpha 还大 ——
+    // 这种配置在数学上不可能判出显著改善, 跑再久也只是把「什么都没学到」重算一遍。
+    // 2026-10-21 实测: --pairs 3 时每题 3v3, 最小双侧 p = 2/C(6,3) = 0.1 > alpha_win 0.025,
+    // 于是一道预期 −14.7% 帧时的考题也被判成「没有任何指标显著改善」。
+    let alpha = 0.05_f64;
+    let alpha_win = alpha / 2.0; // 帧时/帧率两张表 (功耗进判定时是 3, 更严)
+    let p_min = crate::loopstat::min_two_sided_p(a.pairs);
+    if p_min >= alpha_win {
+        return Err(format!(
+            "{}v{} 的样本量判不出显著改善: 精确置换检验的最小双侧 p = {p_min:.4}, \
+而显著改善要求 p < {alpha_win:.4}。--pairs 至少给 {}, 否则这一轮的结论只能是「没有显著变化」",
+            a.pairs,
+            a.pairs,
+            (2..=64)
+                .find(|n| crate::loopstat::min_two_sided_p(*n) < alpha_win)
+                .unwrap_or(5),
+        ));
+    }
     if todo.is_empty() {
         return cmd_report(&a);
     }
@@ -1956,9 +1998,29 @@ mod tests {
         assert_eq!(pwr_changed(&a, &parse_pwr("")), None);
     }
 
+    /// 采集窗的判据是「样本够多 + 采到了这一轮的大部分」, 不是墙钟时长。
+    ///
+    /// 实例数据 (2026-10-21, NX809J): wg0 跑 3000 帧、344 fps, trace 采到 2245 帧 / 6.53 s。
+    /// 旧口径要求 span ≥ 10 × 0.8 = 8 s, 于是每一臂都判「未量成」, 标定拟合不出点,
+    /// 已知答案的考题一道也判不成 —— 整条自检链在能跑的负载上反而全废。
     #[test]
-    fn a_case_missing_an_arm_is_abort_not_evidence() {
-        let root = std::env::temp_dir().join(format!("pf_selftest_miss_{}", std::process::id()));
+    fn capture_window_asks_for_enough_samples_not_wall_clock() {
+        let (ok, expected) = capture_window(6.53, 2245, 343.99, 3000, 10);
+        assert!((expected - 8.72).abs() < 0.01, "{expected}");
+        assert!(ok, "2245 帧的样本不该被墙钟判废");
+        assert!(!capture_window(6.53, 0, 343.99, 3000, 10).0, "零帧不算");
+        assert!(!capture_window(6.53, 50, 343.99, 3000, 10).0, "50 帧不够做统计");
+        assert!(!capture_window(0.4, 2245, 343.99, 3000, 10).0, "跨度不到 1 s 不算");
+        let (ok, expected) = capture_window(8.5, 255, 30.0, 100000, 10);
+        assert!((expected - 10.0).abs() < 1e-9);
+        assert!(ok, "低帧率负载跑满采集窗就算量成");
+        let (ok, expected) = capture_window(8.5, 300, 0.0, 0, 10);
+        assert!((expected - 10.0).abs() < 1e-9);
+        assert!(ok);
+    }
+
+    #[test]
+    fn a_case_missing_an_arm_is_abort_not_evidence() {        let root = std::env::temp_dir().join(format!("pf_selftest_miss_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         write_case(&root, "better5_1", "better", -0.05, 5);
         std::fs::remove_dir_all(root.join("better5_1").join("ctrl3")).unwrap();

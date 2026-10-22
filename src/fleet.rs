@@ -99,12 +99,34 @@ pub struct LockEvent {
     pub label: String,
 }
 
+/// 一层改动面在这台设备上的可用性: 平台声明 + 这台机器的阻塞原因。
+#[derive(Debug, Serialize)]
+pub struct LayerRow {
+    /// `sysparam` | `gray` | `shader` | `measure`
+    pub layer: &'static str,
+    /// `yes` | `if_met` | `no` | `unknown`
+    pub support: &'static str,
+    /// 声明的前提 (例如 `root`)。
+    pub needs: &'static str,
+    /// 为什么这样声明。
+    pub why: &'static str,
+    /// 实测到的、会让这一层现在开不了的原因。`None` = 没发现阻塞 (不等于已跑通)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<String>,
+}
+
 /// 一台手机一张卡片。
 #[derive(Debug, Serialize)]
 pub struct Card {
     pub serial: String,
     /// `adb` | `hdc`
     pub transport: &'static str,
+    /// 后端声明的平台名: `android` | `openharmony` | `ios`。
+    pub platform: &'static str,
+    /// 三层改动面 + 测量在这台设备上的可用性。来自 `platform::Backend::layers()`,
+    /// 加上这台机器实测到的阻塞原因。上层与同事据此决定「这台能干什么」,
+    /// 不必再自己猜平台能力。
+    pub layers: Vec<LayerRow>,
     /// adb 自报的状态原文: `device` / `offline` / `unauthorized` / `no permissions` …
     pub state: String,
     pub online: bool,
@@ -184,6 +206,49 @@ pub struct Screenshot {
     pub age_s: u64,
     /// 这一轮是新截的, 还是沿用上一张。
     pub fresh: bool,
+}
+
+// ══════════════ 层声明 (平台声明 + 这台机器的阻塞) ══════════════
+
+/// 「这台设备能改哪一层」—— 取自 `platform::Backend::layers()`, 再叠上这台机器实测到的事实。
+///
+/// 声明是平台级的 (`OPENHARMONY_LAYERS` 之类), 阻塞原因是这台机器的 (`root` 拿不到、设备掉线)。
+/// 两者不能混: 声明说「安卓上这层能开」, 阻塞说「这台不行」。
+///
+/// `layers()` 之前只有单测在读, 外面拿不到 —— 于是每次问「哪台能改哪层」都得靠人记。
+/// 摆进 `fleet` 是因为上层和同事要的就是「现在有哪几台、每台能开哪几层」这一趟拿齐。
+pub fn layer_rows(serial: &str, root: Option<bool>, online: bool) -> (&'static str, Vec<LayerRow>) {
+    // `layers()` 是纯声明, 不碰设备: 掉线/没授权的机器也能给出声明。
+    let backend = crate::platform::open(
+        Some(serial.to_string()),
+        std::env::temp_dir().to_string_lossy().to_string(),
+    );
+    let platform = backend.platform();
+    let rows = backend
+        .layers()
+        .into_iter()
+        .map(|l| {
+            let blocked_by = if !online {
+                Some("设备不在线: 这一层既没法核实也没法用".to_string())
+            } else if root == Some(false) && l.needs.contains("root") {
+                Some("这台机器拿不到 root (su 不可用)".to_string())
+            } else if l.layer == crate::platform::Layer::Measure && serial.starts_with("emulator-") {
+                // 框架自己的硬规矩: 性能测量必须上真机 (AGENTS「测试环境约束」)。
+                // 模拟器的帧时与功耗没有意义, 声明成 yes 会让人当真。
+                Some("模拟器: 帧时与功耗没有意义, 性能测量要真机".to_string())
+            } else {
+                None
+            };
+            LayerRow {
+                layer: l.layer.id(),
+                support: l.support.id(),
+                needs: l.needs,
+                why: l.why,
+                blocked_by,
+            }
+        })
+        .collect();
+    (platform, rows)
 }
 
 // ══════════════ 纯解析 (单测全打在这一层) ══════════════
@@ -536,7 +601,9 @@ pub fn card_from_android(serial: &str, state: &str, raw: &str, probe_ms: u64, de
 
     // 轻量档没探 root —— 那要 `su -c`, 会在别人正跑测试的机器上多拉一个进程。
     // 没探就是 None, 不能默认成 false: "没 root" 与 "没查" 是两回事。
-    let root = sec(&ss, "root").map(parse_root);
+    // 段在就是探过了: `su` 不存在时脚本里 `2>/dev/null` 吃掉报错, 段是空的, 这也是「没 root」。
+    // 不能用 `sec` (它把空段当成没有), 否则没 root 的机器会被记成「没查」, 层声明照旧显示可用。
+    let root = ss.iter().find(|(k, _)| k == "root").map(|(_, v)| parse_root(v));
 
     let mut battery = Battery::default();
     if let Some(b) = sec(&ss, "sysbat") {
@@ -613,9 +680,12 @@ pub fn card_from_android(serial: &str, state: &str, raw: &str, probe_ms: u64, de
         }
     }
 
+    let (platform, layers) = layer_rows(serial, root, state == "device");
     Card {
         serial: serial.to_string(),
         transport: "adb",
+        platform,
+        layers,
         state: state.to_string(),
         online: state == "device",
         model,
@@ -669,16 +739,36 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
     }
 
     unknown.push("风扇 / 不息屏策略: 鸿蒙侧这两项尚未上真机验证, 一律不猜".into());
+    if thermal.zones == 0 {
+        // 观测到的事实, 不是判定: 温度一个热区都读不到, HiSmartPerf 在 shell 权限下也没出数。
+        unknown.push(
+            "测量: 温度一个热区都读不到 (sysfs 无权限); SP_daemon 在 shell 权限下不出数, 未验证".into(),
+        );
+    }
 
+    let root = sec(&ss, "root").map(|r| r.trim() == "0");
+    let (platform, mut layers) = layer_rows(serial, root, true);
+    // 声明说鸿蒙量测靠 HiSmartPerf, 但这台机器上 shell 权限取不到电量/温度, SP_daemon 也不出数。
+    // 测不了就没有「能测」的证据 —— 不能因为平台声明是 yes 就当它 now 可用。
+    if battery.level_pct.is_none() && thermal.zones == 0 {
+        if let Some(m) = layers.iter_mut().find(|l| l.layer == "measure") {
+            m.blocked_by = Some(
+                "这台机器上电量/温度/HiSmartPerf 都取不到 (shell 无权限): 能不能测没有证据".into(),
+            );
+        }
+        unknown.push("测量: 电量与温度都读不到, HiSmartPerf 也没出数".into());
+    }
     Card {
         serial: serial.to_string(),
         transport: "hdc",
+        platform,
+        layers,
         state: "device".to_string(),
         online: true,
         model,
         brand,
         os,
-        root: sec(&ss, "root").map(|r| r.trim() == "0"),
+        root,
         battery,
         thermal,
         fan: Fan::default(),
@@ -961,9 +1051,12 @@ pub fn collect(opts: &Opts) -> Fleet {
 }
 
 fn offline_card(serial: &str, transport: &'static str, state: &str, model: Option<String>) -> Card {
+    let (platform, layers) = layer_rows(serial, None, false);
     Card {
         serial: serial.to_string(),
         transport,
+        platform,
+        layers,
         state: state.to_string(),
         online: false,
         model,
@@ -1105,6 +1198,22 @@ pub fn render_text(f: &Fleet) -> String {
             match d.screen_on { Some(true) => "是", Some(false) => "否", None => "?" },
             d.foreground.clone().unwrap_or_else(|| "-".into()),
         ));
+        let layers = d
+            .layers
+            .iter()
+            .map(|l| format!("{}={}", l.layer, l.support))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !layers.is_empty() {
+            s.push_str(&format!("    · 层: {layers}\n"));
+        }
+        for l in d.layers.iter().filter(|l| l.blocked_by.is_some()) {
+            s.push_str(&format!(
+                "      {} 现在开不了: {}\n",
+                l.layer,
+                l.blocked_by.as_deref().unwrap_or_default()
+            ));
+        }
         for u in &d.unknown {
             s.push_str(&format!("    · {u}\n"));
         }
@@ -1367,6 +1476,9 @@ mod tests {
         assert_eq!(full.root, Some(true));
         let no_su = card_from_android("SER", "device", "-----PF:root-----\nsu: not found\n", 0, "full");
         assert_eq!(no_su.root, Some(false));
+        // 荣耀 AAP-AN00 实测: su 不存在, 报错被 2>/dev/null 吃掉, root 段是空的
+        let silent = card_from_android("SER", "device", "-----PF:root-----\n-----PF:uptime-----\n1.0 1.0\n", 0, "full");
+        assert_eq!(silent.root, Some(false));
     }
 
     #[test]
@@ -1420,5 +1532,94 @@ mod tests {
         assert!(!card.fan.supported);
         assert_eq!(card.keepalive.policy_ok, None);
         assert!(card.unknown.iter().any(|u| u.contains("尚未上真机验证")));
+    }
+
+    /// 每台设备的卡片必须自带四层声明 —— 上层/同事不用再猜平台能力。
+    #[test]
+    fn every_card_carries_the_four_layer_rows() {
+        let android = offline_card("X", "adb", "offline", None);
+        let oh = card_from_oh("hdc:abc", "", 1);
+        for card in [android, oh] {
+            let names: Vec<&str> = card.layers.iter().map(|l| l.layer).collect();
+            assert_eq!(names, vec!["sysparam", "gray", "shader", "measure"], "{}", card.serial);
+            assert!(card.layers.iter().all(|l| !l.why.is_empty() && !l.needs.is_empty()));
+            assert!(!card.platform.is_empty());
+        }
+    }
+
+    /// 没有 root 的安卓机: 要 root 的那几层必须被点出来, 不能继续显示成可用。
+    #[test]
+    fn no_root_blocks_the_layers_that_need_it() {
+        let (_platform, rows) = layer_rows("91253241019A", Some(false), true);
+        let sys = rows.iter().find(|l| l.layer == "sysparam").unwrap();
+        assert_eq!(sys.support, "yes", "平台声明仍是我 yes");
+        assert!(sys.blocked_by.as_deref().unwrap_or_default().contains("root"));
+        let measure = rows.iter().find(|l| l.layer == "measure").unwrap();
+        assert!(measure.blocked_by.is_some(), "安卓上功耗/帧时测量要 root");
+
+        // 有 root 的时候不该凭空给出阻塞。
+        let (_p, rooted) = layer_rows("91253241019A", Some(true), true);
+        assert!(rooted.iter().all(|l| l.blocked_by.is_none()));
+    }
+
+    /// 掉线设备照样给声明 (纯声明不碰设备), 但每一层都标成现在用不了。
+    #[test]
+    fn offline_devices_keep_declarations_but_are_blocked() {
+        let (_platform, rows) = layer_rows("GONE", None, false);
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|l| l.blocked_by.as_deref().unwrap_or_default().contains("不在线")));
+    }
+
+    /// 模拟器上性能测量必须被拦: 模拟器的帧时与功耗没有意义。
+    #[test]
+    fn emulator_measure_layer_is_blocked() {
+        let (_platform, rows) = layer_rows("emulator-5554", Some(true), true);
+        let measure = rows.iter().find(|l| l.layer == "measure").unwrap();
+        assert!(measure.blocked_by.as_deref().unwrap_or_default().contains("模拟器"));
+        let sys = rows.iter().find(|l| l.layer == "sysparam").unwrap();
+        assert!(sys.blocked_by.is_none());
+    }
+
+    /// 鸿蒙机声明「能测」的前提是 HiSmartPerf/电量/温度取得得到; 这台机器取不到时
+    /// 不能继续显示 measure=yes — 声明是平台级的, 阻塞得是这台机器的。
+    #[test]
+    fn oh_without_any_measurement_source_blocks_measure() {
+        let card = card_from_oh("hdc:abc", "-----PF:props-----\nEMA-AL00U\nHUAWEI\nOpenHarmony 6.1\n", 5);
+        let measure = card.layers.iter().find(|l| l.layer == "measure").unwrap();
+        assert_eq!(measure.support, "yes");
+        assert!(
+            measure.blocked_by.as_deref().unwrap_or_default().contains("没有证据"),
+            "取不到电量/温度时必须点出没有证据: {:?}",
+            measure.blocked_by
+        );
+    }
+
+    /// 有电量/温度的时候不该凭空给 measure 加阻塞。
+    #[test]
+    fn oh_with_measurement_data_does_not_block_measure() {
+        let raw = "-----PF:props-----\nEMA-AL00U\nHUAWEI\nOpenHarmony 6.1\n\
+-----PF:battery-----\ncapacity: 88\nvoltage: 4200000\ntemperature: 310\n\
+-----PF:thermal-----\nsoc-thermal 45000\n";
+        let card = card_from_oh("hdc:abc", raw, 5);
+        let measure = card.layers.iter().find(|l| l.layer == "measure").unwrap();
+        assert!(measure.blocked_by.is_none(), "{:?}", measure.blocked_by);
+    }
+
+    /// 人读的那一屏也要看得到层, 否则同事只能去读 JSON。
+    #[test]
+    fn text_render_prints_the_layer_line() {
+        let fleet = Fleet {
+            schema: "phonefarm/fleet@1",
+            tool: "phonefarm",
+            version: "0.2.0",
+            generated_at: "now".into(),
+            backends: Backends { adb: None, hdc: false },
+            lock: None,
+            devices: vec![card_from_oh("hdc:abc", "", 1)],
+            notes: vec![],
+        };
+        let s = render_text(&fleet);
+        assert!(s.contains("sysparam=no"), "{s}");
+        assert!(s.contains("measure=yes"), "{s}");
     }
 }
