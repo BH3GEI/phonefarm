@@ -22,8 +22,6 @@
 //! LOAD 读一遍、STORE 写一遍; UBWC 压缩与驱动的 sysmem 直绘模式都会让真实值更小,
 //! 所以是**未压缩上限**。时间只用层的时间戳实测值, 没有就写不确定。
 
-use crate::eval::{adb, adb_ok, su};
-use crate::graylayer::{GrayLayer, FA_GO_PROP};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -949,43 +947,6 @@ pub(crate) fn analyze(paths: &[PathBuf]) -> Result<(String, Value), String> {
 
 // ── 真机抓帧 ──
 
-/// 把游戏带到要抓的画面。原神走既有流程 (等登录页 → 点门 → 按每帧 pass 数判大世界);
-/// 别的游戏不猜: 先确认层真在出帧 (marker 的 frames 在涨), 依次点 `taps` 里的坐标
-/// (每点之后等 5 秒), 再等 `settle` 秒让场景稳定。
-fn reach_scene(serial: &str, pkg: &str, taps: &[(u32, u32)], settle: u64) -> Result<(), String> {
-    if pkg == "com.miHoYo.Yuanshen" && taps.is_empty() {
-        crate::grayab::launch_to_world_layered(serial)?;
-        std::thread::sleep(std::time::Duration::from_secs(settle.min(60)));
-        return Ok(());
-    }
-    let frames = || -> i64 {
-        let m = su(serial, &format!("cat /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json /data/data/{pkg}/knobs_layer_out.json 2>/dev/null"), 30);
-        let body = GrayLayer::adb_stdout(&m);
-        regex::Regex::new(r#""frames":([0-9]+)"#).ok().and_then(|re| re.captures(body).and_then(|c| c[1].parse().ok())).unwrap_or(-1)
-    };
-    let mut f0 = -1;
-    for _ in 0..30 {
-        f0 = frames();
-        if f0 >= 0 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-    if f0 < 0 {
-        return Err(format!("{pkg} 的层 marker 没出现: 层没挂上 (或不是 Vulkan 游戏)"));
-    }
-    for (x, y) in taps {
-        let _ = adb(serial, &["shell", &format!("input tap {x} {y}")], 30);
-        std::thread::sleep(std::time::Duration::from_secs(5));
-    }
-    std::thread::sleep(std::time::Duration::from_secs(settle));
-    let f1 = frames();
-    if f1 <= f0 {
-        return Err(format!("{pkg} 的 present 计数不涨 ({f0} -> {f1}): 游戏没在出帧"));
-    }
-    Ok(())
-}
-
 fn parse_taps(s: &str) -> Vec<(u32, u32)> {
     s.split(';')
         .filter_map(|p| {
@@ -995,38 +956,7 @@ fn parse_taps(s: &str) -> Vec<(u32, u32)> {
         .collect()
 }
 
-const FA_FILES: [&str; 3] = [
-    "/storage/emulated/0/Android/data/{pkg}/files/knobs_frameaudit.json",
-    "/data/data/{pkg}/knobs_frameaudit.json",
-    "/data/local/tmp/knobs_frameaudit.{pkg}.json",
-];
-
-fn pull_audit(serial: &str, pkg: &str, go: u32, dst: &Path) -> Result<(), String> {
-    for _ in 0..45 {
-        for tpl in FA_FILES {
-            let path = tpl.replace("{pkg}", pkg);
-            let probe = su(serial, &format!("grep -c \"\\\"go\\\":{go},\" {path} 2>/dev/null"), 20);
-            if GrayLayer::adb_stdout(&probe).trim().parse::<u32>().unwrap_or(0) > 0 {
-                let tmp = format!("/data/local/tmp/fa_pull_{go}.json");
-                su(serial, &format!("cp {path} {tmp} && chmod 644 {tmp}"), 30);
-                let r = adb(serial, &["pull", &tmp, &dst.to_string_lossy()], 120);
-                su(serial, &format!("rm -f {tmp}"), 15);
-                return if adb_ok(&r) { Ok(()) } else { Err(format!("pull 失败: {r}")) };
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-    Err(format!("等不到 go={go} 的落盘 (层没武装? 游戏不在前台?)"))
-}
-
-fn screencap(serial: &str, dst: &Path) {
-    su(serial, "screencap -p /data/local/tmp/fa_shot.png", 30);
-    let _ = adb(serial, &["pull", "/data/local/tmp/fa_shot.png", &dst.to_string_lossy()], 60);
-    su(serial, "rm -f /data/local/tmp/fa_shot.png", 15);
-}
-
 // This finite capture owns every transport, including scene input and trigger writes.
-// The legacy storeop-check caller still has a separate migration obligation.
 fn capture_scene(
     session: &crate::gray_session::Session,
     pkg: &str,
@@ -1210,12 +1140,6 @@ impl StoreopFrame {
         if size == 0 || size > 64 * 1024 * 1024 { return Err("decoded frame exceeds RGBA limit".into()); }
         Ok(Self { width, height, rgba: frame.to_rgba8().into_raw() })
     }
-
-    fn from_raw(bytes: &[u8]) -> Result<Self, String> {
-        let (width, height, rgba) = parse_raw(bytes).ok_or("raw screenshot could not be parsed")?;
-        if width == 0 || height == 0 { return Err("empty raw screenshot".into()); }
-        Ok(Self { width, height, rgba: rgba.to_vec() })
-    }
 }
 
 /// Decode lossless PNG through the same bounded path used by storeop, then
@@ -1230,7 +1154,7 @@ pub(crate) fn png_raw(path: &Path) -> Result<Vec<u8>, String> {
     Ok(raw)
 }
 
-// Both acquisition paths use the same pixel calculation and UI exclusion policy.
+// Standalone and parent-session collectors share pixel calculation and UI exclusions.
 fn storeop_diffs(phases: &[(bool, Vec<StoreopFrame>)]) -> Result<(usize, usize, Vec<Value>), String> {
     let first = phases.first().and_then(|p| p.1.first()).ok_or("no storeop frames")?;
     let (w, h) = (first.width, first.height);
@@ -1344,82 +1268,6 @@ fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, round
         report["report_persistence_error"] = json!(e);
     }
     Ok(report)
-}
-
-// Kept only for eval until it passes its actual parent lease and recovery context.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn storeop_check_legacy(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<Value, String> {
-    std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
-    let gl = GrayLayer::new(serial).with_so(so).with_storeop(Some(rule.to_string()), true).with_launch_extras(extras);
-    let before = gl.off(Some(pkg));
-    crate::graylayer::record_deactivation(out, "before", &before)?;
-    before.map_err(|e| e.to_string())?;
-    let set_on = |on: bool| {
-        su(serial, &format!("setprop {} {}", crate::graylayer::STOREOP_ON_PROP, if on { 1 } else { 0 }), 15);
-        // 层每 30 帧读一次开关; 等 3 秒 (≥ 90 帧) 足够生效并让画面稳定
-        std::thread::sleep(std::time::Duration::from_secs(3));
-    };
-    let res = (|| -> Result<Value, String> {
-        gl.mount_mode("frameaudit", pkg, false)?;
-        reach_scene(serial, pkg, taps, settle)?;
-        // 关/开交替: off on off on ... off, 每段 3 张 (间隔约 1 秒)
-        let mut phases: Vec<(bool, Vec<Vec<u8>>)> = Vec::new();
-        for k in 0..(2 * rounds + 1) {
-            let on = k % 2 == 1;
-            set_on(on);
-            let mut shots = Vec::new();
-            for _ in 0..3 {
-                shots.push(crate::grayab::screencap_raw_bin(serial));
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-            if k <= 1 {
-                screencap(serial, &out.join(if on { "shot_on.png" } else { "shot_off.png" }));
-            }
-            phases.push((on, shots));
-        }
-        // 开着时抓一次步骤清单 (证明孪生 pass 真换上: 被改附件的 storeOp 应显示 DONT_CARE)
-        set_on(true);
-        su(serial, &format!("setprop {FA_GO_PROP} 1"), 15);
-        let fa_ok = pull_audit(serial, pkg, 1, &out.join("fa_on.json")).is_ok();
-        set_on(false);
-        let alive = !GrayLayer::adb_stdout(&adb(serial, &["shell", &format!("pidof {pkg}")], 15)).trim().is_empty();
-        let m = su(serial, &format!("cat /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json 2>/dev/null"), 30);
-        let marker_txt = GrayLayer::adb_stdout(&m).to_string();
-        let _ = std::fs::write(out.join("layer_marker.json"), &marker_txt);
-        let marker: Value = serde_json::from_str(marker_txt.trim()).unwrap_or(Value::Null);
-        let crash = GrayLayer::adb_stdout(&su(serial, &format!("logcat -b crash -d -t 200 2>/dev/null | grep -c {pkg}"), 30)).trim().parse::<u64>().unwrap_or(0);
-
-        let phases: Vec<(bool, Vec<StoreopFrame>)> = phases.iter().map(|(on, frames)| {
-            Ok((*on, frames.iter().map(|bytes| StoreopFrame::from_raw(bytes)).collect::<Result<_, String>>()?))
-        }).collect::<Result<_, String>>()?;
-        let (w, h, rows) = storeop_diffs(&phases)?;
-        let eff = marker["effective"].as_array().cloned().unwrap_or_default();
-        let hit = eff.iter().filter(|e| e["begins"].as_u64().unwrap_or(0) > 0).count();
-        Ok(json!({
-            "rule": rule, "screen": [w, h], "rounds": rounds,
-            "effective": eff, "effective_hit": hit,
-            "game_alive": alive, "crash_log_lines": crash, "frameaudit_on_captured": fa_ok,
-            "diffs": rows,
-        }))
-    })();
-    let off = gl.off(Some(pkg));
-    let off_record = crate::graylayer::record_deactivation(out, "after", &off)?;
-    let mut v = match res {
-        Ok(v) => v,
-        Err(e) => json!({"error": e}),
-    };
-    v["restore"] = off_record;
-    v["job_recovery_complete"] = json!(false);
-    v["game_state_restored"] = json!(false);
-    if let Err(e) = off {
-        v["error"] = json!(match v["error"].as_str() {
-            Some(prior) => format!("{prior}; layer deactivation failed: {e}"),
-            None => format!("layer deactivation failed: {e}"),
-        });
-    }
-    std::fs::write(out.join("storeop_check.json"), serde_json::to_vec_pretty(&v).unwrap()).map_err(|e| e.to_string())?;
-    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
-    if v.get("error").is_some() { Err(v["error"].to_string()) } else { Ok(v) }
 }
 
 pub fn run_frame_audit(args: &[String]) -> i32 {

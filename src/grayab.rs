@@ -9,7 +9,6 @@
 //!
 //! 原神里**不按 A 键、不按 BACK**: 全程只在登录页点一次"门", 负载只在画面空白处拖视角。
 
-use crate::eval::{adb, su};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -18,69 +17,6 @@ const GATE_X: u32 = 1342;
 const GATE_Y: u32 = 651;
 /// 大世界判定: 每帧 render pass 数 >= 25 (登录/加载 ≈ 12-17, 大世界 ≈ 30, 余量很大)
 const IN_WORLD_PPF: i64 = 25;
-
-fn mark_field(serial: &str, field: &str) -> Option<i64> {
-    let out = su(
-        serial,
-        "cat /storage/emulated/0/Android/data/com.miHoYo.Yuanshen/files/knobs_layer_out.json 2>/dev/null",
-        30,
-    );
-    let body = crate::graylayer::GrayLayer::adb_stdout(&out);
-    // Python 版用 sed 提取 "field":<digits> —— 只认整数字段
-    let pat = format!("\"{field}\":[0-9]*");
-    let re = regex::Regex::new(&pat).ok()?;
-    let m = re.captures(body)?;
-    m[0]
-        .split_once(':')
-        .and_then(|(_, v)| v.parse::<i64>().ok())
-}
-
-/// 进没进大世界: 用**每帧 render pass 数**判, 不用帧率
-/// (本机原神登录页和大世界都被限在 30fps)。
-fn in_world(serial: &str) -> bool {
-    let (f1, r1) = (
-        mark_field(serial, "frames").unwrap_or(0),
-        mark_field(serial, "render_pass_begins").unwrap_or(0),
-    );
-    std::thread::sleep(std::time::Duration::from_secs(10));
-    let (f2, r2) = (
-        mark_field(serial, "frames").unwrap_or(0),
-        mark_field(serial, "render_pass_begins").unwrap_or(0),
-    );
-    let df = f2 - f1;
-    let dr = r2 - r1;
-    if df <= 0 {
-        return false;
-    }
-    let ppf = dr / df;
-    eprintln!("    passes/帧={ppf} (>= {IN_WORLD_PPF} 判为大世界)");
-    ppf >= IN_WORLD_PPF
-}
-
-/// 等登录页的门出现再点; 点早了会落空。然后等进大世界 (passes/帧 >= 25)。
-pub(crate) fn launch_to_world_layered(serial: &str) -> Result<(), String> {
-    let mut i = 0u32;
-    while i < 40 {
-        if mark_field(serial, "frames").is_some() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        i += 1;
-    }
-    if mark_field(serial, "frames").is_none() {
-        return Err("层没挂上, 本臂作废".into());
-    }
-    std::thread::sleep(std::time::Duration::from_secs(30));
-    let _ = adb(serial, &["shell", &format!("input tap {GATE_X} {GATE_Y}")], 30);
-    eprintln!("    已点门, 等进大世界...");
-    for _ in 0..18 {
-        if in_world(serial) {
-            eprintln!("    已进大世界");
-            return Ok(());
-        }
-    }
-    Err("等不到大世界, 本臂作废".into())
-}
 
 /// 二进制安全的 `adb exec-out screencap` (PNG 之外的原始 RGBA)。
 pub(crate) fn screencap_raw_bin(serial: &str) -> Vec<u8> {
