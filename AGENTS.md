@@ -164,6 +164,10 @@ GPU submit proxy 不等于显示 FPS，首批不按不同窗口推算每帧能�
 会话可在创建时显式选择 --power-policy observe|battery，默认只观察；battery首次采样准备一次并跨轮保持，
 原记录绑定当前context。独立恢复供电不代表自然输入/整个会话已恢复；未知时保留屏障及原件。
 同期trace电池能量/平均功率是V×I采样积分估计，缺覆盖或放电资格时null；每帧能耗仍待完整分组窗口。
+画质检查点使用同一owner的quality begin/checkpoint/finish动作，逐阶段保存当前控制epoch，
+完整原图与明确派生的半尺寸预览分开；缺marker保原图且阶段不前进，显式新请求可重采失败阶段。
+Web/CLI共读持久manifest；采集完成不代表同场景或画质通过，旧quality客户端迁移单列。
+合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-QUALITY.md。
 旧 gray-layer/reference 脚本迁移仍待完成；合同见
 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
 

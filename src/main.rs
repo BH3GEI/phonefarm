@@ -59,6 +59,7 @@ mod grayab;
 mod graylayer;
 mod gray_session;
 mod gray_control;
+mod gray_quality;
 mod gray_script;
 mod gray_eval_session;
 mod grayartifact;

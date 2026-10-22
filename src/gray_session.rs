@@ -562,11 +562,14 @@ impl Session {
     pub fn marker(&self) -> Result<Option<Value>, String> { self.json_output(false, None) }
     pub fn audit(&self, go: u32) -> Result<Option<Value>, String> { self.json_output(true, Some(go)) }
     pub fn screenshot(&self, dst: &Path) -> Result<(), String> {
+        new_file(dst, &self.screenshot_bytes()?)
+    }
+    pub fn screenshot_bytes(&self) -> Result<Vec<u8>, String> {
         self.ready()?;
         let output = self.command("screenshot", &["exec-out".into(), "screencap".into(), "-p".into()], 30_000)?;
         let bytes = bounded(&output.stdout_path, CAP)?;
         if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") { return Err("screenshot is not a PNG".into()); }
-        new_file(dst, &bytes)
+        Ok(bytes)
     }
 
     fn archive(&self, index: usize, path: &str) -> Result<(), String> {

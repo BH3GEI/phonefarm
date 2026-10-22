@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -24,6 +24,7 @@ const FRAME_AGE_SECONDS: i64 = 30;
 const ACTIONS: &[&str] = &[
     "capture",
     "sample",
+    "quality",
     "tap",
     "swipe",
     "marker",
@@ -191,6 +192,9 @@ impl Store {
     }
     fn write(&self, rel: &str, value: &Value, replace: bool) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(value).map_err(|e| err("io_error", e.to_string()))?;
+        self.write_bytes(rel, &bytes, replace)
+    }
+    fn write_bytes(&self, rel: &str, bytes: &[u8], replace: bool) -> Result<()> {
         let (dir, name) = self.parent(rel)?;
         let tmp = CString::new(format!(
             ".control-{}-{}",
@@ -211,7 +215,7 @@ impl Store {
         }
         let mut file = unsafe { File::from_raw_fd(fd) };
         let saved = (|| -> Result<()> {
-            file.write_all(&bytes)?;
+            file.write_all(bytes)?;
             file.sync_all()?;
             let code = unsafe {
                 if replace {
@@ -241,6 +245,14 @@ impl Store {
             libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0);
         }
         saved
+    }
+    fn mkdir(&self, rel: &str) -> Result<()> {
+        let (dir, name) = self.parent(rel)?;
+        if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        dir.sync_all()?;
+        Ok(())
     }
     fn lock(&self, name: &str, wait: Duration) -> Result<File> {
         let file = self.open_file(&format!("{CONTROL}/{name}.lock"), libc::O_RDWR)?;
@@ -618,6 +630,16 @@ fn descriptor(store: &Store) -> Result<Value> {
     {
         return Err(err("invalid_request", "invalid descriptor job ID"));
     }
+    if let Some(label) = d["latest_quality"]["label"].as_str() {
+        if !safe_id(label) {
+            return Err(err("invalid_request", "invalid quality label"));
+        }
+        let path = format!("{CONTROL}/quality/{label}/quality.json");
+        let quality = store.read(&path)?;
+        crate::gray_quality::validate(&quality, &d, label, &path)
+            .map_err(|e| err("invalid_request", e))?;
+        d["latest_quality"] = crate::gray_quality::summary(&quality);
+    }
     Ok(d)
 }
 fn observed(store: &Store, mut d: Value) -> Result<Value> {
@@ -687,6 +709,17 @@ fn validate_request(r: &Value) -> Result<()> {
     let p = &r["params"];
     match string(r, "action")? {
         "capture" | "marker" | "narrow" | "release_control" | "stop" => exact(p, &[])?,
+        "quality" => {
+            exact(p, &["op", "label"])?;
+            if !matches!(string(p, "op")?, "begin" | "checkpoint" | "finish")
+                || !safe_id(string(p, "label")?)
+            {
+                return Err(err(
+                    "invalid_request",
+                    "quality requires begin/checkpoint/finish and a 1–64 character safe label",
+                ));
+            }
+        }
         "sample" => {
             let mut fields = vec!["seconds"];
             if p.get("render_comm").is_some() {
@@ -814,6 +847,20 @@ fn sample_capability(d: &Value, r: &Value) -> Result<()> {
     }
     Ok(())
 }
+fn quality_capability(d: &Value, r: &Value) -> Result<()> {
+    if r["action"] == "quality"
+        && (d["action_capabilities"]["quality"] != 1
+            || !d["allowed_actions"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|v| v == "quality")))
+    {
+        return Err(err(
+            "invalid_request",
+            "this owner does not support quality checkpoints; start a newer control session",
+        ));
+    }
+    Ok(())
+}
 fn sample_budget(deadline: Instant, plan: &crate::gray_script::Plan) -> Result<()> {
     let required_ms = plan.duration_ms().max((plan.seconds + 10) * 1000);
     if deadline.saturating_duration_since(Instant::now()) < Duration::from_millis(required_ms) {
@@ -845,6 +892,7 @@ fn publish(store: &Store, r: &Value) -> Result<Value> {
         return Err(err("session_closed", "session is not accepting actions"));
     }
     sample_capability(&d, r)?;
+    quality_capability(&d, r)?;
     let pending = store.requests()?;
     if pending.iter().any(|e| e["request"]["action"] == "stop") {
         return Err(err("session_closed", "stop is already queued"));
@@ -909,6 +957,7 @@ fn create_control(store: &Store) -> Result<()> {
         "gray-control/started",
         "gray-control/results",
         "gray-control/artifacts",
+        "gray-control/quality",
     ] {
         let (dir, name) = store.parent(rel)?;
         if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
@@ -999,7 +1048,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
     let deadline = Instant::now() + Duration::from_secs(a.seconds);
     let mut d = json!({"schema":SCHEMA,"producer":"phonefarm","session_id":sid,"session_path":sid,"job_id":job,
         "serial":a.serial,"package":a.package,"mode":a.mode,"phase":"starting","accepting":false,
-        "controller":{"actor_id":a.actor,"kind":"agent","epoch":1,"expires_at":null},"allowed_actions":allowed(&a.mode),"action_capabilities":{"sample":2},
+        "controller":{"actor_id":a.actor,"kind":"agent","epoch":1,"expires_at":null},"allowed_actions":allowed(&a.mode),"action_capabilities":{"sample":2,"quality":1},"latest_quality":null,
         "power":parent.control_power_state().map_err(device)?,"latest_image":null,"recovery":{"status":"not_reported","session_path":sid,"reports":[],"error":null},
         "created_at":now(),"updated_at":now(),"deadline_at":(chrono::Utc::now()+chrono::Duration::seconds(a.seconds as i64)).to_rfc3339(),
         "max_seconds":a.seconds,"frame_max_age_seconds":FRAME_AGE_SECONDS,"keep_prop":a.keep,"stop_reason":null});
@@ -1248,11 +1297,15 @@ fn execute(
     let p = &r["params"];
     if matches!(
         action,
-        "tap" | "swipe" | "trigger" | "narrow" | "release_control" | "sample"
+        "tap" | "swipe" | "trigger" | "narrow" | "release_control" | "sample" | "quality"
     ) {
         require_controller(d, r)?;
     }
     match action {
+        "quality" => {
+            quality_capability(d, r)?;
+            execute_quality(store, base, d, r)
+        }
         "sample" => {
             sample_capability(d, r)?;
             let seconds = number(p, "seconds")?;
@@ -1380,22 +1433,10 @@ fn execute(
         }
         "capture" => {
             let path = format!("{CONTROL}/artifacts/capture-{id}.png");
-            let absolute = store.path.join(&path);
-            let before_rotation = base.display_rotation().ok();
-            base.screenshot(&absolute).map_err(device)?;
-            let captured_at = now();
-            let (width, height) = png_dimensions(&absolute)?;
-            let after_rotation = base.display_rotation().ok();
-            let rotation = if before_rotation == after_rotation {
-                after_rotation
-            } else {
-                None
-            };
-            base.control_ready().map_err(device)?;
-            let image = json!({"path":path,"request_id":id,"captured_at":captured_at,"width":width,"height":height,"rotation":rotation,"format":"png","lossless":true});
+            let (image, _) = capture_image(store, base, id, &path)?;
             d["latest_image"] = image.clone();
             save_descriptor(store, d)?;
-            Ok(json!({"image":image,"input_available":rotation.is_some()}))
+            Ok(json!({"input_available":!image["rotation"].is_null(),"image":image}))
         }
         "tap" | "swipe" => {
             check_frame(store, base, d, r)?;
@@ -1469,27 +1510,109 @@ fn frameaudit_mode(d: &Value) -> Result<()> {
     }
     Ok(())
 }
+fn capture_image(
+    store: &Store,
+    base: &Session,
+    id: &str,
+    path: &str,
+) -> Result<(Value, image::DynamicImage)> {
+    let before_rotation = base.display_rotation().ok();
+    let bytes = base.screenshot_bytes().map_err(device)?;
+    let captured_at = now();
+    store.write_bytes(path, &bytes, false)?;
+    drop(bytes);
+    let decoded =
+        crate::gray_quality::read_png(BufReader::new(store.open_file(path, libc::O_RDONLY)?))
+            .map_err(device)?;
+    let after_rotation = base.display_rotation().ok();
+    let rotation = if before_rotation == after_rotation {
+        after_rotation
+    } else {
+        None
+    };
+    base.control_ready().map_err(device)?;
+    Ok((
+        json!({"path":path,"request_id":id,"captured_at":captured_at,"width":decoded.width(),"height":decoded.height(),
+        "rotation":rotation,"format":"png","lossless":true}),
+        decoded,
+    ))
+}
+fn save_quality(store: &Store, d: &mut Value, manifest: &Value, replace: bool) -> Result<()> {
+    store.write(string(manifest, "path")?, manifest, replace)?;
+    d["latest_quality"] = crate::gray_quality::summary(manifest);
+    save_descriptor(store, d)
+}
+fn execute_quality(store: &Store, base: &Session, d: &mut Value, r: &Value) -> Result<Value> {
+    let label = string(&r["params"], "label")?;
+    let op = string(&r["params"], "op")?;
+    let id = string(r, "request_id")?;
+    let directory = format!("{CONTROL}/quality/{label}");
+    let path = format!("{directory}/quality.json");
+    let prior = store.optional(&path)?;
+    if prior.is_none() && op != "begin" {
+        return Err(err("conflict", "quality label has not begun"));
+    }
+    let mut manifest = prior
+        .clone()
+        .unwrap_or_else(|| crate::gray_quality::new_manifest(d, label, &path, &now()));
+    crate::gray_quality::validate(&manifest, d, label, &path).map_err(|e| err("conflict", e))?;
+    let attempt_dir = format!("{directory}/attempts/{id}");
+    let attempt_path = format!("{attempt_dir}/attempt.json");
+    crate::gray_quality::start_attempt(&mut manifest, r, &attempt_path, &now())
+        .map_err(|e| err("conflict", e))?;
+    if prior.is_none() {
+        store.mkdir(&directory)?;
+        store.mkdir(&format!("{directory}/attempts"))?;
+    }
+    store.mkdir(&attempt_dir)?;
+    save_quality(store, d, &manifest, prior.is_some())?;
+    let acquisition = (|| -> Result<()> {
+        let original = format!("{attempt_dir}/original.png");
+        let (image, decoded) = capture_image(store, base, id, &original)?;
+        manifest["active_attempt"]["image"] = image.clone();
+        d["latest_image"] = image;
+        save_quality(store, d, &manifest, true)?;
+        let (bytes, width, height) =
+            crate::gray_quality::half_preview(&decoded).map_err(|e| err("preview_error", e))?;
+        let preview = format!("{attempt_dir}/preview-half.png");
+        store.write_bytes(&preview, &bytes, false)?;
+        manifest["active_attempt"]["preview"] = json!({"path":preview,"width":width,"height":height,"format":"png",
+            "derived":true,"method":"stride2_rgb_even_coordinates","source_path":original});
+        save_quality(store, d, &manifest, true)?;
+        if op == "finish" {
+            let marker = base
+                .marker()
+                .map_err(device)?
+                .ok_or_else(|| err("not_found", "quality finish marker is not available"))?;
+            let marker_path = format!("{attempt_dir}/marker.json");
+            store.write(&marker_path, &marker, false)?;
+            manifest["active_attempt"]["marker"] =
+                json!({"path":marker_path,"observed_at":now(),"kind":"marker"});
+            save_quality(store, d, &manifest, true)?;
+            crate::gray_quality::validate_marker(&marker, string(d, "package")?)
+                .map_err(|e| err("invalid_evidence", e))?;
+        }
+        Ok(())
+    })();
+    let error = acquisition
+        .err()
+        .map(|e| json!({"code":e.code,"message":public_text(base,&e.message)}));
+    let attempt = crate::gray_quality::finish_attempt(&mut manifest, error, &now())
+        .map_err(|e| err("io_error", e))?;
+    store.write(&attempt_path, &attempt, false)?;
+    save_quality(store, d, &manifest, true)?;
+    Ok(
+        json!({"quality":crate::gray_quality::summary(&manifest),"image":attempt["image"],
+        "collection":{"status":if attempt["status"]=="completed"{"complete"}else{"failed"},"error":attempt["error"]["message"]}}),
+    )
+}
 fn png_dimensions(path: &Path) -> Result<(u32, u32)> {
-    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
-    if reader.format() != Some(image::ImageFormat::Png) {
-        return Err(err("device_error", "capture is not PNG"));
-    }
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    reader.limits(limits);
-    let decoded = reader
-        .decode()
-        .map_err(|e| err("device_error", format!("PNG decode failed: {e}")))?;
-    let dimensions = (decoded.width(), decoded.height());
-    if dimensions.0 == 0
-        || dimensions.1 == 0
-        || u64::from(dimensions.0) * u64::from(dimensions.1) > 16 * 1024 * 1024
-    {
-        return Err(err("device_error", "decoded image exceeds dimension limit"));
-    }
-    Ok(dimensions)
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let decoded = crate::gray_quality::read_png(BufReader::new(file)).map_err(device)?;
+    Ok((decoded.width(), decoded.height()))
 }
 fn frame_fresh(image: &Value) -> Result<()> {
     let at = chrono::DateTime::parse_from_rfc3339(string(image, "captured_at")?)
@@ -1769,6 +1892,21 @@ mod tests {
         let r = request("same");
         assert_eq!(publish(&store, &r).unwrap()["status"], "accepted");
         assert_eq!(publish(&store, &r).unwrap()["sequence"], 1);
+        let mut quality = request("quality");
+        quality["action"] = json!("quality");
+        quality["params"] = json!({"op":"begin","label":"comparison_1"});
+        assert_eq!(
+            publish(&store, &quality).unwrap_err().code,
+            "invalid_request"
+        );
+        assert_eq!(store.requests().unwrap().len(), 1);
+        let mut quality_owner = d.clone();
+        quality_owner["allowed_actions"] = json!(["quality"]);
+        quality_owner["action_capabilities"] = json!({"quality":1});
+        quality_capability(&quality_owner, &quality).unwrap();
+        validate_request(&quality).unwrap();
+        quality["params"]["label"] = json!("../outside");
+        assert!(validate_request(&quality).is_err());
         // Old C1 descriptors remain readable; the newer helper must not enqueue
         // unsupported sample requests into their live mailbox.
         let mut sample = request("sample");
@@ -1892,6 +2030,91 @@ mod tests {
         assert!(frame_fresh(&json!({"captured_at":now()})).is_ok());
         assert!(frame_fresh(
             &json!({"captured_at":(chrono::Utc::now()-chrono::Duration::seconds(31)).to_rfc3339()})
+        )
+        .is_err());
+
+        // Quality records preserve failed attempts without advancing the stage,
+        // and use the current actor/epoch independently at each checkpoint.
+        let path = "gray-control/quality/example/quality.json";
+        let mut quality = crate::gray_quality::new_manifest(&d, "example", path, &now());
+        let mut stage = current;
+        stage["action"] = json!("quality");
+        stage["params"] = json!({"op":"begin","label":"example"});
+        crate::gray_quality::start_attempt(&mut quality, &stage, "attempt-bad.json", &now())
+            .unwrap();
+        let failed = crate::gray_quality::finish_attempt(
+            &mut quality,
+            Some(json!({"message":"bad PNG"})),
+            &now(),
+        )
+        .unwrap();
+        assert!(quality["phase"].is_null());
+        assert_eq!(failed["status"], "failed");
+        stage["request_id"] = json!("begin-retry");
+        crate::gray_quality::start_attempt(&mut quality, &stage, "attempt-begin.json", &now())
+            .unwrap();
+        quality["active_attempt"]["image"] = json!({"path":"original.png"});
+        quality["active_attempt"]["preview"] = json!({"path":"preview-half.png"});
+        let begin = crate::gray_quality::finish_attempt(&mut quality, None, &now()).unwrap();
+        assert!(
+            crate::gray_quality::start_attempt(&mut quality, &stage, "duplicate.json", &now())
+                .is_err()
+        );
+        stage["params"]["op"] = json!("finish");
+        assert!(
+            crate::gray_quality::start_attempt(&mut quality, &stage, "too-early.json", &now())
+                .is_err()
+        );
+        stage["params"]["op"] = json!("checkpoint");
+        stage["request_id"] = json!("checkpoint-human");
+        d["controller"] = json!({"actor_id":"human","kind":"human","epoch":4});
+        assert!(require_controller(&d, &stage).is_err());
+        stage["actor_id"] = json!("human");
+        stage["control_epoch"] = json!(4);
+        require_controller(&d, &stage).unwrap();
+        crate::gray_quality::start_attempt(&mut quality, &stage, "attempt-checkpoint.json", &now())
+            .unwrap();
+        quality["active_attempt"]["image"] = json!({"path":"checkpoint.png"});
+        quality["active_attempt"]["preview"] = json!({"path":"checkpoint-half.png"});
+        crate::gray_quality::finish_attempt(&mut quality, None, &now()).unwrap();
+        stage["params"]["op"] = json!("finish");
+        stage["request_id"] = json!("finish-missing-marker");
+        crate::gray_quality::start_attempt(&mut quality, &stage, "attempt-failed.json", &now())
+            .unwrap();
+        quality["active_attempt"]["image"] = json!({"path":"failed-original.png"});
+        quality["active_attempt"]["preview"] = json!({"path":"failed-half.png"});
+        assert!(crate::gray_quality::finish_attempt(&mut quality, None, &now()).is_err());
+        let failed_finish = crate::gray_quality::finish_attempt(
+            &mut quality,
+            Some(json!({"message":"missing marker"})),
+            &now(),
+        )
+        .unwrap();
+        assert_eq!(quality["phase"], "checkpointed");
+        assert_eq!(failed_finish["image"]["path"], "failed-original.png");
+        assert_eq!(quality["stages"]["begin"], begin);
+        let marker = json!({"layer_loaded":true,"pkg":"com.example.fixture","readonly_stats":{"frames":10,"render_pass_begins":300}});
+        crate::gray_quality::validate_marker(&marker, "com.example.fixture").unwrap();
+        assert!(crate::gray_quality::validate_marker(&marker, "other.package").is_err());
+        assert!(crate::gray_quality::validate_marker(
+            &json!({"frames":10,"render_pass_begins":300}),
+            "com.example.fixture"
+        )
+        .is_err());
+        stage["request_id"] = json!("finish-retry");
+        crate::gray_quality::start_attempt(&mut quality, &stage, "attempt-finish.json", &now())
+            .unwrap();
+        quality["active_attempt"]["image"] = json!({"path":"finish.png"});
+        quality["active_attempt"]["preview"] = json!({"path":"finish-half.png"});
+        quality["active_attempt"]["marker"] = json!({"path":"marker.json"});
+        crate::gray_quality::finish_attempt(&mut quality, None, &now()).unwrap();
+        assert_eq!(quality["phase"], "collected");
+        crate::gray_quality::validate(&quality, &d, "example", path).unwrap();
+        assert!(crate::gray_quality::start_attempt(
+            &mut quality,
+            &stage,
+            "duplicate-finish.json",
+            &now()
         )
         .is_err());
     }
