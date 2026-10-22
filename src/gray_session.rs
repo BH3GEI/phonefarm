@@ -182,12 +182,22 @@ impl Session {
     fn stop_target(&self) -> Result<(), String> {
         let package = self.package();
         self.write("stop_target", &format!("am force-stop {}", q(&package)))?;
-        let ps = self.root_read("target_readback", "ps -A -o NAME")?;
-        let mut names = ps.lines().map(str::trim).filter(|s| !s.is_empty());
-        if names.next() != Some("NAME") || names.any(|name| name == package || name.starts_with(&format!("{package}:"))) {
+        if self.target_alive()? {
             return self.stop("target process absence not verified".into());
         }
         Ok(())
+    }
+
+    pub fn target_alive(&self) -> Result<bool, String> {
+        let ps = self.root_read("target_readback", "ps -A -o NAME")?;
+        match target_in_process_list(&ps, &self.package()) {
+            Ok(alive) => Ok(alive),
+            Err(error) => self.stop(error),
+        }
+    }
+
+    pub fn crash_log(&self) -> Result<String, String> {
+        self.root_read("crash_log", "logcat -b crash -d -t 200")
     }
 
     pub fn prepare(&self) -> Result<(), String> {
@@ -227,6 +237,15 @@ impl Session {
     }
 
     pub fn install(&self, so: Option<&str>, ts: bool, extras: Option<&str>) -> Result<(), String> {
+        self.install_mode(so, ts, extras, None)
+    }
+
+    pub fn install_storeop(&self, so: Option<&str>, rule: &str, extras: Option<&str>) -> Result<(), String> {
+        let rule = storeop_rule(rule)?;
+        self.install_mode(so, false, extras, Some(&rule))
+    }
+
+    fn install_mode(&self, so: Option<&str>, ts: bool, extras: Option<&str>, storeop: Option<&str>) -> Result<(), String> {
         self.ready()?;
         if self.state.borrow()["stage"] != "prepared" { return Err("gray capture must be prepared before install".into()); }
         let local = so.map(str::to_owned).unwrap_or_else(graylayer::layer_so_path);
@@ -284,7 +303,13 @@ impl Session {
             return self.stop("layer registration readback differs".into());
         }
         for property in LAYER_PROPERTIES.into_iter().filter(|p| *p != "debug.vulkan.layers") {
-            let value = match property { "debug.knobs.passdump" | "debug.knobs.frameaudit" => "1", "debug.knobs.frameaudit_ts" if ts => "1", _ => "0" };
+            let value = match property {
+                "debug.knobs.passdump" | "debug.knobs.frameaudit" => "1",
+                "debug.knobs.frameaudit_ts" if ts => "1",
+                graylayer::STOREOP_PROP => storeop.unwrap_or("0"),
+                graylayer::STOREOP_LIVE_PROP if storeop.is_some() => "1",
+                _ => "0",
+            };
             self.set_property(property, value)?;
         }
         self.set_property("debug.vulkan.layers", LAYER_NAME)?;
@@ -293,6 +318,7 @@ impl Session {
     }
 
     pub fn narrow(&self) -> Result<(), String> { self.set_property("debug.vulkan.layers", "") }
+    pub fn set_storeop(&self, on: bool) -> Result<(), String> { self.set_property(graylayer::STOREOP_ON_PROP, if on { "1" } else { "0" }) }
     pub fn trigger(&self, go: u32) -> Result<(), String> { self.set_property(graylayer::FA_GO_PROP, &go.to_string()) }
     pub fn tap(&self, x: u32, y: u32) -> Result<(), String> { self.write("tap", &format!("input tap {x} {y}")) }
 
@@ -455,6 +481,23 @@ fn pending_clear(state: &Value) -> Result<(), String> {
     } else { Ok(()) }
 }
 
+fn target_in_process_list(text: &str, package: &str) -> Result<bool, String> {
+    let mut names = text.lines().map(str::trim).filter(|s| !s.is_empty());
+    if names.next() != Some("NAME") { return Err("unrecognized ps NAME output; target liveness unknown".into()); }
+    Ok(names.any(|name| name == package || name.starts_with(&format!("{package}:"))))
+}
+
+fn storeop_rule(rule: &str) -> Result<String, String> {
+    let rule = rule.trim();
+    if matches!(rule, "0" | "ds") { return Ok(rule.into()); }
+    let items = rule.split(',').map(|item| {
+        let (signature, attachment) = item.split_once(':').ok_or("storeop rule requires sig:attachment items, 0 or ds")?;
+        let attachment = attachment.trim().parse::<u32>().map_err(|_| "invalid storeop attachment index")?;
+        Ok((signature.to_owned(), attachment))
+    }).collect::<Result<Vec<_>, &str>>()?;
+    graylayer::storeop_spec(&items)
+}
+
 fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
     let token = state["token"].as_str().ok_or("missing gray session token")?;
     let package = state["package"].as_str().ok_or("missing gray session package")?;
@@ -557,5 +600,19 @@ mod tests {
         assert!(pending_clear(&json!({"write_pending":{"operation":"setprop"},"transport_uncertain":false})).is_err());
         assert!(pending_clear(&json!({"write_pending":null,"transport_uncertain":true})).is_err());
         assert!(pending_clear(&json!({})).is_err());
+    }
+    #[test]
+    fn storeop_rule_validates_before_install_and_normalizes_with_shared_spec() {
+        for rule in ["0", "ds"] { assert_eq!(storeop_rule(rule).unwrap(), rule); }
+        assert_eq!(storeop_rule("DEADBEEF:1,12345678:0,deadbeef:1").unwrap(), "12345678:0,deadbeef:1");
+        for rule in ["", "1234567:0", "deadbeef:32", "deadbeef:0;id", "deadbeef:0,", "ds:0"] {
+            assert!(storeop_rule(rule).is_err(), "accepted {rule:?}");
+        }
+    }
+    #[test]
+    fn target_liveness_is_exact_and_malformed_output_is_unknown() {
+        assert!(target_in_process_list("NAME\ncom.example.fixture:worker\n", "com.example.fixture").unwrap());
+        assert!(!target_in_process_list("NAME\ncom.example.fixture2\n", "com.example.fixture").unwrap());
+        assert!(target_in_process_list("", "com.example.fixture").is_err());
     }
 }

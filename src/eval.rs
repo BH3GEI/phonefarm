@@ -2261,7 +2261,9 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let mut live_check: Option<Value> = None;
     if let Some(l) = &launch {
         let static_extras = l.static_extras.clone().unwrap_or_else(|| l.extras.clone());
-        let chk = crate::frameaudit::storeop_check(
+        // This caller still owns the outer eval lease. Its session/parent recovery
+        // migration must not use the standalone command's completion receipt.
+        let chk = crate::frameaudit::storeop_check_legacy(
             serial,
             &evidence.join("image_check"),
             None,

@@ -34,7 +34,7 @@ const USAGE: &str = "用法:
       [--tap \"x,y;x,y\"] [--settle 秒] [--extras \"intent extras\"] [--json] [--evidence-origin device|synthetic]
       (非原神: 不判大世界, 确认层在出帧后依次点击再等 settle 秒; Megacity 例:
        --pkg com.unity.megacity.metro --extras \"--es scene city_static --es frames 100000\")
-  phonefarm frame-audit storeop-check --rule <sig:i,...> --out <目录> [--rounds N] [--so 本机层.so] [--serial S]
+  phonefarm frame-audit storeop-check --rule <sig:i,...> --out <目录> [--rounds N] [--so 本机层.so] [--serial S] [--json] [--evidence-origin device|synthetic]
       (storeop 开关机制验证: 同一局里现场开/关, 同位置同视角截图逐像素比对 + effective 命中 + 不崩)
   phonefarm frame-audit recover --session <capture会话目录> --serial S [--json]
   phonefarm frame-audit analyze <knobs_frameaudit.json>... [--md 输出.md] [--json 输出.json]";
@@ -1191,8 +1191,142 @@ fn ui_rects(w: usize, h: usize) -> Vec<(usize, usize, usize, usize)> {
     ]
 }
 
+struct StoreopFrame {
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+}
+
+impl StoreopFrame {
+    fn from_png(path: &Path) -> Result<Self, String> {
+        let bytes = crate::confirmation_transport::bounded(path, 8 * 1024 * 1024)?;
+        let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(64 * 1024 * 1024);
+        reader.limits(limits);
+        let frame = reader.decode().map_err(|e| format!("PNG decode failed at {}: {e}", path.display()))?;
+        let (width, height) = (frame.width() as usize, frame.height() as usize);
+        let size = width.checked_mul(height).and_then(|n| n.checked_mul(4)).ok_or("frame size overflow")?;
+        if size == 0 || size > 64 * 1024 * 1024 { return Err("decoded frame exceeds RGBA limit".into()); }
+        Ok(Self { width, height, rgba: frame.to_rgba8().into_raw() })
+    }
+
+    fn from_raw(bytes: &[u8]) -> Result<Self, String> {
+        let (width, height, rgba) = parse_raw(bytes).ok_or("raw screenshot could not be parsed")?;
+        if width == 0 || height == 0 { return Err("empty raw screenshot".into()); }
+        Ok(Self { width, height, rgba: rgba.to_vec() })
+    }
+}
+
+// Both acquisition paths use the same pixel calculation and UI exclusion policy.
+fn storeop_diffs(phases: &[(bool, Vec<StoreopFrame>)]) -> Result<(usize, usize, Vec<Value>), String> {
+    let first = phases.first().and_then(|p| p.1.first()).ok_or("no storeop frames")?;
+    let (w, h) = (first.width, first.height);
+    if phases.iter().any(|(_, frames)| frames.len() != 3 || frames.iter().any(|f| f.width != w || f.height != h)) {
+        return Err("storeop frames are incomplete or have different dimensions".into());
+    }
+    let mut rows = Vec::new();
+    let full = (0, 0, w, h);
+    let excl = ui_rects(w, h);
+    let mut cmp = |label: String, kind: &str, a: (usize, usize), b: (usize, usize)| {
+        let (pct, mad, mx) = pixel_diff(&phases[a.0].1[a.1].rgba, &phases[b.0].1[b.1].rgba, w, full, &excl);
+        rows.push(json!({"pair":label,"kind":kind,"diff_px_pct":(pct * 1000.0).round() / 1000.0,
+            "mean_abs":(mad * 1000.0).round() / 1000.0,"max":mx}));
+    };
+    for p in 0..phases.len() {
+        cmp(format!("段{p}({}) 第1张~第2张", if phases[p].0 { "开" } else { "关" }), "noise_1s", (p, 0), (p, 1));
+        if p + 1 < phases.len() { cmp(format!("段{p}~段{}", p + 1), "off_vs_on", (p, 1), (p + 1, 1)); }
+        if p + 2 < phases.len() { cmp(format!("段{p}~段{}", p + 2), "same_state", (p, 1), (p + 2, 1)); }
+    }
+    Ok((w, h, rows))
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<Value, String> {
+fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>, origin: &str) -> Result<Value, String> {
+    let phase_count = rounds.checked_mul(2).and_then(|n| n.checked_add(1)).ok_or("round count overflow")?;
+    let lease = crate::devlease::Lease::target(Some(serial), "frame-audit-storeop")?;
+    let session = crate::gray_session::Session::new(lease, out, pkg, origin)?;
+    let mut frames = Vec::new();
+    let collected: Result<Value, String> = (|| {
+        session.prepare()?;
+        session.install_storeop(so.as_deref(), rule, extras.as_deref())?;
+        capture_scene(&session, pkg, taps, settle)?;
+        let set_on = |on| -> Result<(), String> {
+            session.set_storeop(on)?;
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            Ok(())
+        };
+        let mut phases = Vec::new();
+        for phase in 0..phase_count {
+            let on = phase % 2 == 1;
+            set_on(on)?;
+            let mut shots = Vec::new();
+            for index in 0..3 {
+                let path = session.dir.join(format!("phase-{phase}-{index}.png"));
+                session.screenshot(&path)?;
+                frames.push(json!({"phase":phase,"on":on,"index":index,"image":path,"wall":chrono::Utc::now().to_rfc3339()}));
+                shots.push(StoreopFrame::from_png(&path)?);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            phases.push((on, shots));
+        }
+        set_on(true)?;
+        session.trigger(1)?;
+        let mut audit = None;
+        for attempt in 0..45 {
+            if let Some(value) = session.audit(1)? { audit = Some(value); break; }
+            if attempt < 44 { std::thread::sleep(std::time::Duration::from_secs(2)); }
+        }
+        let audit = audit.ok_or("enabled storeop trigger produced no matching audit")?;
+        let audit_path = session.dir.join("fa_on.json");
+        crate::confirmation_transport::new_file(&audit_path, &serde_json::to_vec_pretty(&audit).map_err(|e| e.to_string())?)?;
+        set_on(false)?;
+        let alive = session.target_alive()?;
+        let marker = session.marker()?.ok_or("layer marker disappeared after storeop capture")?;
+        let marker_path = session.dir.join("layer_marker.json");
+        crate::confirmation_transport::new_file(&marker_path, &serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?)?;
+        let crash = session.crash_log()?;
+        let crash_path = session.dir.join("crash.log");
+        crate::confirmation_transport::new_file(&crash_path, crash.as_bytes())?;
+        let (w, h, rows) = storeop_diffs(&phases)?;
+        let effective = marker["effective"].as_array().cloned().unwrap_or_default();
+        let hit = effective.iter().filter(|e| e["begins"].as_u64().unwrap_or(0) > 0).count();
+        Ok(json!({"rule":rule,"screen":[w,h],"rounds":rounds,"effective":effective,"effective_hit":hit,
+            "game_alive":alive,"crash_log_lines":crash.lines().filter(|l| l.contains(pkg)).count(),
+            "frameaudit_on_captured":true,"diffs":rows,"audit":audit_path,"marker":marker_path,"crash_log":crash_path,
+            "shot_off":frames[1]["image"],"shot_on":frames[4]["image"],
+            "pixel_source":"lossless_png_decoded_rgba8","ui_exclusion":"existing_frameaudit_proportional_regions"}))
+    })();
+    let (result, mut error) = match collected { Ok(v)=>(v,None), Err(e)=>(Value::Null,Some(e)) };
+    let collection_path = session.dir.join("collection.json");
+    let collection = json!({"schema":"phonefarm/gray-storeop-collection@1","serial":serial,"package":pkg,
+        "session":session.dir,"evidence_origin":origin,"frames":frames,"result":result,"error":error,
+        "collection_ok":error.is_none(),"request":{"rule":rule,"rounds":rounds,"taps":taps,"settle_s":settle,
+            "launch_extras":extras,"layer_source":so}});
+    if let Err(e) = crate::confirmation_transport::new_file(&collection_path, &serde_json::to_vec_pretty(&collection).unwrap()) {
+        error = Some(match error {Some(prior)=>format!("{prior}; collection evidence: {e}"),None=>e});
+    }
+    let recovery = match session.finish(error.as_deref()) {
+        Ok(v)=>v, Err(e)=>json!({"status":"required","error":e,"session":session.dir}),
+    };
+    let meta = session.dir.join("storeop_check.json");
+    let mut report = json!({"schema":"phonefarm/gray-storeop@1","serial":serial,"package":pkg,
+        "out":session.dir,"session":session.dir,"collection":collection_path,"frames":frames,"result":result,
+        "collection_ok":error.is_none(),"error":error,"recovery":recovery,"report_path":meta,
+        "game_state_restored":false,"evidence_origin":origin});
+    // Keep the existing CLI metric fields while exposing the separate collection result.
+    if let Some(fields) = result.as_object() {
+        for (key, value) in fields { report[key] = value.clone(); }
+    }
+    if let Err(e) = crate::confirmation_transport::new_file(&meta, &serde_json::to_vec_pretty(&report).unwrap()) {
+        report["report_persistence_error"] = json!(e);
+    }
+    Ok(report)
+}
+
+// Kept only for eval until it passes its actual parent lease and recovery context.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn storeop_check_legacy(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<Value, String> {
     std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
     let gl = GrayLayer::new(serial).with_so(so).with_storeop(Some(rule.to_string()), true).with_launch_extras(extras);
     let before = gl.off(Some(pkg));
@@ -1233,30 +1367,10 @@ pub(crate) fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: 
         let marker: Value = serde_json::from_str(marker_txt.trim()).unwrap_or(Value::Null);
         let crash = GrayLayer::adb_stdout(&su(serial, &format!("logcat -b crash -d -t 200 2>/dev/null | grep -c {pkg}"), 30)).trim().parse::<u64>().unwrap_or(0);
 
-        // ── 比对 (在节点上算, 只带回数字) ──
-        let mut rows = Vec::new();
-        let get = |p: usize, i: usize| parse_raw(&phases[p].1[i]);
-        let Some((w, h, _)) = get(0, 1) else { return Err("截图解析失败".into()) };
-        let full = (0, 0, w, h);
-        let excl = ui_rects(w, h);
-        let mut cmp = |label: String, kind: &str, a: (usize, usize), b: (usize, usize)| {
-            if let (Some((_, _, pa)), Some((_, _, pb))) = (get(a.0, a.1), get(b.0, b.1)) {
-                let (pct, mad, mx) = pixel_diff(pa, pb, w, full, &excl);
-                rows.push(json!({"pair": label, "kind": kind, "diff_px_pct": (pct * 1000.0).round() / 1000.0, "mean_abs": (mad * 1000.0).round() / 1000.0, "max": mx}));
-            }
-        };
-        for p in 0..phases.len() {
-            // 同一段内相隔 1 秒的两张: 纯动画噪声
-            cmp(format!("段{p}({}) 第1张~第2张", if phases[p].0 { "开" } else { "关" }), "noise_1s", (p, 0), (p, 1));
-            if p + 1 < phases.len() {
-                // 相邻两段: 一关一开
-                cmp(format!("段{p}~段{}", p + 1), "off_vs_on", (p, 1), (p + 1, 1));
-            }
-            if p + 2 < phases.len() {
-                // 隔一段: 同状态 (关~关 或 开~开), 时间间隔与「关~开」相当的噪声底
-                cmp(format!("段{p}~段{}", p + 2), "same_state", (p, 1), (p + 2, 1));
-            }
-        }
+        let phases: Vec<(bool, Vec<StoreopFrame>)> = phases.iter().map(|(on, frames)| {
+            Ok((*on, frames.iter().map(|bytes| StoreopFrame::from_raw(bytes)).collect::<Result<_, String>>()?))
+        }).collect::<Result<_, String>>()?;
+        let (w, h, rows) = storeop_diffs(&phases)?;
         let eff = marker["effective"].as_array().cloned().unwrap_or_default();
         let hit = eff.iter().filter(|e| e["begins"].as_u64().unwrap_or(0) > 0).count();
         Ok(json!({
@@ -1422,6 +1536,7 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
             let (mut out, mut so, mut rule, mut rounds) = (None, None, None, 2u32);
             let mut pkg = "com.miHoYo.Yuanshen".to_string();
             let (mut taps, mut settle, mut extras) = (Vec::new(), None::<u64>, None::<String>);
+            let mut origin = "device".to_string();
             let mut it = rest.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -1434,6 +1549,8 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                     "--tap" => taps = it.next().map(|s| parse_taps(s)).unwrap_or_default(),
                     "--settle" => settle = it.next().and_then(|x| x.parse().ok()),
                     "--extras" => extras = it.next().cloned(),
+                    "--json" => {}, // This command already returns JSON by default.
+                    "--evidence-origin" => origin = it.next().cloned().unwrap_or_default(),
                     other => {
                         eprintln!("不认识的参数 {other:?}\n{USAGE}");
                         return 2;
@@ -1445,11 +1562,17 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                 eprintln!("{USAGE}");
                 return 2;
             };
-            match storeop_check(&serial, Path::new(&out), so, &rule, rounds.max(1), &pkg, &taps, settle, extras) {
-                Ok(_) => 0,
+            if !matches!(origin.as_str(), "device" | "synthetic") {
+                eprintln!("--evidence-origin must be device or synthetic"); return 2;
+            }
+            match storeop_check(&serial, Path::new(&out), so, &rule, rounds.max(1), &pkg, &taps, settle, extras, &origin) {
+                Ok(report) => {
+                    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+                    capture_exit(&report)
+                }
                 Err(e) => {
-                    eprintln!("{e}");
-                    1
+                    println!("{}", json!({"error":e,"collection_ok":false,"recovery":{"status":"unknown"}}));
+                    2
                 }
             }
         }
@@ -1656,6 +1779,21 @@ mod tests {
         assert!((pct - 100.0 / 3.0).abs() < 1e-9);
         assert!((mad - 25.0 / 9.0).abs() < 1e-9);
         assert_eq!(mx, 20);
+    }
+
+    #[test]
+    fn storeop_comparison_rejects_missing_or_different_frames() {
+        let frame = || StoreopFrame { width: 2, height: 2, rgba: vec![0; 16] };
+        let mut phases = vec![(false, vec![frame(), frame(), frame()]),
+            (true, vec![frame(), frame(), frame()]), (false, vec![frame(), frame(), frame()])];
+        let (w, h, rows) = storeop_diffs(&phases).unwrap();
+        assert_eq!((w, h, rows.len()), (2, 2, 6));
+        assert!(rows.iter().all(|row| row["diff_px_pct"] == 0.0));
+        phases[1].1[0].width = 1;
+        assert!(storeop_diffs(&phases).is_err());
+        phases[1].1[0].width = 2;
+        phases[1].1.pop();
+        assert!(storeop_diffs(&phases).is_err());
     }
 
     #[test]
