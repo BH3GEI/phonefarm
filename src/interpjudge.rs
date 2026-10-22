@@ -10,15 +10,19 @@
 //! 2. **运动块保真**: 其余块上 PSNR(C,T) 要比「直接复制较近的原生帧」高 [`InterpConfig::move_gain_db`],
 //!    并且不低于绝对下限 [`InterpConfig::move_floor_db`]。复制帧和前后平均都在这里被判掉。
 //! 3. **最差运动块** (运动边缘光晕、遮挡/露出处撕裂): 每个有明显运动的块单独算
-//!    MSE(C,T) / MSE(复制较近原生帧, T); 任一块比复制原生帧还差 (比值 > [`InterpConfig::worst_tile_ratio`]) 就不通过。
+//!    MSE(C,T) / MSE(复制较近原生帧, T); 任一块比复制原生帧还差 (比值 > [`InterpConfig::worst_tile_ratio`]) 就在参考线外。
 //! 4. **包络外像素** (沿用 gpuop 的拉扯判据): C 的像素落在 P、N 半径 r 邻域亮度包络外的比例,
-//!    跟真值 T 自己落在包络外的比例比 (真值的比例就是原生自噪声), 多出 [`InterpConfig::envelope_margin_pct`] 个百分点就不通过。
+//!    跟真值 T 自己落在包络外的比例比 (真值的比例就是原生自噪声), 多出 [`InterpConfig::envelope_margin_pct`] 个百分点就在参考线外。
 //! 5. **细节能量** (同 iq-judge): |log2 E(C)/E(T)| ≤ max(|log2 E(P)/E(T)|, |log2 E(N)/E(T)|) + 0.15。
 //!    前后平均、模糊的插帧在这里掉细节。
 //!
-//! 序列层面 (见 [`judge_sequence`]): 静止块 (HUD) 一帧都不许坏; 其余判不通过的帧不超过 1%, 且不许连续两帧;
-//! 插帧整体比原生偏糊/偏亮 (每帧都在容差内, 但隔帧来回变 = 闪烁) 单独判;
-//! 快速转镜头的帧单独统计, 不放宽。
+//! 序列层面 (见 [`judge_sequence`]): 静止块 (HUD) 坏了几帧; 有指标在参考线外的帧占多少、最长连续几帧;
+//! 插帧整体比原生偏糊/偏亮 (每帧都在容差内, 但隔帧来回变 = 闪烁) 单独列;
+//! 快速转镜头的帧单独统计。
+//!
+//! 输出 (2026-10-21 起): **不判通过 / 不通过**。上面各项的容差都只是参考线, 回包列出序列级指标行
+//! (数值、参考线、离参考线多远, 见 `crate::iqsheet`)、逐帧哪几项在参考线外、对照表 (候选与
+//! 「复制前帧」「前后平均」两个基线并排) 和一句话摘要, 由人选。
 
 use crate::iqjudge::{detail_log2, median, pair_tiles, psnr_of_mse, r4, Shot};
 use serde_json::{json, Value};
@@ -57,15 +61,15 @@ pub(crate) struct InterpConfig {
     pub envelope_margin_pct: f64,
     /// 细节能量 |log2| 余量。
     pub detail_margin: f64,
-    /// 序列: 允许判不通过的帧占比 (向下取整)。
+    /// 序列参考线: 有指标在参考线外的帧占比 (向下取整)。
     pub max_fail_frac: f64,
-    /// 序列: 最多允许连续几帧不通过。
+    /// 序列参考线: 连续几帧在参考线外。
     pub max_consecutive_fail: usize,
     /// 序列: 插帧相对真值的细节 log2 中位数, 绝对值上限 (超了 = 隔帧一糊一清, 闪烁)。
     pub flicker_detail_log2: f64,
     /// 序列: 插帧相对真值的平均亮度差中位数, 绝对值上限 (灰阶)。
     pub flicker_luma: f64,
-    /// 序列: 有运动的插帧少于它 → 判不了。
+    /// 序列: 有运动的插帧少于它 → 算不了。
     pub min_motion_frames: usize,
     /// 「快速运动」帧: 复制较近原生帧的全帧 PSNR 低于它。
     pub fast_db: f64,
@@ -106,11 +110,11 @@ impl Default for InterpConfig {
     }
 }
 
-/// 一张插帧的判定结果。
+/// 一张插帧的结果。`ok` = 各项都在参考线原生一侧 (内部汇总用, 输出写成 `beyond_ref`)。
 #[derive(Debug, Clone)]
 pub(crate) struct FrameResult {
     pub ok: bool,
-    /// 静止块 (HUD) 不通过: 序列里零容忍。
+    /// 静止块 (HUD) 有项在参考线外。
     pub static_fail: bool,
     /// 有运动块 (否则这帧对插帧好坏没有信息)。
     pub has_motion: bool,
@@ -398,22 +402,12 @@ pub(crate) fn judge_frame(p: &Shot, t: &Shot, n: &Shot, c: &Shot, cfg: &InterpCo
     }
 }
 
-/// 序列判定结果。
+/// 序列各项相对参考线的位置 (内部用, 不进输出)。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SeqVerdict {
-    Pass,
-    Fail(String),
-    Inconclusive(String),
-}
-
-impl SeqVerdict {
-    pub(crate) fn label(&self) -> &'static str {
-        match self {
-            SeqVerdict::Pass => "pass",
-            SeqVerdict::Fail(_) => "fail",
-            SeqVerdict::Inconclusive(_) => "inconclusive",
-        }
-    }
+    WithinRef,
+    BeyondRef(String),
+    NotComputed(String),
 }
 
 /// 整段判定。`native` = 原生 2 倍帧率连续帧 (至少 3 张), `interp[i]` = 用 native[2i]、native[2i+2] 插出的帧,
@@ -423,10 +417,11 @@ pub(crate) fn judge_sequence(native: &[Shot], interp: &[Shot], cfg: &InterpConfi
     let mut rep = json!({"n_native": native.len(), "n_interp": interp.len(), "n_judged": k});
     let bad_shape = native.iter().chain(interp).any(|s| s.w != native[0].w || s.h != native[0].h || s.tile != cfg.tile);
     if k == 0 || bad_shape {
-        let v = SeqVerdict::Inconclusive("帧数不够 (原生至少 3 张、插帧至少 1 张) 或尺寸不一致".into());
-        rep["verdict"] = json!(v.label());
-        rep["reason"] = json!(match &v { SeqVerdict::Inconclusive(r) => r.clone(), _ => String::new() });
-        return (v, rep);
+        let why = "帧数不够 (原生至少 3 张、插帧至少 1 张) 或尺寸不一致".to_string();
+        rep["metrics"] = json!([]);
+        rep["not_computed"] = json!([why.clone()]);
+        rep["summary"] = json!(crate::iqsheet::summary(&[], &[why.clone()]));
+        return (SeqVerdict::NotComputed(why), rep);
     }
     let frames: Vec<FrameResult> = (0..k)
         .map(|i| judge_frame(&native[2 * i], &native[2 * i + 1], &native[2 * i + 2], &interp[i], cfg))
@@ -465,24 +460,24 @@ pub(crate) fn judge_sequence(native: &[Shot], interp: &[Shot], cfg: &InterpConfi
 
     let mut fails: Vec<String> = Vec::new();
     if n_static_fail > 0 {
-        fails.push(format!("{n_static_fail} 帧静止块 (HUD/文字) 不通过: 静止内容插帧只要照抄, 零容忍"));
+        fails.push(format!("{n_static_fail} 帧静止块 (HUD/文字) 在参考线外: 静止内容插帧只要照抄, 参考线是 0 帧"));
     }
     if n_fail > allowed {
-        fails.push(format!("{n_fail}/{k} 帧不通过, 超过允许的 {allowed} 帧 ({:.0}%)", cfg.max_fail_frac * 100.0));
+        fails.push(format!("{n_fail}/{k} 帧有指标在参考线外, 多于参考线 {allowed} 帧 ({:.0}%)", cfg.max_fail_frac * 100.0));
     }
     if max_run > cfg.max_consecutive_fail {
-        fails.push(format!("连续 {max_run} 帧不通过 (最多允许 {})", cfg.max_consecutive_fail));
+        fails.push(format!("连续 {max_run} 帧在参考线外 (参考线 {})", cfg.max_consecutive_fail));
     }
     if !motion.is_empty() && det_med.abs() > cfg.flicker_detail_log2 {
         fails.push(format!(
-            "插帧整体比原生{} (细节 log2 中位数 {det_med:+.3}, 上限 ±{:.2}): 隔帧一清一糊, 会闪",
+            "插帧整体比原生{} (细节 log2 中位数 {det_med:+.3}, 参考线 ±{:.2}): 隔帧一清一糊, 会闪",
             if det_med < 0.0 { "糊" } else { "锐" },
             cfg.flicker_detail_log2
         ));
     }
     if luma_med.abs() > cfg.flicker_luma {
         fails.push(format!(
-            "插帧整体比原生{} {:.2} 灰阶 (上限 {:.1}): 隔帧一亮一暗, 会闪",
+            "插帧整体比原生{} {:.2} 灰阶 (参考线 {:.1}): 隔帧一亮一暗, 会闪",
             if luma_med > 0.0 { "亮" } else { "暗" },
             luma_med.abs(),
             cfg.flicker_luma
@@ -502,27 +497,83 @@ pub(crate) fn judge_sequence(native: &[Shot], interp: &[Shot], cfg: &InterpConfi
         idx.iter().map(|i| json!({"interp": i, "truth_native": 2 * i + 1, "bucket": bucket(&frames[*i]),
             "reasons": frames[*i].fails, "detail": frames[*i].detail})).collect()
     };
-    rep["frames_fail"] = json!(n_fail);
-    rep["frames_fail_allowed"] = json!(allowed);
-    rep["frames_static_fail"] = json!(n_static_fail);
-    rep["max_consecutive_fail"] = json!(max_run);
+    rep["frames_beyond_ref"] = json!(n_fail);
+    rep["frames_beyond_ref_line"] = json!(allowed);
+    rep["frames_static_beyond_ref"] = json!(n_static_fail);
+    rep["max_consecutive_beyond_ref"] = json!(max_run);
     rep["frames_with_motion"] = json!(motion.len());
     rep["buckets"] = Value::Object(buckets);
     rep["flicker"] = json!({"detail_log2_median": r4(det_med), "luma_diff_median": r4(luma_med)});
-    rep["failed_frames"] = json!(worst);
-    rep["per_frame"] = json!(frames.iter().enumerate().map(|(i, f)| json!({"i": i, "ok": f.ok, "bucket": bucket(f), "d": f.detail})).collect::<Vec<_>>());
+    rep["worst_frames"] = json!(worst);
+    rep["per_frame"] = json!(frames.iter().enumerate().map(|(i, f)| json!({"i": i, "beyond_ref": f.fails, "bucket": bucket(f), "d": f.detail})).collect::<Vec<_>>());
+    let rows = sequence_rows(&frames, k, n_fail, n_static_fail, max_run, det_med, luma_med, allowed, cfg);
+    rep["summary"] = json!(crate::iqsheet::summary(&rows, &missing));
+    rep["beyond_ref_line"] = json!(crate::iqsheet::beyond_ref_line(&rows));
+    rep["metrics"] = json!(rows);
+    rep["not_computed"] = json!(missing);
     let v = if !fails.is_empty() {
-        SeqVerdict::Fail(fails.join("; "))
+        SeqVerdict::BeyondRef(fails.join("; "))
     } else if !missing.is_empty() {
-        SeqVerdict::Inconclusive(missing.join("; "))
+        SeqVerdict::NotComputed(missing.join("; "))
     } else {
-        SeqVerdict::Pass
+        SeqVerdict::WithinRef
     };
-    rep["verdict"] = json!(v.label());
-    if let SeqVerdict::Fail(r) | SeqVerdict::Inconclusive(r) = &v {
-        rep["reason"] = json!(r);
-    }
     (v, rep)
+}
+
+/// 序列级指标行 (数值 + 参考线, 见 `crate::iqsheet`)。逐帧的量取中位数 / 最差值。
+#[allow(clippy::too_many_arguments)]
+fn sequence_rows(
+    frames: &[FrameResult],
+    k: usize,
+    n_beyond: usize,
+    n_static_beyond: usize,
+    max_run: usize,
+    det_med: f64,
+    luma_med: f64,
+    allowed: usize,
+    cfg: &InterpConfig,
+) -> Vec<Value> {
+    use crate::iqsheet::{row, Better};
+    let pick = |path: &[&str]| -> Vec<f64> {
+        frames
+            .iter()
+            .filter_map(|f| {
+                let mut v = &f.detail;
+                for p in path {
+                    v = &v[*p];
+                }
+                v.as_f64()
+            })
+            .collect()
+    };
+    let med = |v: Vec<f64>| (!v.is_empty()).then(|| median(v));
+    let mov_psnr = pick(&["moving", "psnr_db"]);
+    let dup_psnr = pick(&["moving", "dup_psnr_db"]);
+    let gain = pick(&["moving", "gain_db"]);
+    let worst_ratio = pick(&["moving", "worst_tile_ratio"]).into_iter().reduce(f64::max);
+    let static_margin = pick(&["static", "worst_margin_db"]).into_iter().reduce(f64::min);
+    let env_c = pick(&["envelope", "cand_pct"]);
+    let env_t = pick(&["envelope", "truth_pct"]);
+    let env_excess: Vec<f64> = env_c.iter().zip(&env_t).map(|(c, t)| c - t).collect();
+    let pct = |n: usize| if k > 0 { Some(n as f64 / k as f64 * 100.0) } else { None };
+    vec![
+        row("frames_beyond_ref_pct", "有项在参考线外的帧", "%", Better::Lower, pct(n_beyond), None,
+            Some(allowed as f64 / k.max(1) as f64 * 100.0), &format!("{:.0}% 帧 (向下取整)", cfg.max_fail_frac * 100.0), &format!("{n_beyond}/{k} 帧")),
+        row("static_frames_beyond_ref", "静止块 (HUD/文字) 坏的帧", "帧", Better::Lower, Some(n_static_beyond as f64), None, Some(0.0), "0 帧", ""),
+        row("static_worst_margin_db", "静止块最差一块离原生连续帧", "dB", Better::Higher, static_margin, None, Some(0.0),
+            &format!("每块 ≥ min(原生连续帧, {:.0}) − {:.1} dB", cfg.static_cap_db, cfg.static_margin_db), "已是相对量: 负 = 比原生连续帧差"),
+        row("max_consecutive_beyond_ref", "最长连续在参考线外", "帧", Better::Lower, Some(max_run as f64), None, Some(cfg.max_consecutive_fail as f64), "", ""),
+        row("moving_psnr_db_median", "运动块 PSNR (中位数)", "dB", Better::Higher, med(mov_psnr), med(dup_psnr), Some(cfg.move_floor_db),
+            &format!("绝对下限 {:.1} dB", cfg.move_floor_db), "「原生自噪声」列放的是复制较近原生帧的 PSNR (中位数)"),
+        row("moving_gain_db_median", "运动块比复制原生帧好 (中位数)", "dB", Better::Higher, med(gain), None, Some(cfg.move_gain_db),
+            &format!("运动明显时 ≥ {:.1} dB", cfg.move_gain_db), ""),
+        row("worst_tile_ratio_max", "最差运动块误差 / 复制原生帧 (最大)", "倍", Better::Lower, worst_ratio, None, Some(cfg.worst_tile_ratio), "", "运动边缘光晕、遮挡处撕裂"),
+        row("envelope_excess_pct_median", "包络外像素比真值多 (中位数)", "百分点", Better::Lower, med(env_excess), med(env_t), Some(cfg.envelope_margin_pct),
+            "", "「原生自噪声」列放的是真值自己落在包络外的比例"),
+        row("flicker_detail_log2", "细节 log2 中位数 (闪烁)", "", Better::NearZero, Some(det_med), None, Some(cfg.flicker_detail_log2), "", "负 = 整体偏糊"),
+        row("flicker_luma", "平均亮度差中位数 (闪烁)", "灰阶", Better::NearZero, Some(luma_med), None, Some(cfg.flicker_luma), "", "正 = 整体偏亮"),
+    ]
 }
 
 /// 两张亮度图的平均 = 「前后帧平均」基线。
@@ -552,18 +603,21 @@ fn list_frames(spec: &str) -> Result<Vec<String>, String> {
 }
 
 /// `phonefarm interp-judge --native <目录|a,b,c…> (--interp <目录|列表> | --interp-full <目录>) [--baselines] …`
-/// 退出码 0 = 通过, 1 = 不通过, 3 = 判不了, 2 = 用法错。
+/// 输出指标 + 参考线 + 对照表 (候选与两个基线并排) + 摘要, 不判通过。退出码 0 = 算完, 2 = 用法/输入错。
 pub fn run_interp_judge(args: &[String]) -> i32 {
     let usage = "用法: phonefarm interp-judge --native <目录|a.png,b.png,…> \
 (--interp <目录|列表> | --interp-full <目录>) [--baselines] [--exclude x0,y0,x1,y1]… \
-[--max-frames N] [--require-fast N] [--per-frame]\n\
+[--max-frames N] [--require-fast N] [--per-frame] [--sheet out.md]\n\
   --native       原生按 2 倍帧率的连续帧, 按名字排序; 偶数帧 = 插帧输入, 奇数帧 = 真值\n\
   --interp       只有插出来的帧, 第 i 张对应 native[2i+1]\n\
   --interp-full  插帧器输出的完整 2 倍帧率序列, 取其中奇数帧\n\
-  --baselines    另外判「复制前帧」「前后平均」两个基线 (标定用, 两个都应不通过)";
+  --baselines    另外算「复制前帧」「前后平均」两个基线, 在对照表里与候选并排\n\
+  --sheet        对照表另存为 Markdown\n\
+  输出只列指标、参考线和离参考线多远, 不判通过";
     let mut cfg = InterpConfig::default();
     let (mut native, mut interp, mut full): (Option<String>, Option<String>, Option<String>) = (None, None, None);
     let (mut baselines, mut per_frame, mut max_frames) = (false, false, usize::MAX);
+    let mut sheet_out: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_default();
@@ -573,6 +627,7 @@ pub fn run_interp_judge(args: &[String]) -> i32 {
             "--interp-full" => full = Some(val()),
             "--baselines" => baselines = true,
             "--per-frame" => per_frame = true,
+            "--sheet" => sheet_out = Some(val()),
             "--max-frames" => max_frames = val().parse().unwrap_or(usize::MAX),
             "--require-fast" => cfg.min_fast_frames = val().parse().unwrap_or(0),
             "--min-motion" => cfg.min_motion_frames = val().parse().unwrap_or(cfg.min_motion_frames),
@@ -636,13 +691,13 @@ pub fn run_interp_judge(args: &[String]) -> i32 {
     };
     let mut out = json!({"native": native, "native_frames": nat.len()});
     let mut code = 2;
+    let mut cols: Vec<(String, Vec<Value>)> = Vec::new();
+    let rows_of = |r: &Value| r["metrics"].as_array().cloned().unwrap_or_default();
     if !ints.is_empty() {
-        let (v, rep) = judge_sequence(&nat, &ints, &cfg);
-        code = match v {
-            SeqVerdict::Pass => 0,
-            SeqVerdict::Fail(_) => 1,
-            SeqVerdict::Inconclusive(_) => 3,
-        };
+        let (_, rep) = judge_sequence(&nat, &ints, &cfg);
+        code = 0;
+        cols.push(("候选".into(), rows_of(&rep)));
+        out["summary"] = rep["summary"].clone();
         out["candidate"] = strip(rep);
     }
     if baselines && nat.len() >= 3 {
@@ -651,10 +706,23 @@ pub fn run_interp_judge(args: &[String]) -> i32 {
             .map(|i| Shot::from_luma(nat[2 * i].w, nat[2 * i].h, nat[2 * i].y.clone(), cfg.tile).expect("同尺寸"))
             .collect();
         let bl: Vec<Shot> = (0..k).map(|i| blend(&nat[2 * i], &nat[2 * i + 2], cfg.tile)).collect();
-        out["baseline_duplicate_prev"] = strip(judge_sequence(&nat, &dup, &cfg).1);
-        out["baseline_linear_blend"] = strip(judge_sequence(&nat, &bl, &cfg).1);
+        let d = judge_sequence(&nat, &dup, &cfg).1;
+        let b = judge_sequence(&nat, &bl, &cfg).1;
+        cols.push(("基线: 复制前帧".into(), rows_of(&d)));
+        cols.push(("基线: 前后平均".into(), rows_of(&b)));
+        out["baseline_duplicate_prev"] = strip(d);
+        out["baseline_linear_blend"] = strip(b);
         if ints.is_empty() {
             code = 0;
+        }
+    }
+    if !cols.is_empty() {
+        out["sheet"] = json!(crate::iqsheet::sheet(&cols));
+        if let Some(p) = &sheet_out {
+            if let Err(e) = std::fs::write(p, out["sheet"].as_str().unwrap_or("")) {
+                eprintln!("写不了对照表 {p}: {e}");
+                return 2;
+            }
         }
     }
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
@@ -743,8 +811,8 @@ mod tests {
     fn perfect_interpolation_passes() {
         let nat = native_seq(21, 3.0, Some(5.0));
         let (v, rep) = judge(&nat, perfect(&nat));
-        assert_eq!(v, SeqVerdict::Pass, "{rep}");
-        assert_eq!(rep["frames_fail"], json!(0));
+        assert_eq!(v, SeqVerdict::WithinRef, "{rep}");
+        assert_eq!(rep["frames_beyond_ref"], json!(0));
     }
 
     /// 完美插帧加 ±1 灰阶的随机误差 (int8 量化、取整那一级): 仍要通过, 判据不能比原生自噪声还苛刻。
@@ -765,7 +833,7 @@ mod tests {
             })
             .collect();
         let (v, rep) = judge(&nat, noisy);
-        assert_eq!(v, SeqVerdict::Pass, "{rep}");
+        assert_eq!(v, SeqVerdict::WithinRef, "{rep}");
     }
 
     #[test]
@@ -774,10 +842,10 @@ mod tests {
         let dup = (0..10).map(|i| nat[2 * i].clone()).collect();
         let (v, rep) = judge(&nat, dup);
         match v {
-            SeqVerdict::Fail(r) => assert!(r.contains("帧不通过"), "{r}"),
-            _ => panic!("复制前帧必须不通过: {rep}"),
+            SeqVerdict::BeyondRef(r) => assert!(r.contains("帧有指标在参考线外"), "{r}"),
+            _ => panic!("复制前帧必须在参考线外: {rep}"),
         }
-        assert!(rep["failed_frames"][0]["reasons"].to_string().contains("等于没插"), "{rep}");
+        assert!(rep["worst_frames"][0]["reasons"].to_string().contains("等于没插"), "{rep}");
     }
 
     #[test]
@@ -787,19 +855,19 @@ mod tests {
             .map(|i| nat[2 * i].iter().zip(&nat[2 * i + 2]).map(|(a, b)| ((a + b) / 2.0).round()).collect())
             .collect();
         let (v, rep) = judge(&nat, bl);
-        assert!(matches!(v, SeqVerdict::Fail(_)), "{rep}");
+        assert!(matches!(v, SeqVerdict::BeyondRef(_)), "{rep}");
         // HUD 不动, 前后平均在 HUD 上是对的: 不能误报成 HUD 问题
-        assert_eq!(rep["frames_static_fail"], json!(0), "{rep}");
+        assert_eq!(rep["frames_static_beyond_ref"], json!(0), "{rep}");
     }
 
-    /// 没有运动时前后平均等于真值: 判据不能冤枉它, 但也不能拿它当插帧好的证据 (判不了)。
+    /// 没有运动时前后平均等于真值: 判据不能冤枉它, 但也不能拿它当插帧好的证据 (算不了)。
     #[test]
     fn no_motion_is_inconclusive() {
         let nat = native_seq(21, 0.0, None);
         let bl = (0..10).map(|i| nat[2 * i].clone()).collect();
         let (v, rep) = judge(&nat, bl);
-        assert!(matches!(v, SeqVerdict::Inconclusive(_)), "{rep}");
-        assert_eq!(rep["frames_fail"], json!(0));
+        assert!(matches!(v, SeqVerdict::NotComputed(_)), "{rep}");
+        assert_eq!(rep["frames_beyond_ref"], json!(0));
     }
 
     /// 世界插对了, 但 HUD 被当成跟镜头一起动: HUD 区域是「HUD 和移了半步的 HUD」叠在一起 (重影)。
@@ -821,10 +889,10 @@ mod tests {
             .collect();
         let (v, rep) = judge(&nat, ghost);
         match v {
-            SeqVerdict::Fail(r) => assert!(r.contains("静止块"), "{r}"),
-            _ => panic!("HUD 重影必须不通过: {rep}"),
+            SeqVerdict::BeyondRef(r) => assert!(r.contains("静止块"), "{r}"),
+            _ => panic!("HUD 重影必须在参考线外: {rep}"),
         }
-        assert!(rep["frames_static_fail"].as_u64().unwrap() == 10, "{rep}");
+        assert!(rep["frames_static_beyond_ref"].as_u64().unwrap() == 10, "{rep}");
     }
 
     /// 方块边缘 3 像素一圈取错 (取前帧): 运动边缘光晕。全帧平均看着还行, 最差块要抓到。
@@ -849,8 +917,8 @@ mod tests {
             })
             .collect();
         let (v, rep) = judge(&nat, halo);
-        assert!(matches!(v, SeqVerdict::Fail(_)), "{rep}");
-        assert!(rep["failed_frames"].to_string().contains("光晕"), "{rep}");
+        assert!(matches!(v, SeqVerdict::BeyondRef(_)), "{rep}");
+        assert!(rep["worst_frames"].to_string().contains("光晕"), "{rep}");
     }
 
     /// 偶发一帧坏: 1% 以内可以; 连续两帧坏不行。
@@ -862,13 +930,13 @@ mod tests {
         one_bad[50] = nat[100].clone();
         one_bad[120] = nat[240].clone();
         let (v, rep) = judge(&nat, one_bad);
-        assert_eq!(v, SeqVerdict::Pass, "200 帧坏 2 帧 (1%) 且不相连应通过: {rep}");
+        assert_eq!(v, SeqVerdict::WithinRef, "200 帧坏 2 帧 (1%) 且不相连应在参考线内: {rep}");
         let mut two_bad = perfect(&nat);
         two_bad[50] = nat[100].clone();
         two_bad[51] = nat[102].clone();
         let (v, rep) = judge(&nat, two_bad);
         match v {
-            SeqVerdict::Fail(r) => assert!(r.contains("连续 2 帧"), "{r}"),
+            SeqVerdict::BeyondRef(r) => assert!(r.contains("连续 2 帧"), "{r}"),
             _ => panic!("{rep}"),
         }
         assert_eq!(k, (nat.len() - 1) / 2);
@@ -894,7 +962,7 @@ mod tests {
             .collect();
         let (v, rep) = judge(&nat, bright);
         match v {
-            SeqVerdict::Fail(r) => assert!(r.contains("会闪"), "{r}"),
+            SeqVerdict::BeyondRef(r) => assert!(r.contains("会闪"), "{r}"),
             _ => panic!("{rep}"),
         }
     }

@@ -239,7 +239,7 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                     }
                     crate::eval::ImageRuling::Fail(reason) => {
                         image["gate"] = gate.gate("failed");
-                        image_fail = Some(reason);
+                        image_fail = Some(format!("{} (全帧 PSNR, image_policy=gate 不量性能): {reason}", crate::scorecard::IMAGE_GATE_PREFIX));
                     }
                 }
             }
@@ -257,16 +257,16 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     } else {
         unavailable(&mut report["metrics"], "psnr_db", "workload.launch 没给 static_extras, 无静态画面可比");
     }
-    // 画质判据: 不通过 = 画面出错 (与 PSNR 门槛同等处理); 判不了 = 照常量性能, 但不许判 PASS (增益要求画面确认不变)
+    // 画质指标: gate 下有指标在参考线外 = 不量性能 (与全帧 PSNR 同等处理); 算不了 = 照常量性能, 但不出 PASS
     let mut image_unverified: Option<String> = None;
     match &iq_verdict {
-        Some(crate::iqjudge::IqVerdict::Fail(r)) if !measure_only && policy.is_report() => {
+        Some(crate::iqjudge::IqVerdict::BeyondRef(r)) if !measure_only && policy.is_report() => {
             gap_open.push(format!("画质判据: {r}"));
         }
-        Some(crate::iqjudge::IqVerdict::Fail(r)) if !measure_only && image_fail.is_none() => {
-            image_fail = Some(format!("画质判据不通过: {r}"));
+        Some(crate::iqjudge::IqVerdict::BeyondRef(r)) if !measure_only && image_fail.is_none() => {
+            image_fail = Some(format!("{} (画质指标, image_policy=gate 不量性能): {r}", crate::scorecard::IMAGE_GATE_PREFIX));
         }
-        Some(crate::iqjudge::IqVerdict::Inconclusive(r)) => image_unverified = Some(r.clone()),
+        Some(crate::iqjudge::IqVerdict::NotComputed(r)) => image_unverified = Some(r.clone()),
         None if image_fail.is_none() && launch.static_extras.is_some() => {
             image_unverified = Some("画质判据没跑成".into())
         }
@@ -288,8 +288,9 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     let gap_json = crate::scorecard::quality_gap_json(
         policy,
         &gap_state,
-        "iq_judge+psnr_gate",
-        json!({"checks": image["iq"]["checks"], "iq": image["iq"], "psnr_db_used": image["psnr_db_used"], "noise_floor_db": image["noise_floor_db"]}),
+        "iq_judge+psnr",
+        crate::scorecard::image_rows(&image["iq"], image["psnr_db_used"].as_f64(), image["noise_floor_db"].as_f64(), crate::eval::IMAGE_GATE_MARGIN_DB),
+        json!({"iq": image["iq"], "psnr_db_used": image["psnr_db_used"], "noise_floor_db": image["noise_floor_db"]}),
     );
     report["image_check"] = image;
     if let Some(e) = image_fail {
@@ -321,6 +322,8 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
     let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(1).max(1) as u32;
     let seconds = req["workload"]["seconds"].as_i64().unwrap_or(30).max(1) as u64;
     let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
+    let spf = crate::eval::declared_spf(req);
+    let fps_cap_declared = crate::eval::declared_fps_cap(req);
     let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
     let empty = BTreeMap::new();
     let (mut knob_runs, mut ctrl_runs, mut cool_log, mut checks) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -349,7 +352,7 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
                 break 'pairs;
             }
             let arm_launch = crate::eval::LaunchSpec { extras, marker: marker.clone(), static_extras: None };
-            let res = run_one_launch(serial, &format!("wb_{tag}"), &dir, seconds, &pkg, req["workload"]["render_comm"].as_str(), &arm_launch, false);
+            let res = run_one_launch(serial, &format!("wb_{tag}"), &dir, seconds, &pkg, req["workload"]["render_comm"].as_str(), &arm_launch, false, None, spf);
             // 采完等 harness 走完路线落 json, 再核对旋钮
             let out = wait_out_json(serial, &pkg);
             let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
@@ -402,6 +405,9 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         "arm_order": crate::curtail::order_note(order_seed, rounds as usize),
         "charge_settle": charge_settle,
         "env_consistency": consistency_note(&dropped, true),
+        "marker_to_capture": crate::eval::marker_delay_note(&knob_runs, &ctrl_runs),
+        "spf_declared": spf,
+        "fps_cap_declared": fps_cap_declared,
         "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
     });
     report["evidence_dir"] = json!(evidence.display().to_string());
@@ -418,9 +424,11 @@ pub(crate) fn whitebox_eval(req: &Value, serial: Option<&str>, evidence: &Path) 
         ));
         return done(&report);
     }
-    let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
+    let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds, fps_cap_declared);
     report["verdict"] = verdict;
     append_dropped_reason(&mut report, &dropped);
+    let md = report["conditions_observed"]["marker_to_capture"].clone();
+    crate::eval::append_marker_delay_reason(&mut report, &md);
     let mut m = report["metrics"].take();
     let psnr = m["psnr_db"].clone();
     let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
