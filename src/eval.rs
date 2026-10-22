@@ -2290,9 +2290,15 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         live_check = Some(v);
     }
     // 实验资格: 不挂层的冷机 + 负载自检 + 3 轮基线, 资格不过不上挂层候选实验
+    let before = gl.off(Some(&pkg));
+    let before_record = crate::graylayer::record_deactivation(evidence, "baseline-before", &before)?;
+    if let Err(e) = before {
+        report["conditions_observed"] = json!({"layer_deactivation":before_record,"restored":null});
+        report["verdict"]["reason"] = json!(format!("前置摘层失败，停止后续操作: {e}"));
+        return Ok(serde_json::to_string_pretty(&report).unwrap());
+    }
     push_tools(serial)?;
     let baseline_before=snapshot(serial);
-    let _ = gl.off();
     let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false,"reason"=>"conditions.cool_c 未知"}};
     facts.cold_ok=cold.get("ok").and_then(|v|v.as_bool());
     if facts.cold_ok==Some(true) {
@@ -2316,6 +2322,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let mut knob_runs: Vec<Value> = Vec::new();
     let mut ctrl_runs: Vec<Value> = Vec::new();
     let mut abort_reason: Option<String> = None;
+    let mut failed_deactivation = None;
     // 画面比对: 每一轮两臂各在负载开始前、同一位置截一张, 改写臂对对照臂算 PSNR。
     // 对照臂相邻两轮之间也算一个, 当作"什么都没改时画面自己会差多少"的参照, 一起落进报告。
     let mut psnr_knob_vs_ctrl: Vec<f64> = Vec::new();
@@ -2329,7 +2336,13 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         let mut shots: std::collections::BTreeMap<&str, (u32, u32, Vec<u8>)> = Default::default();
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 层是 CreateInstance 时读的, 切属性必须重启目标 —— force-stop 是两臂切换的一部分
-            let _ = gl.off();
+            let before = gl.off(Some(&pkg));
+            let before_record = crate::graylayer::record_deactivation(evidence, &format!("{arm}{i}-before"), &before)?;
+            if let Err(e) = &before {
+                abort_reason = Some(format!("{arm}{i} 前置摘层失败: {e}"));
+                failed_deactivation = Some((before, before_record));
+                break 'rounds;
+            }
             let fan = arm_fan_off(serial);
             // 游戏关着的时候等冷最快; 等到请求的 cool_c 或超时
             let mut c = arm_wait_cool(serial, cool_c, &format!("{arm}{i}"), arm_cool_timeout(&cool_log));
@@ -2460,8 +2473,14 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         prev_ctrl = shots.remove("ctrl");
     }
     // 还原
-    let restore_log = gl.off();
-    std::fs::write(evidence.join("restore.log"), &restore_log).ok();
+    let (retirement, retirement_record) = match failed_deactivation {
+        Some(result) => result,
+        None => {
+            let result = gl.off(Some(&pkg));
+            let record = crate::graylayer::record_deactivation(evidence, "after", &result)?;
+            (result, record)
+        }
+    };
 
     // 画面判定: 拿同设置重拍的噪声底比, 而不是拿一个固定阈值硬卡。
     let noise_floor = noise_floor_db(
@@ -2484,7 +2503,7 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         .filter_map(|r| r["layer_hits"].as_u64())
         .max()
         .unwrap_or(0);
-    let restore_clean = gl_off_clean(&restore_log);
+    let layer_deactivated = retirement.is_ok();
     let min_of = |v: &[f64]| v.iter().cloned().reduce(f64::min);
     let (cool_reached, cool_timeout) = cool_summary(&cool_log);
     report["conditions_observed"] = json!({
@@ -2494,7 +2513,10 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         "cool_per_arm": cool_log,
         "hits": hits,
         "apply_ok": hits > 0,
-        "restored": restore_clean,
+        "restored": null,
+        "layer_deactivated": layer_deactivated,
+        "layer_deactivation": retirement_record,
+        "recovery_note": "Layer deactivation does not verify sampler, input, ftrace or charging recovery.",
         "image_check": match &live_check {
             Some(v) => json!({"method": "storeop_check_live", "result": v}),
             None => json!({
@@ -2525,14 +2547,18 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         report["verdict"]["reason"] = json!(reason);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
-    if !restore_clean {
-        report["verdict"]["reason"] = json!("摘层没摘干净 (见 restore.log), 后续数据不可信");
+    if !layer_deactivated {
+        report["verdict"]["reason"] = json!("指定目标层停用失败 (见 layer_deactivation 原件)，完整恢复仍未核验");
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
     facts.stage=Stage::Conclusion;facts.control=ctrl_runs.clone();facts.candidate=knob_runs.clone();
-    facts.device.control_verified=Some(hits>0);facts.restored=Some(restore_clean);
+    facts.device.control_verified=Some(hits>0);facts.restored=None;
     // Missing baseline/cold/workload/quality evidence remains unknown, never a complete optimizer.
-    let _=record_qualification(&mut report,evidence,&facts)?;
+    let qualified=record_qualification(&mut report,evidence,&facts)?;
+    if !qualified.conclusion_allowed {
+        report["verdict"]["reason"]=json!("完整恢复等结论资格尚未核验；层停用证据和采样原件保留，禁止 PASS/KEEP");
+        return Ok(serde_json::to_string_pretty(&report).unwrap());
+    }
     // require_hit 缺省为真: 改写一次都没命中 = 拿 A 去和 A 比, 整轮作废
     if require_hit && hits == 0 {
         report["verdict"]["reason"] =
@@ -2559,11 +2585,6 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     report["metrics"] = m;
     report["status"] = json!(if keep { "PASS" } else { "REJECT" });
     Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
-}
-
-/// 摘层回包是否干净 (无 KNOB/RESTORE 失败标记, 无非零退出)。
-fn gl_off_clean(restore_log: &str) -> bool {
-    !restore_log.contains("#adb_exit=1") && !restore_log.contains("警告")
 }
 
 /// 层自报的改写命中数 (契约 verdict 口径: "改写被绑定的次数")。

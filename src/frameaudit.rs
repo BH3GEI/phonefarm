@@ -1028,8 +1028,9 @@ fn screencap(serial: &str, dst: &Path) {
 fn capture(serial: &str, out: &Path, so: Option<String>, ts: bool, captures: u32, gap: u64, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
     let gl = GrayLayer::new(serial).with_so(so).with_launch_extras(extras);
-    let _ = gl.off();
-    let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    let before = gl.off(Some(pkg));
+    crate::graylayer::record_deactivation(out, "before", &before)?;
+    before.map_err(|e| e.to_string())?;
     let mode = if ts { "frameaudit-ts" } else { "frameaudit" };
     let res = (|| -> Result<Vec<Value>, String> {
         gl.mount_mode(mode, pkg, false)?;
@@ -1060,18 +1061,22 @@ fn capture(serial: &str, out: &Path, so: Option<String>, ts: bool, captures: u32
         Ok(got)
     })();
     // 收尾无论成败: 摘层 + 关游戏 (进程里的层不随 .so 删除而卸载)
-    let off = gl.off();
-    let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
-    eprintln!("{off}");
     let ver = adb(serial, &["shell", &format!("dumpsys package {pkg} | grep -m1 versionName")], 30);
+    let off = gl.off(Some(pkg));
+    let off_record = crate::graylayer::record_deactivation(out, "after", &off)?;
     let meta = json!({
         "serial": serial, "pkg": pkg, "mode": mode, "captures": captures, "gap_s": gap,
         "pkg_version": GrayLayer::adb_stdout(&ver).trim(),
         "result": match &res { Ok(v) => json!(v), Err(e) => json!({"error": e}) },
-        "restore": off,
+        "restore": off_record, "job_recovery_complete": false, "game_state_restored": false,
     });
-    let _ = std::fs::write(out.join("capture_meta.json"), serde_json::to_string_pretty(&meta).unwrap_or_default());
-    res.map(|_| ())
+    std::fs::write(out.join("capture_meta.json"), serde_json::to_vec_pretty(&meta).unwrap()).map_err(|e| e.to_string())?;
+    match (res, off) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(e), Ok(_)) => Err(e),
+        (Ok(_), Err(e)) => Err(format!("layer deactivation failed: {e}")),
+        (Err(e), Err(off)) => Err(format!("{e}; layer deactivation failed: {off}")),
+    }
 }
 
 // ── storeop 开关的画面验证 ──
@@ -1136,8 +1141,9 @@ fn ui_rects(w: usize, h: usize) -> Vec<(usize, usize, usize, usize)> {
 pub(crate) fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: &str, rounds: u32, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<Value, String> {
     std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
     let gl = GrayLayer::new(serial).with_so(so).with_storeop(Some(rule.to_string()), true).with_launch_extras(extras);
-    let _ = gl.off();
-    let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    let before = gl.off(Some(pkg));
+    crate::graylayer::record_deactivation(out, "before", &before)?;
+    before.map_err(|e| e.to_string())?;
     let set_on = |on: bool| {
         su(serial, &format!("setprop {} {}", crate::graylayer::STOREOP_ON_PROP, if on { 1 } else { 0 }), 15);
         // 层每 30 帧读一次开关; 等 3 秒 (≥ 90 帧) 足够生效并让画面稳定
@@ -1206,14 +1212,22 @@ pub(crate) fn storeop_check(serial: &str, out: &Path, so: Option<String>, rule: 
             "diffs": rows,
         }))
     })();
-    let off = gl.off();
-    let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    let off = gl.off(Some(pkg));
+    let off_record = crate::graylayer::record_deactivation(out, "after", &off)?;
     let mut v = match res {
         Ok(v) => v,
         Err(e) => json!({"error": e}),
     };
-    v["restore"] = json!(off);
-    let _ = std::fs::write(out.join("storeop_check.json"), serde_json::to_string_pretty(&v).unwrap_or_default());
+    v["restore"] = off_record;
+    v["job_recovery_complete"] = json!(false);
+    v["game_state_restored"] = json!(false);
+    if let Err(e) = off {
+        v["error"] = json!(match v["error"].as_str() {
+            Some(prior) => format!("{prior}; layer deactivation failed: {e}"),
+            None => format!("layer deactivation failed: {e}"),
+        });
+    }
+    std::fs::write(out.join("storeop_check.json"), serde_json::to_vec_pretty(&v).unwrap()).map_err(|e| e.to_string())?;
     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
     if v.get("error").is_some() { Err(v["error"].to_string()) } else { Ok(v) }
 }

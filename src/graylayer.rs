@@ -16,12 +16,16 @@
 //! 收窄暴露窗口; 无论怎么用, 收尾都要跑 [`off`]。
 
 use crate::eval::{adb, adb_ok, adb_path, resolve_path};
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::path::Path;
 
 const LAYER_NAME: &str = "VK_LAYER_refknobs_readonly";
 const LOADOP_PROP: &str = "debug.knobs.loadop"; // 1 = 层把 loadOp LOAD 改写成 DONT_CARE
 const DUMP_PROP: &str = "debug.knobs.passdump"; // 1 = 层导出 render pass 形状表
 const CP_PROP: &str = "debug.knobs.copyprobe"; // 1 = 1:1 拷贝探针 (隐含 passdump 追踪)
 const UPOP_PROP: &str = "debug.knobs.upop"; // 1 = 真超分算子 (gen1_loc3)
+const NPUPROBE_PROP: &str = "debug.knobs.npuprobe";
 /// Android 非只读属性值上限 91 字节 (PROP_VALUE_MAX 92 含结尾 0)。超了 setprop 会失败。
 pub(crate) const PROP_VALUE_MAX: usize = 91;
 pub(crate) const FA_PROP: &str = "debug.knobs.frameaudit"; // 1 = 一帧步骤清单 (只读, 隐含 passdump)
@@ -33,7 +37,83 @@ pub(crate) const STOREOP_ON_PROP: &str = "debug.knobs.storeop_on"; // 现场切�
 const SO: &str = "libVkLayer_refknobs.so";
 const STATE: &str = "/data/local/tmp/knobs_layer_state"; // "把 .so 推进了哪个包"
 
-const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off} [--serial S] [--keep-prop] [--so 本机.so]";
+const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off [pkg] [--json]} [--serial S] [--keep-prop] [--so 本机.so]";
+
+const DEACTIVATION_SCOPE: &str = "known_target_layer_deactivated";
+
+#[derive(Debug, Serialize)]
+pub struct DeactivationCommand {
+    pub command: String,
+    /// Unmodified transport output, including its exit marker.
+    pub output: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeactivationEvidence {
+    pub scope: &'static str,
+    pub serial: String,
+    pub package: String,
+    pub recorded_installation: Option<String>,
+    pub recorded_installation_absent: Option<bool>,
+    pub state_absent: bool,
+    pub processes_absent: bool,
+    pub properties_disabled: bool,
+    pub original_properties_restored: bool,
+    pub unregistered_installations_verified: bool,
+    pub game_state_restored: bool,
+    pub job_recovery_complete: bool,
+    pub commands: Vec<DeactivationCommand>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeactivationFailure {
+    pub scope: &'static str,
+    pub serial: String,
+    pub package: Option<String>,
+    pub error: String,
+    pub game_state_restored: bool,
+    pub job_recovery_complete: bool,
+    pub commands: Vec<DeactivationCommand>,
+}
+
+impl std::fmt::Display for DeactivationEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: 已核验目标进程停止及灰层属性停用；{}。范围仅为指定目标摘层，不代表游戏状态或整个任务恢复。",
+            self.package, if self.recorded_installation_absent == Some(true) {
+                "登记的安装文件及 state 已缺席"
+            } else { "没有安装登记，未验证未登记的安装文件" })
+    }
+}
+impl std::fmt::Display for DeactivationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "目标灰层停用未获核验: {}", self.error)
+    }
+}
+
+pub(crate) fn deactivation_json(result: &Result<DeactivationEvidence, DeactivationFailure>) -> Value {
+    match result {
+        Ok(evidence) => json!({"schema":"phonefarm/gray-layer-deactivation@1", "status":"verified", "evidence":evidence}),
+        Err(error) => json!({"schema":"phonefarm/gray-layer-deactivation@1", "status":"failed", "error":error}),
+    }
+}
+
+pub(crate) fn record_deactivation(
+    dir: &Path,
+    phase: &str,
+    result: &Result<DeactivationEvidence, DeactivationFailure>,
+) -> Result<Value, String> {
+    if phase.is_empty() || !phase.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
+        return Err("invalid deactivation evidence phase".into());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.canonicalize().map_err(|e| e.to_string())?.join(format!(
+        "deactivation-{phase}-{}-{}.json", std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().ok_or("evidence timestamp unavailable")?));
+    let mut value = deactivation_json(result);
+    value["evidence_path"] = json!(path);
+    crate::confirmation_transport::new_file(&path, &serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?)?;
+    Ok(value)
+}
 
 /// 「去掉多余写回」的属性串: 每项 (pass 特征码前缀, 附件下标) → "<sig>:<i>,…"。
 ///
@@ -375,74 +455,141 @@ impl GrayLayer {
         l.join("\n")
     }
 
-    /// 摘层并清理: 清属性 → 按 state 精确删 .so 与 marker → 兜底按文件名全盘扫残留
-    /// (state 只记得最后一次挂在哪, 手动推过/异常退出留下的副本它不知道; .so 文件名
-    /// 是我们独有的, 按名字清不会误伤) → 清掉立项时那套本来就不生效的 settings。
-    pub fn off(&self) -> String {
-        self.ashell(
-            &format!(
-                "su -c 'setprop debug.vulkan.layers \"\"; setprop {LOADOP_PROP} 0; setprop {DUMP_PROP} 0; setprop {CP_PROP} 0; setprop {UPOP_PROP} 0; setprop {FA_PROP} 0; setprop {FA_TS_PROP} 0; setprop {FA_GO_PROP} 0; setprop {STOREOP_PROP} 0; setprop {STOREOP_LIVE_PROP} 0; setprop {STOREOP_ON_PROP} 0'"
-            ),
-            15,
-        );
-        let st = Self::adb_stdout(
-            &self.ashell(&format!("su -c 'cat {STATE} 2>/dev/null'"), 15),
-        )
-        .trim()
-        .to_string();
-        if !st.is_empty() {
-            let (pkg, dir) = st.split_once('|').unwrap_or(("", ""));
-            self.ashell(
-                &format!(
-                    "su -c 'rm -f /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json /data/data/{pkg}/knobs_layer_out.json /data/local/tmp/knobs_layer_out.{pkg}.json /storage/emulated/0/Android/data/{pkg}/files/knobs_frameaudit.json /data/data/{pkg}/knobs_frameaudit.json /data/local/tmp/knobs_frameaudit.{pkg}.json'"
-                ),
-                15,
-            );
-            self.ashell(&format!("su -c 'rm -f \"{dir}/{SO}\"'"), 15);
-            if adb_ok(&self.ashell(&format!("su -c 'test -e \"{dir}/{SO}\"'"), 15)) {
-                println!("警告: {dir}/{SO} 没删掉");
-            } else {
-                println!("已删除 {dir}/{SO}");
+    /// Stop only the validated target and deactivate our properties. This is
+    /// deliberately narrower than restoring a game or completing a job lease.
+    pub fn off(&self, expected_pkg: Option<&str>) -> Result<DeactivationEvidence, DeactivationFailure> {
+        deactivate(&self.serial, expected_pkg, |command| self.ashell(command, 30))
+    }
+
+}
+
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn root_command(command: &str) -> String {
+    format!("su -c {}", shell_quote(&format!("{command} 2>&1")))
+}
+
+fn valid_package(package: &str) -> bool {
+    !package.is_empty() && package.split('.').all(|part| {
+        !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            && part.as_bytes()[0].is_ascii_alphabetic()
+    })
+}
+
+fn valid_install_dir(dir: &str) -> bool {
+    dir.starts_with('/') && dir[1..].split('/').all(|part| {
+        !part.is_empty() && part != "." && part != ".."
+            && !part.chars().any(|c| c.is_control())
+    })
+}
+
+fn parse_layer_state(text: &str) -> Result<(String, String), String> {
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    let (package, dir) = line.split_once('|').ok_or("invalid layer state: expected package|directory")?;
+    if !valid_package(package) || !valid_install_dir(dir) || dir.contains('|') || line.contains('\n') {
+        return Err("invalid layer state package/directory; preserved".into());
+    }
+    Ok((package.into(), dir.into()))
+}
+
+/// The injected shell keeps the same bounded transport as the existing layer
+/// calls; one command journal records both preflight and each checked mutation.
+fn deactivate(
+    serial: &str,
+    expected_pkg: Option<&str>,
+    mut shell: impl FnMut(&str) -> String,
+) -> Result<DeactivationEvidence, DeactivationFailure> {
+    let mut commands = Vec::new();
+    let mut package = expected_pkg.map(str::to_owned);
+    let result: Result<Option<String>, String> = (|| {
+        if expected_pkg.is_some_and(|p| !valid_package(p)) {
+            return Err("invalid explicit target package".into());
+        }
+        let mut run = |command: String| -> Result<String, String> {
+            let output = shell(&command);
+            let success = adb_ok(&output);
+            let body = GrayLayer::adb_stdout(&output).to_owned();
+            commands.push(DeactivationCommand { command: command.clone(), output });
+            if success { Ok(body) } else { Err(format!("command failed or outcome unknown: {command}")) }
+        };
+        // Missing state must be proved by a successful parent listing. A failed
+        // cat/test cannot distinguish absence from transport or permission loss.
+        let listing = run(root_command("ls -1A -- /data/local/tmp"))?;
+        let state = if listing.lines().any(|name| name == "knobs_layer_state") {
+            Some(parse_layer_state(&run(root_command(&format!("cat {}", shell_quote(STATE))))?)?)
+        } else { None };
+        if let Some((recorded_package, _)) = &state {
+            if expected_pkg.is_some_and(|p| p != recorded_package) {
+                return Err("explicit target differs from layer state; no cleanup performed".into());
+            }
+            package = Some(recorded_package.clone());
+        }
+        let target = package.as_deref().ok_or("no layer state or explicit target; cannot verify a target process stopped")?;
+        let layer = run("getprop debug.vulkan.layers 2>&1".into())?;
+        if !matches!(layer.trim(), "" | LAYER_NAME) {
+            return Err("debug.vulkan.layers contains a foreign layer; no cleanup performed".into());
+        }
+        let installation = if let Some((_, dir)) = &state {
+            let dump = run(format!("dumpsys package {} 2>&1", shell_quote(target)))?;
+            let native: Vec<_> = dump.lines().filter_map(|line| {
+                line.trim().strip_prefix("legacyNativeLibraryDir=")
+            }).collect();
+            if native.len() != 1 || !valid_install_dir(native[0]) || format!("{}/arm64", native[0]) != *dir {
+                return Err("recorded installation differs from the current target native library directory; preserved".into());
+            }
+            run(root_command(&format!("ls -1A -- {}", shell_quote(dir))))?;
+            Some(format!("{dir}/{SO}"))
+        } else { None };
+
+        // All target/path/global-layer checks precede the first device write.
+        run(format!("am force-stop {} 2>&1", shell_quote(target)))?;
+        let processes = run(root_command("ps -A -o NAME"))?;
+        let mut names = processes.lines().map(str::trim).filter(|line| !line.is_empty());
+        if names.next() != Some("NAME") {
+            return Err("unrecognized process-name readback".into());
+        }
+        if names.any(|name| name == target || name.starts_with(&format!("{target}:"))) {
+            return Err("target process remains after force-stop".into());
+        }
+        for (property, value) in std::iter::once(("debug.vulkan.layers", "")).chain(
+            [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, NPUPROBE_PROP, FA_PROP, FA_TS_PROP, FA_GO_PROP,
+                STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP].into_iter().map(|p| (p, "0"))) {
+            run(root_command(&format!("setprop {property} {}", shell_quote(value))))?;
+            if run(format!("getprop {property} 2>&1"))?.trim() != value {
+                return Err(format!("property readback differs after deactivation: {property}"));
             }
         }
-        let stray = self
-            .ashell(
-                &format!("su -c 'find /data/app /data/data /data/local/tmp -name \"{SO}\" 2>/dev/null'"),
-                60,
-            )
-            .trim_end_matches("#adb_exit=0")
-            .trim()
-            .to_string();
-        for f in stray.lines() {
-            let f = f.trim();
-            if f.is_empty() {
-                continue;
+        if let Some(path) = &installation {
+            run(root_command(&format!("rm -f -- {}", shell_quote(path))))?;
+            let dir = &state.as_ref().unwrap().1;
+            let listing = run(root_command(&format!("ls -1A -- {}", shell_quote(dir))))?;
+            if listing.lines().any(|name| name == SO) {
+                return Err("recorded layer installation remains after deletion".into());
             }
-            if adb_ok(&self.ashell(&format!("su -c 'rm -f \"{f}\"'"), 15)) {
-                println!("已清理残留 {f}");
-            }
+            // Preserve the only installation record until earlier checks pass.
+            run(root_command(&format!("rm -f -- {}", shell_quote(STATE))))?;
         }
-        self.ashell(&format!("su -c 'rm -f {STATE} /data/local/tmp/{SO}'"), 15);
-        // 立项时那套 settings 本来就不生效, 但早先版本写过, 一并清干净
-        for k in [
-            "gpu_debug_layers",
-            "gpu_debug_layer_app",
-            "gpu_debug_app",
-            "enable_gpu_debug_layers",
-        ] {
-            let _ = adb(
-                &self.serial,
-                &["shell", &format!("settings delete global {k}")],
-                15,
-            );
+        let listing = run(root_command("ls -1A -- /data/local/tmp"))?;
+        if listing.lines().any(|name| name == "knobs_layer_state") {
+            return Err("layer state still exists or appeared during deactivation".into());
         }
-        format!(
-            "已摘层。回读:\n  debug.vulkan.layers = [{}]\n  state               = [{}]",
-            self.getprop("debug.vulkan.layers"),
-            self.ashell(&format!("su -c 'cat {STATE} 2>/dev/null'"), 15)
-                .trim_end_matches("#adb_exit=0")
-                .trim()
-        )
+        Ok(installation)
+    })();
+    match result {
+        Ok(installation) => Ok(DeactivationEvidence {
+            scope: DEACTIVATION_SCOPE, serial: serial.into(), package: package.unwrap(),
+            recorded_installation_absent: installation.as_ref().map(|_| true),
+            recorded_installation: installation, state_absent: true, processes_absent: true,
+            properties_disabled: true, original_properties_restored: false,
+            unregistered_installations_verified: false, game_state_restored: false,
+            job_recovery_complete: false, commands,
+        }),
+        Err(error) => Err(DeactivationFailure {
+            scope: DEACTIVATION_SCOPE, serial: serial.into(), package, error, game_state_restored: false,
+            job_recovery_complete: false, commands,
+        }),
     }
 }
 
@@ -461,6 +608,7 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
     let mut serial = std::env::var("REFBENCH_SERIAL")
         .unwrap_or_else(|_| std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into()));
     let mut keep_prop = false;
+    let mut json_output = false;
     let mut so: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -468,6 +616,7 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
             "--serial" => serial = it.next().cloned().unwrap_or(serial),
             "--so" => so = it.next().cloned(),
             "--keep-prop" => keep_prop = true,
+            "--json" => json_output = true,
             other => positional.push(other.to_string()),
         }
     }
@@ -475,6 +624,10 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
         eprintln!("{USAGE}");
         return 2;
     };
+    if mode == "off" && positional.len() > 2 {
+        eprintln!("off 只接受一个可选目标包名\n{USAGE}");
+        return 2;
+    }
     // Status is a read-only plan/status path and does not interrupt the lease owner.
     let _lease = if mode == "status" { None } else {
         match crate::devlease::Lease::target(Some(&serial), "gray-layer") {
@@ -493,8 +646,16 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
             0
         }
         "off" => {
-            println!("{}", gl.off());
-            0
+            let result = gl.off(positional.get(1).map(String::as_str));
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&deactivation_json(&result)).unwrap());
+            } else {
+                match &result {
+                    Ok(evidence) => println!("{evidence}"),
+                    Err(error) => eprintln!("{error}"),
+                }
+            }
+            if result.is_ok() { 0 } else { 1 }
         }
         "probe" | "loadop" | "passdump" | "copyprobe" | "upop" | "frameaudit" | "frameaudit-ts" | "target" => {
             let default_pkg = if mode == "probe" || mode == "loadop" {
@@ -535,6 +696,50 @@ mod launch_tests {
         let raw = "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false\ncom.miHoYo.Yuanshen/com.miHoYo.GetMobileInfo.MainActivity\n#adb_exit=0";
         let act = GrayLayer::adb_stdout(raw).lines().rev().find(|l| !l.trim().is_empty()).unwrap();
         assert_eq!(act.trim(), "com.miHoYo.Yuanshen/com.miHoYo.GetMobileInfo.MainActivity");
+    }
+}
+
+#[cfg(test)]
+mod deactivation_tests {
+    use super::*;
+
+    #[test]
+    fn state_is_one_target_and_an_absolute_directory() {
+        assert_eq!(parse_layer_state("com.example.game|/data/app/~~id/pkg/lib/arm64\n").unwrap(),
+            ("com.example.game".into(), "/data/app/~~id/pkg/lib/arm64".into()));
+        for invalid in ["", "com.example.game|relative/path", "com.example.game|/data/../app",
+            "com.example.game|/data/app\nother|/data/other", "com.example.game;id|/data/app"] {
+            assert!(parse_layer_state(invalid).is_err(), "accepted {invalid:?}");
+        }
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn failed_read_and_conflicting_preflight_never_start_cleanup() {
+        for fault in ["listing", "target", "foreign_layer", "installation"] {
+            let result = deactivate("fixture-serial", Some("com.example.game"), |command| {
+                let body = if command.contains("ls -1A -- /data/local/tmp") {
+                    if fault == "listing" { return "Permission denied\n#adb_exit=1".into(); }
+                    "knobs_layer_state\n"
+                } else if command.contains("cat ") {
+                    if fault == "target" { "com.example.other|/data/app/pkg/lib/arm64\n" }
+                    else { "com.example.game|/data/app/pkg/lib/arm64\n" }
+                } else if command.starts_with("getprop ") {
+                    if fault == "foreign_layer" { "VK_LAYER_other\n" } else { "\n" }
+                } else if command.starts_with("dumpsys ") {
+                    "legacyNativeLibraryDir=/data/app/new-version/lib\n"
+                } else { panic!("unexpected mutation or command after failed preflight: {command}"); };
+                format!("{body}#adb_exit=0")
+            });
+            let failure = result.unwrap_err();
+            assert!(!failure.commands.is_empty());
+            assert!(failure.commands.iter().all(|c| !c.command.contains("force-stop")
+                && !c.command.contains("setprop") && !c.command.contains("rm -f")));
+            assert!(!failure.job_recovery_complete);
+            if fault == "listing" {
+                assert_eq!(failure.commands[0].output, "Permission denied\n#adb_exit=1");
+            }
+        }
     }
 }
 

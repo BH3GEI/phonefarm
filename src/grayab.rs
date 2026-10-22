@@ -12,7 +12,7 @@
 use crate::eval::{adb, adb_ok, run_one, su};
 use crate::graylayer::GrayLayer;
 use crate::shotdiff;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 /// 登录页那扇"门" (画面坐标, 点一次进游戏)
@@ -97,8 +97,6 @@ fn arm(
     lease: &crate::devlease::Lease,
 ) -> Result<(), String> {
     eprintln!("── 臂 {label} (rewrite={}) ──", rewrite as u8);
-    let _ = gl.off();
-    let _ = adb(serial, &["shell", "am force-stop com.miHoYo.Yuanshen"], 30);
     let _ = su(
         serial,
         "rm -f /storage/emulated/0/Android/data/com.miHoYo.Yuanshen/files/knobs_layer_out.json",
@@ -191,8 +189,6 @@ fn sample_perf_under_lease(
 fn arm_none(serial: &str, label: &str, outdir: &Path, workload: &Path, pf_bin: &str) -> Result<(), String> {
     let _ = std::fs::create_dir_all(outdir);
     eprintln!("── 臂 {label} (无层) ──");
-    let _ = gl_off_for(serial);
-    let _ = adb(serial, &["shell", "am force-stop com.miHoYo.Yuanshen"], 30);
     let act = adb(serial, &["shell", "cmd package resolve-activity --brief com.miHoYo.Yuanshen"], 30);
     let act = act.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).unwrap_or_default();
     if act.contains('/') {
@@ -221,10 +217,6 @@ fn arm_none(serial: &str, label: &str, outdir: &Path, workload: &Path, pf_bin: &
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
     run_workload_and_shots(serial, label, outdir, workload, pf_bin)
-}
-
-fn gl_off_for(serial: &str) -> String {
-    crate::graylayer::GrayLayer::new(serial).off()
 }
 
 
@@ -286,8 +278,6 @@ fn arm_copyprobe(
 ) -> Result<(), String> {
     let _ = std::fs::create_dir_all(outdir);
     eprintln!("── 臂 {label} (copyprobe) ──");
-    let _ = gl.off();
-    let _ = adb(serial, &["shell", "am force-stop com.miHoYo.Yuanshen"], 30);
     let _ = su(
         serial,
         "rm -f /storage/emulated/0/Android/data/com.miHoYo.Yuanshen/files/knobs_layer_out.json",
@@ -295,7 +285,7 @@ fn arm_copyprobe(
     );
     gl.mount_mode("copyprobe", "com.miHoYo.Yuanshen", false)?;
     launch_to_world_layered(serial)?;
-    let _ = run_one(serial, label, outdir, 30, workload, "com.miHoYo.Yuanshen");
+    run_one(serial, label, outdir, 30, workload, "com.miHoYo.Yuanshen")?;
     // 负载结束人物站定后连拍三张, 离线比对用中间那张
     std::thread::sleep(std::time::Duration::from_secs(3));
     for k in 1..=3 {
@@ -326,7 +316,7 @@ fn run_workload_and_shots(
     workload: &Path,
     pf_bin: &str,
 ) -> Result<(), String> {
-    let _ = run_one(serial, label, outdir, 30, workload, "com.miHoYo.Yuanshen");
+    run_one(serial, label, outdir, 30, workload, "com.miHoYo.Yuanshen")?;
     std::thread::sleep(std::time::Duration::from_secs(3));
     for k in 1..=3 {
         let f = outdir.join(format!("shot{k}.raw"));
@@ -376,40 +366,56 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
         .unwrap_or_else(|_| PathBuf::from("phonefarm"))
         .to_string_lossy()
         .into_owned();
-    let _ = std::fs::create_dir_all(&out);
-    if mode == "loadop" {
-        for i in 1..=pairs {
-            if let Err(e) = arm(&serial, &gl, &format!("ctrl{i}"), false, &out.join(format!("ctrl{i}")), &workload, 30, &pf_bin, &_lease) {
-                eprintln!("ctrl{i} 作废: {e}");
-            }
-            if let Err(e) = arm(&serial, &gl, &format!("knob{i}"), true, &out.join(format!("knob{i}")), &workload, 30, &pf_bin, &_lease) {
-                eprintln!("knob{i} 作废: {e}");
-            }
-        }
-    } else {
-        // copyprobe 验收: none1 none2 (无层控制对) + probe1..N (探针)。
-        // 验收 ② 画面逐像素的比对交给 `phonefarm shot-diff`。
-        let _ = gl.off();
-        if let Err(e) = arm_none(&serial, "none1", &out.join("none1"), &workload, &pf_bin) {
-            eprintln!("none1 作废: {e}");
-        }
-        if let Err(e) = arm_none(&serial, "none2", &out.join("none2"), &workload, &pf_bin) {
-            eprintln!("none2 作废: {e}");
-        }
-        for i in 1..=probes {
-            let label = format!("probe{i}");
-            if let Err(e) = arm_copyprobe(&serial, &gl, &label, &out.join(&label), &workload, &pf_bin) {
-                eprintln!("{label} 作废: {e}");
-            }
-        }
-        let _ = gl.off();
-        let _ = adb(&serial, &["shell", "am force-stop com.miHoYo.Yuanshen"], 30);
-        if let Ok(t) = shotdiff::report(&out) {
-            println!("{t}");
-        }
+    if out.as_os_str().is_empty() || pairs == 0 || probes == 0 {
+        eprintln!("gray-ab requires --out and positive --pairs/PROBES"); return 2;
     }
-    let _ = gl.off();
-    if let Err(e) = _lease.check() { eprintln!("{e}"); return 2; }
-    println!("全部完成, 证据: {}", out.display());
-    0
+    if let Err(e)=std::fs::create_dir_all(&out) {eprintln!("{e}");return 2;}
+    let mut arms:Vec<(String,bool)>=Vec::new();
+    if mode=="loadop" {
+        for i in 1..=pairs {arms.push((format!("ctrl{i}"),false));arms.push((format!("knob{i}"),true));}
+    } else {
+        arms.extend([("none1".into(),false),("none2".into(),false)]);
+        for i in 1..=probes {arms.push((format!("probe{i}"),true));}
+    }
+    let mut records=Vec::new();
+    let mut code=0;
+    for (label,rewrite) in arms {
+        let arm_dir=out.join(&label);
+        if let Err(e)=std::fs::create_dir_all(&arm_dir) {eprintln!("{e}");code=2;break;}
+        let before=gl.off(Some(crate::plugins::genshin::PACKAGE));
+        let before_record=match crate::graylayer::record_deactivation(&arm_dir,"before",&before) {
+            Ok(v)=>v,Err(e)=>{eprintln!("{e}");code=2;break;}
+        };
+        if let Err(e)=before {
+            eprintln!("{label} 前置摘层失败，停止后续操作: {e}");
+            records.push(json!({"arm":label,"status":"not_started","deactivation_before":before_record}));
+            code=2;break;
+        }
+        let measured=if mode=="loadop" {
+            arm(&serial,&gl,&label,rewrite,&arm_dir,&workload,30,&pf_bin,&_lease)
+        } else if rewrite {arm_copyprobe(&serial,&gl,&label,&arm_dir,&workload,&pf_bin)}
+        else {arm_none(&serial,&label,&arm_dir,&workload,&pf_bin)};
+        // A failed experiment still retires its target. A retirement failure
+        // ends this loop; no extra force-stop or next-arm writes follow it.
+        let after=gl.off(Some(crate::plugins::genshin::PACKAGE));
+        let after_record=match crate::graylayer::record_deactivation(&arm_dir,"after",&after) {
+            Ok(v)=>v,Err(e)=>{eprintln!("{e}");code=2;break;}
+        };
+        records.push(json!({"arm":label,"status":if measured.is_ok(){"collected"}else{"failed"},
+            "error":measured.as_ref().err(),"deactivation_before":before_record,"deactivation_after":after_record}));
+        if let Err(e)=after {eprintln!("{label} 摘层失败，停止后续操作: {e}");code=2;break;}
+        if let Err(e)=measured {eprintln!("{label} 作废，停止后续臂: {e}");code=1;break;}
+    }
+    if code==0 && mode=="copyprobe" {
+        match shotdiff::report(&out) {Ok(t)=>println!("{t}"),Err(e)=>{eprintln!("{e}");code=1;}}
+    }
+    if let Err(e)=_lease.check() {eprintln!("{e}");code=2;}
+    let report=json!({"schema":"phonefarm/gray-ab-collection@1","serial":serial,"mode":mode,
+        "collection_ok":code==0,"arms":records,"job_recovery_complete":false,
+        "game_state_restored":false,"recovery_status":"not_verified",
+        "recovery_note":"Layer deactivation does not verify sampler, input, ftrace or charging recovery."});
+    let path=out.join(format!("gray-ab-{}-{}.json",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+    if let Err(e)=crate::confirmation_transport::new_file(&path,report.to_string().as_bytes()) {eprintln!("{e}");code=2;}
+    println!("采集结束: exit={code}, 完整恢复尚未核验；证据 {}",path.display());
+    code
 }

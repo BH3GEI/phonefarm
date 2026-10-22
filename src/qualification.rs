@@ -847,12 +847,13 @@ mod tests {
     }
     #[test]
     fn charging_missing_metric_and_failed_restore_block() {
-        for n in 0..3 {
+        for n in 0..4 {
             let mut e = ready();
             match n {
                 0 => e.candidate[0]["env"]["power_window_verified"] = json!(false),
                 1 => e.candidate[0]["summary"]["frame_p95"] = Value::Null,
-                _ => e.restored = Some(false),
+                2 => e.restored = Some(false),
+                _ => e.restored = None,
             }
             assert!(!evaluate(&e).unwrap().conclusion_allowed);
         }
