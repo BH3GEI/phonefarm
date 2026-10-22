@@ -1,0 +1,68 @@
+{
+  "scope": "original30_restored_ordinary_HOME_pause_one_readonly_perfectto_query_no_trace_started",
+  "actions": [
+    [
+      "close-settings",
+      [
+        "shell",
+        "input",
+        "tap",
+        "2165",
+        "55"
+      ],
+      1,
+      false
+    ],
+    [
+      "close-main-menu",
+      [
+        "shell",
+        "input",
+        "tap",
+        "2050",
+        "75"
+      ],
+      1,
+      false
+    ],
+    [
+      "ordinary-HOME",
+      [
+        "shell",
+        "input",
+        "keyevent",
+        "3"
+      ],
+      2,
+      false
+    ],
+    [
+      "gpu-boot-and-perfetto-query",
+      [
+        "shell",
+        "su -c 'echo BOOT; cat /proc/sys/kernel/random/boot_id; echo GPU_MIN; cat /sys/class/kgsl/kgsl-3d0/min_pwrlevel; echo GPU_CLOCK; cat /sys/class/kgsl/kgsl-3d0/gpuclk; echo PERFETTO_PROGRAM; command -v perfetto; echo PERFETTO_QUERY_BEGIN; timeout 5 perfetto --query; rc=$?; echo PERFETTO_QUERY_END_EXIT=$rc; echo UPTIME; cat /proc/uptime; exit $rc'"
+      ],
+      0,
+      false
+    ],
+    [
+      "screen",
+      [
+        "exec-out",
+        "screencap",
+        "-p"
+      ],
+      0,
+      true
+    ],
+    [
+      "state",
+      [
+        "shell",
+        "su -c 'echo BOOT; cat /proc/sys/kernel/random/boot_id; echo FOREGROUND; timeout 4 dumpsys activity activities | grep -E \"mResumedActivity|topResumedActivity\" || true; echo UPTIME; cat /proc/uptime'"
+      ],
+      0,
+      false
+    ]
+  ]
+}

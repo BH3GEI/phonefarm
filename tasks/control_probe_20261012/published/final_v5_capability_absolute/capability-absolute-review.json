@@ -1,0 +1,66 @@
+{
+  "schema": "hgamey/capability_absolute_independent_review@1",
+  "reviewed_at_utc": "2026-10-11T20:04:10.366328+00:00",
+  "scope": "initial stable SPEC/source only",
+  "cargo_or_shell_tests_run": 0,
+  "device_calls": 0,
+  "model_api_calls": 0,
+  "private_auth_accessed": false,
+  "pf_narrow_source_blocker_found": false,
+  "gol_legacy_mixed_purpose_rejection_gap": "static receiver predicate; actual CLI NOT_RUN",
+  "device_acceptance": "NOT_RUN",
+  "whole_suite_acceptance": "NOT_RUN",
+  "files": [
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/docs/SPEC_CONTROL_PROBE.md",
+      "sha256": "4a6a7b51579b07ce5950309acf174ae6f95146a55f33bca9feebf993e8f4eea2",
+      "bytes": 8296
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/docs/SPEC_THERMAL_PROFILE.md",
+      "sha256": "a15e24acb1342a18bb732b710d5b266cd1fbb6880ac58c852898369506957b9e",
+      "bytes": 5105
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/src/thermal_profile.rs",
+      "sha256": "0be9d5fc1dfbbf2fe9e91200d1bffd6088a55d0d352c6c8ae6225a60187bb376",
+      "bytes": 26549
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/src/confirmation_temperature.rs",
+      "sha256": "f5d8696cc6eb8ed145b43c38b719996ad115a34bfaec090a351a6ae8bcccc7a4",
+      "bytes": 42129
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/src/confirmation_control_probe.rs",
+      "sha256": "1b8f7f51ef24224538787e8295ee3365eaed4f44dce981addae934b60f9235ce",
+      "bytes": 17660
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/loop_v1/tools/confirmation_worker.sh",
+      "sha256": "018bd5f9b04dbee2324e01fcf5a182cd2d0b663b8f2c46c0bc7474d6b791b97b",
+      "bytes": 22568
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/src/confirmation_driver.rs",
+      "sha256": "47b8c567595b0b463cbaf3c29a882c9aafab8339a71fe4e324e948962d1b8cfc",
+      "bytes": 58603
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/src/confirmation_observation.rs",
+      "sha256": "b15dc354bf5e7e2083af1fa265316c06a73f7bfe564623c1d803096ed86cdf66",
+      "bytes": 56845
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/src/qualification.rs",
+      "sha256": "002106c1fe5d6d0f22ef0e02b618899021805dcadd1495176dcf87d0a6d121f1",
+      "bytes": 31016
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/worktrees/game-loop-loaded-confirmation/src/confirmation.rs",
+      "sha256": "caa8807d742972668d66c65fa0fecf928c67fa5f445445c303b9d37cd2c0081f",
+      "bytes": 48212
+    }
+  ],
+  "report_sha256": "4e082e43bd5e95fa6ed2ae9cc8e69eb80d6a25412dc65c50bf55ba2b89a36c0e"
+}

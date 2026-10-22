@@ -1,0 +1,16 @@
+{
+  "bootstrap_sha256": "dbc28126998d7d80b624bb3f422f03c105e4096c79bc7bfc6e529fb497bb80b7",
+  "candidate_sha256": "defb53333b696c6a8a6f7dbaf1bb64da52fd9212c6bed34e4813f03026e280e6",
+  "cold_sha256": "f84df2e01a5e19d154c9b6d7f90f2b357851a3dcf6a2ede401c0108387325085",
+  "eligible": false,
+  "env_sha256": "717883243a0771f18ffafb3c4ee2c752ae8ff3489694d6d320ff342c37259cf3",
+  "hold_seconds": 11,
+  "probe_sha256": "56e652ab08626d8ac6090772a94541ee2cfe4901abfa498f06896dc07da4e764",
+  "request_sha256": "75d073d3edd96ff29865d02f90002d59fa49b985cba713eab4d2a0cb6a87b034",
+  "schema": "phonefarm/control_probe_contract@1",
+  "scope": "configuration_readback_only",
+  "snapshot_sha256": "d86b4d4b22bd1ce65a37d8bfd7e399a67cab79285425160d80830fd3e82b33a6",
+  "temperature_profile_id": "capability_absolute_v1",
+  "transport_sha256": "8f2fa7dbc3f4e09f5610874b419cfaafa8d8bb91cde80a75df2f2325335c8899",
+  "worker_sha256": "018bd5f9b04dbee2324e01fcf5a182cd2d0b663b8f2c46c0bc7474d6b791b97b"
+}

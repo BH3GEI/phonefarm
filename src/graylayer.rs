@@ -475,6 +475,13 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
         eprintln!("{USAGE}");
         return 2;
     };
+    // Status is a read-only plan/status path and does not interrupt the lease owner.
+    let _lease = if mode == "status" { None } else {
+        match crate::devlease::Lease::target(Some(&serial), "gray-layer") {
+            Ok(v) => { serial = v.serial.clone(); Some(v) },
+            Err(e) => { eprintln!("{e}"); return 2; }
+        }
+    };
     if adb_path().is_empty() {
         eprintln!("找不到 adb");
         return 2;

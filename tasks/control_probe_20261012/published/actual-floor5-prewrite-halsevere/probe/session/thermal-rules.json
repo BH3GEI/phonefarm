@@ -1,0 +1,18 @@
+{
+  "actual_serial": "c531e0a",
+  "boot_id": "b03328bb-9647-4cc1-8e6c-8f534df69dad",
+  "freeze_at": "2026-10-11T21:00:52.231736+00:00",
+  "hal_raw": {
+    "path": "thermal_hal.raw.txt",
+    "sha256": "fb1404a902a4fe45df0fd5d52edd21ee450f1220c28d68072bc322f7ba815dd9"
+  },
+  "metadata_raw": {
+    "path": "thermal_metadata.raw.tsv",
+    "sha256": "39f5b865e967a0eeec9d18ade875e3fe87a181f9197538745e134d7090ec65e3"
+  },
+  "profile_sha256": "84cd16cf257c692f9b016411801ed5fc58ce3f0a5e2c317de204fbade575c49b",
+  "schema": "phonefarm/frozen_thermal_producer@1",
+  "scope": "temperature_only_before_control",
+  "temperature_profile_id": "capability_absolute_v1",
+  "warmup_script_sha256": "ffd1948608cc9af8908ee6c344352782ab0cc8be74644b38aa80425b5c798051"
+}

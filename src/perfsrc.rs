@@ -812,7 +812,7 @@ pub fn parse_perf_args(args: &[String]) -> Result<PerfArgs, String> {
 ///
 /// 退出码: 0 = 采到了至少一个采样点; 1 = 设备在但什么都没采到; 2 = 参数或设备不可用。
 pub fn run_perf(args: &[String]) -> i32 {
-    let a = match parse_perf_args(args) {
+    let mut a = match parse_perf_args(args) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
@@ -833,46 +833,83 @@ pub fn run_perf(args: &[String]) -> i32 {
         };
     }
 
-    let tmp = std::env::temp_dir().join(format!("phonefarm-perf-{}", std::process::id()));
-    if let Err(e) = std::fs::create_dir_all(&tmp) {
-        eprintln!("建不了临时目录 {}: {e}", tmp.display());
-        return 2;
+    let lease = match crate::devlease::Lease::target(a.serial.as_deref(), "perf") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    a.serial = Some(lease.serial.clone());
+    match collect_under_lease(&a, &lease) {
+        Ok(snap) => {
+            emit_perf(&snap, a.json);
+            exit_code_of(&snap)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            2
+        }
     }
+}
+
+/// Explicit borrowed lease for nested measurement in gray-ab; target must match its owner.
+pub(crate) fn perf_to_file_under_lease(
+    args: &[String],
+    lease: &crate::devlease::Lease,
+    out: &std::path::Path,
+) -> Result<(), String> {
+    let a = parse_perf_args(args)?;
+    let snap = collect_under_lease(&a, lease)?;
+    std::fs::write(
+        out,
+        serde_json::to_string_pretty(&snap).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if exit_code_of(&snap) != 0 {
+        return Err("nested perf returned unavailable samples".into());
+    }
+    Ok(())
+}
+fn collect_under_lease(
+    a: &PerfArgs,
+    lease: &crate::devlease::Lease,
+) -> Result<PerfSnapshot, String> {
+    lease.check()?;
+    if a.serial.as_deref() != Some(lease.serial.as_str()) {
+        return Err("nested perf target differs from lease".into());
+    }
+    let tmp = std::env::temp_dir().join(format!("phonefarm-perf-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("perf directory: {e}"))?;
     let phone = Device::new(a.serial.clone(), tmp.to_string_lossy().to_string());
     if !phone.health_check(8_000) {
-        eprintln!("设备无心跳 (devices 里不是在线态, 或未指定 --serial)");
-        return 2;
+        return Err("device has no heartbeat".into());
     }
-    // 先回滚上次遗留的停充状态 (进程被杀没来得及还原)。无条件做, 与 --suspend-charging 无关 ——
-    // 遗留状态的危害是"手机一直没在充电", 不该等到下次有人恰好又要停充才被清掉。
     let charge_state = hwcond::lock_state_path("charge", &a.serial);
-    hwcond::recover_stale_charge_ctl(&phone, &charge_state);
-
-    let mut suspend = None;
-    if a.suspend_charging {
-        match hwcond::ChargeSuspend::apply(&phone, &charge_state) {
-            Ok(g) => suspend = Some(g),
-            Err(e) => {
-                eprintln!("停充失败: {e}");
-                return 2;
-            }
-        }
+    if (charge_state.exists() || a.suspend_charging) && !hwcond::root_ok(&phone) {
+        return Err("charging control/recovery requires verified root".into());
     }
-
-    let src = for_device(&phone, &a);
-    // 进度一律走 stderr: --json 时 stdout 只能有 JSON, 而「这次走的是哪条采集源」必须看得见
-    hwcond::progress("perf", &format!("采集源 {} · {} 个采集点", src.id(), a.rounds));
+    if hwcond::recover_stale_charge_ctl(&phone, &charge_state) == Some(false) {
+        return Err("stale charging restoration failed".into());
+    }
+    let suspend = if a.suspend_charging {
+        Some(hwcond::ChargeSuspend::apply(&phone, &charge_state)?)
+    } else {
+        None
+    };
+    let src = for_device(&phone, a);
+    hwcond::progress(
+        "perf",
+        &format!("采集源 {} · {} 个采集点", src.id(), a.rounds),
+    );
     let snap = src.collect(&phone, a.rounds);
-
-    // 测完立刻恢复充电, 在打印之前 —— 打印失败也不能把手机丢在不充电的状态里
     if let Some(mut g) = suspend {
         if !g.restore(&phone) {
-            eprintln!("警告: 恢复充电后回读不符 ({}); 状态文件留着, 下次启动会再试一次", g.node());
+            return Err("charging restoration readback failed".into());
         }
     }
-
-    emit_perf(&snap, a.json);
-    exit_code_of(&snap)
+    lease.check()?;
+    Ok(snap)
 }
 
 /// 退出码: `0` = 采到了至少一个采样点; `1` = 设备在、但这轮什么都没采到;
@@ -924,6 +961,18 @@ pub fn render_perf_text(s: &PerfSnapshot) -> String {
 mod tests {
     use super::*;
     use crate::smartperf::parse_sp_csv;
+
+    #[test]
+    fn nested_perf_requires_exact_parent_target_before_any_device_call() {
+        let dir=std::env::temp_dir().join(format!("perf-lease-test-{}",std::process::id()));
+        let lease=crate::devlease::Lease::acquire(&dir.join("lease"),&dir.join("legacy"),"parent-fake","test",std::time::Duration::from_millis(20)).unwrap();
+        let args=["--serial","different-fake","--rounds","1"].iter().map(|s|s.to_string()).collect::<Vec<_>>();
+        let error=perf_to_file_under_lease(&args,&lease,&dir.join("perf.json")).unwrap_err();
+        assert!(error.contains("target differs"));
+        assert!(!dir.join("perf.json").exists());
+        assert!(lease.check().is_ok()); drop(lease);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     const SP_CSV: &str = include_str!("testdata/sp_daemon_data.csv");
 

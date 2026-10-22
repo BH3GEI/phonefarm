@@ -1,0 +1,41 @@
+[
+  {
+    "label": "blocked-state",
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "su -c 'echo BOOT; cat /proc/sys/kernel/random/boot_id; echo GPU_MIN; cat /sys/class/kgsl/kgsl-3d0/min_pwrlevel; echo GPU_MAX; cat /sys/class/kgsl/kgsl-3d0/max_pwrlevel; echo GPU_NUM; cat /sys/class/kgsl/kgsl-3d0/num_pwrlevels; echo BATTERY_STATUS; cat /sys/class/power_supply/battery/status; echo BATTERY_TEMP; cat /sys/class/power_supply/battery/temp'"
+    ],
+    "started_unix_s": 1791744564.547657,
+    "finished_unix_s": 1791744564.7763531,
+    "elapsed_s": 0.22869954211637378,
+    "exit_code": 0,
+    "stdout_sha256": "750198eb834572dd83fc7eda76cf5022c24706e91e6202d579552f8d20fa5d54",
+    "output_file": "blocked-state.stdout",
+    "device_executed": true,
+    "scope": "control_capability_checkpoint_outside_hold",
+    "performance_eligible": false
+  },
+  {
+    "label": "blocked-image",
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "exec-out",
+      "screencap",
+      "-p"
+    ],
+    "started_unix_s": 1791744564.77667,
+    "finished_unix_s": 1791744568.293598,
+    "elapsed_s": 3.516988791991025,
+    "exit_code": 0,
+    "stdout_sha256": "51e8f181ebec004d2f11daeddbc0a7bbc4f9015a37bac0b4aac5af00780c6210",
+    "output_file": "blocked-image.png",
+    "device_executed": true,
+    "scope": "control_capability_checkpoint_outside_hold",
+    "performance_eligible": false
+  }
+]

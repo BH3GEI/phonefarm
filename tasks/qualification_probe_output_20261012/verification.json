@@ -1,0 +1,20 @@
+{
+  "historical_acceptance_commit": "e411436a3a6f5610d315899c3c782a1d1588eb6c",
+  "upstream_probe_fix": "5390db7",
+  "upstream_tmpdir_negative_test": "767b3ebfcebd9703bdf79ec8186c1482f088d4a6",
+  "unit_tests_passed": 521,
+  "binary_cli_tests_passed": 9,
+  "default_clippy_exit": 0,
+  "default_clippy_repository_warnings": true,
+  "changed_rust_file_diagnostics": false,
+  "real_device_or_api_calls": 0,
+  "qualification_rules_changed": false,
+  "driver_modules_added": false,
+  "binary_sha256": "51fc288e55d7295b23f1baefa75a3c9e24f6f6bdf3cb943e7b36affb81de243f",
+  "source_sha256": {
+    "src/qualification.rs": "02f22e2ac22544173ecd5a1ab397aa6171478e1c3819ebb3f23cb8bd2779c79a",
+    "src/tests/qualification_cli.rs": "faff73325a778cf0440afb11128586c30e9ef1d0aad4dcd395931f0c60f9e50b",
+    "docs/SPEC_EXPERIMENT_QUALIFICATION.md": "ff1da25dbbc674c6fffc24e27e37f45e193a63f10d0dec591a83215f8ac5aef7"
+  },
+  "claim_scope": "host_concurrent_probe_output_isolation_not_device_authentication"
+}

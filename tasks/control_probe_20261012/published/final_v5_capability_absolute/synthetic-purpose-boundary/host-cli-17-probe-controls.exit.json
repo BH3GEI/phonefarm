@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/src/target/debug/phonefarm",
+    "confirmation-driver",
+    "probe-controls",
+    "--request",
+    "control-request.json",
+    "--out",
+    "absolute"
+  ],
+  "cwd": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/tasks/control_probe_20261012/final_gate_v5_capability_absolute/driver-artifacts/confirmation-driver-37730-1",
+  "environment_overrides": {
+    "DEVLOCK_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/tasks/control_probe_20261012/final_gate_v5_capability_absolute/driver-artifacts/confirmation-driver-37730-1/legacy",
+    "PHONEFARM_FAKE_DEVICE_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/tasks/control_probe_20261012/final_gate_v5_capability_absolute/driver-artifacts/confirmation-driver-37730-1",
+    "PHONEFARM_FAKE_FAIL": "capability_fluctuating",
+    "PHONEFARM_LEASE_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/tasks/control_probe_20261012/final_gate_v5_capability_absolute/driver-artifacts/confirmation-driver-37730-1/lease",
+    "PHONEFARM_LEASE_TIMEOUT_MS": "100"
+  },
+  "exit": 0
+}

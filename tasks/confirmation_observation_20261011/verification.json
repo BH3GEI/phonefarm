@@ -1,0 +1,19 @@
+{
+  "schema": "phonefarm/offline_confirmation_contract_check@1",
+  "scope": "hypothetical driver declarations and transformed archived trace excerpt; zero device/API calls; no acquisition attestation",
+  "cargo_test_passed": 542,
+  "clippy_exit_code": 0,
+  "strict_clippy_clean": false,
+  "game_opt_loop_source_consumer_commit": "920357e",
+  "game_opt_loop_integration_commit": "ca4c699",
+  "game_opt_loop_binary_sha256": "ac28453bc09cbf648a009b9959ee892b2fa70075b28fd7099dbe435d56eb06e6",
+  "phonefarm_binary_sha256": "380c084c5e8b1c4bd6cffdb4b7c927a9521399b4fe61b4ef1b806376fa59f856",
+  "observations_valid": 10,
+  "judge": "PASS",
+  "hash_consistent_restore_gate_tamper": "BLOCKED",
+  "synthetic_origin": "BLOCKED",
+  "shared_long_env_reviewer_replay": "BLOCKED",
+  "nontrivial_float_margin": 51.248178375505404,
+  "real_game_optimization_proven": false,
+  "promotion_allowed": false
+}

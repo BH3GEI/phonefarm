@@ -1,0 +1,11 @@
+   Compiling phonefarm v0.2.0 (/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/src)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.93s
+     Running unittests main.rs (target/debug/deps/phonefarm-e88849b1f1fea8e7)
+
+running 3 tests
+test qualification::tests::root_does_not_prove_driver_capability ... ok
+test thermal_profile::tests::capability_absolute_retains_caps_integrity_but_not_performance_stability ... ok
+test confirmation_driver::temperature::capability_entry_tests::actual_worker_purpose_guard_rejects_performance_before_ownership ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 573 filtered out; finished in 0.04s
+

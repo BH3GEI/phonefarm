@@ -67,4 +67,5 @@ while [ "$n" -lt "$DUR" ]; do
   n=$((n + IVL))
   sleep "$IVL"
 done
+echo "#battery_status_after=$(cat $B/status 2>/dev/null)"
 echo "#sample_env done"

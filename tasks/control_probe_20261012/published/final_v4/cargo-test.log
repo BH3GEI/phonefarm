@@ -1,0 +1,776 @@
+warning: function `power_usable` is never used
+   --> hwcond.rs:339:8
+    |
+339 | pub fn power_usable(rail: PowerRail, samples: &[PowerSample]) -> Result<(), String> {
+    |        ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `count_false_success` is never used
+  --> mtools.rs:48:8
+   |
+48 | pub fn count_false_success(samples: &[Value]) -> u32 {
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: method `events` is never used
+   --> mtools.rs:132:12
+    |
+102 | impl ToolStore {
+    | -------------- method in this implementation
+...
+132 |     pub fn events(&self) -> &[Value] {
+    |            ^^^^^^
+
+warning: methods `events` and `next_id` are never used
+  --> caps.rs:80:12
+   |
+52 | impl CapStore {
+   | ------------- methods in this implementation
+...
+80 |     pub fn events(&self) -> &[Value] { &self.events }
+   |            ^^^^^^
+...
+83 |     pub fn next_id(&self, prefix: &str) -> String {
+   |            ^^^^^^^
+
+warning: function `summarize_android` is never used
+   --> perfsrc.rs:131:8
+    |
+131 | pub fn summarize_android(samples: &[PowerSample], rail: PowerRail) -> PerfSnapshot {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: `phonefarm` (bin "phonefarm") generated 5 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests main.rs (src/target/debug/deps/phonefarm-e88849b1f1fea8e7)
+
+running 574 tests
+test autoloop::tests::clean_snapshot_passes_both_layers ... ok
+test autoloop::tests::temp_cap_and_cooldown_derivations ... ok
+test autoloop::tests::touched_keys_include_the_rollback_siblings ... ok
+test autoloop::tests::sibling_left_behind_is_caught ... ok
+test bench::tests::args_forms ... ok
+test bench::tests::args_unlock_needs_no_model ... ok
+test bench::tests::max_rounds_defaults_and_bounds ... ok
+test bench::tests::round_log_full_gpu ... ok
+test bench::tests::round_log_partial_and_failed_delegate ... ok
+test brain::tests::test_openrouter_minimax_call ... ok
+test brain::tests::test_siliconflow_call ... ok
+test caps::tests::adopt_requires_matching_ver ... ok
+test caps::tests::auto_candidate_thresholds ... ok
+test caps::tests::candidate_materialize_fields ... ok
+test caps::tests::file_reload_persist ... ok
+test caps::tests::inject_line_scope_conds_and_cap ... ok
+test autoloop::tests::a_node_we_wrote_still_counts_as_residue ... ok
+test caps::tests::next_id_sequences ... ok
+test caps::tests::rollback_excludes_injection ... ok
+test capture::tests::args_forms ... ok
+test caps::tests::version_chain_recandidate ... ok
+test capture::tests::thumb_diff_forms ... ok
+test cli::export_tests::ctx_segments_split ... ok
+test cli::export_tests::redact_text_counts ... ok
+test cli::tests::cat_filter_and_schema_cover_all_types ... ok
+test cli::export_tests::parse_evalsets_two_lists ... ok
+test cli::tests::run_summary_prefers_end_record_and_derives_for_old ... ok
+test cli::tests::stat3_percentiles ... ok
+test cli::tests::status_three_states ... ok
+test cli::tests::fuzzy_run_resolution_in_scratch_dir ... ok
+test autoloop::tests::key_mapping_matches_device_snapshot_naming ... ok
+test autoloop::tests::vendor_drift_on_untouched_keys_is_not_our_residue ... ok
+test confirmation_control::tests::actual_remote_entry_intent_and_bootstrap_reject_terminal_session ... ok
+test confirmation_control::tests::known_unset_public_setting_requires_actual_read_hold_and_restore ... ok
+test confirmation_control::tests::canonical_devfreq_has_every_restoration_sibling ... ok
+test confirmation_control::tests::actual_worker_bounds_reaches_up_down_and_inverse_without_invalid_intermediate ... ok
+test confirmation_driver::temperature::hal_tests::hal_caps_use_known_severe_enum_index_not_cached_current_temperature ... ok
+test confirmation_driver::temperature::hal_tests::status_must_be_unique_connected_and_not_overridden ... ok
+test confirmation_driver::temperature::tests::sample_requires_exact_frozen_paths_and_finite_monotonic_clock_value ... ok
+test confirmation_driver::temperature::tests::typed_inventory_rejects_unknown_mixed_identity_and_missing_values ... ok
+test confirmation_transport::tests::changed_frozen_stdin_never_starts_transport ... ok
+test confirmation_control::tests::actual_worker_ledger_rejects_partial_and_failed_reads_before_restore ... ok
+test confirmation_transport::tests::fifo_input_is_rejected_without_waiting ... ok
+test confirmation_transport::tests::permit_reader_never_observes_partial_published_bytes ... ok
+test confirmation_transport::tests::child_consumes_frozen_stdin_even_after_original_is_replaced ... ok
+test crosscheck::tests::delta_refuses_to_invent_a_zero ... ok
+test crosscheck::tests::extreme_integers_do_not_panic ... ok
+test crosscheck::tests::falsy_snapshot_still_says_the_path_died ... ok
+test crosscheck::tests::missing_readings_say_so_instead_of_printing_zero ... ok
+test crosscheck::tests::non_finite_formats_like_python ... ok
+test crosscheck::tests::report_matches_recorded_golden ... ok
+test crosscheck::tests::thermal_zones_drop_non_temperatures ... ok
+test cts::tests::batch_state_roundtrip_and_sanitize ... ok
+test cts::tests::carried_report_from_prev_summary ... ok
+test cts::tests::instrument_command_builds_method_slice ... ok
+test cts::tests::junit_maps_verdicts_and_never_counts_pass_wrong ... ok
+test cts::tests::log_ts_and_window_slice ... ok
+test cts::tests::module_arg_and_profile_plan ... ok
+test cts::tests::oh_android_neg1_unchanged ... ok
+test cts::tests::oh_case_code_mapping_table ... ok
+test cts::tests::oh_case_error_neg1_counts_as_fail_never_silent ... ok
+test cts::tests::oh_command_composition ... ok
+test cts::tests::oh_double_finish_deduped ... ok
+test cts::tests::oh_protocol_parses_pass_fail_stack_and_run_end ... ok
+test cts::tests::parse_module_plan_android_and_oh ... ok
+test cts::tests::parser_marks_skipped_as_not_run_never_pass ... ok
+test cts::tests::parser_streams_case_results_before_run_end ... ok
+test cts::tests::pm_instrumentation_and_aapt_parsing ... ok
+test cts::tests::reconcile_clean_run_adds_nothing ... ok
+test cts::tests::reconcile_crash_midcase_env_blocked_and_unaccounted ... ok
+test cts::tests::reconcile_runner_error_env_blocked ... ok
+test cts::tests::reconcile_runner_error_fallback_from_stderr_text ... ok
+test cts::tests::reconcile_slice_mode_skips_numtests_synthesis ... ok
+test cts::tests::reconcile_watchdog_timeout_and_unaccounted ... ok
+test cts::tests::scan_assertions_finds_failures_skips_binary_and_oversize ... ok
+test cts::tests::summary_uses_colleague_verdict_literals ... ok
+test cts::tests::telemetry_diff_reports_deltas ... ok
+test device::tests::aa_dump_foreground_record ... ok
+test device::tests::adb_search_order_includes_linux_sdk ... ok
+test device::tests::adb_search_order_spec ... ok
+test device::tests::an_explicit_serial_wins_without_touching_any_device ... ok
+test device::tests::auto_resolution_either_finds_one_device_or_says_it_cannot_tell ... ok
+test device::tests::bm_bundle_list_and_main_ability ... ok
+test device::tests::device_dispatch_by_serial_prefix ... ok
+test device::tests::els_truncation_preserved_full_lossless ... ok
+test device::tests::frozen_blocks_device_writes ... ok
+test device::tests::full_layer_keeps_containers_and_attrs ... ok
+test device::tests::hdc_shell_root_is_detected_from_uid ... ok
+test device::tests::hdc_telemetry_guards_privileged_sections ... ok
+test device::tests::oh_layout_bad_json_yields_empty ... ok
+test device::tests::oh_layout_els_contract_matches_parse_dump ... ok
+test device::tests::oh_layout_parses_isomorphic_to_android ... ok
+test confirmation_transport::tests::timeout_and_output_cap_fail_closed ... ok
+test device::tests::single_online_adb_needs_exactly_one_connectable_device ... ok
+test device::tests::single_online_hdc_filters_sentinels ... ok
+test device::tests::sys_state_parses_activity_and_ime ... ok
+test device::tests::sys_state_relative_activity_and_no_ime ... ok
+test device::tests::pure_rust_image_resample_and_wh ... ok
+test confirmation_driver::temperature::cadence_tests::actual_overrun_and_backward_unknown_clocks_refuse_without_catchup ... ok
+test devlease::tests::marker_child_identity_requires_complete_equal_positive_signed_pair ... ok
+test devlease::tests::cancellation_rejects_mismatched_pending_child_or_owner_without_mutating ... ok
+test eval::path_tests::resolve_path_tries_cwd_then_repo_root ... ok
+test eval::path_tests::serial_resolution_prefers_cli ... ok
+test eval::tests::apply_failure_maps_to_abort_not_reject ... ok
+test eval::tests::base_report_honest_nulls_and_sentinel_p ... ok
+test eval::tests::deny_keywords_block_again_at_the_receiver ... ok
+test eval::tests::gray_rejects_unimplemented_knobs ... ok
+test eval::tests::out_of_whitelist_params_are_rejected_receiver_side ... ok
+test eval::tests::plan_entries_are_cross_checked_against_the_whitelist ... ok
+test eval::tests::probe_only_never_claims_reverted_from_failed_or_missing_snapshot ... ok
+test eval::tests::protocol_is_validated_before_any_device_touch ... ok
+test eval::tests::reachable_reflects_the_resolution_floor ... ok
+test eval::tests::shader_v2_maps_to_v1_request ... ok
+test eval::tests::sysparam_requires_params_object ... ok
+test eval::tests::to_pyval_keeps_int_float_distinction ... ok
+test eval::tests::to_serde_round_trips_and_drops_non_finite ... ok
+test eval::tests::v2_envelope_needs_all_required_fields ... ok
+test experiment::tests::ledger_dedup_resume_skips ... ok
+test experiment::tests::mech_counters ... ok
+test experiment::tests::prepare_arm_semantics ... ok
+test devlease::tests::unspawned_pending_cancellation_releases_but_unresolved_drop_preserves ... ok
+test experiment::tests::schedule_interleaves_arms_alphabetically ... ok
+test experiment::tests::report_small_sample_and_negative_result ... ok
+test experiment::tests::spec_parse_ok_and_defaults ... ok
+test experiment::tests::summary_line_parsing ... ok
+test experiment::tests::token_cap_boundary ... ok
+test fleet::tests::a_lock_held_by_someone_else_downgrades_the_probe ... ok
+test fleet::tests::adb_devices_l_keeps_multiword_states ... ok
+test fleet::tests::adb_devices_l_keeps_offline_and_unauthorized ... ok
+test fleet::tests::an_empty_reply_yields_unknowns_not_zeros ... ok
+test fleet::tests::android_card_reads_the_real_battery_dump ... ok
+test fleet::tests::battery_status_code_is_not_guessed ... ok
+test fleet::tests::charging_is_never_reported_as_on_battery ... ok
+test fleet::tests::fan_absent_is_not_fan_off ... ok
+test fleet::tests::hdc_targets_filter_sentinels ... ok
+test fleet::tests::lock_files_are_parsed ... ok
+test experiment::tests::spec_reject_bad ... ok
+test fleet::tests::offline_devices_still_get_a_card ... ok
+test fleet::tests::oh_card_does_not_invent_android_only_fields ... ok
+test fleet::tests::os_line_combines_release_and_sdk ... ok
+test fleet::tests::root_is_null_when_it_was_never_probed ... ok
+test fleet::tests::screenshots_yield_to_the_device_lock ... ok
+test fleet::tests::serial_with_colon_becomes_a_safe_filename ... ok
+test fleet::tests::sysfs_battery_reads_charging_as_not_on_battery ... ok
+test fleet::tests::text_render_marks_unknowns_with_question_marks ... ok
+test fleet::tests::thermal_picks_gpu_and_battery_zones ... ok
+test fleet::tests::the_light_probe_still_yields_temperature_battery_and_fan ... ok
+test fleet::tests::uptime_and_root_and_policy ... ok
+test fleet::tests::wakefulness_and_foreground ... ok
+test fold::tests::head_is_largest_text_and_tap_anchor ... ok
+test fold::tests::heterogeneous_feed_folds_via_scrollable_semantics ... ok
+test fold::tests::feed_cards_fold_noise_gone_skeleton_intact ... ok
+test fold::tests::settings_menu_untouched ... ok
+test fold::tests::mine_page_folds_cards_keeps_nav ... ok
+test framecheck::tests::avg_diff_needs_at_least_one_sample ... ok
+test framecheck::tests::header_length_is_derived_not_assumed ... ok
+test framecheck::tests::identical_frames_are_not_spinning ... ok
+test framecheck::tests::malformed_capture_reports_error_not_a_pass ... ok
+test fold::tests::simple_repeats_never_fold ... ok
+test framecheck::tests::small_frames_do_not_degenerate_to_one_sample ... ok
+test framecheck::tests::sub_threshold_noise_is_ignored ... ok
+test framecheck::tests::tiny_animation_does_not_count_as_spinning ... ok
+test framecheck::tests::whole_frame_change_is_spinning ... ok
+test framecheck::tests::real_frames_match_recorded_golden ... ok
+test ftrace::tests::a_wrong_comm_filter_yields_nothing ... ok
+test ftrace::tests::an_empty_trace_yields_empty_stats ... ok
+test ftrace::tests::frame_intervals_come_from_submit_timestamps ... ok
+test ftrace::tests::gpu_busy_is_attributed_by_context_not_by_comm ... ok
+test ftrace::tests::key_lookup_matches_whole_words_only ... ok
+test ftrace::tests::parses_a_real_retire_line ... ok
+test ftrace::tests::out_of_order_timestamps_are_sorted_before_differencing ... ok
+test ftrace::tests::parses_a_real_submit_line ... ok
+test ftrace::tests::skips_headers_and_blanks ... ok
+test ftrace::tests::splits_comm_on_the_last_dash ... ok
+test gpdaemon::tests::command_receipts_are_not_mistaken_for_samples ... ok
+test gpdaemon::tests::default_mask_is_fps_gpu_temp_power ... ok
+test gpdaemon::tests::device_info_keeps_string_values_verbatim ... ok
+test gpdaemon::tests::a_zero_thermal_zone_is_a_missing_sensor_not_zero_celsius ... ok
+test gpdaemon::tests::empty_record_is_not_a_sample ... ok
+test gpdaemon::tests::frames_split_on_end_marker_not_on_semicolon ... ok
+test gpdaemon::tests::half_a_frame_is_kept_as_remainder ... ok
+test gpdaemon::tests::missing_power_fields_give_none_not_zero ... ok
+test gpdaemon::tests::negative_pid_is_dropped_not_sent ... ok
+test gpdaemon::tests::non_numeric_values_are_dropped_not_zeroed ... ok
+test gpdaemon::tests::other_commands_are_verbatim ... ok
+test gpdaemon::tests::realtime_sample_parses_into_numbers ... ok
+test gpdaemon::tests::start_collect_matches_hismartperf_wire_format ... ok
+test gpdaemon::tests::start_collect_without_pid_omits_the_pid_token ... ok
+test gpdaemon::tests::two_commands_must_not_be_concatenated_into_one_write ... ok
+test gpdaemon::tests::version_frame_is_recognised ... ok
+test gpdaemon::tests::zero_current_or_voltage_is_not_zero_watts ... ok
+test gpdaemon::tests::watt_reuses_hwcond_arithmetic_on_the_raw_sysfs_values ... ok
+test gpuop::tests::a_clean_operator_trips_neither_artifact_gate ... ok
+test gpuop::tests::a_crash_short_circuits_everything ... ok
+test gpuop::tests::a_failed_runner_report_carries_its_error ... ok
+test gpuop::tests::a_frame_set_folds_into_the_mean_of_per_frame_db ... ok
+test gpuop::tests::a_frame_set_with_nothing_measured_stays_empty ... ok
+test gpuop::tests::a_missing_or_corrupt_reference_is_reported ... ok
+test gpuop::tests::a_missing_test_reports_p_as_one ... ok
+test devlease::tests::corrupt_marker_extensions_block_every_release_and_transfer ... ok
+test confirmation_driver::temperature::cadence_tests::real_slow_body_uses_remaining_wait_instead_of_post_query_sleep ... ok
+test gpuop::tests::a_report_without_artifacts_still_parses ... ok
+test gpuop::tests::a_reference_frame_smaller_than_the_target_is_rejected ... ok
+test gpuop::tests::a_success_with_no_samples_is_rejected ... ok
+test gpuop::tests::accepts_a_well_formed_compute_module ... ok
+test gpuop::tests::against_an_empty_baseline_arm_the_incumbent_decides_what_faster_means ... ok
+test gpuop::tests::alternating_schedule_interleaves_the_arms ... ok
+test gpuop::tests::an_empty_or_missing_reference_source_is_an_error ... ok
+test gpuop::tests::an_oversized_reference_directory_is_sampled_evenly ... ok
+test gpuop::tests::beating_the_baseline_is_never_a_regression ... ok
+test gpuop::tests::below_the_quality_floor_is_rejected_even_when_significantly_faster ... ok
+test gpuop::tests::both_arms_always_get_the_same_number_of_rounds ... ok
+test gpuop::tests::deserialises_the_upstream_request_shape ... ok
+test gpuop::tests::even_subset_spreads_across_the_whole_list ... ok
+test gpuop::tests::faster_but_not_significant_is_not_an_improvement ... ok
+test gpuop::tests::hud_ghosting_is_caught ... ok
+test gpuop::tests::missing_readings_yield_no_verdict ... ok
+test gpuop::tests::non_alternating_schedule_runs_each_arm_in_a_block ... ok
+test gpuop::tests::over_budget_is_slow_regardless_of_quality ... ok
+test gpuop::tests::parses_a_successful_runner_report ... ok
+test gpuop::tests::parses_the_usual_invocation ... ok
+test gpuop::tests::picks_the_report_out_of_noisy_stdout ... ok
+test gpuop::tests::power_rail_defaults_to_the_read_only_usb_rail ... ok
+test gpuop::tests::reads_big_endian_modules ... ok
+test gpuop::tests::refbench_quality_capture_or_unknown_declarations_never_supply_performance ... ok
+test gpuop::tests::reference_is_optional_on_the_command_line ... ok
+test gpuop::tests::rejects_a_module_with_no_compute_entry_point ... ok
+test gpuop::tests::rejects_a_truncated_instruction_stream ... ok
+test gpuop::tests::rejects_a_zero_dimension_workgroup ... ok
+test gpuop::tests::rejects_an_oversized_workgroup ... ok
+test gpuop::tests::rejects_empty_or_unparseable_runner_output ... ok
+test gpuop::tests::rejects_malformed_requests ... ok
+test gpuop::tests::rejects_missing_request_and_bad_flags ... ok
+test gpuop::tests::rejects_non_spirv_bytes ... ok
+test gpuop::tests::report_serialises_to_the_contract_vocabulary ... ok
+test gpuop::tests::runner_report_parses_the_artifact_block ... ok
+test gpuop::tests::serial_is_optional ... ok
+test gpuop::tests::significantly_faster_and_within_quality_is_an_improvement ... ok
+test gpuop::tests::significantly_slower_is_not_an_improvement ... ok
+test gpuop::tests::small_fluctuations_within_tolerance_are_not_a_regression ... ok
+test gpuop::tests::stretching_is_caught_independently_of_ghosting ... ok
+test gpuop::tests::the_quality_pass_is_on_unless_explicitly_waived ... ok
+test gpuop::tests::the_report_states_where_the_quality_truth_came_from ... ok
+test gpuop::tests::the_request_can_carry_the_quality_reference ... ok
+test gpuop::tests::the_two_arms_average_over_the_same_frames ... ok
+test gpuop::tests::unknown_battery_observation_is_null_not_request_echo ... ok
+test gpuop::tests::unlock_needs_no_request ... ok
+test gpuop::tests::unmeasured_metrics_serialize_as_null_not_as_zero ... ok
+test gpuop::tests::v2_refbench_actual_unknown_or_mismatch_cannot_pass_conditions ... ok
+test gpustat::tests::a_real_regression_is_detected_with_four_rounds_per_arm ... ok
+test gpustat::tests::basic_moments ... ok
+test gpustat::tests::delta_sign_convention_is_b_minus_a ... ok
+test gpustat::tests::ln_gamma_matches_known_values ... ok
+test gpustat::tests::overlapping_samples_are_not_significant ... ok
+test gpustat::tests::p_value_decreases_monotonically_with_t ... ok
+test gpustat::tests::p_value_is_symmetric_and_bounded ... ok
+test gpustat::tests::percentiles_interpolate ... ok
+test gpustat::tests::too_few_samples_yield_no_verdict ... ok
+test gpustat::tests::two_sided_p_matches_the_standard_t_table ... ok
+test gpustat::tests::welch_matches_a_known_reference_case ... ok
+test gpustat::tests::welch_penalises_unequal_variance_with_lower_df ... ok
+test gpustat::tests::zero_variance_inputs_get_a_defined_verdict ... ok
+test grayartifact::tests::malformed_elf_and_strict_arguments ... ok
+test hwcond::tests::a_garbage_power_now_node_is_rejected_not_reported ... ok
+test hwcond::tests::an_all_zero_rail_is_reported_as_unmeasurable_not_as_zero_watts ... ok
+test hwcond::tests::an_ordinary_load_reading_still_passes ... ok
+test hwcond::tests::battery_state_parses_and_survives_missing_nodes ... ok
+test hwcond::tests::charge_ctl_state_file_roundtrips_and_rejects_garbage ... ok
+test hwcond::tests::charging_invalidates_power_even_when_the_reading_looks_perfectly_normal ... ok
+test hwcond::tests::dispersion_and_samples ... ok
+test hwcond::tests::every_charge_ctl_candidate_is_a_sysfs_path ... ok
+test hwcond::tests::lock_state_path_separates_paths_and_serials ... ok
+test hwcond::tests::low_battery_blocks_suspending_the_charger ... ok
+test hwcond::tests::on_battery_needs_both_not_charging_and_a_discharge_current ... ok
+test hwcond::tests::one_out_of_range_sample_invalidates_the_whole_window ... ok
+test hwcond::tests::parses_power_lines_and_tolerates_missing_power_now ... ok
+test hwcond::tests::power_falls_back_to_volts_times_amps ... ok
+test hwcond::tests::power_is_sign_agnostic ... ok
+test hwcond::tests::power_now_is_only_a_fallback_when_v_or_i_is_missing ... ok
+test hwcond::tests::power_prefers_volts_times_amps_over_the_device_reported_wattage ... ok
+test hwcond::tests::power_sample_cmd_targets_the_right_rail ... ok
+test hwcond::tests::power_stats_reports_mean_median_and_range ... ok
+test hwcond::tests::settle_window_outlasts_the_fuel_gauge_lag ... ok
+test hwcond::tests::snapshot_cmd_is_single_quoted_root_payload ... ok
+test hwcond::tests::snapshot_thermal_and_levels ... ok
+test hwcond::tests::suspend_value_depends_on_the_node_semantics ... ok
+test hwcond::tests::suspend_value_never_goes_out_of_percent_range ... ok
+test hwcond::tests::the_candidate_that_works_on_this_device_is_in_the_list ... ok
+test hwcond::tests::unknown_battery_status_never_certifies_discharge ... ok
+test hypo::tests::eval_assert_truth_table ... ok
+test hypo::tests::inject_line_conditions_and_cap ... ok
+test hypo::tests::next_id_sequences ... ok
+test hypo::tests::one_pred_revises_multiple_hyps ... ok
+test hypo::tests::parse_hypothesize_rejects_bad ... ok
+test hypo::tests::parse_hypothesize_valid_full ... ok
+test hypo::tests::pred_register_outcome_pending ... ok
+test hypo::tests::retract_and_supersede_exclude_injectable ... ok
+test hypo::tests::store_propose_materialize ... ok
+test hypo::tests::support_against_idempotent_and_active ... ok
+test keepalive::tests::adb_devices_skips_offline_and_header ... ok
+test keepalive::tests::args_parsing_forms ... ok
+test keepalive::tests::hdc_targets_filters_sentinels ... ok
+test keepalive::tests::override_timeout_and_active_mode ... ok
+test keepalive::tests::swipe_coords_scale_with_resolution ... ok
+test keepalive::tests::wakefulness_and_power_status ... ok
+test llm::tests::candidate_serializes_in_insertion_order ... ok
+test llm::tests::drops_malformed_items_and_caps_count ... ok
+test llm::tests::every_generated_candidate_stays_inside_the_whitelist ... ok
+test llm::tests::garbage_returns_empty_not_crash ... ok
+test llm::tests::mutator_avoids_history ... ok
+test llm::tests::mutator_is_deterministic_for_a_given_seed ... ok
+test llm::tests::mutator_produces_valid_distinct_candidates ... ok
+test llm::tests::ordinal_only_for_freq_and_pwrlevel_sysfs ... ok
+test llm::tests::parses_fenced_json_and_stringifies_values ... ok
+test llm::tests::prompt_carries_the_clamp_warning_and_system_rules ... ok
+test llm::tests::prompt_prints_history_params_compactly ... ok
+test llm::tests::secrets_take_export_and_quotes_without_shell_expansion ... ok
+test llm::tests::why_is_clipped_by_chars ... ok
+test loopreport::tests::report_matches_recorded_golden ... ok
+test loopreport::tests::snapshot_diff_pads_and_caps ... ok
+test loopreport::tests::snapshot_diff_reports_missing_files ... ok
+test loopreport::tests::splitlines_drops_trailing_newline ... ok
+test loopstat::tests::analyze_matches_recorded_golden ... ok
+test loopstat::tests::cohens_d_undefined_when_no_spread ... ok
+test loopstat::tests::combinations_match_itertools_order ... ok
+test loopstat::tests::dispersion_and_drift_edge_cases ... ok
+test loopstat::tests::fnmatch_matches_python_glob_rules ... ok
+test loopstat::tests::glob_skips_hidden_entries ... ok
+test loopstat::tests::hodges_lehmann_promotes_like_python ... ok
+test loopstat::tests::int_metrics_stay_int_through_round ... ok
+test loopstat::tests::permutation_enumerates_every_split ... ok
+test loopstat::tests::sum_matches_cpython_promotion ... ok
+test looptrace::tests::attribute_matches_recorded_golden ... ok
+test looptrace::tests::degenerate_trace_stays_sane ... ok
+test looptrace::tests::fps_cap_detection_uses_2pct_band ... ok
+test looptrace::tests::meta_dict_keeps_insertion_order_on_overwrite ... ok
+test looptrace::tests::negative_zero_normalizes_like_python ... ok
+test looptrace::tests::parse_matches_recorded_golden ... ok
+test looptrace::tests::pct_interpolates_like_numpy_default ... ok
+test looptrace::tests::share_pct_rounds_like_the_recorded_report ... ok
+test looptrace::tests::spf_detection_prefers_smallest_positive_lag ... ok
+test looptrace::tests::spf_falls_back_to_one_without_periodicity ... ok
+test looptrace::tests::unparseable_ddr_meta_is_an_error_not_a_zero ... ok
+test mtools::tests::adopted_excludes_retired ... ok
+test mtools::tests::calib_ok_thresholds ... ok
+test mtools::tests::count_false_success_stats ... ok
+test mtools::tests::logrep_single_and_multi_word ... ok
+test mtools::tests::next_id_sequences ... ok
+test mtools::tests::reload_persist_and_header ... ok
+test mtools::tests::repropose_resets_lifecycle ... ok
+test mtools::tests::tool_lifecycle_materialize ... ok
+test mtools::tests::xmlassert_need_and_ban ... ok
+test parallel::tests::hdc_tag_truncated ... ok
+test parallel::tests::job_parse_three_to_five_fields ... ok
+test parallel::tests::same_task_rejected_diff_task_allowed ... ok
+test perfsrc::tests::a_zero_or_nan_temperature_is_absence_not_a_reading ... ok
+test perfsrc::tests::android_frame_time_is_null_because_it_comes_from_another_channel ... ok
+test perfsrc::tests::android_smartperf_charging_spike_invalidates_the_window ... ok
+test perfsrc::tests::android_smartperf_never_reports_a_per_frame_p95 ... ok
+test perfsrc::tests::android_smartperf_summarises_the_real_device_numbers ... ok
+test perfsrc::tests::android_snapshot_records_which_power_rail_it_measured ... ok
+test perfsrc::tests::android_summary_keeps_hwcond_semantics ... ok
+test perfsrc::tests::bad_perf_args_are_rejected_with_a_readable_reason ... ok
+test perfsrc::tests::both_sources_emit_exactly_the_same_json_field_set ... ok
+test perfsrc::tests::charging_invalidates_power_even_when_the_reading_looks_plausible ... ok
+test perfsrc::tests::exit_code_separates_unusable_pipeline_from_zero_samples ... ok
+test perfsrc::tests::harmony_rejects_the_charging_power_reading_instead_of_reporting_it ... ok
+test perfsrc::tests::harmony_reports_soc_temp_as_null_when_the_sensor_is_absent ... ok
+test perfsrc::tests::harmony_summary_uses_the_real_genshin_numbers ... ok
+test perfsrc::tests::nested_perf_requires_exact_parent_target_before_any_device_call ... ok
+test perfsrc::tests::offline_csv_mode_parses_without_touching_a_device ... ok
+test perfsrc::tests::parses_perf_args ... ok
+test perfsrc::tests::snapshot_round_trips_through_json ... ok
+test perfsrc::tests::source_flag_picks_the_android_pipeline ... ok
+test perfsrc::tests::source_selection_follows_the_device_backend ... ok
+test perfsrc::tests::text_render_says_not_measured_rather_than_zero ... ok
+test perfsrc::tests::unmeasured_fields_serialize_as_null_never_zero ... ok
+test perfsrc::tests::version_probe_rejects_a_missing_sp_daemon ... ok
+test plugins::genshin::plugin_tests::test_plugin_only_claims_its_own_package ... ok
+test plugins::genshin::plugin_tests::test_plugin_uses_gamepad_input_mode ... ok
+test plugins::genshin::plugin_tests::test_plugin_yields_without_image ... ok
+test pyjson::tests::dumps_indent_sorted_matches_python ... ok
+test pyjson::tests::dumps_matches_python_indent1 ... ok
+test pyjson::tests::loads_and_roundtrip_serde_are_correctly_rounded ... ok
+test pyjson::tests::loads_handles_escapes_and_rejects_trailing_junk ... ok
+test pyjson::tests::loads_is_as_strict_as_json_loads ... ok
+test pyjson::tests::loads_keeps_number_kind_and_insertion_order ... ok
+test pyjson::tests::loads_round_trips_non_finite_like_python ... ok
+test pyjson::tests::loads_survives_hostile_input ... ok
+test pyjson::tests::median_keeps_int_float_distinction ... ok
+test pyjson::tests::repr_matches_python ... ok
+test pyjson::tests::round_matches_python ... ok
+test pyjson::tests::str_escape_matches_python ... ok
+test pyrandom::tests::choice_and_sample_match_cpython ... ok
+test pyrandom::tests::degenerate_cases ... ok
+test pyrandom::tests::getrandbits_matches_cpython ... ok
+test qualification::tests::baseline_drift_in_either_direction_blocks ... ok
+test qualification::tests::charging_missing_metric_and_failed_restore_block ... ok
+test qualification::tests::complete_evidence_is_ready_and_replayable ... ok
+test qualification::tests::harmony_nonroot_is_measure_only ... ok
+test qualification::tests::loaded_evidence_needs_derived_admission_and_each_bound_typed_window ... ok
+test qualification::tests::loaded_policy_has_typed_hashes_without_caller_caps_or_legacy_upgrade ... ok
+test qualification::tests::missing_bound_trace_and_failed_workload_are_not_eligible ... ok
+test qualification::tests::proxy_is_not_display_or_known_fallback ... ok
+test qualification::tests::request_thermal_cap_is_replayed_and_unknown_is_not_ready ... ok
+test qualification::tests::root_does_not_prove_driver_capability ... ok
+test qualification::tests::strict_alpha_requires_reachable_sample_size ... ok
+test qualification::tests::synthetic_and_unknown_sources_are_not_real_experiment_eligible ... ok
+test qualification::tests::target_metrics_cannot_be_removed_after_freeze ... ok
+test qualification::tests::unknown_is_never_ready ... ok
+test refbenchreport::tests::report_matches_recorded_golden ... ok
+test refbenchreport::tests::rules_hash_is_the_rules_file ... ok
+test runtime::tests::assert_reads_full_layer_beyond_els_truncation ... ok
+test runtime::tests::assert_requires_all_words_present ... ok
+test runtime::tests::assert_word_matched_by_substring_within_one_element ... ok
+test runtime::tests::assert_words_not_stitched_across_elements ... ok
+test runtime::tests::auto_candidate_caps_thresholds_and_idempotent ... ok
+test runtime::tests::bounce_alerts_without_collateral_block ... ok
+test runtime::tests::bounce_guard_blocks_walls_spares_visits_and_toggles ... ok
+test runtime::tests::find_el_reaches_beyond_els_truncation ... ok
+test runtime::tests::icon_what_passes_gate_without_list ... ok
+test runtime::tests::load_resume_tri_state ... ok
+test runtime::tests::ocr_compile_degrades_without_compiler ... ok
+test runtime::tests::ocr_gating_20 ... ok
+test runtime::tests::oscillation_detected_on_tap_back_loop ... ok
+test runtime::tests::page_boundary_conjunction_of_known_components ... ok
+test runtime::tests::pkg_killable_protects_oh_system ... ok
+test runtime::tests::plan_done_single_and_goto_tail_preserved ... ok
+test runtime::tests::plan_probe_alias_and_tail_truncation ... ok
+test runtime::tests::plan_tolerates_contract_violating_done ... ok
+test runtime::tests::probe_find_beyond_els_and_history ... ok
+test runtime::tests::probe_gate_validation ... ok
+test runtime::tests::probe_inspect_expands_folded_card ... ok
+test runtime::tests::run_id_unique_across_calls ... ok
+test runtime::tests::same_point_different_targets_not_rejected ... ok
+test runtime::tests::same_point_same_target_third_tap_rejected ... ok
+test runtime::tests::scroll_alternation_not_flagged ... ok
+test runtime::tests::secrets_parse_never_executes ... ok
+test runtime::tests::strip_norm_suffix_parses_display_candidate_format ... ok
+test runtime::tests::tap_display_format_what_strips_suffix_and_snaps ... ok
+test runtime::tests::tap_sig_ignores_coord_jitter ... ok
+test runtime::tests::tap_unknown_what_degrades_to_coordinate_path ... ok
+test runtime::tests::text_what_off_list_falls_back_to_coordinates ... ok
+test runtime::tests::three_beat_loop_flagged ... ok
+test runtime::tests::verdict_parse_and_prompt_line ... ok
+test runtime::tests::verdict_scan_and_injection_tri_state ... ok
+test script::tests::test_loop_expansion ... ok
+test script::tests::test_parse_json_array_script ... ok
+test script::tests::test_parse_json_object_wrapper ... ok
+test script::tests::test_parse_log_jsonl_replay ... ok
+test script::tests::test_parse_toml_steps ... ok
+test serve::tests::build_argv_run_forces_detach_and_no_endless ... ok
+test serve::tests::build_argv_script_forces_detach ... ok
+test serve::tests::cat_jail_refuses_escape ... ok
+test serve::tests::initialize_echoes_client_version ... ok
+test serve::tests::notifications_get_no_response ... ok
+test serve::tests::tools_list_shape_and_surface ... ok
+test serve::tests::truncate_marks_original_size ... ok
+test serve::tests::unknown_method_and_parse_error ... ok
+test serve::tests::unknown_tool_is_error_result ... ok
+test shaderplan::tests::headless_seconds_are_explicit_no_frames_no_defaults ... ok
+test shaderplan::tests::maps_every_consumed_refbench_field ... ok
+test shaderplan::tests::rejects_conditions_without_implementation ... ok
+test shaderplan::tests::typed_gol_native_route_does_not_turn_unknown_fan_into_observation ... ok
+test shaderplan::tests::unknown_actual_does_not_echo_requested ... ok
+test shotdiff::tests::diff_counts_only_pixels_above_threshold ... ok
+test shotdiff::tests::excluded_regions_are_skipped ... ok
+test shotdiff::tests::landscape_and_portrait_are_safe ... ok
+test shotdiff::tests::report_ranks_probe_against_control ... ok
+test shotdiff::tests::wrong_format_is_rejected ... ok
+test smartperf::tests::a_plausible_discharging_reading_passes_through ... ok
+test smartperf::tests::a_repeated_header_does_not_become_a_phantom_sample ... ok
+test smartperf::tests::charging_garbage_power_is_rejected_not_averaged_into_a_number ... ok
+test smartperf::tests::collect_cmd_follows_the_official_flag_table ... ok
+test smartperf::tests::csv_parsing_is_header_driven_not_position_driven ... ok
+test smartperf::tests::empty_and_junk_input_parses_to_nothing_rather_than_panicking ... ok
+test smartperf::tests::missing_current_or_voltage_yields_none_never_zero ... ok
+test smartperf::tests::one_charging_spike_invalidates_the_whole_window ... ok
+test smartperf::tests::parses_key_value_blocks_in_both_shapes ... ok
+test smartperf::tests::parses_sp_daemon_stdout_records ... ok
+test smartperf::tests::parses_the_real_genshin_csv_rows ... ok
+test smartperf::tests::parses_the_real_report_general_csv ... ok
+test smartperf::tests::parsing_is_deterministic ... ok
+test smartperf::tests::stdout_parser_tolerates_key_value_on_the_same_line_as_order ... ok
+test smartperf::tests::xpower_commands_match_hismartperf ... ok
+test storageadapter::tests::real_naga_interleaved_builtin_globals_keep_dependency_order ... ok
+test storageadapter::tests::real_naga_sr_preserves_shared_output_and_other_instructions ... ok
+test storageadapter::tests::real_naga_variants_with_multiple_reads_are_transformed ... ok
+test storageadapter::tests::rejects_abi_and_identity_corruption ... ok
+test storageadapter::tests::rejects_optional_masks_and_wrong_input_ops ... ok
+test storageadapter::tests::rejects_pointer_and_loaded_resource_aliases ... ok
+test sysparam::tests::bonferroni_tightens_only_the_win_side ... ok
+test sysparam::tests::charging_makes_power_unusable ... ok
+test sysparam::tests::contested_nodes_stay_out_of_the_whitelist ... ok
+test sysparam::tests::decide_matches_recorded_result ... ok
+test sysparam::tests::discharging_uses_volts_times_amps_not_power_now ... ok
+test sysparam::tests::fan_and_charge_nodes_can_never_enter ... ok
+test sysparam::tests::fps_parser_takes_both_dumpsys_wordings ... ok
+test sysparam::tests::keep_needs_a_significant_win_and_no_regression ... ok
+test sysparam::tests::negative_average_does_not_prove_full_window_discharge ... ok
+test sysparam::tests::old_or_partial_power_evidence_keeps_raw_but_not_verdict_metric ... ok
+test sysparam::tests::on_battery_needs_both_status_and_current_direction ... ok
+test sysparam::tests::only_writable_and_effective_nodes_get_in ... ok
+test sysparam::tests::plan_is_tab_separated_and_deterministic ... ok
+test sysparam::tests::plan_text_refuses_unknown_ids ... ok
+test sysparam::tests::plausible_power_now_is_still_only_recorded ... ok
+test sysparam::tests::power_out_of_verdict_drops_the_metric_entirely ... ok
+test sysparam::tests::power_win_counts_too ... ok
+test sysparam::tests::refresh_rate_values_come_from_display_modes ... ok
+test sysparam::tests::required_missing_metric_and_unknown_thermal_block_other_win ... ok
+test sysparam::tests::rule_doc_records_reachability_and_why_power_is_out ... ok
+test sysparam::tests::sentinel_temps_and_missing_fan_are_not_guessed ... ok
+test sysparam::tests::single_valued_params_are_dropped ... ok
+test sysparam::tests::thermal_nodes_can_never_enter ... ok
+test sysparam::tests::three_abort_lines_beat_any_improvement ... ok
+test sysparam::tests::unparseable_current_fails_the_candidate_not_the_guard ... ok
+test sysparam::tests::validate_accepts_legal_and_rejects_the_rest ... ok
+test sysparam::tests::value_table_error_keeps_python_list_repr ... ok
+test sysparam::tests::vendor_refresh_mode_is_absent_without_real_evidence ... ok
+test sysparam::tests::vendor_refresh_mode_only_takes_modes_that_really_changed_fps ... ok
+test sysparam::tests::watt_math_follows_python_left_to_right ... ok
+test sysparam::tests::whitelist_matches_recorded_golden ... ok
+test sysparam::tests::window_requires_done_count_span_and_bound_capture ... ok
+test telemetry::tests::android_parsers_pinned_by_fixtures ... ok
+test telemetry::tests::oh_parsers_pinned_by_fixtures ... ok
+test telemetry::tests::sectioned_assembly_and_graceful_empty ... ok
+test thermal_profile::tests::loaded_soc80_is_not_battery80_or_legacy_cold ... ok
+test thermal_profile::tests::missing_domain_unknown_preset_duplicate_path_refuse ... ok
+test thermal_profile::tests::no_trip_shell_can_be_diagnostic_without_losing_skin ... ok
+test thermal_profile::tests::passive_cap_and_profile_tamper_refuse ... ok
+test thermal_profile::tests::raw_missing_extra_nonfinite_and_severity_failclosed ... ok
+test thermal_profile::tests::rehashed_or_widened_reference_is_not_a_new_policy ... ok
+test thermal_profile::tests::serialized_unknown_fields_and_profile_preservation ... ok
+test thermal_profile::tests::short_runtime_uses_frozen_band_without_requiring_30s ... ok
+test thermal_profile::tests::typed_units_and_unknown_domain_are_preserved ... ok
+test thermal_profile::tests::unbounded_cpu_or_gpu_cannot_be_excluded_because_a_sibling_has_trips ... ok
+test thermal_profile::tests::warmup_stability_and_clock_are_not_inferred_from_one_point ... ok
+test tree::rebuild_tests::rebuild_err_on_empty_and_round2_half_even ... ok
+test tree::rebuild_tests::rebuild_pages_edges_ripe_orphan ... ok
+test universal::action::tests::test_action_creation ... ok
+test universal::action::tests::test_normalized_tap_conversion ... ok
+test universal::dialogue::tests::test_choice_selection ... ok
+test universal::dialogue::tests::test_gamepad_subtitle_skip ... ok
+test universal::engine::tests::test_core_is_plugin_agnostic_when_none_registered ... ok
+test universal::engine::tests::test_engine_priority_popup_over_dialogue ... ok
+test universal::engine::tests::test_engine_yield_when_no_pattern_matches ... ok
+test universal::engine::tests::test_plugin_decide_is_fallback_before_model ... ok
+test universal::engine::tests::test_plugin_intercept_precedes_universal_operators ... ok
+test universal::nav::tests::test_nav_centered_movement ... ok
+test universal::nav::tests::test_scroll_down_generation ... ok
+test universal::plugin::tests::test_empty_registry_is_transparent ... ok
+test universal::plugin::tests::test_registry_activates_only_matching_package ... ok
+test universal::popup::tests::test_element_popup_detection ... ok
+test universal::popup::tests::test_no_false_positive_on_plain_app_screen ... ok
+test universal::popup::tests::test_popup_stuck_escape ... ok
+test upopabi::tests::reflects_instruction_types_and_rejects_wrong_abi ... ok
+test upopabi::tests::rejects_format_shape_set_access_push_constants_and_entry_mutations ... ok
+test vks::tests::crosscheck_compares_submit_rate_not_fps_mean ... ok
+test vks::tests::crosscheck_keeps_int_ness_of_passthrough_fields ... ok
+test vks::tests::crosscheck_prefers_window_samples_but_falls_back_honestly ... ok
+test vks::tests::crosscheck_without_any_data_stays_null ... ok
+test vks::tests::malformed_fps_is_an_error ... ok
+test vks::tests::matches_recorded_golden ... ok
+test vks::tests::pick_breaks_ties_by_first_seen ... ok
+test vks::tests::pick_on_an_empty_trace_says_so ... ok
+test vks::tests::pick_takes_the_busiest_submitter_and_reports_the_share ... ok
+test vks::tests::ready_needs_both_a_step_and_a_flat_tail ... ok
+test vksreport::tests::binder_comms_normalize_but_classes_do_not ... ok
+test vksreport::tests::collectors_see_the_recorded_conditions ... ok
+test vksreport::tests::report_matches_recorded_golden ... ok
+test vksreport::tests::rules_hash_is_the_rules_file ... ok
+test gpuop::tests::a_single_file_reference_is_a_one_frame_set ... ok
+test gpuop::tests::a_reference_frame_is_centre_cropped_not_rescaled ... ok
+test gpuop::tests::a_directory_reference_takes_every_image_in_name_order ... ok
+
+test result: ok. 574 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.12s
+
+     Running tests/confirmation_driver_cli.rs (src/target/debug/deps/confirmation_driver_cli-83762d2f688767ef)
+
+running 24 tests
+test actual_remote_prepare_probe_rechecks_thermal_before_apply_without_transport ... ok
+test capability_adb_without_execute_and_extra_game_fields_do_not_call_transport ... ok
+test capability_missing_frozen_tool_cannot_reconcile_or_release_barrier ... ok
+test boot_changed_reconcile_preserves_barrier ... ok
+test capability_only_endpoint_has_no_game_inputs_no_sampling_and_closes_fake_session ... ok
+test capability_root_hot_gate_precedes_install_and_failure_keeps_recovery has been running for over 60 seconds
+test explicit_reconcile_never_validates_failed_old_sample ... ok
+test complete_actual_driver_all_control_categories_retains_synthetic_and_cannot_replay has been running for over 60 seconds
+test every_failed_raw_gate_stops_and_preserves_uncertainty has been running for over 60 seconds
+test capability_root_hot_gate_precedes_install_and_failure_keeps_recovery ... ok
+test loaded_capability_missing_typed_sensor_and_severe_hal_cannot_install_or_write ... ok
+test loaded_capability_uses_typed_warmup_at_80c_still_never_experiment_qualified ... ok
+test loaded_cadence_driver_freeze_ten_arms_and_actual_judge_cannot_promote_synthetic has been running for over 60 seconds
+test loaded_explicit_cadence_freezes_two_metrics_while_charging_does_not_silently_change_efficiency has been running for over 60 seconds
+test loaded_explicit_cadence_freezes_two_metrics_while_charging_does_not_silently_change_efficiency ... ok
+test loaded_prepare_checks_fresh_profile_after_install_before_first_control_write ... ok
+test every_failed_raw_gate_stops_and_preserves_uncertainty ... ok
+test loaded_prepare_freezes_real_raw_contract_and_three_independent_windows_but_fixture_is_blocked has been running for over 60 seconds
+test loaded_restore_target_is_post_warmup_state_before_remote_writes_for_probe_and_prepare has been running for over 60 seconds
+test loaded_prepare_freezes_real_raw_contract_and_three_independent_windows_but_fixture_is_blocked ... ok
+test loaded_whole_thermal_failure_keeps_durable_barrier_without_sampling_further_baselines has been running for over 60 seconds
+test loaded_cadence_driver_freeze_ten_arms_and_actual_judge_cannot_promote_synthetic ... ok
+test local_parent_exit_with_lingering_closed_pipe_child_is_not_success ... ok
+test per_device_lease_excludes_other_cwd_renews_and_releases_completed_command ... ok
+test real_validation_without_execute_invokes_no_transport ... ok
+test loaded_restore_target_is_post_warmup_state_before_remote_writes_for_probe_and_prepare ... ok
+test unbound_pending_transport_cannot_be_reconciled_or_asserted_idle ... ok
+test unknown_root_blocks_before_any_write ... ok
+test unsupported_display_goal_rejects_before_transport ... ok
+test complete_actual_driver_all_control_categories_retains_synthetic_and_cannot_replay ... ok
+test uncertain_session_closure_keeps_barrier_and_delayed_command_revoked ... ok
+test loaded_whole_thermal_failure_keeps_durable_barrier_without_sampling_further_baselines ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 612.11s
+
+     Running tests/confirmation_observation_cli.rs (src/target/debug/deps/confirmation_observation_cli-599078781b906035)
+
+running 18 tests
+test different_hashes_of_shared_long_telemetry_cannot_admit_independent_baselines ... ok
+test admission_recomputes_repetition_and_rejects_unstable_raw_baselines ... ok
+test complete_telemetry_cannot_exceed_the_recorded_run_duration ... ok
+test candidate_uses_real_gol_plan_entry_shape_and_readback ... ok
+test frozen_binding_raw_reuse_and_aggregate_admission_fail_closed ... ok
+test loaded_and_legacy_raw_schemas_cannot_be_mixed ... ok
+test even_identical_snapshots_cannot_omit_untouched_fixed_or_declared_cpu_domains ... ok
+test loaded_reference_widening_is_rejected_after_all_outer_bindings_are_rehashed ... ok
+test loaded_raw_cli_reconstructs_typed_windows_and_keeps_experiment_ineligible ... ok
+test named_pipe_evidence_is_blocked_without_waiting_for_a_writer ... ok
+test missing_driver_context_and_handwritten_gates_are_rejected ... ok
+test no_device_or_model_invocation_even_for_valid_observation ... ok
+test loaded_raw_cli_missing_window_bad_exit_and_over_cap_are_blocked ... ok
+test raw_single_observation_recomputes_metrics_and_remains_ineligible ... ok
+test same_boot_uptime_cannot_go_back_after_baseline_admission ... ok
+test trace_truncation_incomplete_power_and_snapshot_truncation_cannot_pass ... ok
+test wrong_bytes_symlinks_and_existing_output_are_rejected ... ok
+test every_raw_gate_blocks_independently_and_synthetic_never_valid ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.34s
+
+     Running tests/gray_artifact_process.rs (src/target/debug/deps/gray_artifact_process-555359938921e832)
+
+running 15 tests
+test compiler_reads_snapshot_even_if_original_source_changes ... ok
+test compiler_background_writer_with_closed_pipes_is_rejected ... ok
+test fixture_build_archives_snapshot_checks_reuse_and_tampering ... ok
+test inherited_mode_requires_isolation_explicit_tools_and_build_subcommand ... ok
+test inherited_timeout_does_not_log_into_a_full_unread_stderr_before_killing ... ok
+test inherited_tools_share_the_outer_group_and_artifact_remains_provisional ... ok
+test inspect_is_a_real_cross_process_spirv_gate ... ok
+test compiler_failure_missing_tools_wrong_abi_and_snapshot_mutation_publish_nothing ... ok
+test oversize_source_is_rejected_before_tools_or_staging ... ok
+test upopabi::tests::reflects_instruction_types_and_rejects_wrong_abi ... ok
+test upopabi::tests::rejects_format_shape_set_access_push_constants_and_entry_mutations ... ok
+test outer_supervisor_rejects_closed_pipe_descendants_after_launcher_success ... ok
+test version_probe_hang_is_bounded_too ... ok
+test compiler_hang_and_spam_are_bounded_and_fail_closed ... ok
+test inherited_caps_kill_the_launcher_group_without_publishing_success ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.30s
+
+     Running tests/native_artifact_host.rs (src/target/debug/deps/native_artifact_host-d044ce9c47291400)
+
+running 1 test
+test host_native_counters_and_actual_layer_hooks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.61s
+
+     Running tests/qualification_cli.rs (src/target/debug/deps/qualification_cli-29294f844499d9c6)
+
+running 10 tests
+test actual_eval_offline_route_freezes_target_without_optimization_pass ... ok
+test capability_scratch_reservation_failure_is_unknown_before_transport ... ok
+test actual_eval_nonroot_stops_before_push_or_writable_probe ... ok
+test eval_refuses_generator_relaxing_alpha ... ok
+test integrated_offline_shader_precedes_live_support_and_lease_gates ... ok
+test published_synthetic_fixture_cannot_qualify_real_claim ... ok
+test qualify_replays_same_evidence_and_blocks_display_proxy ... ok
+test actual_autoloop_nonroot_stops_before_probe_or_model ... ok
+test actual_probe_failed_restore_cannot_report_reverted ... ok
+test concurrent_capability_probes_cannot_borrow_another_devices_root_output ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.80s
+
+     Running tests/sequence_quality_cli.rs (src/target/debug/deps/sequence_quality_cli-11eebd8cd1579240)
+
+running 11 tests
+test derived_and_hud_sources_cannot_be_real_game_qualification ... ok
+test candidate_artifact_binding_is_required_and_crosschecked ... ok
+test flicker_is_detected_when_each_spatial_frame_passes ... ok
+test color_bias_and_temporal_ghost_have_explainable_frames ... ok
+test empty_masks_and_report_overwrite_are_rejected ... ok
+test hash_consistent_malformed_and_16bit_images_are_unknown ... ok
+test frozen_rules_and_path_traversal_do_not_silently_pass ... ok
+test actual_cli_landscape_portrait_and_replay ... ok
+test hash_corruption_alignment_and_high_motion_are_unknown ... ok
+test provenance_and_ledger_are_separate_from_metrics ... ok
+test missing_frame_timestamp_mismatch_and_dimensions_never_pass ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/storage_adapter_process.rs (src/target/debug/deps/storage_adapter_process-83da1a82c295d18b)
+
+running 6 tests
+test hash_reforging_cannot_bypass_deterministic_transformation ... ok
+test mutually_exclusive_sources_and_missing_toolchain_fail_explicitly ... ok
+test real_naga_cli_freezes_reuses_and_replays_exact_bytecode ... ok
+test symlinks_extra_files_nonregular_and_oversize_inputs_are_rejected ... ok
+test tampering_and_status_forgery_do_not_reach_native_tools ... ok
+test imported_builder_archives_origin_and_never_recompiles_storage_candidate ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.76s
+
+     Running tests/v2_conditions_lease.rs (src/target/debug/deps/v2_conditions_lease-1873dc9f63afe489)
+
+running 12 tests
+test actual_eval_route_writes_consumed_plan_and_honest_abort_without_phone ... ok
+test actual_typed_gol_request_reaches_native_plan_and_blocks_unimplemented_layer_without_device ... ok
+test eval_sysparam_entry_respects_existing_manual_lease_before_device_access ... ok
+test executable_permission_spawn_failure_retires_only_its_pending_marker ... ok
+test invalid_pid_marker_and_live_owner_cannot_be_recovered ... ok
+test gpuop_adapter_and_perf_cannot_write_through_a_manual_lock ... ok
+test timeout_preserves_other_owner_and_failure_releases ... ok
+test unknown_manual_lock_is_never_deleted_even_when_old ... ok
+test unsupported_injection_returns_specific_abort_before_artifact_or_device ... ok
+test two_real_processes_do_not_interleave_across_cwds ... ok
+test crash_releases_kernel_but_abandoned_owner_blocks_live_child_and_unknown_device ... ok
+test heartbeat_renews_and_live_or_replaced_legacy_owner_is_not_reclaimed ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.65s
+

@@ -1,0 +1,32 @@
+{
+  "repository_url": "https://dl.google.com/android/repository/repository2-3.xml",
+  "repository_sha256": "13dd16e8984cc6f3202a72c8eb269bd7ad03be4247b41b4412b315c5b8bf6d4b",
+  "packages": {
+    "platforms;android-35": [
+      {
+        "size": "64273788",
+        "checksum": "0bb560a90a7a2cbd0dd8348224d518b638fe7949",
+        "checksum_type": "sha1",
+        "url": "platform-35_r02.zip"
+      }
+    ],
+    "ndk;28.2.13676358": [
+      {
+        "size": "952495160",
+        "checksum": "fc20a6bf15a30fb3428c9b60a7308793a362dc6d",
+        "checksum_type": "sha1",
+        "url": "android-ndk-r28c-darwin.zip",
+        "host-os": "macosx"
+      }
+    ],
+    "build-tools;35.0.0": [
+      {
+        "size": "76857898",
+        "checksum": "93ab8ce91230e067b5add4bfa79919c52b27f072",
+        "checksum_type": "sha1",
+        "url": "build-tools_r35_macosx.zip",
+        "host-os": "macosx"
+      }
+    ]
+  }
+}

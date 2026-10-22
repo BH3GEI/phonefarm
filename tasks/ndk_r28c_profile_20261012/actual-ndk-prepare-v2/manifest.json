@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "artifact_id": "upop-54cb1c3e3b7c0fdfcd3d1a4f01c177f4b3ac314cfb93ab9371751c9f8cd3dd7a",
+  "state": "built_offline_outer_quiescence_required",
+  "device_validation": "not_run",
+  "deployable": false,
+  "descriptor": {
+    "schema_version": 1,
+    "target": "android-arm64-v8a-api30",
+    "abi": {
+      "version": 1,
+      "entry_point": "main",
+      "local_size": [
+        16,
+        16,
+        1
+      ],
+      "input": "set0/binding0:combined_sampler_2d_float32",
+      "output": "set0/binding1:writeonly_rgba8_2d"
+    },
+    "inputs": {
+      "VkLayer_refknobs.json": "ec69a8c831a6ac4bd6521904269b5dc9809def25df36c9152b7403e1ac46776d",
+      "adaptation_descriptor.json": "01e67a5e92937da8b0369f19bbc6a38bea0be40e8c7f820af75883e60fc595a1",
+      "adaptation_manifest.json": "73fd384316497fa249e00485af98063726436cfa262c75bd0599e11bc56dc81f",
+      "artifact_stats.h": "a827991b4bab553ded8633f895556981645d605145f2b583a8d464820bdef648",
+      "candidate.comp": "f8563e4747bf005ea5da870bee66d5c18c021704597b9b708d9d40186f97cde0",
+      "candidate.spv": "6f76f1c7649fcb10c82800b9c072df3777e669208878baee9b8039a4faa93325",
+      "copy_spv.h": "99f4bf5e12deda760798f7c9b63cf0d329b9c51c1456a48247bf686012ad1087",
+      "copyprobe_copy.comp": "5a45495dbc18f185519f1cc1e0b398d477af2e13fe03c0a4c1f3de4710de21cd",
+      "copyprobe_copy.spv": "002c72f559fa35bcb4b6cd33593cb2958b34bf72729807de392c6923de6396c8",
+      "original_candidate.spv": "843f8435d5dd04c84dcc4c3ed5255e11c3dac408bf05763f1ad74f07a118ad03",
+      "vk_layer_refknobs.cpp": "cf9dcc89983f401434c4113d28ed95a6249ebdd8899eadb19453aea2590396bc"
+    },
+    "tools": {
+      "clang++": {
+        "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-ndk-prepare-v2/session/ndk.snapshot/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android30-clang++",
+        "sha256": "662b264a3a4ecaa251c2eee4537000a69b5078211223a9eeb76b0c3a213a1ee4",
+        "version": "Android (13624864, +pgo, -bolt, +lto, -mlgo, based on r530567e) clang version 19.0.1 (https://android.googlesource.com/toolchain/llvm-project 97a699bf4812a18fb657c2779f5296a4ab2694d2)\nTarget: aarch64-unknown-linux-android30\nThread model: posix\nInstalledDir: /Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-ndk-prepare-v2/session/ndk.snapshot/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+      },
+      "glslc": {
+        "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-ndk-prepare-v2/session/ndk.snapshot/shader-tools/darwin-x86_64/glslc",
+        "sha256": "63da7bd4a7086bfb448e2c3d74af167f80204937bf3b440c5c99eeb76ee9b8b6",
+        "version": "shaderc v2022.3 ndk-r29-beta2\nspirv-tools v2022.4 ndk-r29-beta2\nglslang ndk-r29-beta2\n\nTarget: SPIR-V 1.0"
+      },
+      "nm": {
+        "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-ndk-prepare-v2/session/ndk.snapshot/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-nm",
+        "sha256": "709c3ec8bf09b68ac535275b1bb5bb511b7809413817036e3605f187809e7b81",
+        "version": "llvm-nm, compatible with GNU nm\nLLVM (http://llvm.org/):\n  LLVM version 19.0.1 (/Volumes/Android/buildbot/src/android/llvm-r530567/out/llvm-project/llvm 97a699bf4812a18fb657c2779f5296a4ab2694d2)\n  Optimized build."
+      },
+      "readelf": {
+        "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-ndk-prepare-v2/session/ndk.snapshot/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-readelf",
+        "sha256": "37e565359be0c9f2868348dd314416a420d137ee84c891ec8474cf7d29cfd995",
+        "version": "LLVM (http://llvm.org/):\n  LLVM version 19.0.1 (/Volumes/Android/buildbot/src/android/llvm-r530567/out/llvm-project/llvm 97a699bf4812a18fb657c2779f5296a4ab2694d2)\n  Optimized build."
+      }
+    },
+    "shader_flags": [
+      "--target-env=vulkan1.0",
+      "-O"
+    ],
+    "native_flags": [
+      "-O2",
+      "-Wall",
+      "-fPIC",
+      "-std=c++17",
+      "-fno-exceptions",
+      "-fno-rtti",
+      "-static-libstdc++",
+      "-Wl,--exclude-libs,ALL",
+      "-DRK_DYNAMIC_UPOP_BUILD=1",
+      "-shared",
+      "-I<snapshot>",
+      "-llog"
+    ],
+    "adaptation": {
+      "adaptation_id": "01e67a5e92937da8b0369f19bbc6a38bea0be40e8c7f820af75883e60fc595a1",
+      "deployable": false,
+      "descriptor": {
+        "adapted_abi": {
+          "entry_point": "main",
+          "input": "set0/binding0:combined_sampler_2d_float32",
+          "local_size": [
+            16,
+            16,
+            1
+          ],
+          "output": "set0/binding1:writeonly_rgba8_2d",
+          "version": 1
+        },
+        "adapted_spirv_sha256": "6f76f1c7649fcb10c82800b9c072df3777e669208878baee9b8039a4faa93325",
+        "changes": {
+          "direct_loads": 2,
+          "image_reads_to_fetch": 1,
+          "image_sizes_to_lod": 1,
+          "input_variable": 33,
+          "original_image_type": 5,
+          "original_pointer_type": 34,
+          "output_shared_original_type": true,
+          "output_variable": 35,
+          "unused_loads": 1
+        },
+        "original_source_sha256": "f8563e4747bf005ea5da870bee66d5c18c021704597b9b708d9d40186f97cde0",
+        "original_spirv_sha256": "843f8435d5dd04c84dcc4c3ed5255e11c3dac408bf05763f1ad74f07a118ad03",
+        "protocol_version": 1,
+        "source_spirv_association": "caller_supplied_unverified",
+        "transform": "direct_rgba8_storage_to_combined_fetch_lod0"
+      },
+      "device_validation": "not_run",
+      "qualification": "not_run",
+      "semantic_equivalence": "not_run",
+      "source_spirv_association": "caller_supplied_unverified",
+      "state": "verified_offline"
+    },
+    "process_supervision": "inherited_group"
+  },
+  "files": {
+    "VkLayer_refknobs.json": "ec69a8c831a6ac4bd6521904269b5dc9809def25df36c9152b7403e1ac46776d",
+    "adaptation_descriptor.json": "01e67a5e92937da8b0369f19bbc6a38bea0be40e8c7f820af75883e60fc595a1",
+    "adaptation_manifest.json": "73fd384316497fa249e00485af98063726436cfa262c75bd0599e11bc56dc81f",
+    "artifact_metadata.h": "05bdbd0409ae3f853f9c78efbe4bb833e0979f32920b932153d95b8e77717b1a",
+    "artifact_stats.h": "a827991b4bab553ded8633f895556981645d605145f2b583a8d464820bdef648",
+    "candidate.comp": "f8563e4747bf005ea5da870bee66d5c18c021704597b9b708d9d40186f97cde0",
+    "candidate.spv": "6f76f1c7649fcb10c82800b9c072df3777e669208878baee9b8039a4faa93325",
+    "candidate_compile.log": "22078a76eb0c6777ad5dcb9f37e553b86f7dcfb5bbd4446790cd4c28fcbd907d",
+    "copy_compile.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "copy_spv.h": "99f4bf5e12deda760798f7c9b63cf0d329b9c51c1456a48247bf686012ad1087",
+    "copyprobe_copy.comp": "5a45495dbc18f185519f1cc1e0b398d477af2e13fe03c0a4c1f3de4710de21cd",
+    "copyprobe_copy.spv": "002c72f559fa35bcb4b6cd33593cb2958b34bf72729807de392c6923de6396c8",
+    "dependencies.log": "e8bc82f83ad2cf335327763d505d2bf2ec2bf2679780768194f3c1525623b86e",
+    "descriptor.json": "54cb1c3e3b7c0fdfcd3d1a4f01c177f4b3ac314cfb93ab9371751c9f8cd3dd7a",
+    "exports.log": "aa2b7915aea2b95f13045ab9ad37c122572adde54a9f79a50487af403ff0b216",
+    "layer_compile.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "libVkLayer_refknobs.so": "771889e55414656f79454bac55e89e9795332b42e5e87a4f37cd6e0cee66bc5e",
+    "original_candidate.spv": "843f8435d5dd04c84dcc4c3ed5255e11c3dac408bf05763f1ad74f07a118ad03",
+    "vk_layer_refknobs.cpp": "cf9dcc89983f401434c4113d28ed95a6249ebdd8899eadb19453aea2590396bc"
+  },
+  "layer_sha256": "771889e55414656f79454bac55e89e9795332b42e5e87a4f37cd6e0cee66bc5e",
+  "checks": {
+    "abi_reflected": true,
+    "candidate_route": "adapted_spirv",
+    "elf_machine": "AArch64",
+    "needed": [
+      "liblog.so",
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "required_exports": [
+      "vkNegotiateLoaderLayerInterfaceVersion",
+      "vkGetInstanceProcAddr",
+      "vkGetDeviceProcAddr",
+      "vkEnumerateInstanceLayerProperties",
+      "vkEnumerateInstanceExtensionProperties"
+    ]
+  }
+}

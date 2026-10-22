@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests main.rs (target/debug/deps/phonefarm-e88849b1f1fea8e7)
+
+running 1 test
+test qualification::tests::loaded_policy_has_typed_hashes_without_caller_caps_or_legacy_upgrade ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 575 filtered out; finished in 0.00s
+

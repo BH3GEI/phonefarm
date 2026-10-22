@@ -444,17 +444,20 @@ impl BatteryState {
     /// `Not charging` 而不是 `Discharging`; 而 `current_now` 在充放平衡的瞬间会过零。
     /// 只有「没在充电」且「电流确实是放电方向」才算数。
     pub fn on_battery(&self) -> bool {
-        if self.status.eq_ignore_ascii_case("Charging") {
+        // 状态未知/缺失不能证明在放电, 即便电流为负。
+        let status = self.status.trim().to_ascii_lowercase();
+        if status == "charging" {
             return false;
         }
         // 满电空闲: 电池不进不出, 整机由 USB 供电 —— 不是放电态 (与 charge_suspend.sh /
         // sysparam::env_stats 同一判据, 门限 sysparam::BYPASS_IDLE_UA)
-        if self.status.eq_ignore_ascii_case("Full")
+        if status == "full"
             && matches!(self.current_ua, Some(c) if (c.abs() as f64) < crate::sysparam::BYPASS_IDLE_UA)
         {
             return false;
         }
-        matches!(self.current_ua, Some(c) if c < 0)
+        matches!(status.as_str(), "discharging" | "not charging" | "full")
+            && matches!(self.current_ua, Some(c) if c < 0)
     }
 
     /// 人能读的一句话, 进 `unavailable` 的原因里。
@@ -965,6 +968,13 @@ mod tests {
     use super::*;
 
     // ── 电池状态: 功耗读数算不算数全看它 ──
+
+    #[test]
+    fn unknown_battery_status_never_certifies_discharge() {
+        for status in ["", "Unknown", "NA", "manufacturer-custom"] {
+            assert!(!BatteryState { status:status.into(), current_ua:Some(-200_000), capacity_pct:Some(80) }.on_battery());
+        }
+    }
 
     fn bat(status: &str, cur: i64, cap: i64) -> BatteryState {
         BatteryState { status: status.into(), current_ua: Some(cur), capacity_pct: Some(cap) }

@@ -395,12 +395,18 @@ fn run_round(phone: &crate::device::Device, a: &BenchArgs, remote_model: &str, s
 // ══════════════ 主流程 ══════════════
 
 pub fn run_bench(args: &[String]) -> i32 {
-    let a = match parse_args(args) {
+    let mut a = match parse_args(args) {
         Ok(a) => a,
         Err(e) => { eprintln!("{e}"); return 2; }
     };
+    let _lease = match crate::devlease::Lease::target(a.serial.as_deref(), "bench") {
+        Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
+    };
+    a.serial = Some(_lease.serial.clone());
+
     match bench(&a) {
         Ok((report, code)) => {
+            if let Err(e)=_lease.check() {eprintln!("{e}"); return 2;}
             if a.json {
                 emit(&format!("{}\n", serde_json::to_string_pretty(&report).unwrap_or_default()));
             } else {

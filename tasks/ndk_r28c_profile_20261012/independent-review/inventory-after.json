@@ -1,0 +1,13 @@
+{
+  "source_file": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-ndk-profile/tools/export_ndk_profile.py",
+  "source_sha256": "7bb7ee2d613690f83e5b8588135d62bc435b4c9e9f9d09a1c11f866c775a212f",
+  "case": "owned4097zero-files same independent inventory counterexample",
+  "source_kind": "synthetic_host_fixture",
+  "configured_entry_cap": 4096,
+  "outcome": "REJECTED",
+  "error": "[Errno 20] Not a directory: 'var'",
+  "elapsed_seconds": 0.00010237516835331917,
+  "sdk_calls": 0,
+  "device_calls": 0,
+  "model_calls": 0
+}

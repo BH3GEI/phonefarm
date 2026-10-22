@@ -1,0 +1,1 @@
+{"eligible":false,"error":"thermal_baseline_only_warmup exited 83: ","promotion_allowed":false,"real_game_optimization_proven":false,"recovery":"device writes may have begun; no automatic retry, inspect persistent barrier and explicit reconcile","status":"BLOCKED"}

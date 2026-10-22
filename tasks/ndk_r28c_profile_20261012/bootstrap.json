@@ -1,0 +1,10 @@
+{
+  "url": "https://dl.google.com/android/repository/commandlinetools-mac_arm64-15859902_latest.zip",
+  "sha256": "835b62a26162b229b441d1f6d4680383815a270809eb33522c0d480fa5002c4e",
+  "bytes": 156083281,
+  "official_sha256_matched": true,
+  "sdkroot": "/Users/kamico/Library/Android/sdk",
+  "java_home": "/Applications/DevEco-Studio.app/Contents/jbr/Contents/Home",
+  "model_api_calls": 0,
+  "device_calls": 0
+}

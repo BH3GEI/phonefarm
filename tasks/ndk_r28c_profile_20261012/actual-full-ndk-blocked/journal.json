@@ -1,0 +1,325 @@
+{
+  "frozen_inputs_sha256": "4a8ee194a9bcbd1bb1e906a0e6d6201b1c02ad77f82184be8c0ab8dce08b844f",
+  "inputs": {
+    "build": true,
+    "candidate": {
+      "bytes": 1014,
+      "sha256": "92897edec2fda7122d7790c33f240bc141422c670a10a67b3663b8cc4105244f"
+    },
+    "execution_scope": "trusted_local_binaries_and_OS_shell_process_groups_not_sandbox_or_remote_attestation",
+    "gate_sha256": "10212fe5f2c297f934da6bb810645f5bff9bc378c1dfcf5851b4220fd06e2ff1",
+    "gol": {
+      "bytes": 46920192,
+      "sha256": "0b6a45e5453d6d73f9184bf67d29aefb5de14c8041d8cad8c5720f51370943e6"
+    },
+    "implementation_sha256": "a47ede0a59472aced2776f8907449ea0c031c5e80d2aa5b3a93aa8884cb71374",
+    "native_implementation_sha256": "0ac1c3240a534ef0891bc80740444d8b83ad7b3bfe663fcac3d9dcdcd789e2e3",
+    "native_layer_input_root": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-build-supervision/knobs/gray/layer",
+    "native_plan": {
+      "inventory": [],
+      "inventory_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "layer_contract": "not_selected",
+      "layer_inputs": {},
+      "layer_root": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-build-supervision/knobs/gray/layer",
+      "reason": "BLOCKED_NATIVE_INPUTS: SDK symlink layout unsupported: toolchains/llvm/prebuilt/darwin-x86_64/bin/clang",
+      "sdk_path": null,
+      "state": "BLOCKED"
+    },
+    "native_tool_timeout_seconds": 60,
+    "ndk": "/Users/kamico/Library/Android/sdk/ndk/28.2.13676358",
+    "phonefarm": {
+      "bytes": 32183608,
+      "sha256": "db1721a7779741367f974b27d57e398b1392cd08fb4c16972e95015a5fe65005"
+    },
+    "provenance": "caller_supplied_local_candidate_not_real_game_attestation",
+    "stage_wall_ms": 120000,
+    "stream_bytes": 1048576,
+    "whole_wall_ms": 300000
+  },
+  "prepared_receipt": {
+    "bytes": 4790,
+    "sha256": "bed32b9e7bcea7ccd7b8e4c5e0ebc36666a017e9cef0e712a43e2179c3aeec01"
+  },
+  "proof_flags": {
+    "deployable": false,
+    "gpu_validated": false,
+    "promotion_allowed": false,
+    "quality_verified": false,
+    "real_game_optimization_proven": false,
+    "semantic_equivalence_proven": false
+  },
+  "schema": "game_opt_loop/candidate_prepare@2",
+  "stages": [
+    {
+      "argv": [
+        "candidate-artifact",
+        "compile",
+        "--candidate",
+        "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-full-ndk-blocked/session/candidate.json",
+        "--out",
+        "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-full-ndk-blocked/session/compiled"
+      ],
+      "elapsed_ms": 2943,
+      "error": null,
+      "exit_code": 0,
+      "group_absent": true,
+      "name": "compile",
+      "pid": 35871,
+      "result": {
+        "adapter_input": {
+          "candidate_json_sha256": "92897edec2fda7122d7790c33f240bc141422c670a10a67b3663b8cc4105244f",
+          "descriptor_sha256": "f15ac9c0c5d9ba7c44a512779ac502ec8ae44a798ca1291e75db8cfe69f4d5de",
+          "frozen_identity": "f15ac9c0c5d9ba7c44a512779ac502ec8ae44a798ca1291e75db8cfe69f4d5de",
+          "manifest_sha256": "839d481c41ba56bea143830618f4521fb75bb5ddd4d7c6766ccfd6cd27500bde",
+          "original_spirv_path": "original.spv",
+          "original_spirv_sha256": "843f8435d5dd04c84dcc4c3ed5255e11c3dac408bf05763f1ad74f07a118ad03",
+          "source_path": "original.comp",
+          "source_sha256": "f8563e4747bf005ea5da870bee66d5c18c021704597b9b708d9d40186f97cde0",
+          "source_spirv_association": "repository_gate_compiler_replayable",
+          "trust_scope": "local_integrity_not_authenticated_attestation"
+        },
+        "candidate_id": "actual-naga-sr-interface",
+        "claim_scope": "static_gate_and_local_compilation_only",
+        "descriptor_sha256": "f15ac9c0c5d9ba7c44a512779ac502ec8ae44a798ca1291e75db8cfe69f4d5de",
+        "frozen_identity": "f15ac9c0c5d9ba7c44a512779ac502ec8ae44a798ca1291e75db8cfe69f4d5de",
+        "gate_passed": true,
+        "manifest_sha256": "839d481c41ba56bea143830618f4521fb75bb5ddd4d7c6766ccfd6cd27500bde",
+        "proof_flags": {
+          "deployable": false,
+          "gpu_validated": false,
+          "promotion_allowed": false,
+          "quality_verified": false,
+          "real_game_optimization_proven": false,
+          "semantic_equivalence_proven": false
+        },
+        "schema": "game_opt_loop/candidate_compilation@1",
+        "state": "host_compiled",
+        "track": "sr"
+      },
+      "signal": null,
+      "state": "COMPLETED",
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 1524,
+        "sha256": "a6a5dc32f18e69e25933c9cbd317a9845536209fd3283dd4968ea63d398a4090"
+      },
+      "tool_sha256": "0b6a45e5453d6d73f9184bf67d29aefb5de14c8041d8cad8c5720f51370943e6"
+    },
+    {
+      "argv": [
+        "candidate-artifact",
+        "verify",
+        "--artifact",
+        "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-full-ndk-blocked/session/compiled",
+        "--expected-identity",
+        "f15ac9c0c5d9ba7c44a512779ac502ec8ae44a798ca1291e75db8cfe69f4d5de"
+      ],
+      "elapsed_ms": 1736,
+      "error": null,
+      "exit_code": 0,
+      "group_absent": true,
+      "name": "verify_compile",
+      "pid": 35973,
+      "result": {
+        "adapter_input": {
+          "candidate_json_sha256": "92897edec2fda7122d7790c33f240bc141422c670a10a67b3663b8cc4105244f",
+          "descriptor_sha256": "f15ac9c0c5d9ba7c44a512779ac502ec8ae44a798ca1291e75db8cfe69f4d5de",
+          "frozen_identity": "f15ac9c0c5d9ba7c44a512779ac502ec8ae44a798ca1291e75db8cfe69f4d5de",
+          "manifest_sha256": "839d481c41ba56bea143830618f4521fb75bb5ddd4d7c6766ccfd6cd27500bde",
+          "original_spirv_path": "original.spv",
+          "original_spirv_sha256": "843f8435d5dd04c84dcc4c3ed5255e11c3dac408bf05763f1ad74f07a118ad03",
+          "source_path": "original.comp",
+          "source_sha256": "f8563e4747bf005ea5da870bee66d5c18c021704597b9b708d9d40186f97cde0",
+          "source_spirv_association": "repository_gate_compiler_replayable",
+          "trust_scope": "local_integrity_not_authenticated_attestation"
+        },
+        "candidate_id": "actual-naga-sr-interface",
+        "claim_scope": "static_gate_and_local_compilation_only",
+        "descriptor_sha256": "f15ac9c0c5d9ba7c44a512779ac502ec8ae44a798ca1291e75db8cfe69f4d5de",
+        "frozen_identity": "f15ac9c0c5d9ba7c44a512779ac502ec8ae44a798ca1291e75db8cfe69f4d5de",
+        "gate_passed": true,
+        "manifest_sha256": "839d481c41ba56bea143830618f4521fb75bb5ddd4d7c6766ccfd6cd27500bde",
+        "proof_flags": {
+          "deployable": false,
+          "gpu_validated": false,
+          "promotion_allowed": false,
+          "quality_verified": false,
+          "real_game_optimization_proven": false,
+          "semantic_equivalence_proven": false
+        },
+        "schema": "game_opt_loop/candidate_compilation@1",
+        "state": "host_compiled_replay_match",
+        "track": "sr"
+      },
+      "signal": null,
+      "state": "COMPLETED",
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 1537,
+        "sha256": "97e84be1921f972fecd8b4a06ce5b364b80a546fa1174f2891b035278a990e89"
+      },
+      "tool_sha256": "0b6a45e5453d6d73f9184bf67d29aefb5de14c8041d8cad8c5720f51370943e6"
+    },
+    {
+      "argv": [
+        "gray-artifact",
+        "adapt-storage",
+        "--source",
+        "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-full-ndk-blocked/session/compiled/original.comp",
+        "--spirv",
+        "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-full-ndk-blocked/session/compiled/original.spv",
+        "--out",
+        "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-full-ndk-blocked/session/adapted"
+      ],
+      "elapsed_ms": 429,
+      "error": null,
+      "exit_code": 0,
+      "group_absent": true,
+      "name": "adapt",
+      "pid": 35979,
+      "result": {
+        "adaptation_id": "01e67a5e92937da8b0369f19bbc6a38bea0be40e8c7f820af75883e60fc595a1",
+        "deployable": false,
+        "descriptor": {
+          "adapted_abi": {
+            "entry_point": "main",
+            "input": "set0/binding0:combined_sampler_2d_float32",
+            "local_size": [
+              16,
+              16,
+              1
+            ],
+            "output": "set0/binding1:writeonly_rgba8_2d",
+            "version": 1
+          },
+          "adapted_spirv_sha256": "6f76f1c7649fcb10c82800b9c072df3777e669208878baee9b8039a4faa93325",
+          "changes": {
+            "direct_loads": 2,
+            "image_reads_to_fetch": 1,
+            "image_sizes_to_lod": 1,
+            "input_variable": 33,
+            "original_image_type": 5,
+            "original_pointer_type": 34,
+            "output_shared_original_type": true,
+            "output_variable": 35,
+            "unused_loads": 1
+          },
+          "original_source_sha256": "f8563e4747bf005ea5da870bee66d5c18c021704597b9b708d9d40186f97cde0",
+          "original_spirv_sha256": "843f8435d5dd04c84dcc4c3ed5255e11c3dac408bf05763f1ad74f07a118ad03",
+          "protocol_version": 1,
+          "source_spirv_association": "caller_supplied_unverified",
+          "transform": "direct_rgba8_storage_to_combined_fetch_lod0"
+        },
+        "device_validation": "not_run",
+        "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-full-ndk-blocked/session/adapted/storage-01e67a5e92937da8b0369f19bbc6a38bea0be40e8c7f820af75883e60fc595a1",
+        "qualification": "not_run",
+        "semantic_equivalence": "not_run",
+        "source_spirv_association": "caller_supplied_unverified",
+        "state": "verified_offline"
+      },
+      "signal": null,
+      "state": "COMPLETED",
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 1537,
+        "sha256": "73cb5fc3ac12d397c2b1169013eb0d713d1af3a6314e2828cde2a6a743347197"
+      },
+      "tool_sha256": "db1721a7779741367f974b27d57e398b1392cd08fb4c16972e95015a5fe65005"
+    },
+    {
+      "argv": [
+        "gray-artifact",
+        "verify-adaptation",
+        "--artifact",
+        "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/native-tools/actual-full-ndk-blocked/session/adapted/storage-01e67a5e92937da8b0369f19bbc6a38bea0be40e8c7f820af75883e60fc595a1"
+      ],
+      "elapsed_ms": 38,
+      "error": null,
+      "exit_code": 0,
+      "group_absent": true,
+      "name": "verify_adaptation",
+      "pid": 35983,
+      "result": {
+        "adaptation_id": "01e67a5e92937da8b0369f19bbc6a38bea0be40e8c7f820af75883e60fc595a1",
+        "compiler_binding_scope": "local_replayed_compilation_not_authenticated_attestation",
+        "descriptor_sha256": "01e67a5e92937da8b0369f19bbc6a38bea0be40e8c7f820af75883e60fc595a1",
+        "files": {
+          "adapted.spv": {
+            "bytes": 2800,
+            "sha256": "6f76f1c7649fcb10c82800b9c072df3777e669208878baee9b8039a4faa93325"
+          },
+          "descriptor.json": {
+            "bytes": 947,
+            "sha256": "01e67a5e92937da8b0369f19bbc6a38bea0be40e8c7f820af75883e60fc595a1"
+          },
+          "manifest.json": {
+            "bytes": 698,
+            "sha256": "73fd384316497fa249e00485af98063726436cfa262c75bd0599e11bc56dc81f"
+          },
+          "original.comp": {
+            "bytes": 673,
+            "sha256": "f8563e4747bf005ea5da870bee66d5c18c021704597b9b708d9d40186f97cde0"
+          },
+          "original.spv": {
+            "bytes": 2688,
+            "sha256": "843f8435d5dd04c84dcc4c3ed5255e11c3dac408bf05763f1ad74f07a118ad03"
+          }
+        },
+        "local_compiler_export_bytes_equal": true,
+        "manifest_sha256": "73fd384316497fa249e00485af98063726436cfa262c75bd0599e11bc56dc81f",
+        "source_spirv_association": "caller_supplied_unverified"
+      },
+      "signal": null,
+      "state": "COMPLETED",
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 1537,
+        "sha256": "73cb5fc3ac12d397c2b1169013eb0d713d1af3a6314e2828cde2a6a743347197"
+      },
+      "tool_sha256": "db1721a7779741367f974b27d57e398b1392cd08fb4c16972e95015a5fe65005"
+    },
+    {
+      "argv": [],
+      "elapsed_ms": null,
+      "error": "BLOCKED_NATIVE_INPUTS: SDK symlink layout unsupported: toolchains/llvm/prebuilt/darwin-x86_64/bin/clang",
+      "exit_code": null,
+      "group_absent": null,
+      "name": "native_build",
+      "pid": null,
+      "result": null,
+      "signal": null,
+      "state": "NOT_RUN",
+      "stderr": null,
+      "stdout": null,
+      "tool_sha256": null
+    },
+    {
+      "argv": [],
+      "elapsed_ms": null,
+      "error": "native build unavailable",
+      "exit_code": null,
+      "group_absent": null,
+      "name": "verify_native",
+      "pid": null,
+      "result": null,
+      "signal": null,
+      "state": "NOT_RUN",
+      "stderr": null,
+      "stdout": null,
+      "tool_sha256": null
+    }
+  ],
+  "status": "BLOCKED"
+}

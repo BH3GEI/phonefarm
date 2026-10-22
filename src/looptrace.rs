@@ -69,7 +69,10 @@ fn acf(xs: &[f64], lag: usize) -> f64 {
     let n = xs.len() - lag;
     let (a, b) = (&xs[..n], &xs[lag..lag + n]);
     let nf = n as f64;
-    let (ma, mb) = (py_sum(a.iter().copied()) / nf, py_sum(b.iter().copied()) / nf);
+    let (ma, mb) = (
+        py_sum(a.iter().copied()) / nf,
+        py_sum(b.iter().copied()) / nf,
+    );
     let num: f64 = py_sum((0..n).map(|i| (a[i] - ma) * (b[i] - mb)));
     let da = py_sum(a.iter().map(|v| (v - ma).powi(2))).sqrt();
     let db = py_sum(b.iter().map(|v| (v - mb).powi(2))).sqrt();
@@ -229,7 +232,7 @@ fn kv(re: &Regex, rest: &str) -> HashMap<String, i64> {
 }
 
 pub fn parse(text: &str, render_comm: &str) -> Parsed {
-    parse_with_spf(text, render_comm, None)
+    parse_grouped(text, render_comm, None, None)
 }
 
 /// 同 [`parse`], 但每帧提交数由调用方给定 (`Some(n)`), 不从数据自检。
@@ -240,6 +243,25 @@ pub fn parse(text: &str, render_comm: &str) -> Parsed {
 /// 帧数少 3 倍 (10-11 selftest 标定 3000 工作组: 8.28 ms 实为 2.76 ms)。
 /// 自检的打分照样算出来记在 `spf_scores` 里, 只是不用它分组。
 pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -> Parsed {
+    parse_grouped(text, render_comm, fixed_spf, None)
+}
+
+/// 只认 `contexts` 里这些 kgsl ctx 的提交 (目标归属已由调用方冻结), 每帧提交数可冻结。
+pub fn parse_owned_contexts(
+    text: &str,
+    render_comm: &str,
+    contexts: &std::collections::BTreeSet<i64>,
+    spf: Option<usize>,
+) -> Parsed {
+    parse_grouped(text, render_comm, spf, Some(contexts))
+}
+
+fn parse_grouped(
+    text: &str,
+    render_comm: &str,
+    fixed_spf: Option<usize>,
+    contexts: Option<&std::collections::BTreeSet<i64>>,
+) -> Parsed {
     let line_re = Regex::new(LINE_RE).expect("LINE_RE");
     let kv_re = Regex::new(KV_RE).expect("KV_RE");
 
@@ -287,14 +309,15 @@ pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -
                 // ftrace 在 comm 列放不下时写成 "<...>", 提交还在, 只是名字丢了
                 // (2026-10-14 better1_1 重考: 6/20 臂因此 n_frames=0)。整窗一个正常
                 // 名字都没有时, 才把截断的提交算进来, 避免和别的进程的提交混在一起。
+                // 给了 owned contexts 时按 ctx 归属认提交, 不看 comm。
                 let comm = m["comm"].trim();
                 if let (Some(&ctx), Some(&ts)) = (f.get("ctx"), f.get("ts")) {
-                    if comm == render_comm {
+                    if contexts.map_or(comm == render_comm, |owned| owned.contains(&ctx)) {
                         if !render_ctxs.contains(&ctx) {
                             render_ctxs.push(ctx);
                         }
                         submits.push((wall, ctx, ts));
-                    } else if comm == "<...>" {
+                    } else if contexts.is_none() && comm == "<...>" {
                         truncated.push((wall, ctx, ts));
                     }
                 }
@@ -520,10 +543,9 @@ fn num_or_zero(s: &PyVal, k: &str) -> f64 {
 /// —— 悄悄填个 0 等于凭空造一个测量值, 比整轮失败更糟。
 fn str_num_or_zero(s: &PyVal, k: &str) -> Result<f64, String> {
     match s.get(k) {
-        Some(PyVal::Str(t)) if !t.is_empty() => t
-            .trim()
-            .parse()
-            .map_err(|_| format!("{k} 不是数字: {t:?}")),
+        Some(PyVal::Str(t)) if !t.is_empty() => {
+            t.trim().parse().map_err(|_| format!("{k} 不是数字: {t:?}"))
+        }
         Some(v) => Ok(match v.as_f64() {
             Some(x) if x != 0.0 => x,
             _ => 0.0,
@@ -766,7 +788,10 @@ mod tests {
             for (name, got) in [
                 (format!("{stem}.summary.json"), summary.clone()),
                 (format!("{stem}.full.json"), dumps(&d.to_pyval())),
-                (format!("{stem}.attr.json"), dumps(&attribute(&parsed).unwrap())),
+                (
+                    format!("{stem}.attr.json"),
+                    dumps(&attribute(&parsed).unwrap()),
+                ),
             ] {
                 let want = std::fs::read_to_string(dir.join(&name)).unwrap();
                 assert_eq!(got, want.trim_end_matches('\n'), "{name} 不一致");
