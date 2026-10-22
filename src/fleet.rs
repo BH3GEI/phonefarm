@@ -541,10 +541,14 @@ echo "-----PF:uptime-----"; cat /proc/uptime 2>/dev/null
 echo "-----PF:battery-----"; hidumper -s BatteryService -a -i 2>/dev/null
 echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done
 echo "-----PF:screen-----"; hidumper -s RenderService -a screen 2>/dev/null
+echo "-----PF:focus-----"; aa dump -l 2>/dev/null
 echo "-----PF:end-----""#
 }
 
 /// OH 的 `hidumper -s RenderService -a screen` → 亮屏没有。
+///
+/// 熄屏在真机 (EMA-AL00U, OH 6.1) 上报的是 `SUSPEND` 而不是 `OFF`; `STANDBY`/`DOZE`
+/// 也都是屏幕不亮。`ON_ADVANCED` / `OFF_FAKE` 这类带后缀的取下划线前的那段。
 pub fn parse_hdc_power_on(text: &str) -> Option<bool> {
     let i = text.find("powerStatus=POWER_STATUS_")?;
     let v: String = text[i + "powerStatus=POWER_STATUS_".len()..]
@@ -553,9 +557,33 @@ pub fn parse_hdc_power_on(text: &str) -> Option<bool> {
         .collect();
     match v.as_str() {
         "ON" => Some(true),
-        "OFF" => Some(false),
+        "OFF" | "SUSPEND" | "STANDBY" | "DOZE" => Some(false),
         _ => None,
     }
+}
+
+/// OH 的 BatteryService dump → (状态, 插线没有)。状态词与安卓侧对齐, 面板只认一套。
+///
+/// `chargingStatus`: 0 NONE / 1 ENABLE / 2 DISABLE / 3 FULL;
+/// `pluggedType`: 0 NONE / 1 AC / 2 USB / 3 WIRELESS。
+pub fn parse_battery_status_oh(text: &str) -> (Option<String>, Option<bool>) {
+    let num = |key: &str| -> Option<i64> {
+        let l = text.lines().map(str::trim).find(|l| l.starts_with(key))?;
+        l[key.len()..].trim().parse().ok()
+    };
+    let plugged = match num("pluggedType:") {
+        Some(0) => Some(false),
+        Some(1..=3) => Some(true),
+        _ => None,
+    };
+    let status = match (num("chargingStatus:"), plugged) {
+        (Some(1), _) => Some("Charging"),
+        (Some(2), _) => Some("Not charging"),
+        (Some(3), _) => Some("Full"),
+        (Some(0), Some(false)) => Some("Discharging"),
+        _ => None,
+    };
+    (status.map(str::to_string), plugged)
 }
 
 // ══════════════ 组装 ══════════════
@@ -704,9 +732,18 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
     let mut battery = Battery::default();
     if let Some(b) = sec(&ss, "battery") {
         let (level, mv, temp, _cur) = telemetry::parse_battery_oh(b);
+        let (status, plugged) = parse_battery_status_oh(b);
         battery.level_pct = level;
         battery.voltage_mv = mv;
         battery.temp_c = temp;
+        // 口径同安卓侧 card: 充电/充满一定不是放电态; 没插线才算整机靠电池。
+        battery.on_battery = match (&status, plugged) {
+            (Some(s), _) if s == "Charging" || s == "Full" => Some(false),
+            (_, Some(false)) => Some(true),
+            _ => None,
+        };
+        battery.status = status;
+        battery.plugged = plugged;
     } else {
         unknown.push("电池: hidumper BatteryService 没回值".into());
     }
@@ -729,6 +766,23 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
         unknown.push(
             "测量: 温度一个热区都读不到 (sysfs 无权限); SP_daemon 在 shell 权限下不出数, 未验证".into(),
         );
+    }
+
+    let screen_on = sec(&ss, "screen").and_then(parse_hdc_power_on);
+    if screen_on.is_none() {
+        unknown.push("亮屏: hidumper RenderService 没给出可识别的 powerStatus".into());
+    }
+    // aa dump -l 里 state #FOREGROUND 的那条 ability; 熄屏或停在桌面时一条都没有。
+    let foreground = sec(&ss, "focus")
+        .map(crate::device::parse_aa_dump)
+        .map(|(bundle, _)| bundle)
+        .filter(|b| !b.is_empty());
+    if foreground.is_none() {
+        unknown.push(match (sec(&ss, "focus"), screen_on) {
+            (None, _) => "前台应用: aa dump -l 没回值".into(),
+            (Some(_), Some(false)) => "前台应用: 熄屏中, 没有处于前台的应用".into(),
+            (Some(_), _) => "前台应用: 任务栈里没有前台 ability (可能停在桌面)".into(),
+        });
     }
 
     let root = sec(&ss, "root").map(|r| r.trim() == "0");
@@ -757,8 +811,8 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
         battery,
         thermal,
         fan: Fan::default(),
-        screen_on: sec(&ss, "screen").and_then(parse_hdc_power_on),
-        foreground: None,
+        screen_on,
+        foreground,
         keepalive: Keepalive::default(),
         uptime_s: sec(&ss, "uptime").and_then(parse_uptime_s),
         screenshot: None,
@@ -1579,6 +1633,43 @@ mod tests {
             "取不到电量/温度时必须点出没有证据: {:?}",
             measure.blocked_by
         );
+    }
+
+    /// 真机 (EMA-AL00U) 熄屏报 SUSPEND, 不能当成「判不出来」。
+    #[test]
+    fn oh_power_status_suspend_is_screen_off() {
+        let on = "screen[0]: id=0, powerStatus=POWER_STATUS_ON, backlight=223";
+        let suspend = "screen[0]: id=0, powerStatus=POWER_STATUS_SUSPEND, backlight=2039";
+        let adv = "screen[0]: id=0, powerStatus=POWER_STATUS_ON_ADVANCED, backlight=1";
+        assert_eq!(parse_hdc_power_on(on), Some(true));
+        assert_eq!(parse_hdc_power_on(suspend), Some(false));
+        assert_eq!(parse_hdc_power_on(adv), Some(true));
+        assert_eq!(parse_hdc_power_on("powerStatus=POWER_STATUS_BUTT"), None);
+    }
+
+    #[test]
+    fn oh_battery_status_and_foreground() {
+        let raw = "-----PF:props-----\nEMA-AL00U\nHUAWEI\nOpenHarmony 6.1\n\
+-----PF:battery-----\ncapacity: 100 \nchargingStatus: 3 \npluggedType: 1 \ntemperature: 270 \n\
+-----PF:screen-----\nscreen[0]: id=0, powerStatus=POWER_STATUS_ON, backlight=9\n\
+-----PF:focus-----\n    Mission ID #169\n        main name [UnityPlayerAbility]\n        bundle name [com.miHoYo.Yuanshen]\n        state #FOREGROUND  start time [1]\n";
+        let card = card_from_oh("hdc:abc", raw, 5);
+        assert_eq!(card.battery.status.as_deref(), Some("Full"));
+        assert_eq!(card.battery.plugged, Some(true));
+        assert_eq!(card.battery.on_battery, Some(false));
+        assert_eq!(card.screen_on, Some(true));
+        assert_eq!(card.foreground.as_deref(), Some("com.miHoYo.Yuanshen"));
+    }
+
+    /// 熄屏时任务栈全是 BACKGROUND: 前台留空, 但要写明为什么。
+    #[test]
+    fn oh_screen_off_explains_missing_foreground() {
+        let raw = "-----PF:screen-----\npowerStatus=POWER_STATUS_SUSPEND\n\
+-----PF:focus-----\n        bundle name [com.ohos.contacts]\n        state #BACKGROUND  start time [1]\n";
+        let card = card_from_oh("hdc:abc", raw, 5);
+        assert_eq!(card.screen_on, Some(false));
+        assert_eq!(card.foreground, None);
+        assert!(card.unknown.iter().any(|u| u.contains("熄屏")), "{:?}", card.unknown);
     }
 
     /// 有电量/温度的时候不该凭空给 measure 加阻塞。
