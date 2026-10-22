@@ -31,6 +31,8 @@ fn cmd(t: &Scratch) -> Command {
     c.current_dir(&t.0)
         .env("PHONEFARM_LEASE_DIR", t.0.join("leases"))
         .env("DEVLOCK_DIR", t.0.join("legacy"))
+        // main 的外层农场锁 (devlock::gate) 视为已在本侧手里 (renew 恒成功): 这里只测租约本身
+        .env("DEVLOCK_BIN", "/usr/bin/true")
         .env("PHONEFARM_LEASE_TIMEOUT_MS", "150");
     c
 }

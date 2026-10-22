@@ -64,6 +64,8 @@ fn host_native_counters_and_actual_layer_hooks() {
         let exe = temp.join(format!("layer-{dynamic}-{fixture}-test"));
         let output = cmd
             .arg(root.join("tests/layer_artifact_test.cpp"))
+            // main 的层把 present 钩子接到 npuprobe (build_layer.sh 一起编), 宿主测试同样链进来
+            .arg(root.join("layer/npuprobe.cpp"))
             .arg("-o")
             .arg(&exe)
             .output()

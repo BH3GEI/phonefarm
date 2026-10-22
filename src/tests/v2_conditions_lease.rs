@@ -24,6 +24,8 @@ impl Fixture {
         c.current_dir(&self.dir)
             .env("PHONEFARM_LEASE_DIR", self.dir.join("leases"))
             .env("DEVLOCK_DIR", self.dir.join("legacy"))
+            // main 的外层农场锁 (devlock::gate) 视为已在本侧手里 (renew 恒成功): 这里只测租约本身
+            .env("DEVLOCK_BIN", "/usr/bin/true")
             .env("PHONEFARM_LEASE_TIMEOUT_MS", "100")
             .env("ADB_BIN", self.dir.join("fake-adb"));
         c
@@ -496,4 +498,34 @@ fn gpuop_adapter_and_perf_cannot_write_through_a_manual_lock() {
         std::fs::read_to_string(f.legacy().join("owner")).unwrap(),
         "someone-else\n"
     );
+}
+
+#[test]
+fn lease_nests_inside_outer_farm_devlock_held_by_same_label() {
+    // main 的 devlock::gate 已用 tools/devlock 拿了农场锁 (owner = "<label> since ..."), 子进程带
+    // DEVLOCK_LABEL=<label> 原地执行: 租约不能再抢 devlock.d (否则自己等自己), 改用 phonefarm-lease.d。
+    let f = Fixture::new("nested-outer");
+    std::fs::create_dir_all(f.legacy()).unwrap();
+    std::fs::write(f.legacy().join("owner"), "phonefarm since 2026-10-22 00:00:00\n").unwrap();
+    let r = f
+        .cmd()
+        .env("DEVLOCK_LABEL", "phonefarm")
+        .args(["lease", "--serial", "fake-device", "--timeout-ms", "100", "--", "/usr/bin/true"])
+        .output()
+        .unwrap();
+    assert_eq!(r.status.code(), Some(0), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(
+        std::fs::read_to_string(f.legacy().join("owner")).unwrap(),
+        "phonefarm since 2026-10-22 00:00:00\n"
+    );
+    assert!(!f.dir.join("legacy/phonefarm-lease.d").exists());
+    // 另一个 label 持有的外层锁仍然是忙
+    let r = f
+        .cmd()
+        .env("DEVLOCK_LABEL", "someone-else")
+        .args(["lease", "--serial", "fake-device", "--timeout-ms", "100", "--", "/usr/bin/true"])
+        .output()
+        .unwrap();
+    assert_eq!(r.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("manual/legacy devlock busy"));
 }

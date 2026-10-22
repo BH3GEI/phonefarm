@@ -177,10 +177,7 @@ struct DevDisp {
     PFN_vkCmdBindPipeline CmdBindPipeline = nullptr;
     PFN_vkCmdDispatch CmdDispatch = nullptr;
     // frameaudit: 一帧步骤清单要看的命令 (只读转发) + 时间戳
-    PFN_vkCmdEndRenderPass CmdEndRenderPass = nullptr;
-    PFN_vkCmdEndRenderPass2 CmdEndRenderPass2 = nullptr;
-    PFN_vkCmdNextSubpass CmdNextSubpass = nullptr;
-    PFN_vkCmdNextSubpass2 CmdNextSubpass2 = nullptr;
+    // (CmdEndRenderPass / CmdNextSubpass 及其 2 版与 dispatch ownership 共用上面的字段)
     PFN_vkCmdBeginRendering CmdBeginRendering = nullptr;
     PFN_vkCmdEndRendering CmdEndRendering = nullptr;
     PFN_vkCmdDrawIndirect CmdDrawIndirect = nullptr;
@@ -2161,30 +2158,6 @@ static void fa_on_present(const DevDisp& d, uint64_t f, const VkPresentInfoKHR* 
     if (k >= FA_READ_DELAY) { fa_write_file(d); g_fa.arm_frame = 0; }
 }
 
-static VKAPI_ATTR void VKAPI_CALL rk_CmdEndRenderPass(VkCommandBuffer cb) {
-    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdEndRenderPass) { RK_LOG_ONCE("CmdEndRenderPass: 无下层"); return; }
-    d.CmdEndRenderPass(cb);
-    std::lock_guard<std::mutex> lk(g_mtx);
-    if (FaEv* e = fa_open(cb)) e->ts1 = fa_ts(cb, d);
-    auto it = g_facb.find(cb); if (it != g_facb.end()) it->second.open = -1;
-}
-static VKAPI_ATTR void VKAPI_CALL rk_CmdEndRenderPass2(VkCommandBuffer cb, const VkSubpassEndInfo* ei) {
-    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdEndRenderPass2) { RK_LOG_ONCE("CmdEndRenderPass2: 无下层"); return; }
-    d.CmdEndRenderPass2(cb, ei);
-    std::lock_guard<std::mutex> lk(g_mtx);
-    if (FaEv* e = fa_open(cb)) e->ts1 = fa_ts(cb, d);
-    auto it = g_facb.find(cb); if (it != g_facb.end()) it->second.open = -1;
-}
-static VKAPI_ATTR void VKAPI_CALL rk_CmdNextSubpass(VkCommandBuffer cb, VkSubpassContents c) {
-    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdNextSubpass) { RK_LOG_ONCE("CmdNextSubpass: 无下层"); return; }
-    { std::lock_guard<std::mutex> lk(g_mtx); if (FaEv* e = fa_open(cb)) e->subpasses++; }
-    d.CmdNextSubpass(cb, c);
-}
-static VKAPI_ATTR void VKAPI_CALL rk_CmdNextSubpass2(VkCommandBuffer cb, const VkSubpassBeginInfo* bi, const VkSubpassEndInfo* ei) {
-    DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdNextSubpass2) { RK_LOG_ONCE("CmdNextSubpass2: 无下层"); return; }
-    { std::lock_guard<std::mutex> lk(g_mtx); if (FaEv* e = fa_open(cb)) e->subpasses++; }
-    d.CmdNextSubpass2(cb, bi, ei);
-}
 static VKAPI_ATTR void VKAPI_CALL rk_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo* ri) {
     DevDisp d; if (!dev_of(key(cb), &d) || !d.CmdBeginRendering) { RK_LOG_ONCE("CmdBeginRendering: 无下层"); return; }
     if (ri) {
@@ -2769,6 +2742,16 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
     return d.QueuePresentKHR(q, pi);
 }
 
+// frameaudit: pass 结束时补结束时间戳并关掉当前事件 / 子 pass 计数 (只读)
+static void fa_end_pass(VkCommandBuffer cb, const DevDisp& d) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (FaEv* e = fa_open(cb)) e->ts1 = fa_ts(cb, d);
+    auto it = g_facb.find(cb); if (it != g_facb.end()) it->second.open = -1;
+}
+static void fa_next_subpass(VkCommandBuffer cb) {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (FaEv* e = fa_open(cb)) e->subpasses++;
+}
 static void end_target_pass(VkCommandBuffer cb, bool next_subpass) {
     std::lock_guard<std::mutex> lk(g_mtx);
     auto it = rk_lifetime::cbs.find(cb);
@@ -2786,12 +2769,14 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdEndRenderPass(VkCommandBuffer cb) {
         return;
     d.CmdEndRenderPass(cb);
     end_target_pass(cb, false);
+    fa_end_pass(cb, d);
 }
 static VKAPI_ATTR void VKAPI_CALL rk_CmdNextSubpass(VkCommandBuffer cb,
                                                     VkSubpassContents contents) {
     DevDisp d;
     if (!dev_of(key(cb), &d) || !d.CmdNextSubpass)
         return;
+    fa_next_subpass(cb);
     d.CmdNextSubpass(cb, contents);
     end_target_pass(cb, true);
 }
@@ -2802,6 +2787,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdEndRenderPass2(VkCommandBuffer cb,
         return;
     d.CmdEndRenderPass2(cb, info);
     end_target_pass(cb, false);
+    fa_end_pass(cb, d);
 }
 static VKAPI_ATTR void VKAPI_CALL rk_CmdNextSubpass2(VkCommandBuffer cb,
                                                      const VkSubpassBeginInfo *begin,
@@ -2809,6 +2795,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_CmdNextSubpass2(VkCommandBuffer cb,
     DevDisp d;
     if (!dev_of(key(cb), &d) || !d.CmdNextSubpass2)
         return;
+    fa_next_subpass(cb);
     d.CmdNextSubpass2(cb, begin, end);
     end_target_pass(cb, true);
 }

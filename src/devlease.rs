@@ -62,6 +62,35 @@ fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .and_then(|d| d.sync_all())
         .map_err(|e| e.to_string())
 }
+/// 农场设备锁 (`tools/devlock`, 由 main 的 `devlock::gate` 在碰设备的子命令外层拿) 已被本进程树
+/// 持有时 (`DEVLOCK_LABEL=L` 且 devlock.d/owner 是 `L since ...`), 租约不能再去抢同一个 devlock.d
+/// (否则自己等自己), 改用旁边的 `phonefarm-lease.d` 放 owner/marker/恢复屏障; 外层锁照旧排斥别的参与者。
+const NESTED_DIR: &str = "phonefarm-lease.d";
+fn outer_devlock_is_ours(legacy_root: &Path) -> bool {
+    let Some(label) = std::env::var("DEVLOCK_LABEL").ok().filter(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    fs::read_to_string(legacy_root.join("devlock.d").join("owner")).is_ok_and(|o| {
+        !o.contains("token=") && o.split_whitespace().next() == Some(label.trim())
+    })
+}
+/// 本次租约用的目录: 外层农场锁归本进程树时用 [`NESTED_DIR`], 否则就是 devlock.d。
+fn lease_dir(legacy_root: &Path) -> PathBuf {
+    if outer_devlock_is_ours(legacy_root) {
+        legacy_root.join(NESTED_DIR)
+    } else {
+        legacy_root.join("devlock.d")
+    }
+}
+/// 恢复类入口: 哪个目录里有 phonefarm marker 就用哪个 (devlock.d 优先)。
+fn recovery_dir(legacy_root: &Path) -> PathBuf {
+    let main = legacy_root.join("devlock.d");
+    if marker(&main).is_none() && marker(&legacy_root.join(NESTED_DIR)).is_some() {
+        legacy_root.join(NESTED_DIR)
+    } else {
+        main
+    }
+}
 fn marker(path: &Path) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(path.join("phonefarm-lease.json")).ok()?).ok()
 }
@@ -166,7 +195,18 @@ impl Lease {
         let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
         // Legacy devlock is global. Same order for every participant, no ABBA deadlock.
         let bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
-        let legacy = legacy_root.join("devlock.d");
+        let legacy = lease_dir(legacy_root);
+        // 另一个目录里残留的租约 (崩溃/恢复屏障) 同样阻断, 不因换了目录而被忽略
+        for other in [legacy_root.join("devlock.d"), legacy_root.join(NESTED_DIR)] {
+            if other == legacy {
+                continue;
+            }
+            if let Some(m) = marker(&other) {
+                if !marker_state(&m).is_ok_and(|(pending, recovery)| !pending && !recovery) {
+                    return Err(format!("lease barrier present in {}; reconcile/recover it first", other.display()));
+                }
+            }
+        }
         loop {
             match fs::create_dir(&legacy) {
                 Ok(()) => break,
@@ -382,7 +422,7 @@ impl Lease {
         let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
         let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
         let bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
-        let legacy = legacy_root.join("devlock.d");
+        let legacy = recovery_dir(legacy_root);
         let prior = marker(&legacy).ok_or("missing/corrupt recovery owner")?;
         let (pending, _) = marker_state(&prior)?;
         let prior_token = prior["token"].as_str().ok_or("missing recovery token")?;
@@ -485,7 +525,7 @@ impl Lease {
         let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
         let _device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
         let _bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
-        let legacy = legacy_root.join("devlock.d");
+        let legacy = recovery_dir(legacy_root);
         let m = marker(&legacy)
             .ok_or("no verifiable phonefarm owner; cannot recover manual/unknown lock")?;
         let (pending, recovery) = marker_state(&m)?;
