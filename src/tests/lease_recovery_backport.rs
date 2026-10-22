@@ -44,6 +44,16 @@ impl Fixture {
             .output()
             .unwrap()
     }
+    fn status(&self) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_phonefarm"))
+            .current_dir(&self.dir)
+            .env("DEVLOCK_DIR", self.dir.join("legacy"))
+            .args(["lease", "status", "--json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
     fn save(&self, name: &str, r: &Output) {
         std::fs::write(
             self.dir.join(format!("{name}.json")),
@@ -72,6 +82,18 @@ impl Drop for OwnedGroup {
             libc::kill(-self.0, libc::SIGKILL);
         }
     }
+}
+
+#[test]
+fn status_without_serial_leaves_missing_roots_missing() {
+    let f = Fixture::new("readonly-status");
+    let status = f.status();
+    assert_eq!(
+        status,
+        json!({"schema_version":1,"status":"clear","bridge_held":false,
+        "entries":[],"error":null})
+    );
+    assert_eq!(std::fs::read_dir(&f.dir).unwrap().count(), 0);
 }
 
 #[test]
@@ -179,6 +201,11 @@ fn old_idle_format_one_without_extensions_remains_manual_assertion_only_compatib
     let f = Fixture::new("legacy-idle");
     let m = dead_owner_marker(&f);
     std::fs::write(f.marker(), m.to_string()).unwrap();
+    let status = f.status();
+    assert_eq!(status["status"], "blocked");
+    assert_eq!(status["entries"][0]["state"], "abandoned");
+    assert_eq!(status["entries"][0]["label"], Value::Null);
+    assert_eq!(std::fs::read_to_string(f.marker()).unwrap(), m.to_string());
     let recovery = f.recover();
     f.save("manual-recover", &recovery);
     assert_eq!(recovery.status.code(), Some(0));

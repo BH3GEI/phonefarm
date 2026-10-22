@@ -627,7 +627,139 @@ impl Drop for Lease {
     }
 }
 
+/// Observe existing host state only. This is neither a recovery receipt nor write authorization.
+fn lease_status(legacy_root: &Path) -> Value {
+    let probe_bridge = || -> Result<bool, String> {
+        let path = legacy_root.join("phonefarm-bridge.lock");
+        match fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(format!("bridge metadata: {e}")),
+            Ok(m) if !m.is_file() => return Err("bridge is not a regular file".into()),
+            Ok(_) => {}
+        }
+        let file = File::open(path).map_err(|e| format!("bridge read: {e}"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(false), // Closing this descriptor releases only our brief probe lock.
+            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+            Err(e) => Err(format!("bridge probe: {e}")),
+        }
+    };
+    let bridge = probe_bridge();
+    let bridge_held = bridge.as_ref().ok().copied();
+    let mut errors = bridge.err().into_iter().collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    for directory in ["devlock.d", NESTED_DIR] {
+        let path = legacy_root.join(directory);
+        let mut entry = json!({"directory":directory,"serial":null,"label":null,
+            "state":"unknown","reason":null,"recovery_context":null});
+        let inspect = || -> Result<Option<(Value, bool, bool)>, String> {
+            match fs::symlink_metadata(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(format!("directory metadata: {e}")),
+                Ok(m) if !m.is_dir() => return Err("lease entry is not a directory".into()),
+                Ok(_) => {}
+            }
+            let marker_path = path.join("phonefarm-lease.json");
+            let metadata = fs::symlink_metadata(&marker_path)
+                .map_err(|e| format!("lease marker unavailable: {e}"))?;
+            if !metadata.is_file() || metadata.len() > 1 << 20 {
+                return Err("lease marker is not a bounded regular file".into());
+            }
+            let bytes =
+                fs::read(marker_path).map_err(|e| format!("lease marker unavailable: {e}"))?;
+            let m: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "lease marker is not valid JSON".to_string())?;
+            let (pending, recovery) = marker_state(&m)?;
+            Ok(Some((m, pending, recovery)))
+        };
+        match inspect() {
+            Ok(None) => continue,
+            Err(reason) => entry["reason"] = json!(reason),
+            Ok(Some((m, pending, recovery))) => {
+                for key in ["serial", "label", "recovery_context"] {
+                    entry[key] = m[key].as_str().map_or(Value::Null, |s| json!(s));
+                }
+                let age = fs::metadata(path.join("owner"))
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| std::time::SystemTime::now().duration_since(t).ok());
+                if let Some(age) = age {
+                    entry["heartbeat_age_s"] = json!(age.as_secs_f64());
+                }
+                let pid = m["pid"]
+                    .as_u64()
+                    .filter(|n| *n > 0 && *n <= u32::MAX as u64);
+                let identity = m["serial"].as_str().is_some_and(|s| !s.trim().is_empty())
+                    && m["token"].as_str().is_some_and(|token| owns(&path, token));
+                let (state, reason) = if !identity || pid.is_none() {
+                    ("unknown", "lease owner identity is missing or inconsistent")
+                } else if pending {
+                    (
+                        "command_pending",
+                        "transport launch is not yet bound to a child receipt",
+                    )
+                } else if recovery {
+                    (
+                        "recovery_required",
+                        "recorded recovery barrier requires reconciliation",
+                    )
+                } else if pid_dead(pid.unwrap() as u32) {
+                    (
+                        "abandoned",
+                        "owner exited; remote workload and restoration remain unverified",
+                    )
+                } else if bridge_held == Some(true)
+                    && age.is_some_and(|a| a <= Duration::from_secs(10))
+                {
+                    ("active", "bridge is held and owner heartbeat is fresh")
+                } else {
+                    (
+                        "unknown",
+                        "owner liveness, bridge ownership or heartbeat is unverified",
+                    )
+                };
+                entry["state"] = json!(state);
+                entry["reason"] = json!(reason);
+            }
+        }
+        if entry["state"] == "unknown" {
+            errors.push(format!(
+                "{directory}: {}",
+                entry["reason"].as_str().unwrap()
+            ));
+        }
+        entries.push(entry);
+    }
+    let status = if !errors.is_empty() {
+        "unknown"
+    } else if entries.iter().any(|e| {
+        matches!(
+            e["state"].as_str(),
+            Some("command_pending" | "recovery_required" | "abandoned")
+        )
+    }) {
+        "blocked"
+    } else if bridge_held == Some(true) || !entries.is_empty() {
+        "held"
+    } else {
+        "clear"
+    };
+    json!({"schema_version":1,"status":status,"bridge_held":bridge_held,"entries":entries,
+        "error":if errors.is_empty(){None}else{Some(errors.join("; "))}})
+}
+
 pub fn run_lease(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("status") {
+        if args.len() != 2 || args[1] != "--json" {
+            eprintln!("phonefarm lease status --json");
+            return 2;
+        }
+        let legacy = std::env::var_os("DEVLOCK_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/private/tmp/claude-501"));
+        println!("{}", lease_status(&legacy));
+        return 0;
+    }
     let split = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let mut recover = false;
     let mut confirm = false;
@@ -794,6 +926,56 @@ mod tests {
         fn drop(&mut self) {
             // This test owns the create-only directory; no global or device state is used.
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn status_observes_held_and_recovery_markers_without_changing_them() {
+        let scratch = Scratch::new();
+        let mut lease = scratch.lease();
+        let root = scratch.0.join("legacy");
+        let before = fs::read(lease.legacy.join("phonefarm-lease.json")).unwrap();
+        let held = lease_status(&root);
+        assert_eq!(held["status"], "held");
+        assert_eq!(held["bridge_held"], true);
+        assert_eq!(held["entries"][0]["state"], "active");
+        assert_eq!(
+            fs::read(lease.legacy.join("phonefarm-lease.json")).unwrap(),
+            before
+        );
+        assert!(!held.to_string().contains(&lease.token));
+        lease.record_command_pending("status-test").unwrap();
+        assert_eq!(
+            lease_status(&root)["entries"][0]["state"],
+            "command_pending"
+        );
+        lease.cancel_unspawned_command("status-test").unwrap();
+        lease.hold_for_recovery(&scratch.0).unwrap();
+        drop(lease);
+        let recovery = lease_status(&root);
+        assert_eq!(recovery["status"], "blocked");
+        assert_eq!(recovery["bridge_held"], false);
+        assert_eq!(recovery["entries"][0]["state"], "recovery_required");
+    }
+
+    #[test]
+    fn status_never_calls_incomplete_or_corrupt_host_state_clear() {
+        let scratch = Scratch::new();
+        let root = scratch.0.join("legacy");
+        fs::create_dir(&root).unwrap();
+        let bridge = lock_file(&root.join("phonefarm-bridge.lock"), Instant::now()).unwrap();
+        assert_eq!(lease_status(&root)["status"], "held");
+        drop(bridge);
+        let legacy = root.join("devlock.d");
+        fs::create_dir(&legacy).unwrap();
+        assert_eq!(lease_status(&root)["status"], "unknown");
+        for content in ["broken JSON", r#"{"format":2,"producer":"phonefarm"}"#] {
+            fs::write(legacy.join("phonefarm-lease.json"), content).unwrap();
+            assert_eq!(lease_status(&root)["status"], "unknown");
+            assert_eq!(
+                fs::read_to_string(legacy.join("phonefarm-lease.json")).unwrap(),
+                content
+            );
         }
     }
 
