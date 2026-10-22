@@ -27,18 +27,17 @@ const EXPORTS: [&str; 5] = [
     "vkEnumerateInstanceLayerProperties",
     "vkEnumerateInstanceExtensionProperties",
 ];
-const FLAGS: &[&str] = &[
-    "-O2",
-    "-Wall",
-    "-fPIC",
-    "-std=c++17",
-    "-fno-exceptions",
-    "-fno-rtti",
-    "-static-libstdc++",
-    "-Wl,--exclude-libs,ALL",
-    "-DRK_DYNAMIC_UPOP_BUILD=1",
-    "-shared",
-];
+#[derive(Deserialize)]
+struct LayerBuild {
+    sources: Vec<String>,
+    inputs: Vec<String>,
+    compile_flags: Vec<String>,
+    link_flags: Vec<String>,
+}
+fn layer_build() -> LayerBuild {
+    serde_json::from_str(include_str!("../knobs/gray/build/layer_build.json"))
+        .expect("checked-in layer build configuration")
+}
 const ADAPTATION_INPUTS: [(&str, &str); 3] = [
     ("original_candidate.spv", "original.spv"),
     ("adaptation_descriptor.json", "descriptor.json"),
@@ -444,17 +443,25 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
     if manifest.artifact_id != format!("upop-{}", hash(&descriptor_bytes)) {
         return Err("artifact ID does not match frozen descriptor".into());
     }
-    let mut required_inputs = vec![
+    let config = layer_build();
+    let mut required_inputs: Vec<&str> = vec![
         "candidate.comp",
         "candidate.spv",
-        "copyprobe_copy.comp",
         "copyprobe_copy.spv",
-        "vk_layer_refknobs.cpp",
-        "artifact_stats.h",
-        "dispatch_ownership.h",
-        "VkLayer_refknobs.json",
         "copy_spv.h",
     ];
+    required_inputs.extend(
+        config
+            .sources
+            .iter()
+            .chain(&config.inputs)
+            .map(String::as_str),
+    );
+    // v1 artifacts built before the NPU integration did not snapshot npuprobe.
+    // Keep reading them without upgrading their device/deployment claims.
+    if !manifest.descriptor.inputs.contains_key("npuprobe.cpp") {
+        required_inputs.retain(|name| *name != "npuprobe.cpp");
+    }
     if manifest.descriptor.adaptation.is_some() {
         required_inputs.extend(ADAPTATION_INPUTS.map(|(name, _)| name));
     }
@@ -465,21 +472,11 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
     {
         return Err("descriptor must freeze every native/shader input".into());
     }
-    let mandatory = [
-        "candidate.comp",
-        "candidate.spv",
-        "copyprobe_copy.comp",
-        "copyprobe_copy.spv",
-        "vk_layer_refknobs.cpp",
-        "artifact_stats.h",
-        "dispatch_ownership.h",
-        "copy_spv.h",
-        "artifact_metadata.h",
-        "VkLayer_refknobs.json",
-        "descriptor.json",
-        LAYER_NAME,
-    ];
-    for name in mandatory {
+    for name in
+        required_inputs
+            .into_iter()
+            .chain(["artifact_metadata.h", "descriptor.json", LAYER_NAME])
+    {
         if !manifest.files.contains_key(name) {
             return Err(format!("manifest missing {name}"));
         }
@@ -741,16 +738,11 @@ fn build_stage(
             inputs.insert(stored.into(), file_hash(&stage.join(stored))?);
         }
     }
-    for name in [
-        "vk_layer_refknobs.cpp",
-        "artifact_stats.h",
-        "dispatch_ownership.h",
-        "copyprobe_copy.comp",
-        "VkLayer_refknobs.json",
-    ] {
+    let config = layer_build();
+    for name in config.sources.iter().chain(&config.inputs) {
         let data = read(&root.join(name))?;
         write(&stage.join(name), &data)?;
-        inputs.insert(name.into(), hash(&data));
+        inputs.insert(name.clone(), hash(&data));
     }
     let candidate = stage.join("candidate.comp");
     let spv = stage.join("candidate.spv");
@@ -802,10 +794,12 @@ fn build_stage(
         inputs,
         tools,
         shader_flags: vec!["--target-env=vulkan1.0".into(), "-O".into()],
-        native_flags: FLAGS
+        native_flags: config
+            .compile_flags
             .iter()
-            .map(|s| s.to_string())
-            .chain(["-I<snapshot>".into(), "-llog".into()])
+            .cloned()
+            .chain(["-DRK_DYNAMIC_UPOP_BUILD=1".into(), "-I<snapshot>".into()])
+            .chain(config.link_flags.iter().cloned())
             .collect(),
         adaptation,
         process_supervision: supervision,
@@ -816,16 +810,19 @@ fn build_stage(
     let metadata_bytes = metadata(&id, &descriptor.inputs).into_bytes();
     write(&stage.join("artifact_metadata.h"), &metadata_bytes)?;
     let layer = stage.join(LAYER_NAME);
-    let native = stage.join("vk_layer_refknobs.cpp");
-    let mut args = FLAGS.to_vec();
+    let sources: Vec<_> = config.sources.iter().map(|name| stage.join(name)).collect();
+    let mut args: Vec<_> = config.compile_flags.iter().map(String::as_str).collect();
     args.extend([
+        "-DRK_DYNAMIC_UPOP_BUILD=1",
         "-I",
         pstr(stage)?,
         "-o",
         pstr(&layer)?,
-        pstr(&native)?,
-        "-llog",
     ]);
+    for source in &sources {
+        args.push(pstr(source)?);
+    }
+    args.extend(config.link_flags.iter().map(String::as_str));
     descriptor.tools["clang++"].exec(&args, &stage.join("layer_compile.log"), timeout)?;
     let layer_bytes = read(&layer)?;
     elf_arm64(&layer_bytes)?;
