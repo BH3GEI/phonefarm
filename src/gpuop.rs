@@ -940,21 +940,24 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
             Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
         };
         a.serial = Some(_lease.serial.clone());
+        let state_path = match hwcond::lock_state_path("gpuop", &a.serial) {
+            Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
+        };
         let phone = crate::device::Device::new(a.serial.clone(), out_dir.clone());
-        let state_path = hwcond::lock_state_path("gpuop", &a.serial);
         return match hwcond::recover_stale_lock("gpu-op", &phone, &state_path) {
-            Some(true) => {
+            Ok(Some(true)) => {
                 progress("遗留锁频态已回滚");
                 0
             }
-            Some(false) => {
+            Ok(Some(false)) => {
                 eprintln!("回滚失败, 设备可能仍处于锁频态");
                 2
             }
-            None => {
+            Ok(None) => {
                 progress("没有遗留的锁频态");
                 0
             }
+            Err(e) => { eprintln!("{e}"); 2 }
         };
     }
 
@@ -1025,13 +1028,34 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
     };
     a.serial = Some(_lease.serial.clone());
+    let state_path = match hwcond::lock_state_path("gpuop", &a.serial) {
+        Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
+    };
+    let charge_state = match hwcond::lock_state_path("charge", &a.serial) {
+        Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
+    };
     let phone = crate::device::Device::new(a.serial.clone(), out_dir.clone());
-    let state_path = hwcond::lock_state_path("gpuop", &a.serial);
 
     // ---- root 与 runner ----
     if !hwcond::root_ok(&phone) {
         eprintln!("设备无 root: 等冷/锁频/功耗遥测都需要 root");
         return 2;
+    }
+    // 必须先处理遗留状态, 再停充、部署或开始新一轮条件化。
+    match hwcond::recover_stale_lock("gpu-op", &phone, &state_path) {
+        Ok(Some(false)) => {
+            eprintln!("上次遗留的锁频态回滚失败, 拒绝继续部署或测量");
+            return 2;
+        }
+        Ok(_) => {}
+        Err(e) => { eprintln!("{e}"); return 2; }
+    };
+    match hwcond::recover_stale_charge_ctl(&phone, &charge_state) {
+        Ok(Some(false)) => {
+            eprintln!("stale charging state restoration failed"); return 2;
+        }
+        Ok(_) => {}
+        Err(e) => { eprintln!("{e}"); return 2; }
     }
     // refbench 载体不需要 headless 工装来跑主测 —— 算子由 refbench 自己装载。
     // 之前这里无条件去找 runner, 于是 refbench 载体也被一个用不到的二进制卡死。
@@ -1057,12 +1081,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     let quality_pass = a.quality_pass && a.carrier == Carrier::Refbench && !runner.is_empty();
 
     // ---- 停充 ----
-    // 先回滚上次遗留的停充状态。无条件做, 与 --suspend-charging 无关 ——
-    // 遗留状态的危害是"手机一直没在充电", 不该等到下次有人恰好又要停充才被清掉。
-    let charge_state = hwcond::lock_state_path("charge", &a.serial);
-    if hwcond::recover_stale_charge_ctl(&phone, &charge_state) == Some(false) {
-        eprintln!("stale charging state restoration failed"); return 2;
-    }
+    // 遗留停充已在部署前处理, 与本次是否要求停充无关。
     let mut suspend = None;
     if a.suspend_charging {
         match hwcond::ChargeSuspend::apply(&phone, &charge_state) {
@@ -1080,7 +1099,10 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     macro_rules! bail {
         ($code:expr) => {{
             if let Some(mut g) = suspend.take() {
-                let _ = g.restore(&phone);
+                if !g.restore(&phone) {
+                    eprintln!("退出时充电恢复未确认 ({}); 状态文件保留, 需要恢复", g.node());
+                    return 2;
+                }
             }
             return $code;
         }};
@@ -1236,14 +1258,6 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
     // 每张参考帧都跑一遍等于把整轮真机时间乘以帧数, 而该载体的主指标是时延,
     // 不是画质。帧集平均只在画质补测里做 —— 那一步本来就只跑两次。
     let inline_reference = remote_references.first().cloned();
-
-    // ---- 回滚上次异常退出遗留的锁态 ----
-    let recovered = hwcond::recover_stale_lock("gpu-op", &phone, &state_path);
-    if recovered == Some(false) {
-        eprintln!("上次遗留的锁频态回滚失败, 拒绝在未知频率状态下跑测");
-        cleanup(&phone);
-        bail!(2);
-    }
 
     // ---- A/B/A/B 交替跑测 ----
     let schedule = ab_schedule(req.protocol.rounds, req.protocol.alternating);

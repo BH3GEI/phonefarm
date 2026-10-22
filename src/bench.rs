@@ -431,6 +431,7 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     if serial.as_deref().map(|s| s.starts_with("hdc:")).unwrap_or(false) {
         return Err("bench 只支持 Android/adb 设备 (kgsl + TFLite GPU Delegate)".into());
     }
+    let state_path = lock_state_path("bench", &serial)?;
     let out_dir = match &a.out {
         Some(d) => std::path::PathBuf::from(d),
         None => std::env::temp_dir().join(format!("phonefarm-bench-{}", std::process::id())),
@@ -440,9 +441,8 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     if !phone.health_check(8000) {
         return Err("设备无心跳 (adb devices 里不是 device 态, 或未指定 --serial)".into());
     }
-    let state_path = lock_state_path("bench", &serial);
     let root = root_ok(&phone);
-    let recovered = if root { recover_stale_lock("bench", &phone, &state_path) } else { None };
+    let recovered = if root { recover_stale_lock("bench", &phone, &state_path)? } else { None };
     if a.unlock {
         let msg = match recovered {
             Some(true) => "已回滚遗留锁频态",
@@ -451,6 +451,16 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
         };
         let code = if matches!(recovered, Some(false)) || !root { 1 } else { 0 };
         return Ok((json!({"v": 1, "ok": code == 0, "verdict": "UNLOCK", "serial": serial, "recovered": recovered, "message": msg}), code));
+    }
+    if recovered == Some(false) {
+        return Err("上次遗留的锁频态回滚失败, 拒绝继续部署或测量".into());
+    }
+    if !root {
+        match std::fs::symlink_metadata(&state_path) {
+            Ok(_) => return Err("存在遗留锁频状态但无 root, 无法确认恢复, 拒绝继续测量".into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("检查锁频状态 {}: {e}", state_path.display())),
+        }
     }
     if a.lock && !root {
         return Err("锁频需要 root (su -c); 无 root 设备请加 --no-lock (标尺不受控, 结果只作参考)".into());
@@ -584,6 +594,10 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
         }));
         clean_flags.push(clean);
         metric_vals.push(metric_val);
+        if !restored {
+            progress("锁频恢复回读失败, 保留状态文件并停止后续轮次");
+            break;
+        }
         // 委托失败 / 出错的模型没有继续测的意义 (零样本秒筛要快), 首轮即定案
         if !st.full_gpu() || st.error.is_some() { break; }
         // 连续 N 轮全干净且离散度达标 → 判定窗口成立, 停
@@ -609,7 +623,10 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     let n = rounds.len();
     let (ws, we) = window.unwrap_or((n.saturating_sub(need), n));
     let vals: Vec<f64> = metric_vals[ws..we].iter().filter_map(|v| *v).collect();
-    let errors: Vec<String> = rounds.iter().filter_map(|r| r["error"].as_str().map(String::from)).collect();
+    let mut errors: Vec<String> = rounds.iter().filter_map(|r| r["error"].as_str().map(String::from)).collect();
+    if !all_restored {
+        errors.push("锁频恢复回读失败, 后续轮次未执行, 状态文件保留".into());
+    }
     let full_gpu = !rounds.is_empty() && rounds.iter().all(|r| r["full_gpu"].as_bool() == Some(true));
     let (median_us, min_us, max_us, disp) = dispersion_pct(&vals);
     let have_all = vals.len() == need && n >= need;
@@ -620,8 +637,8 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     let ran = rounds.iter().all(|r| r["invoke_avg_us"].as_f64().is_some());
     let attempted = rounds.iter().all(|r| r["delegate_attempted"].as_bool() == Some(true));
     let fallback_reason: Option<String> = rounds.iter().find_map(|r| r["fallback_reason"].as_str().map(String::from));
-    // 回退否决优先于 ERROR: delegate 已创建但整图没落在 OpenCL 上 (含申请失败、benchmark 中止) 都是模型的问题, 不是环境的
-    let verdict = if rounds.is_empty() || !attempted { "ERROR" }
+    // 恢复失败先报 ERROR; 否则 delegate 已创建但整图没落在 OpenCL 上按模型回退判定。
+    let verdict = if !all_restored || rounds.is_empty() || !attempted { "ERROR" }
         else if !full_gpu { "FAIL_FALLBACK" }
         else if !ran { "ERROR" }
         else if !dispersion_ok { "FAIL_UNSTABLE" }

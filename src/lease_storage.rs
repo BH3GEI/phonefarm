@@ -56,6 +56,28 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
     Ok(result)
 }
 
+fn configured_state_dir() -> Option<PathBuf> {
+    std::env::var_os("PHONEFARM_STATE_DIR").map(PathBuf::from).or_else(|| {
+        std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state/phonefarm"))
+    })
+}
+
+fn state_path(path: &Path) -> Result<PathBuf, String> {
+    let path = absolute(path)?;
+    match fs::metadata(&path) {
+        Ok(m) if m.is_dir() => Ok(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(path),
+        Ok(_) => Err(format!("state path is not a directory: {}", path.display())),
+        Err(e) => Err(format!("state path {}: {e}", path.display())),
+    }
+}
+
+/// Resolve recovery and lease storage identically, without creating directories.
+pub(crate) fn state_root() -> Result<PathBuf, String> {
+    state_path(&configured_state_dir()
+        .ok_or("PHONEFARM_STATE_DIR or HOME is required for persistent state storage")?)
+}
+
 fn exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
@@ -127,7 +149,7 @@ impl Storage {
             legacy,
         };
         let paths = (|| {
-            s.state_dir = state.as_deref().map(absolute).transpose()?;
+            s.state_dir = state.as_deref().map(state_path).transpose()?;
             s.devlock_dir = Some(match custom {
                 Some(ref p) => absolute(p)?,
                 None => s
@@ -347,13 +369,8 @@ fn ensure_dir(path: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn resolve() -> Storage {
-    let state = std::env::var_os("PHONEFARM_STATE_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state/phonefarm"))
-        });
     Storage::from_paths(
-        state,
+        configured_state_dir(),
         std::env::var_os("DEVLOCK_DIR").map(PathBuf::from),
         std::env::var_os("PHONEFARM_LEASE_DIR").map(PathBuf::from),
         PathBuf::from(LEGACY),
@@ -440,6 +457,12 @@ mod tests {
         assert!(invalid_devices.init().unwrap_err().contains("absolute"));
         assert!(!f.0.join("old-domain").exists());
         assert!(!f.0.join("state").exists());
+        fs::write(f.0.join("state"), "not a directory").unwrap();
+        let invalid_state = Storage::from_paths(Some(f.0.join("state")),
+            Some(f.0.join("custom")), None, f.0.join("old-domain"));
+        assert_eq!(invalid_state.readiness, "unavailable");
+        assert!(state_path(&f.0.join("state")).is_err());
+        assert_eq!(fs::read_to_string(f.0.join("state")).unwrap(), "not a directory");
     }
 
     #[test]

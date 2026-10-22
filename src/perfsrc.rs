@@ -879,17 +879,19 @@ fn collect_under_lease(
     if a.serial.as_deref() != Some(lease.serial.as_str()) {
         return Err("nested perf target differs from lease".into());
     }
+    let charge_state = hwcond::lock_state_path("charge", &a.serial)?;
     let tmp = std::env::temp_dir().join(format!("phonefarm-perf-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("perf directory: {e}"))?;
     let phone = Device::new(a.serial.clone(), tmp.to_string_lossy().to_string());
     if !phone.health_check(8_000) {
         return Err("device has no heartbeat".into());
     }
-    let charge_state = hwcond::lock_state_path("charge", &a.serial);
-    if (charge_state.exists() || a.suspend_charging) && !hwcond::root_ok(&phone) {
+    let has_charge_state = charge_state.try_exists()
+        .map_err(|e| format!("inspect charging state {}: {e}", charge_state.display()))?;
+    if (has_charge_state || a.suspend_charging) && !hwcond::root_ok(&phone) {
         return Err("charging control/recovery requires verified root".into());
     }
-    if hwcond::recover_stale_charge_ctl(&phone, &charge_state) == Some(false) {
+    if hwcond::recover_stale_charge_ctl(&phone, &charge_state)? == Some(false) {
         return Err("stale charging restoration failed".into());
     }
     let suspend = if a.suspend_charging {

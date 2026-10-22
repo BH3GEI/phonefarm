@@ -923,7 +923,7 @@ struct Session {
     lock_state: PathBuf,
 }
 
-fn fan_state_path(serial: &str) -> PathBuf {
+fn fan_state_path(serial: &str) -> Result<PathBuf, String> {
     hwcond::lock_state_path("selftest-fan", &Some(serial.to_string()))
 }
 
@@ -973,9 +973,19 @@ fn device_state(serial: &str) -> Value {
 
 impl Session {
     fn open(c: &Cond) -> Result<Session, String> {
+        let lock_state = hwcond::lock_state_path("selftest", &Some(c.serial.clone()))?;
+        let fan_state = fan_state_path(&c.serial)?;
+        match std::fs::symlink_metadata(&fan_state) {
+            Ok(_) => return Err(format!("遗留风扇状态 {} 的恢复方式未知, 保留原件并停止", fan_state.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("检查遗留风扇状态 {}: {e}", fan_state.display())),
+        }
         let dev = Device::new(Some(c.serial.clone()), std::env::temp_dir().to_string_lossy().into_owned());
         if !hwcond::root_ok(&dev) {
             return Err("设备无 root: ftrace 与停充都需要 root".into());
+        }
+        if hwcond::recover_stale_lock("selftest", &dev, &lock_state)? == Some(false) {
+            return Err("上次遗留的锁频态回滚失败, 拒绝继续部署或测量".into());
         }
         let pm = sh(&c.serial, &format!("pm list packages {}", rb::PACKAGE), 20);
         if !pm.contains(&format!("package:{}", rb::PACKAGE)) {
@@ -995,17 +1005,11 @@ impl Session {
             serial: c.serial.clone(),
             dev,
             charge_suspended: false,
-            lock_state: hwcond::lock_state_path("selftest", &Some(c.serial.clone())),
+            lock_state,
         };
-        // ── 先清上一次异常退出 (含宿主机崩溃) 的遗留, 再动任何东西 ──
-        // 状态文件放在 hwcond::state_dir() (默认 ~/.local/state/phonefarm), 重启不丢;
-        // 停充的「改之前」本来就记在设备上 (charge_suspend.sh 的 STATE)。
-        if hwcond::recover_stale_lock("selftest", &s.dev, &s.lock_state) == Some(false) {
-            return Err("上次遗留的锁频态回滚失败, 拒绝在未知频率状态下跑".into());
-        }
+        // 锁频遗留已在部署前恢复。停充原值由设备端 charge_suspend.sh 另行保存。
         // 风扇一律不开 (owner 规定: 噪音)。开场无条件写 0 —— 旧版本 --fan-on 被杀/宕机后
         // 可能把风扇留在开着 (10-11 19:40 节点宕机那次就是), 不管谁留的都在这里关掉
-        let _ = std::fs::remove_file(fan_state_path(&c.serial));
         let fan_before = strip_exit(&su(&c.serial, &format!("cat {FAN_EN}"), 15)).trim().to_string();
         write_fan_off(&c.serial);
         if fan_before != "0" {
@@ -1050,8 +1054,13 @@ impl Session {
         }
         write_fan_off(&self.serial);
         v["media_volume"] = json!(ensure_muted(&self.serial));
-        if hwcond::recover_stale_lock("selftest", &self.dev, &self.lock_state) == Some(false) {
-            v["lock_restore"] = json!("FAILED");
+        match hwcond::recover_stale_lock("selftest", &self.dev, &self.lock_state) {
+            Ok(Some(false)) => v["lock_restore"] = json!("FAILED"),
+            Err(e) => {
+                v["lock_restore"] = json!("FAILED");
+                v["lock_restore_error"] = json!(e);
+            }
+            Ok(_) => {}
         }
         v["device_after"] = device_state(&self.serial);
         log(&format!("现场还原: {v}"));
@@ -1096,6 +1105,9 @@ fn now_str() -> String {
 /// 量到了但算子没生效等情况落在 arm.json 的 apply_ok=false 里, 由判定链按 ABORT 处理。
 fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_spv: &str) -> Result<Value, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    // 输出文件先打开, 避免锁频成功后因本地创建失败提前返回而漏掉还原。
+    let env_path = dir.join("env.txt");
+    let env_file = std::fs::File::create(&env_path).map_err(|e| format!("创建 {}: {e}", env_path.display()))?;
     let serial = &c.serial;
     let t0 = Instant::now();
     let started_at = now_str();
@@ -1140,17 +1152,16 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     }
     if !started {
         sh(serial, &format!("am force-stop {}", rb::PACKAGE), 15);
-        unlock(&lock);
-        return Err(format!("{label}: refbench 没起跑 (30s 内未见 refbench_started)"));
+        let restored = unlock(&lock);
+        return Err(format!("{label}: refbench 没起跑 (30s 内未见 refbench_started); 锁频恢复={restored}"));
     }
     std::thread::sleep(Duration::from_secs(c.warmup_s));
 
     // 4) 采集: sample_env 后台 + ftrace 前台 (同 eval::run_one)
-    let env_path = dir.join("env.txt");
     let sampler = Command::new(adb_path())
         .args(["-s", serial, "shell"])
         .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {} 1'", c.capdur_s))
-        .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
+        .stdout(env_file)
         .stderr(std::process::Stdio::null())
         .spawn();
     let raw = format!("{REMOTE_DIR}/trace_raw.txt");
