@@ -36,6 +36,7 @@ mod device;
 mod platform;
 mod devlock;
 mod devlease;
+mod lease_receipt;
 mod eval;
 mod onboard;
 mod qualification;

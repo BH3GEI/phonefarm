@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -15,6 +16,8 @@ pub struct Lease {
     stop: Option<mpsc::Sender<()>>,
     heartbeat: Option<JoinHandle<()>>,
     preserve_marker: bool,
+    receipt: Option<crate::lease_receipt::JobReceipt>,
+    receipt_failed: AtomicBool,
     pub serial: String,
 }
 
@@ -38,7 +41,7 @@ fn lock_file(path: &Path, deadline: Instant) -> Result<File, String> {
 }
 
 // Durability is required before device writes: never truncate the live ownership/uncertainty marker.
-fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let parent = path.parent().ok_or("marker parent missing")?;
     let tmp = parent.join(format!(
@@ -67,12 +70,14 @@ fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// (否则自己等自己), 改用旁边的 `phonefarm-lease.d` 放 owner/marker/恢复屏障; 外层锁照旧排斥别的参与者。
 const NESTED_DIR: &str = "phonefarm-lease.d";
 fn outer_devlock_is_ours(legacy_root: &Path) -> bool {
-    let Some(label) = std::env::var("DEVLOCK_LABEL").ok().filter(|l| !l.trim().is_empty()) else {
+    let Some(label) = std::env::var("DEVLOCK_LABEL")
+        .ok()
+        .filter(|l| !l.trim().is_empty())
+    else {
         return false;
     };
-    fs::read_to_string(legacy_root.join("devlock.d").join("owner")).is_ok_and(|o| {
-        !o.contains("token=") && o.split_whitespace().next() == Some(label.trim())
-    })
+    fs::read_to_string(legacy_root.join("devlock.d").join("owner"))
+        .is_ok_and(|o| !o.contains("token=") && o.split_whitespace().next() == Some(label.trim()))
 }
 /// 本次租约用的目录: 外层农场锁归本进程树时用 [`NESTED_DIR`], 否则就是 devlock.d。
 fn lease_dir(legacy_root: &Path) -> PathBuf {
@@ -116,6 +121,8 @@ fn marker_state(m: &Value) -> Result<(bool, bool), String> {
         "recovery_required",
         "recovery_context",
         "previous_owner",
+        "job_id",
+        "lease_id",
     ];
     if let Some(key) = m
         .as_object()
@@ -135,6 +142,15 @@ fn marker_state(m: &Value) -> Result<(bool, bool), String> {
     };
     let pending = flag("command_pending")?;
     let recovery = flag("recovery_required")?;
+    match (m.get("job_id"), m.get("lease_id")) {
+        (None, None) => {}
+        (Some(job), Some(lease))
+            if job.as_str().is_some_and(crate::lease_receipt::valid_job_id)
+                && lease
+                    .as_str()
+                    .is_some_and(crate::lease_receipt::valid_lease_id) => {}
+        _ => return Err("invalid or incomplete lease job association".into()),
+    }
     match (m.get("child_pid"), m.get("child_pgid")) {
         (None, None) => {}
         (Some(pid), Some(pgid)) => {
@@ -188,6 +204,7 @@ impl Lease {
         if serial.trim().is_empty() {
             return Err("lease requires a resolved device serial".into());
         }
+        let receipt = crate::lease_receipt::JobReceipt::from_env(serial, label, Value::Null)?;
         fs::create_dir_all(root).map_err(|e| format!("lease directory: {e}"))?;
         fs::create_dir_all(legacy_root).map_err(|e| format!("devlock directory: {e}"))?;
         let deadline = Instant::now() + timeout;
@@ -203,7 +220,10 @@ impl Lease {
             }
             if let Some(m) = marker(&other) {
                 if !marker_state(&m).is_ok_and(|(pending, recovery)| !pending && !recovery) {
-                    return Err(format!("lease barrier present in {}; reconcile/recover it first", other.display()));
+                    return Err(format!(
+                        "lease barrier present in {}; reconcile/recover it first",
+                        other.display()
+                    ));
                 }
             }
         }
@@ -253,8 +273,11 @@ impl Lease {
             "phonefarm:{label}:{serial} since {} token={token}\n",
             chrono::Utc::now().to_rfc3339()
         );
-        let info = json!({"format":1,"producer":"phonefarm","pid":std::process::id(),
+        let mut info = json!({"format":1,"producer":"phonefarm","pid":std::process::id(),
                           "token":token,"serial":serial,"label":label,"owner":owner});
+        if let Some(r) = &receipt {
+            r.bind_marker(&mut info)?;
+        }
         if let Err(e) = durable_replace(
             &legacy.join("phonefarm-lease.json"),
             info.to_string().as_bytes(),
@@ -285,7 +308,7 @@ impl Lease {
                 }
             }
         });
-        Ok(Self {
+        let lease = Self {
             _device: device,
             _bridge: bridge,
             legacy,
@@ -293,11 +316,33 @@ impl Lease {
             stop: Some(tx),
             heartbeat: Some(heartbeat),
             preserve_marker: false,
+            receipt,
+            receipt_failed: AtomicBool::new(false),
             serial: serial.into(),
-        })
+        };
+        lease.publish_receipt(&info, "active", None)?;
+        Ok(lease)
+    }
+
+    fn publish_receipt(
+        &self,
+        marker: &Value,
+        state: &str,
+        uncertainty: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(r) = &self.receipt {
+            if let Err(e) = r.observe(marker, state, uncertainty) {
+                self.receipt_failed.store(true, Ordering::Relaxed);
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     pub fn check(&self) -> Result<(), String> {
+        if self.receipt_failed.load(Ordering::Relaxed) {
+            return Err("job lease receipt publication failed; recovery remains unverified".into());
+        }
         marker_state(&marker(&self.legacy).ok_or("lease marker unavailable")?)?;
         if !owns(&self.legacy, &self.token) {
             return Err("lease owner changed; experiment contaminated/unknown".into());
@@ -320,7 +365,8 @@ impl Lease {
         durable_replace(
             &self.legacy.join("phonefarm-lease.json"),
             m.to_string().as_bytes(),
-        )
+        )?;
+        self.publish_receipt(&m, "active", None)
     }
     pub(crate) fn record_child(&self, pid: u32) -> Result<(), String> {
         self.check()?;
@@ -332,7 +378,8 @@ impl Lease {
             &self.legacy.join("phonefarm-lease.json"),
             m.to_string().as_bytes(),
         )
-        .map_err(|e| format!("record child: {e}"))
+        .map_err(|e| format!("record child: {e}"))?;
+        self.publish_receipt(&m, "active", None)
     }
 
     /// Only for a definite spawn Err: no child was established for this pending launch.
@@ -360,6 +407,7 @@ impl Lease {
             m.to_string().as_bytes(),
         )
         .map_err(|e| format!("cancel unspawned command: {e}"))?;
+        self.publish_receipt(&m, "active", None)?;
         self.preserve_marker = false;
         Ok(())
     }
@@ -375,7 +423,8 @@ impl Lease {
             &self.legacy.join("phonefarm-lease.json"),
             m.to_string().as_bytes(),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        self.publish_receipt(&m, "active", None)
     }
 
     /// Must precede the first remote write. Failure/drop leaves the barrier intact.
@@ -389,13 +438,38 @@ impl Lease {
             &self.legacy.join("phonefarm-lease.json"),
             m.to_string().as_bytes(),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        self.publish_receipt(&m, "active", None)
     }
 
     /// Internal caller has separately verified the recorded restore/quiescence evidence.
-    pub(crate) fn complete_recovery(&mut self) -> Result<(), String> {
+    pub(crate) fn complete_recovery(
+        &mut self,
+        scope: &str,
+        origin: &str,
+        evidence: &[&Path],
+    ) -> Result<(), String> {
         self.check()?;
+        if scope.trim().is_empty()
+            || origin.trim().is_empty()
+            || evidence.is_empty()
+            || evidence.iter().any(|p| !p.is_absolute() || !p.is_file())
+        {
+            return Err(
+                "recovery completion requires scope, origin, and existing absolute evidence files"
+                    .into(),
+            );
+        }
         let mut m = marker(&self.legacy).ok_or("lease marker unavailable")?;
+        if m["command_pending"] == true || m.get("child_pid").is_some() {
+            return Err("recovery completion requires no pending/local child command".into());
+        }
+        if let Some(r) = &self.receipt {
+            if let Err(e) = r.complete(scope, origin, evidence) {
+                self.receipt_failed.store(true, Ordering::Relaxed);
+                return Err(e);
+            }
+        }
         m["recovery_required"] = json!(false);
         durable_replace(
             &self.legacy.join("phonefarm-lease.json"),
@@ -425,6 +499,16 @@ impl Lease {
         let legacy = recovery_dir(legacy_root);
         let prior = marker(&legacy).ok_or("missing/corrupt recovery owner")?;
         let (pending, _) = marker_state(&prior)?;
+        let recovery_of = if prior.get("job_id").is_some() {
+            json!({"job_id":prior["job_id"], "lease_id":prior["lease_id"]})
+        } else {
+            Value::Null
+        };
+        let receipt = crate::lease_receipt::JobReceipt::from_env(
+            serial,
+            "confirmation-reconcile",
+            recovery_of,
+        )?;
         let prior_token = prior["token"].as_str().ok_or("missing recovery token")?;
         let pid = prior["pid"]
             .as_u64()
@@ -479,10 +563,16 @@ impl Lease {
         next["pid"] = json!(std::process::id());
         next["token"] = json!(token);
         next["owner"] = json!(owner);
+        next["label"] = json!("confirmation-reconcile");
         next["previous_owner"] = prior;
         if let Some(o) = next.as_object_mut() {
             o.remove("child_pid");
             o.remove("child_pgid");
+            o.remove("job_id");
+            o.remove("lease_id");
+        }
+        if let Some(r) = &receipt {
+            r.bind_marker(&mut next)?;
         }
         durable_replace(
             &legacy.join("phonefarm-lease.json"),
@@ -502,7 +592,7 @@ impl Lease {
                 }
             }
         });
-        Ok(Self {
+        let lease = Self {
             _device: device,
             _bridge: bridge,
             legacy,
@@ -510,8 +600,12 @@ impl Lease {
             stop: Some(tx),
             heartbeat: Some(heartbeat),
             preserve_marker: true,
+            receipt,
+            receipt_failed: AtomicBool::new(false),
             serial: serial.into(),
-        })
+        };
+        lease.publish_receipt(&next, "active", None)?;
+        Ok(lease)
     }
 
     fn recover_confirmed_idle(
@@ -615,13 +709,38 @@ impl Drop for Lease {
         if let Some(h) = self.heartbeat.take() {
             let _ = h.join();
         }
-        let unknown_command = marker(&self.legacy).is_none_or(|m| {
-            !marker_state(&m).is_ok_and(|(pending, recovery)| {
-                !pending && !recovery && m.get("child_pid").is_none()
-            })
-        });
-        if !self.preserve_marker && !unknown_command {
+        let m = marker(&self.legacy).unwrap_or(Value::Null);
+        let uncertainty = if self.receipt_failed.load(Ordering::Relaxed) {
+            Some("receipt_publication_failed")
+        } else if marker_state(&m).is_err() {
+            Some("marker_unknown")
+        } else if !owns(&self.legacy, &self.token) {
+            Some("ownership_changed")
+        } else if m["command_pending"] == true {
+            Some("command_pending")
+        } else if m.get("child_pid").is_some() {
+            Some("child_unverified")
+        } else if self.preserve_marker || m["recovery_required"] == true {
+            Some("explicit_recovery_barrier")
+        } else {
+            None
+        };
+        let release = uncertainty.is_none();
+        if let Err(e) = self.publish_receipt(
+            &m,
+            if release { "released" } else { "retained" },
+            uncertainty,
+        ) {
+            eprintln!("{e}; retaining lease marker");
+        }
+        if release && !self.receipt_failed.load(Ordering::Relaxed) {
             remove_owned(&self.legacy, &self.token);
+            if self.legacy.exists() {
+                if let Err(e) = self.publish_receipt(&m, "retained", Some("marker_release_failed"))
+                {
+                    eprintln!("{e}; lease marker removal incomplete");
+                }
+            }
         }
         // File fields close after Drop, releasing both kernel locks on every return/unwind.
     }
@@ -650,7 +769,7 @@ fn lease_status(legacy_root: &Path) -> Value {
     let mut entries = Vec::new();
     for directory in ["devlock.d", NESTED_DIR] {
         let path = legacy_root.join(directory);
-        let mut entry = json!({"directory":directory,"serial":null,"label":null,
+        let mut entry = json!({"directory":directory,"serial":null,"label":null,"job_id":null,"lease_id":null,
             "state":"unknown","reason":null,"recovery_context":null});
         let inspect = || -> Result<Option<(Value, bool, bool)>, String> {
             match fs::symlink_metadata(&path) {
@@ -676,7 +795,7 @@ fn lease_status(legacy_root: &Path) -> Value {
             Ok(None) => continue,
             Err(reason) => entry["reason"] = json!(reason),
             Ok(Some((m, pending, recovery))) => {
-                for key in ["serial", "label", "recovery_context"] {
+                for key in ["serial", "label", "recovery_context", "job_id", "lease_id"] {
                     entry[key] = m[key].as_str().map_or(Value::Null, |s| json!(s));
                 }
                 let age = fs::metadata(path.join("owner"))
@@ -926,6 +1045,113 @@ mod tests {
         fn drop(&mut self) {
             // This test owns the create-only directory; no global or device state is used.
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn attach_receipt(scratch: &Scratch, lease: &mut Lease) -> PathBuf {
+        let dir = scratch.0.join("receipts");
+        fs::create_dir(&dir).unwrap();
+        let r = crate::lease_receipt::JobReceipt::new(
+            "123456abcdef",
+            &dir,
+            &lease.serial,
+            "test",
+            Value::Null,
+        )
+        .unwrap();
+        let mut m = marker(&lease.legacy).unwrap();
+        r.bind_marker(&mut m).unwrap();
+        durable_replace(
+            &lease.legacy.join("phonefarm-lease.json"),
+            m.to_string().as_bytes(),
+        )
+        .unwrap();
+        let path = dir.join(format!("{}.json", m["lease_id"].as_str().unwrap()));
+        lease.receipt = Some(r);
+        lease.publish_receipt(&m, "active", None).unwrap();
+        path
+    }
+    fn read_receipt(path: &Path) -> Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn job_receipt_release_is_not_device_recovery() {
+        let scratch = Scratch::new();
+        let mut lease = scratch.lease();
+        let path = attach_receipt(&scratch, &mut lease);
+        let token = lease.token.clone();
+        assert_eq!(read_receipt(&path)["state"], "active");
+        let observed = lease_status(&scratch.0.join("legacy"));
+        assert_eq!(observed["entries"][0]["job_id"], "123456abcdef");
+        assert_eq!(observed["entries"][0]["lease_id"], read_receipt(&path)["lease_id"]);
+        lease.record_command_pending("host-only").unwrap();
+        assert_eq!(read_receipt(&path)["recovery"]["reason"], "command_pending");
+        lease.cancel_unspawned_command("host-only").unwrap();
+        drop(lease);
+        let r = read_receipt(&path);
+        assert_eq!(r["state"], "released");
+        assert_eq!(r["recovery"]["status"], "not_reported");
+        assert_eq!(r["recovery_of"], Value::Null);
+        assert!(!r.to_string().contains(&token));
+        assert!(!scratch.0.join("legacy/devlock.d").exists());
+    }
+
+    #[test]
+    fn job_receipt_scoped_completion_is_reset_by_new_hold_or_unknown_marker() {
+        let scratch = Scratch::new();
+        let mut lease = scratch.lease();
+        let path = attach_receipt(&scratch, &mut lease);
+        let evidence = scratch.0.join("proof.txt");
+        fs::write(&evidence, "synthetic helper absence").unwrap();
+        lease.hold_for_recovery(&scratch.0).unwrap();
+        assert!(lease
+            .complete_recovery("helper_retirement_only", "synthetic", &[])
+            .is_err());
+        lease
+            .complete_recovery("helper_retirement_only", "synthetic", &[&evidence])
+            .unwrap();
+        assert_eq!(
+            read_receipt(&path)["recovery"]["evidence_origin"],
+            "synthetic"
+        );
+        lease.hold_for_recovery(&scratch.0).unwrap();
+        assert_eq!(read_receipt(&path)["recovery"]["status"], "required");
+        assert_eq!(read_receipt(&path)["recovery"]["scope"], Value::Null);
+        lease
+            .complete_recovery("helper_retirement_only", "synthetic", &[&evidence])
+            .unwrap();
+        fs::write(lease.legacy.join("phonefarm-lease.json"), "invalid").unwrap();
+        drop(lease);
+        let r = read_receipt(&path);
+        assert_eq!(r["state"], "retained");
+        assert_eq!(r["recovery"]["reason"], "marker_unknown");
+        assert_eq!(r["recovery"]["status"], "required");
+        assert!(scratch.0.join("legacy/devlock.d").exists());
+    }
+
+    #[test]
+    fn job_receipt_write_failure_blocks_reacquisition_with_or_without_hold() {
+        for held in [false, true] {
+            let scratch = Scratch::new();
+            let mut lease = scratch.lease();
+            let path = attach_receipt(&scratch, &mut lease);
+            let evidence = scratch.0.join("proof.txt");
+            fs::write(&evidence, "synthetic proof").unwrap();
+            if held { lease.hold_for_recovery(&scratch.0).unwrap(); }
+            fs::rename(path.parent().unwrap(), scratch.0.join("unavailable-receipts")).unwrap();
+            if held {
+                assert!(lease.complete_recovery("configuration_readback_only", "synthetic", &[&evidence]).is_err());
+            } else {
+                assert!(lease.clear_child().is_err());
+            }
+            drop(lease);
+            let legacy = scratch.0.join("legacy/devlock.d");
+            assert!(marker(&legacy).is_some());
+            assert_ne!(lease_status(&scratch.0.join("legacy"))["status"], "clear");
+            let error = Lease::acquire(&scratch.0.join("leases"), &scratch.0.join("legacy"),
+                "fake-spawn-cancel", "next", Duration::from_millis(100)).err().unwrap();
+            assert!(error.contains(if held { "RECOVERY_REQUIRED" } else { "manual/legacy devlock busy" }), "{error}");
         }
     }
 

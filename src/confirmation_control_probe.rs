@@ -420,7 +420,6 @@ pub(super) fn run(path: &Path, out: &Path, execute: bool) -> Result<Value, Strin
         Value::Null
     };
     let closure = close(&mut t, &lease, &out, &state, "closed")?;
-    lease.complete_recovery()?;
     let report = json!({"schema":"phonefarm/control_probe_report@1",
         "status":if req.transport.kind=="fake"{"SIMULATED_CONTROL_RESTORED"}else{"CONTROL_RESTORED"},
         "scope":"configuration_readback_only","evidence_origin":t.origin,"actual_serial":serial,"boot_id":boot,
@@ -428,6 +427,8 @@ pub(super) fn run(path: &Path, out: &Path, execute: bool) -> Result<Value, Strin
         "eligible":false,"experiment_eligible":false,"real_game_optimization_proven":false,"promotion_allowed":false,
         "actual_clock_sustained_proven":false,"power_window_verified":false});
     save_json(&out, "control-report.json", &report)?;
+    lease.complete_recovery("configuration_readback_only", &t.origin,
+        &[&out.join("control-report.json"), &out.join("journal.jsonl")])?;
     Ok(report)
 }
 pub(super) fn reconcile(dir: &Path) -> Result<Value, String> {
@@ -442,7 +443,8 @@ pub(super) fn reconcile(dir: &Path) -> Result<Value, String> {
     );
     let mut t = start_transport_target(&dir, &req.transport, &run)?;
     close(&mut t, &lease, &dir, &state, &run)?;
-    lease.complete_recovery()?;
+    lease.complete_recovery("configuration_readback_only", &t.origin,
+        &[&dir.join(format!("{run}-snapshot_restored.txt")), &dir.join("journal.jsonl")])?;
     Ok(
         json!({"status":if req.transport.kind=="fake"{"SIMULATED_RECONCILED"}else{"RESTORED_REQUIRES_NEW_SESSION"},
         "scope":"configuration_readback_only","old_samples_revalidated":false,"eligible":false,
