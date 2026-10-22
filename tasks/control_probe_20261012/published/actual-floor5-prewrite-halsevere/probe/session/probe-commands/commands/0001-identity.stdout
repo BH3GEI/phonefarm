@@ -1,0 +1,4 @@
+uid=0(root) gid=0(root) groups=0(root) context=u:r:magisk:s0
+c531e0a
+b03328bb-9647-4cc1-8e6c-8f534df69dad
+/system/bin/setsid

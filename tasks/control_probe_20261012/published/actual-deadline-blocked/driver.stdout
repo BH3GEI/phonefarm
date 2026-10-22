@@ -1,0 +1,1 @@
+{"eligible":false,"error":"warmup is not thermally stable: /sys/class/thermal/thermal_zone17/temp","promotion_allowed":false,"real_game_optimization_proven":false,"recovery":"device writes may have begun; no automatic retry, inspect persistent barrier and explicit reconcile","status":"BLOCKED"}

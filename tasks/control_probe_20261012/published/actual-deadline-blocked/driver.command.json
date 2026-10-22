@@ -1,0 +1,26 @@
+{
+  "argv": [
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-loaded-v4-796ea31",
+    "confirmation-driver",
+    "probe-controls",
+    "--request",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/gpu-control-probe.request.json",
+    "--out",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/gpu-control-probe-v4-deadline/session",
+    "--execute"
+  ],
+  "started_unix_s": 1791746736.095155,
+  "finished_unix_s": 1791746789.243212,
+  "elapsed_s": 53.148575250059366,
+  "exit_code": 1,
+  "deadline_exceeded": false,
+  "tool_source": "796ea313dfe832d2de77c63fd8a82462b5e96b88",
+  "tool_signed_sha256": "87669fbc6e2ea10da7a51aa1bccb89392b32c79450def3503800d8e28803fcb0",
+  "request_sha256": "c8eb9cb1482e9ae09860f777cc3f0615e9f3a129f52cdfea5366c92c63935316",
+  "stdout_sha256": "1b22a6f3ab2c5552765147c1022fb60b82a59375e3cc850f53894f613c7d5ab8",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "device_executed": true,
+  "scope": "single_GPU_configuration_readback_and_restore_capability_only",
+  "performance_eligible": false,
+  "api_calls": 0
+}

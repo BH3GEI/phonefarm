@@ -1,0 +1,25 @@
+{
+  "kind": "sysparam",
+  "payload": {
+    "why": "Explicit fixed60fps camp mechanism prerequisite: raise GPU minimum allowed powerlevel from11 to5; sampled actual578MHz, expected available table629MHz at5. Configuration capability only, no performance gain assertion.",
+    "params": {
+      "gpu.min_pwrlevel": "5"
+    },
+    "plan": [
+      {
+        "kind": "sysfs",
+        "path": "/sys/class/kgsl/kgsl-3d0/min_pwrlevel",
+        "value": "5"
+      }
+    ],
+    "deny_keywords": [
+      "thermal",
+      "trip_point",
+      "cooling",
+      "fan",
+      "tsens",
+      "bcl",
+      "throttl"
+    ]
+  }
+}

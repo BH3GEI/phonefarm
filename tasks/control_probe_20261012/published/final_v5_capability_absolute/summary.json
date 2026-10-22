@@ -1,0 +1,27 @@
+{
+  "schema": "hgamey/source_gate_summary@1",
+  "source_head": "19bfed5a2907c1770cf62656fbf9ded4d733a658",
+  "test_groups": [
+    576,
+    27,
+    18,
+    15,
+    1,
+    10,
+    11,
+    6,
+    12
+  ],
+  "total_passed": 676,
+  "default_clippy_exit_code": 0,
+  "strict_clippy_clean_claimed": false,
+  "source_unchanged": true,
+  "raw_phonefarm_sha256": "f5a6dc6560455947a00bfb08516792965119654ea03f581821ad218791634538",
+  "signed_phonefarm_sha256": "b2352f3e9aba7a394ea55af059bf2b66e64a7f0be4654f944f81c5fd83992d7e",
+  "fixture_gol_sha256": "8f1b376ed3487f5fcdc236fc0150ccd2232d59d0b8e4b48a3ad3726d41384eaf",
+  "device_executed_in_this_gate": false,
+  "model_api_calls": 0,
+  "live_capability_profile_executed": false,
+  "historical_796_gate_and_three_failures_unchanged": true,
+  "claim_scope": "host_control_capability_purpose_separation_no_optimization_result"
+}

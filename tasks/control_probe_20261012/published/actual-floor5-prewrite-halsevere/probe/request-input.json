@@ -1,0 +1,10 @@
+{
+  "schema": "phonefarm/control_probe_request@1",
+  "transport": {
+    "kind": "adb",
+    "program": "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+    "target": "c531e0a"
+  },
+  "candidate": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/endfield-gpu-floor5-capability-absolute/candidate-input.json",
+  "temperature_profile_id": "capability_absolute_v1"
+}

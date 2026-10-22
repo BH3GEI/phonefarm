@@ -1,0 +1,41 @@
+{
+  "source_commit": "19bfed5a2907c1770cf62656fbf9ded4d733a658",
+  "full_gate_file": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe/tasks/control_probe_20261012/final_gate_v5_capability_absolute/result.json",
+  "raw_binary_sha256": "f5a6dc6560455947a00bfb08516792965119654ea03f581821ad218791634538",
+  "signed_binary_sha256": "b2352f3e9aba7a394ea55af059bf2b66e64a7f0be4654f944f81c5fd83992d7e",
+  "binary_path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-capability-absolute-v5-19bfed5",
+  "mode": "0500",
+  "commands": [
+    {
+      "argv": [
+        "codesign",
+        "--force",
+        "--sign",
+        "-",
+        "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-capability-absolute-v5-19bfed5"
+      ],
+      "started_unix_s": 1791750790.728199,
+      "finished_unix_s": 1791750790.888003,
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-capability-absolute-v5-19bfed5: replacing existing signature\n"
+    },
+    {
+      "argv": [
+        "codesign",
+        "--verify",
+        "--strict",
+        "--verbose=2",
+        "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-capability-absolute-v5-19bfed5"
+      ],
+      "started_unix_s": 1791750790.888012,
+      "finished_unix_s": 1791750790.933493,
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-capability-absolute-v5-19bfed5: valid on disk\n/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-capability-absolute-v5-19bfed5: satisfies its Designated Requirement\n"
+    }
+  ],
+  "device_executed": false,
+  "api_calls": 0,
+  "prior_accepted_796_tool_unchanged": true
+}

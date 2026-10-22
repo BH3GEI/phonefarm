@@ -1,0 +1,18 @@
+{
+  "schema": "hgamey/source_only_delta_review@1",
+  "source_commit": "19bfed5a2907c1770cf62656fbf9ded4d733a658",
+  "review_path": "reporting/capability-absolute-committed-delta-review.md",
+  "review_sha256": "426c60c7694b3568d304f3cab8a014f760dca991188f40289d782fcc2802b090",
+  "review_scope": [
+    "collect explicit early capability refusal",
+    "actual worker purpose guard extraction test",
+    "qualification tests preserve exact loaded/legacy ID rejection"
+  ],
+  "source_blockers": [],
+  "cargo_run_by_reviewer": false,
+  "android_or_device_validation": false,
+  "device_calls": 0,
+  "model_api_calls": 0,
+  "B_full_gate_at_review": "pending",
+  "GOL_legacy_repair_source": "0dd011e4df887efa11edc597db8f90ea02bbdadb"
+}

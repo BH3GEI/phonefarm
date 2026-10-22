@@ -1,0 +1,107 @@
+[
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "input",
+      "tap",
+      "2165",
+      "55"
+    ],
+    "started_unix_s": 1791752646.374389,
+    "timeout_s": 8,
+    "scope": "original30_restored_ordinary_HOME_pause_one_readonly_perfectto_query_no_trace_started",
+    "finished_unix_s": 1791752646.509683,
+    "exit_code": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "input",
+      "tap",
+      "2050",
+      "75"
+    ],
+    "started_unix_s": 1791752647.5203001,
+    "timeout_s": 8,
+    "scope": "original30_restored_ordinary_HOME_pause_one_readonly_perfectto_query_no_trace_started",
+    "finished_unix_s": 1791752647.620089,
+    "exit_code": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "input",
+      "keyevent",
+      "3"
+    ],
+    "started_unix_s": 1791752648.628324,
+    "timeout_s": 8,
+    "scope": "original30_restored_ordinary_HOME_pause_one_readonly_perfectto_query_no_trace_started",
+    "finished_unix_s": 1791752648.792382,
+    "exit_code": 0,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "su -c 'echo BOOT; cat /proc/sys/kernel/random/boot_id; echo GPU_MIN; cat /sys/class/kgsl/kgsl-3d0/min_pwrlevel; echo GPU_CLOCK; cat /sys/class/kgsl/kgsl-3d0/gpuclk; echo PERFETTO_PROGRAM; command -v perfetto; echo PERFETTO_QUERY_BEGIN; timeout 5 perfetto --query; rc=$?; echo PERFETTO_QUERY_END_EXIT=$rc; echo UPTIME; cat /proc/uptime; exit $rc'"
+    ],
+    "started_unix_s": 1791752650.800492,
+    "timeout_s": 8,
+    "scope": "original30_restored_ordinary_HOME_pause_one_readonly_perfectto_query_no_trace_started",
+    "finished_unix_s": 1791752651.012651,
+    "exit_code": 0,
+    "stdout_sha256": "d34cbfc0d96c06004b325aa0294eb3d40754e2ee9b0a6222690e68f9e57c4197",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "exec-out",
+      "screencap",
+      "-p"
+    ],
+    "started_unix_s": 1791752651.013473,
+    "timeout_s": 8,
+    "scope": "original30_restored_ordinary_HOME_pause_one_readonly_perfectto_query_no_trace_started",
+    "finished_unix_s": 1791752652.57566,
+    "exit_code": 0,
+    "stdout_sha256": "99e979e82b33a6baba0cba81c9f5076dc219c15428bd9e96b7464d3250e5287f",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "su -c 'echo BOOT; cat /proc/sys/kernel/random/boot_id; echo FOREGROUND; timeout 4 dumpsys activity activities | grep -E \"mResumedActivity|topResumedActivity\" || true; echo UPTIME; cat /proc/uptime'"
+    ],
+    "started_unix_s": 1791752652.577541,
+    "timeout_s": 8,
+    "scope": "original30_restored_ordinary_HOME_pause_one_readonly_perfectto_query_no_trace_started",
+    "finished_unix_s": 1791752652.770802,
+    "exit_code": 0,
+    "stdout_sha256": "02b4d18dfda89a43362b04ba93e4c46e6401c1effa0d2fcc2f479758ae87287d",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+]

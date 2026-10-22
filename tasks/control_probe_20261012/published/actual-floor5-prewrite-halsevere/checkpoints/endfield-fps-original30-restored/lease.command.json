@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/tools/phonefarm-loaded-v4-796ea31",
+    "lease",
+    "--serial",
+    "c531e0a",
+    "--timeout-ms",
+    "45000",
+    "--",
+    "python3",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/ordinary_ui_checkpoint.py",
+    "--child",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/oneplus_live_20261012/livephase/endfield-fps-original30-restored"
+  ],
+  "started_unix_s": 1791752568.331895,
+  "scope": "restore_original_game_fps30_after_fixed60_HAL3_prewrite_block_no_sysparam_write",
+  "performance_eligible": false,
+  "finished_unix_s": 1791752577.2854872,
+  "exit_code": 0
+}

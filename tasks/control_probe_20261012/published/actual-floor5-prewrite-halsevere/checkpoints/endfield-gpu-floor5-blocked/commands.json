@@ -1,0 +1,51 @@
+[
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "su -c 'echo GPU_MIN; cat /sys/class/kgsl/kgsl-3d0/min_pwrlevel; echo GPU_CLOCK; cat /sys/class/kgsl/kgsl-3d0/gpuclk; echo THERMAL; timeout 5 dumpsys thermalservice; echo UPTIME; cat /proc/uptime'"
+    ],
+    "started_unix_s": 1791752514.281409,
+    "timeout_s": 8,
+    "scope": "normal_lease_after_prewrite_HAL_block_no_gpu_control_written",
+    "finished_unix_s": 1791752514.556226,
+    "exit_code": 0,
+    "stdout_sha256": "f6e7889b522c1af533e5d4bdc13f1c76127fca2d160f1b695fed4822f0b0f0ad",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "exec-out",
+      "screencap",
+      "-p"
+    ],
+    "started_unix_s": 1791752514.556639,
+    "timeout_s": 8,
+    "scope": "normal_lease_after_prewrite_HAL_block_no_gpu_control_written",
+    "finished_unix_s": 1791752517.352763,
+    "exit_code": 0,
+    "stdout_sha256": "787490de6d14d3a6b40cead0dac7ab63d6d94d6ef73231b79fee8ecc68664034",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "argv": [
+      "/opt/homebrew/Caskroom/android-platform-tools/37.0.1/platform-tools/adb",
+      "-s",
+      "c531e0a",
+      "shell",
+      "su -c 'echo BOOT; cat /proc/sys/kernel/random/boot_id; echo FOREGROUND; timeout 4 dumpsys activity activities | grep -E \"mResumedActivity|topResumedActivity\" || true; echo UPTIME; cat /proc/uptime'"
+    ],
+    "started_unix_s": 1791752517.356593,
+    "timeout_s": 8,
+    "scope": "normal_lease_after_prewrite_HAL_block_no_gpu_control_written",
+    "finished_unix_s": 1791752517.613983,
+    "exit_code": 0,
+    "stdout_sha256": "4121d4585ac559d0bdf4f74afbd64590779e201cf39f3e5a941052caa3fe8659",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+]

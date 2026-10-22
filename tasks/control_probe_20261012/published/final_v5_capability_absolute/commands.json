@@ -1,0 +1,40 @@
+[
+  {
+    "argv": [
+      "cargo",
+      "test",
+      "--offline",
+      "--manifest-path",
+      "src/Cargo.toml",
+      "--",
+      "--test-threads=4"
+    ],
+    "cwd": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe",
+    "source_head": "19bfed5a2907c1770cf62656fbf9ded4d733a658",
+    "started_unix_s": 1791749322.22684,
+    "finished_unix_s": 1791750681.625537,
+    "elapsed_s": 1359.383248207625,
+    "exit_code": 0,
+    "device_executed": false,
+    "api_calls": 0,
+    "gol_sha256": "8f1b376ed3487f5fcdc236fc0150ccd2232d59d0b8e4b48a3ad3726d41384eaf"
+  },
+  {
+    "argv": [
+      "cargo",
+      "clippy",
+      "--offline",
+      "--manifest-path",
+      "src/Cargo.toml"
+    ],
+    "cwd": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-control-probe",
+    "source_head": "19bfed5a2907c1770cf62656fbf9ded4d733a658",
+    "started_unix_s": 1791750681.66748,
+    "finished_unix_s": 1791750684.715585,
+    "elapsed_s": 3.0481255832128227,
+    "exit_code": 0,
+    "device_executed": false,
+    "api_calls": 0,
+    "gol_sha256": "8f1b376ed3487f5fcdc236fc0150ccd2232d59d0b8e4b48a3ad3726d41384eaf"
+  }
+]

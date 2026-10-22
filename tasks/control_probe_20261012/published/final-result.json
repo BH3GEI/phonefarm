@@ -1,0 +1,12 @@
+{
+  "source_head": "e4e059e25e722a4d5963af1ade32994c8a53061c",
+  "source_unchanged": true,
+  "phonefarm_sha256": "43c867a80cb5c7a71a487c84d7d9cd792af525089820e66184fd5a1d1eed92fb",
+  "gol_sha256": "8f1b376ed3487f5fcdc236fc0150ccd2232d59d0b8e4b48a3ad3726d41384eaf",
+  "statuses": [
+    0,
+    0
+  ],
+  "device_executed": false,
+  "api_calls": 0
+}
