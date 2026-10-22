@@ -89,6 +89,10 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
     if sub == "gray-ab" && rest.first().is_some_and(|a| a == "recover") {
         return false;
     }
+    if sub == "gray-layer" && matches!(rest.first().map(String::as_str),
+        Some("session-status" | "session-action" | "session-recover")) {
+        return false;
+    }
     // preflight: 只读核查不拿锁; --fix 要写风扇/音量，跟测量一样排队
     if sub == "preflight" {
         return rest.iter().any(|a| a == "--fix");
@@ -150,7 +154,9 @@ pub fn strip_lock_args(args: &mut Vec<String>) -> Result<LockOpts, String> {
         // Gray admission and execution must see the same option values. A
         // serial/path named --no-devlock must not disable the queue gate.
         let gray_value = match sub.as_str() {
-            "gray-layer" => matches!(a.as_str(), "--serial" | "--so"),
+            "gray-layer" => matches!(a.as_str(), "--serial" | "--so" | "--mode" | "--package" |
+                "--out" | "--max-seconds" | "--actor-id" | "--evidence-origin" |
+                "--request-id" | "--request" | "--session"),
             "gray-ab" => matches!(a.as_str(), "--serial" | "--out" | "--pairs" | "--mode" | "--evidence-origin"),
             _ => false,
         };
@@ -257,15 +263,19 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
     let stop = Arc::new(AtomicBool::new(false));
     let hb = heartbeat(script.clone(), label.clone(), stop.clone());
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm"));
-    let code = match Command::new(&exe)
-        .args(args.iter())
-        .env("DEVLOCK_LABEL", &label)
-        .status()
-    {
-        Ok(s) => s.code().unwrap_or(2),
-        Err(e) => {
-            eprintln!("起不了 {}: {e}", exe.display());
-            2
+    let mut command = Command::new(&exe);
+    command.args(args.iter()).env("DEVLOCK_LABEL", &label);
+    let code = if args.first().is_some_and(|a| a == "gray-layer")
+        && args.get(1).is_some_and(|a| a == "session") {
+        // The node cancels the entire command group. Keep this queue owner
+        // alive while the control child finishes its bounded action and
+        // restores the device; otherwise the node sees a premature exit and
+        // the ordinary outer lock is left behind.
+        wait_control_child(&mut command)
+    } else {
+        match command.status() {
+            Ok(s) => s.code().unwrap_or(2),
+            Err(e) => { eprintln!("起不了 {}: {e}", exe.display()); 2 }
         }
     };
     stop.store(true, Ordering::SeqCst);
@@ -275,6 +285,48 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
         eprintln!("设备锁释放失败 ({label}): {out}");
     }
     Gate::Exit(code)
+}
+
+static CONTROL_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+extern "C" fn control_interrupted(_: libc::c_int) {
+    CONTROL_INTERRUPTED.store(true, Ordering::SeqCst);
+}
+struct ControlInterrupt(libc::sigaction);
+impl Drop for ControlInterrupt {
+    fn drop(&mut self) {
+        unsafe { libc::sigaction(libc::SIGINT, &self.0, std::ptr::null_mut()); }
+    }
+}
+
+fn wait_control_child(command: &mut Command) -> i32 {
+    CONTROL_INTERRUPTED.store(false, Ordering::SeqCst);
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = control_interrupted as *const () as usize;
+    unsafe { libc::sigemptyset(&mut action.sa_mask); }
+    if unsafe { libc::sigaction(libc::SIGINT, &action, &mut previous) } != 0 {
+        eprintln!("cannot supervise gray control cancellation: {}", std::io::Error::last_os_error());
+        return 2;
+    }
+    let _interrupt = ControlInterrupt(previous);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => { eprintln!("cannot start gray control owner: {error}"); return 2; }
+    };
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.code().unwrap_or(2),
+            Err(error) => { eprintln!("cannot wait for gray control owner: {error}"); return 2; }
+            Ok(None) => {},
+        }
+        if CONTROL_INTERRUPTED.swap(false, Ordering::SeqCst) {
+            // Group cancellation already reaches the child. Forwarding also
+            // supports a caller that signals only this wrapper's PID. Repeated
+            // SIGINT is an idempotent stop request, never forced escalation.
+            unsafe { libc::kill(child.id() as i32, libc::SIGINT); }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// 排队直到拿到, 或等满 `wait`。

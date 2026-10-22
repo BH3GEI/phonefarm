@@ -14,6 +14,8 @@ const EVAL_OWNER: &str = "gray_eval_launch";
 const EVAL_SCOPE: &str = "gray_eval_launch_owned_resources";
 const SCRIPT_OWNER: &str = "gray_eval_script";
 const LOADOP_OWNER: &str = "gray_ab_loadop";
+const CONTROL_OWNER: &str = "gray_layer_control";
+const CONTROL_SCOPE: &str = "gray_layer_control_owned_installation_properties_target_stopped";
 const CAP: u64 = 8 * 1024 * 1024;
 
 pub(crate) struct Session {
@@ -43,6 +45,10 @@ impl Session {
         Self::new_owned(lease,out,pkg,origin,LOADOP_OWNER,None)
     }
 
+    pub fn new_control(lease: Lease, out: &Path, pkg: &str, origin: &str) -> Result<Self, String> {
+        Self::new_owned(lease, out, pkg, origin, CONTROL_OWNER, None)
+    }
+
     fn new_owned(lease: Lease, out: &Path, pkg: &str, origin: &str, owner: &str, marker: Option<&str>) -> Result<Self, String> {
         if !graylayer::valid_package(pkg) || !matches!(origin, "device" | "synthetic") {
             return Err("invalid gray capture package or evidence origin".into());
@@ -50,18 +56,24 @@ impl Session {
         if marker.is_some_and(|name| !valid_marker(name)) { return Err("launch marker must be a safe, distinct filename in the target files directory".into()); }
         fs::create_dir_all(out).map_err(|e| e.to_string())?;
         let token = lease.token().to_owned();
-        let dir = out.canonicalize().map_err(|e| e.to_string())?.join(format!("gray-{token}"));
+        // The control descriptor publishes this relative directory. Its name
+        // must not disclose the internal Lease token used by other producers.
+        let name = if owner == CONTROL_OWNER {
+            format!("gray-session-{}-{}", std::process::id(), stamp()?)
+        } else { format!("gray-{token}") };
+        let dir = out.canonicalize().map_err(|e| e.to_string())?.join(name);
         fs::create_dir(&dir).map_err(|e| e.to_string())?;
         for parent in dir.ancestors() {
             fs::File::open(parent).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
         }
-        let state = json!({"schema":SCHEMA,"serial":lease.serial,"token":token,"package":pkg,
+        let mut state = json!({"schema":SCHEMA,"serial":lease.serial,"token":token,"package":pkg,
             "completion_owner":owner,"launch_marker":marker,"generation":0,"round_label":null,"base_recovery":null,
             "stage":"new","boot_id":null,"native_dir":null,"properties":{},"files":[],
             "remote":format!("/data/local/tmp/phonefarm-gray-{token}"),
             "staging_created":false,"installation_owned":false,"state_owned":false,
             "write_pending":null,"transport_uncertain":false,"evidence_origin":origin,
             "created_at":chrono::Utc::now().to_rfc3339()});
+        if owner == CONTROL_OWNER { state["control_session_id"] = json!(dir.file_name().and_then(|s| s.to_str()).ok_or("invalid control session directory")?); }
         let session = Self { lease:RefCell::new(lease), adb:adb_path()?, dir,
             state:RefCell::new(state), stopped:RefCell::new(None), known_dirs:RefCell::new(HashSet::new()) };
         session.save()?;
@@ -78,12 +90,16 @@ impl Session {
 
     pub fn resume_loadop(dir:&Path,serial:&str)->Result<Self,String> {Self::resume_owned(dir,serial,LOADOP_OWNER)}
 
+    pub fn resume_control(dir: &Path, serial: &str) -> Result<Self, String> {
+        Self::resume_owned(dir, serial, CONTROL_OWNER)
+    }
+
     fn resume_owned(dir: &Path, serial: &str, owner: &str) -> Result<Self, String> {
         let dir = dir.canonicalize().map_err(|e| e.to_string())?;
         let state: Value = serde_json::from_slice(&bounded(&dir.join("session.json"), 1024 * 1024)?).map_err(|e| e.to_string())?;
         validate(&state, &dir, serial)?;
         if owner == EVAL_OWNER {
-            if !matches!(completion_owner(&state)?,EVAL_OWNER|SCRIPT_OWNER) {return Err("this parent requires gray-ab recover".into());}
+            if !matches!(completion_owner(&state)?,EVAL_OWNER|SCRIPT_OWNER) {return Err("this session requires its dedicated recovery entry point".into());}
         } else { require_owner(&state, owner)?; }
         pending_clear(&state)?;
         let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
@@ -171,6 +187,23 @@ impl Session {
     }
     fn root_update(&self, operation: &str, command: &str, update: impl FnOnce(&mut Value)) -> Result<(), String> {
         self.write_update(operation, &["shell".into(), format!("su -c {}", q(command))], update)
+    }
+
+    /// Internal identity only: token must never enter the public descriptor.
+    pub fn control_identity(&self) -> Result<Value, String> {
+        require_owner(&self.state.borrow(), CONTROL_OWNER)?;
+        let state = self.state.borrow();
+        Ok(json!({"serial":state["serial"],"token":state["token"],"boot_id":state["boot_id"],
+            "native_dir":state["native_dir"],"package":state["package"],"session":self.dir,
+            "completion_owner":CONTROL_OWNER,"control_session_id":state["control_session_id"],
+            "evidence_origin":state["evidence_origin"]}))
+    }
+
+    pub fn control_ready(&self) -> Result<(), String> {
+        require_owner(&self.state.borrow(), CONTROL_OWNER)?;
+        self.ready()?;
+        let result = self.lease.borrow().check();
+        result.or_else(|error| self.stop(error))
     }
 
     pub fn eval_identity(&self) -> Result<Value, String> {
@@ -314,24 +347,33 @@ impl Session {
     }
 
     pub fn install(&self, so: Option<&str>, ts: bool, extras: Option<&str>) -> Result<(), String> {
-        self.install_mode(so, ts, extras, None, true)
+        self.install_mode(so, ts, extras, None, true, None)
     }
 
     pub fn install_storeop(&self, so: Option<&str>, rule: &str, extras: Option<&str>) -> Result<(), String> {
         let rule = storeop_rule(rule)?;
-        self.install_mode(so, false, extras, Some(&rule), true)
+        self.install_mode(so, false, extras, Some(&rule), true, None)
     }
     pub fn install_script(&self, so: Option<&str>) -> Result<(), String> {
         require_owner(&self.state.borrow(), SCRIPT_OWNER)?;
-        self.install_mode(so, false, None, None, false)
+        self.install_mode(so, false, None, None, false, None)
     }
 
     pub fn install_loadop(&self,so:Option<&str>)->Result<(),String> {
         require_owner(&self.state.borrow(),LOADOP_OWNER)?;
-        self.install_mode(so,false,None,None,false)
+        self.install_mode(so,false,None,None,false,None)
     }
 
-    fn install_mode(&self, so: Option<&str>, ts: bool, extras: Option<&str>, storeop: Option<&str>, frameaudit: bool) -> Result<(), String> {
+    pub fn install_control(&self, so: Option<&str>, mode: &str) -> Result<(), String> {
+        require_owner(&self.state.borrow(), CONTROL_OWNER)?;
+        if let Some(rejection) = graylayer::mode_admission_rejection(mode, so.is_some()) {
+            return Err(rejection.to_string());
+        }
+        let properties = control_properties(mode)?;
+        self.install_mode(so, false, None, None, false, Some(properties))
+    }
+
+    fn install_mode(&self, so: Option<&str>, ts: bool, extras: Option<&str>, storeop: Option<&str>, frameaudit: bool, control: Option<[&str; 12]>) -> Result<(), String> {
         self.ready()?;
         if self.state.borrow()["stage"] != "prepared" { return Err("gray capture must be prepared before install".into()); }
         let local = so.map(str::to_owned).unwrap_or_else(graylayer::layer_so_path);
@@ -383,15 +425,15 @@ impl Session {
         if self.root_read("registration_readback", &format!("cat {}", q(STATE)))?.trim_end_matches('\n') != registration {
             return self.stop("layer registration readback differs".into());
         }
-        for property in LAYER_PROPERTIES.into_iter().filter(|p| *p != "debug.vulkan.layers") {
-            let value = match property {
+        for (index, property) in LAYER_PROPERTIES.into_iter().enumerate().filter(|(_, p)| *p != "debug.vulkan.layers") {
+            let value = if let Some(values) = &control { values[index] } else { match property {
                 "debug.knobs.passdump" if completion_owner(&self.state.borrow())? != LOADOP_OWNER => "1",
                 "debug.knobs.frameaudit" if frameaudit => "1",
                 "debug.knobs.frameaudit_ts" if ts => "1",
                 graylayer::STOREOP_PROP => storeop.unwrap_or("0"),
                 graylayer::STOREOP_LIVE_PROP if storeop.is_some() => "1",
                 _ => "0",
-            };
+            }};
             self.set_property(property, value)?;
         }
         self.set_property("debug.vulkan.layers", LAYER_NAME)?;
@@ -482,6 +524,16 @@ impl Session {
     pub fn set_storeop(&self, on: bool) -> Result<(), String> { self.set_property(graylayer::STOREOP_ON_PROP, if on { "1" } else { "0" }) }
     pub fn trigger(&self, go: u32) -> Result<(), String> { self.set_property(graylayer::FA_GO_PROP, &go.to_string()) }
     pub fn tap(&self, x: u32, y: u32) -> Result<(), String> { self.write("tap", &format!("input tap {x} {y}")) }
+    pub fn swipe(&self, x1: u32, y1: u32, x2: u32, y2: u32, duration_ms: u32) -> Result<(), String> {
+        if !(1..=10_000).contains(&duration_ms) { return Err("swipe duration must be 1..10000 ms".into()); }
+        self.mutate("swipe", &["shell".into(), format!("input swipe {x1} {y1} {x2} {y2} {duration_ms}")],
+            u64::from(duration_ms) + 30_000, |_| {}).map(|_| ())
+    }
+
+    pub fn display_rotation(&self) -> Result<u32, String> {
+        rotation_from_input(&self.read("display_rotation", "dumpsys input")?)
+    }
+
 
     fn json_output(&self, audit: bool, go: Option<u32>) -> Result<Option<Value>, String> {
         for path in output_paths(&self.package()).into_iter().filter(|p| p.contains("knobs_frameaudit") == audit) {
@@ -590,7 +642,8 @@ impl Session {
         let originals = self.state.borrow()["properties"].clone();
         for property in LAYER_PROPERTIES { self.set_property(property, originals[property].as_str().ok_or("missing original property")?)?; }
         if !local_errors.is_empty() { return Err(local_errors.join("; ")); }
-        Ok(json!({"scope":SCOPE,"target_stopped":true,
+        let scope = if completion_owner(&self.state.borrow())? == CONTROL_OWNER { CONTROL_SCOPE } else { SCOPE };
+        Ok(json!({"scope":scope,"target_stopped":true,
             "app_check":"force-stop succeeded; exact package/package:child names absent from ps NAME",
             "property_values_restored":true,"owned_installation_absent":true,
             "acquired_historical_files_restored":true,"owned_staging_absent":true,"game_state_restored":false}))
@@ -606,7 +659,15 @@ impl Session {
     }
 
     pub fn finish(&self, error: Option<&str>) -> Result<Value, String> {
-        require_owner(&self.state.borrow(), "standalone")?;
+        self.finish_owned(error, "standalone")
+    }
+
+    pub fn finish_control(&self, error: Option<&str>) -> Result<Value, String> {
+        self.finish_owned(error, CONTROL_OWNER)
+    }
+
+    fn finish_owned(&self, error: Option<&str>, owner: &str) -> Result<Value, String> {
+        require_owner(&self.state.borrow(), owner)?;
         let mut value = self.restore_report(error)?;
         if value["status"] == "verified" {
             let report_path = PathBuf::from(value["report_path"].as_str().ok_or("missing recovery report path")?);
@@ -655,10 +716,11 @@ impl Session {
     }
 
     fn restore_report(&self, error: Option<&str>) -> Result<Value, String> {
+        let control = completion_owner(&self.state.borrow())? == CONTROL_OWNER;
         let checks = self.restore();
-        let scope = checks.as_ref().ok().and_then(|v| v["scope"].as_str()).unwrap_or(SCOPE).to_owned();
+        let scope = checks.as_ref().ok().and_then(|v| v["scope"].as_str()).unwrap_or(if control { CONTROL_SCOPE } else { SCOPE }).to_owned();
         let report_path = self.dir.join(format!("recovery-{}-{}.json", std::process::id(), stamp()?));
-        let value = json!({"schema":"phonefarm/gray-capture-recovery@1","status":if checks.is_ok(){"verified"}else{"required"},
+        let value = json!({"schema":if control { "phonefarm/gray-control-recovery@1" } else { "phonefarm/gray-capture-recovery@1" },"status":if checks.is_ok(){"verified"}else{"required"},
             "scope":scope,"serial":self.lease.borrow().serial,"token":self.state.borrow()["token"],
             "completion_owner":completion_owner(&self.state.borrow())?,"package":self.package(),"session":self.dir,
             "checks":checks.as_ref().ok(),"error":checks.as_ref().err(),"experiment_error":error,
@@ -707,7 +769,7 @@ fn completion_owner(state: &Value) -> Result<&str, String> {
     match state["schema"].as_str() {
         Some(LEGACY_SCHEMA) if state.get("completion_owner").is_none() || state["completion_owner"] == "standalone" => Ok("standalone"),
         Some(SCHEMA) => match state["completion_owner"].as_str() {
-            Some(owner @ ("standalone" | EVAL_OWNER | SCRIPT_OWNER | LOADOP_OWNER)) => Ok(owner),
+            Some(owner @ ("standalone" | EVAL_OWNER | SCRIPT_OWNER | LOADOP_OWNER | CONTROL_OWNER)) => Ok(owner),
             _ => Err("gray session has no recognized completion owner".into()),
         },
         _ => Err("unsupported gray session schema or completion owner".into()),
@@ -746,6 +808,42 @@ fn pending_clear(state: &Value) -> Result<(), String> {
     } else { Ok(()) }
 }
 
+fn valid_session_directory(dir: &Path, owner: &str, token: &str) -> bool {
+    let Some(name) = dir.file_name().and_then(|s| s.to_str()) else { return false; };
+    if owner != CONTROL_OWNER { return name == format!("gray-{token}"); }
+    name.strip_prefix("gray-session-").and_then(|s| s.split_once('-')).is_some_and(|(pid, nanos)| {
+        !pid.is_empty() && !nanos.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())
+            && nanos.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+fn control_properties(mode: &str) -> Result<[&'static str; 12], String> {
+    if !matches!(mode, "probe" | "target" | "passdump" | "loadop" | "frameaudit" | "frameaudit-ts") {
+        return Err(format!("unsupported gray control mode: {mode}"));
+    }
+    Ok(LAYER_PROPERTIES.map(|property| match property {
+        "debug.vulkan.layers" => LAYER_NAME,
+        "debug.knobs.loadop" if mode == "loadop" => "1",
+        "debug.knobs.passdump" if matches!(mode, "passdump" | "frameaudit" | "frameaudit-ts") => "1",
+        "debug.knobs.frameaudit" if matches!(mode, "frameaudit" | "frameaudit-ts") => "1",
+        "debug.knobs.frameaudit_ts" if mode == "frameaudit-ts" => "1",
+        _ => "0",
+    }))
+}
+
+fn rotation_from_input(text: &str) -> Result<u32, String> {
+    let mut orientation = None;
+    for value in text.lines().filter_map(|line| line.trim().strip_prefix("SurfaceOrientation:")) {
+        let rotation = value.trim().parse::<u32>().ok().filter(|n| *n <= 3)
+            .ok_or("invalid SurfaceOrientation from dumpsys input")?;
+        if orientation.is_some_and(|prior| prior != rotation) {
+            return Err("conflicting display orientations from dumpsys input".into());
+        }
+        orientation = Some(rotation);
+    }
+    orientation.ok_or("display rotation unavailable in dumpsys input".into())
+}
+
 fn target_in_process_list(text: &str, package: &str) -> Result<bool, String> {
     let mut names = text.lines().map(str::trim).filter(|s| !s.is_empty());
     if names.next() != Some("NAME") { return Err("unrecognized ps NAME output; target liveness unknown".into()); }
@@ -769,7 +867,8 @@ fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
     let package = state["package"].as_str().ok_or("missing gray session package")?;
     if state["serial"] != serial || !graylayer::valid_package(package)
         || token.is_empty() || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        || dir.file_name().and_then(|s| s.to_str()) != Some(format!("gray-{token}").as_str())
+        || !valid_session_directory(dir, owner, token)
+        || (owner == CONTROL_OWNER && state["control_session_id"].as_str() != dir.file_name().and_then(|s| s.to_str()))
         || state["remote"] != format!("/data/local/tmp/phonefarm-gray-{token}")
         || !matches!(state["stage"].as_str(), Some("new" | "prepared" | "active"))
         || !matches!(state["evidence_origin"].as_str(), Some("device" | "synthetic"))
@@ -783,7 +882,7 @@ fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
             || state["generation"].as_u64().is_none()
             || state.get("round_label").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|s| !valid_label(s)))
             || state.get("base_recovery").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|p| Path::new(p).parent() != Some(dir)))
-            || (owner == "standalone" && (!state["launch_marker"].is_null() || state["generation"] != 0 || !state["round_label"].is_null() || !state["base_recovery"].is_null()))
+            || (matches!(owner, "standalone" | CONTROL_OWNER) && (!state["launch_marker"].is_null() || state["generation"] != 0 || !state["round_label"].is_null() || !state["base_recovery"].is_null()))
             || (matches!(owner,SCRIPT_OWNER|LOADOP_OWNER) && !state["launch_marker"].is_null())
             || (state["stage"] != "active" && (state["generation"] != 0 || !state["round_label"].is_null())) {
             return Err("invalid gray session generation, marker or recovery evidence".into());
@@ -895,6 +994,35 @@ mod tests {
         assert!(target_in_process_list("", "com.example.fixture").is_err());
     }
     #[test]
+    fn control_modes_do_not_inherit_capture_flags() {
+        for (mode, enabled) in [
+            ("probe", vec![]), ("target", vec![]),
+            ("loadop", vec!["debug.knobs.loadop"]),
+            ("passdump", vec!["debug.knobs.passdump"]),
+            ("frameaudit", vec!["debug.knobs.passdump", "debug.knobs.frameaudit"]),
+            ("frameaudit-ts", vec!["debug.knobs.passdump", "debug.knobs.frameaudit", "debug.knobs.frameaudit_ts"]),
+        ] {
+            let properties = control_properties(mode).unwrap();
+            let actual: Vec<_> = LAYER_PROPERTIES.into_iter().zip(properties)
+                .filter_map(|(key, value)| if key == "debug.vulkan.layers" {
+                    assert_eq!(value, LAYER_NAME); None
+                } else if value == "1" { Some(key) } else { assert_eq!(value, "0"); None }).collect();
+            assert_eq!(actual, enabled, "{mode}");
+        }
+        for mode in ["copyprobe", "upop", "off", "unknown"] { assert!(control_properties(mode).is_err()); }
+    }
+
+    #[test]
+    fn display_rotation_requires_unambiguous_actual_readback() {
+        assert_eq!(rotation_from_input("Touch Input Mapper:\n  SurfaceOrientation: 3\n").unwrap(), 3);
+        assert_eq!(rotation_from_input("SurfaceOrientation: 0\nSurfaceOrientation: 0\n").unwrap(), 0);
+        for text in ["", "rotation=1", "SurfaceOrientation: 4", "SurfaceOrientation: unknown",
+            "SurfaceOrientation: 0\nSurfaceOrientation: 1\n"] {
+            assert!(rotation_from_input(text).is_err(), "accepted {text:?}");
+        }
+    }
+
+    #[test]
     fn parent_completion_and_marker_ownership_are_explicit() {
         assert!(require_owner(&json!({"schema":LEGACY_SCHEMA}), "standalone").is_ok());
         assert!(completion_owner(&json!({"schema":LEGACY_SCHEMA,"completion_owner":EVAL_OWNER})).is_err());
@@ -911,6 +1039,15 @@ mod tests {
         let loadop=json!({"schema":SCHEMA,"completion_owner":LOADOP_OWNER});
         assert!(require_parent(&loadop).is_ok());assert!(require_owner(&loadop,SCRIPT_OWNER).is_err());
         assert_eq!(parent_recovery_contract(LOADOP_OWNER).unwrap(),("phonefarm/gray-ab-loadop-recovery@1","gray_ab_loadop_owned_resources"));
+        let control = json!({"schema":SCHEMA,"completion_owner":CONTROL_OWNER});
+        assert!(require_owner(&control, CONTROL_OWNER).is_ok());
+        assert!(require_parent(&control).is_err());
+        for owner in ["standalone", EVAL_OWNER, SCRIPT_OWNER, LOADOP_OWNER] {
+            assert!(require_owner(&control, owner).is_err());
+            assert!(!valid_session_directory(Path::new("gray-session-42-123456"), owner, "secret-token"));
+        }
+        assert!(valid_session_directory(Path::new("gray-session-42-123456"), CONTROL_OWNER, "secret-token"));
+        assert!(!valid_session_directory(Path::new("gray-secret-token"), CONTROL_OWNER, "secret-token"));
         let paths = session_output_paths(&parent).unwrap();
         assert_eq!(paths.len(), 7);
         assert_eq!(paths[6], "/storage/emulated/0/Android/data/com.example.fixture/files/megacity_started");

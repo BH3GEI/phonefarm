@@ -957,15 +957,18 @@ fn lease_status(legacy_root: &Path) -> Value {
         }
         entries.push(entry);
     }
-    let status = if !errors.is_empty() {
-        "unknown"
-    } else if entries.iter().any(|e| {
+    // A known restoration obligation remains definite even if a separate
+    // ordinary queue entry has no strong marker. Keep its unknown entry/error
+    // for diagnosis; neither condition grants permission to start device work.
+    let status = if entries.iter().any(|e| {
         matches!(
             e["state"].as_str(),
             Some("command_pending" | "recovery_required" | "abandoned")
         )
     }) {
         "blocked"
+    } else if !errors.is_empty() {
+        "unknown"
     } else if bridge_held == Some(true) || !entries.is_empty() {
         "held"
     } else {
@@ -1308,6 +1311,12 @@ mod tests {
         assert_eq!(recovery["status"], "blocked");
         assert_eq!(recovery["bridge_held"], false);
         assert_eq!(recovery["entries"][0]["state"], "recovery_required");
+        let incomplete = root.join(NESTED_DIR);
+        fs::create_dir(&incomplete).unwrap();
+        let mixed = lease_status(&root);
+        assert_eq!(mixed["status"], "blocked");
+        assert_eq!(mixed["entries"][1]["state"], "unknown");
+        assert!(mixed["error"].as_str().unwrap().contains(NESTED_DIR));
     }
 
     #[test]

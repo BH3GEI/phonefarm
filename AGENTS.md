@@ -147,6 +147,17 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 服务本身与缓存读取不持锁。子进程超时/退出不确定时保留屏障，不能自动推断设备端空闲。
 当前合同见 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/OBSERVATION-OWNERSHIP.md`。
 
+**持续灰层控制会话**（源码与宿主替身已验，尚未部署/真机验收）
+
+`gray-layer session --mode MODE --package PKG --serial S --out DIR` 在同一个 owner 内挂层、抓图、有限输入和恢复。
+网页、`pf-node session-status/session-action` 与本机 `gray-layer session-status/session-action` 共用有序请求及回执；
+连接已有会话不另拿设备锁。请求超时保留原 request_id 并查询，不换 ID 重放输入。
+人工接管只改变控制 epoch，lease 仍归原 owner；stop/SIGINT 在有界动作结束后恢复。
+失败使用 `gray-layer session-recover --session DIR --serial S --json` 接续原上下文。
+局部恢复收据不自动解除整个 job，沿用 fresh lease clear + 核查说明释放流程。
+性能采样与旧 gray-layer/reference 脚本迁移仍待完成；合同见
+`https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
+
 **Compute Shader 算子标尺**（零 Token，需 root）
 
 ```bash

@@ -58,6 +58,7 @@ mod preflight;
 mod grayab;
 mod graylayer;
 mod gray_session;
+mod gray_control;
 mod gray_script;
 mod gray_eval_session;
 mod grayartifact;
@@ -253,6 +254,10 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
 灰档:  gray-layer {probe|loadop|passdump|frameaudit|frameaudit-ts [pkg] | target <pkg> | status | off} [--keep-prop] [--so 层.so]
+       gray-layer session --mode MODE --package PKG --serial S --out DIR [--max-seconds 900] [--actor-id agent] [--so 层.so] [--keep-prop]
+       gray-layer session-status --out DIR [--request-id ID] --json
+       gray-layer session-action --out DIR --request REQUEST.json|- --json
+       gray-layer session-recover --session DIR --serial S --json
        (Vulkan 层挂/摘/查; copyprobe/upop 当前不支持执行，包括自定义 SO；历史证据可离线分析)
        frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 层.so]   (只读层抓原神一帧步骤清单)
        frame-audit recover --session <会话目录> --serial S [--json]   (核验并恢复本次灰层抓帧范围)
@@ -412,10 +417,24 @@ fn main() {
         }
         // True help was handled above. A gray option's value named --help must
         // not trigger the legacy gate's token-based help exemption.
-        let gray_execution = gray && !(sub == "gray-ab" && args.get(1).is_some_and(|a| a == "recover"));
-        if gray_execution || devlock::needs_lock(&sub, &args[1..]) {
+        let queue_required = if gray {
+            // Use the same value-aware stripping as admission. Host-only
+            // clients must work while their persistent owner holds the lease;
+            // recovery enters its retained context directly.
+            graylayer::needs_queue(&sub, &args[1..])
+        } else {
+            devlock::needs_lock(&sub, &args[1..])
+        };
+        if queue_required {
             if let devlock::Gate::Exit(code) = devlock::gate(&mut args) {
                 std::process::exit(code);
+            }
+        } else if gray {
+            // Admission already checked these flags; keep execution's argument
+            // view identical without invoking any lock process.
+            if let Err(error) = devlock::strip_lock_args(&mut args) {
+                eprintln!("{error}");
+                std::process::exit(2);
             }
         }
     }

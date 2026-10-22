@@ -665,6 +665,7 @@ pub(crate) fn cli_admission(sub: &str, args: &[String]) -> Result<GrayCliAdmissi
     crate::devlock::strip_lock_args(&mut stripped)?;
     let args = &stripped[1..];
     if sub == "gray-layer" {
+        if crate::gray_control::handles(args) { return crate::gray_control::admission(args); }
         let parsed = layer_args(args)?;
         if parsed.help { return Ok(GrayCliAdmission::Help); }
         return Ok(mode_admission_rejection(&parsed.positional[0], parsed.so.is_some())
@@ -699,6 +700,7 @@ pub(crate) fn cli_admission(sub: &str, args: &[String]) -> Result<GrayCliAdmissi
 }
 
 pub fn run_gray_layer(args: &[String]) -> i32 {
+    if crate::gray_control::handles(args) { return crate::gray_control::run(args); }
     let parsed = match layer_args(args) {
         Ok(parsed) => parsed,
         Err(error) => { eprintln!("{error}\n{USAGE}"); return 2; }
@@ -770,6 +772,17 @@ pub fn run_gray_layer(args: &[String]) -> i32 {
     }
 }
 
+/// Called only after admission has accepted these arguments. Values that look
+/// like flags must not change whether a device owner enters the queue.
+pub(crate) fn needs_queue(sub: &str, args: &[String]) -> bool {
+    let mut stripped = vec![sub.to_owned()];
+    stripped.extend_from_slice(args);
+    if crate::devlock::strip_lock_args(&mut stripped).is_err() { return true; }
+    !matches!((sub, stripped.get(1).map(String::as_str)),
+        ("gray-ab", Some("recover")) |
+        ("gray-layer", Some("session-status" | "session-action" | "session-recover")))
+}
+
 #[cfg(test)]
 mod mode_admission_tests {
     use super::*;
@@ -813,6 +826,18 @@ mod mode_admission_tests {
             }
         }
         assert!(mode_admission_rejection("loadop", false).is_none());
+    }
+
+    #[test]
+    fn control_clients_do_not_queue_behind_their_owner() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for command in ["session-status", "session-action", "session-recover"] {
+            assert!(!needs_queue("gray-layer", &args(&["--lock-label", "control", command, "--out", "--help"])));
+        }
+        assert!(needs_queue("gray-layer", &args(&["session", "--mode", "passdump", "--serial", "--help", "--out", "--no-devlock"])));
+        let mut original = args(&["gray-layer", "session-action", "--request", "--no-devlock", "--out", "--help"]);
+        assert!(!crate::devlock::strip_lock_args(&mut original).unwrap().disabled);
+        assert_eq!(original, args(&["gray-layer", "session-action", "--request", "--no-devlock", "--out", "--help"]));
     }
 }
 
