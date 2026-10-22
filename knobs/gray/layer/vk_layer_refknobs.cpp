@@ -33,6 +33,7 @@
 #include <time.h>
 #include "npu_rt.h"
 #include "framedump.h"
+#include "interp.h"
 #include "artifact_stats.h"
 #ifdef RK_DYNAMIC_UPOP_BUILD
 #include "artifact_metadata.h"
@@ -704,6 +705,7 @@ static void write_marker() {
     else if (rewriting && !used)              unavail = "\"rewritten pass never bound\"";
     std::string knob = g_rewrite_loadop ? "gray_loadop_dontcare" : "";
     if (g_storeop_mode) knob += std::string(knob.empty() ? "" : "+") + (g_storeop_mode == 1 ? "gray_storeop_ds" : "gray_storeop_pick");
+    if (ip_on()) knob += std::string(knob.empty() ? "" : "+") + "gray_interp";
     if (knob.empty()) knob = "gray_readonly_probe";
 
     std::string json =
@@ -778,6 +780,7 @@ static void write_marker() {
                 rk_lifetime::refusal + "\"}";
     }
     if (fd_on()) json += ",\"framedump\":" + fd_json();   // 逐帧读回 (framedump.cpp)
+    if (ip_on()) json += ",\"interp\":" + ip_json();       // 层内多 present (interp.cpp)
     json += "}";
 
     // 通道 1: logcat (root 可读, 不受目标应用存储沙箱影响)。
@@ -874,6 +877,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     if (g_npuop) g_upop = true;   // npuop 建立在 upop 的定位与 dst 上, 失败时就退回 upop 的双线性
     if (g_copyprobe || g_upop || g_frameaudit) g_dump_passes = true;   // 探针/算子/步骤清单全部建立在溯源表上
     if (fd_init_from_props()) RK_LOG("framedump=1: present 处逐帧读回 (framedump.cpp)");
+    if (ip_init_from_props()) RK_LOG("interp=1: 层内多 present, 两帧之间插一张合成帧 (interp.cpp)");
     RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d upop=%d frameaudit=%d ts=%d",
            self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe, (int)g_upop,
            (int)g_frameaudit, (int)g_frameaudit_ts);
@@ -943,7 +947,52 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
     // inst 没查到时 gipa(VK_NULL_HANDLE, "vkCreateDevice") 按规范返回 NULL, 不能直接调
     if (!createFunc) { RK_LOG("next vkCreateDevice is null (inst lookup miss?)"); return VK_ERROR_INITIALIZATION_FAILED; }
     link->u.pLayerInfo = link->u.pLayerInfo->pNext;
+    // interp 的节奏要 VK_GOOGLE_display_timing: 下层支持就替游戏加上 (游戏自己没开的话)。
+    // 加载器链节已推进, 复制一份 create info 改扩展列表即可 (pNext 链原样共享)。
+    VkDeviceCreateInfo ip_ci;
+    std::vector<const char*> ip_exts;
+    bool ip_ext_enabled = false;
+    const VkDeviceCreateInfo* orig_ci = ci;
+    if (ip_on()) {
+        bool supported = false, already = false;
+        for (uint32_t i = 0; i < ci->enabledExtensionCount; i++)
+            if (!strcmp(ci->ppEnabledExtensionNames[i], VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME)) already = true;
+        PFN_vkEnumerateDeviceExtensionProperties enumDevExt = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            auto it = g_inst.find(key(phys));
+            if (it == g_inst.end() && g_inst.size() == 1) it = g_inst.begin();
+            if (it != g_inst.end()) enumDevExt = it->second.EnumDevExt;
+        }
+        if (already) supported = true;
+        else if (enumDevExt) {
+            uint32_t n = 0;
+            if (enumDevExt(phys, nullptr, &n, nullptr) == VK_SUCCESS && n) {
+                std::vector<VkExtensionProperties> ep(n);
+                enumDevExt(phys, nullptr, &n, ep.data());
+                for (uint32_t i = 0; i < n; i++) if (!strcmp(ep[i].extensionName, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME)) supported = true;
+            }
+        }
+        const char* want = ip_wanted_device_ext(supported);
+        if (want && !already) {
+            ip_exts.assign(ci->ppEnabledExtensionNames, ci->ppEnabledExtensionNames + ci->enabledExtensionCount);
+            ip_exts.push_back(want);
+            ip_ci = *ci;
+            ip_ci.enabledExtensionCount = (uint32_t)ip_exts.size();
+            ip_ci.ppEnabledExtensionNames = ip_exts.data();
+            ci = &ip_ci;
+            ip_ext_enabled = true;
+        } else if (want && already) ip_ext_enabled = true;
+        RK_LOG("interp: VK_GOOGLE_display_timing supported=%d already=%d enabled=%d", (int)supported, (int)already, (int)ip_ext_enabled);
+    }
     VkResult r = createFunc(phys, ci, a, pDev);
+    if (r != VK_SUCCESS && ip_ext_enabled && ci == &ip_ci) {
+        // 重试只在「没有别的层夹在中间」时可靠 (加载器链节已被推进一次); 本机只挂本层
+        RK_LOG("interp: 加扩展后 vkCreateDevice 失败 (%d), 退回原参数", (int)r);
+        ip_ext_enabled = false;
+        ci = orig_ci;
+        r = createFunc(phys, ci, a, pDev);
+    }
     if (r != VK_SUCCESS) return r;
     DevDisp d;
     d.gdpa = gdpa;
@@ -1073,11 +1122,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
         if (gpp) { VkPhysicalDeviceProperties pp{}; gpp(phys, &pp); d.ts_period_ns = pp.limits.timestampPeriod; }
     }
     { std::lock_guard<std::mutex> lk(g_mtx); g_dev[key(*pDev)] = d; }
-    if (fd_on()) {
-        uint32_t sole = ci->queueCreateInfoCount == 1 && ci->pQueueCreateInfos ? ci->pQueueCreateInfos[0].queueFamilyIndex
-                                                                               : UINT32_MAX;
-        fd_on_device(inst, phys, *pDev, gipa, gdpa, sdld, sole);
-    }
+    uint32_t sole_family = ci->queueCreateInfoCount == 1 && ci->pQueueCreateInfos ? ci->pQueueCreateInfos[0].queueFamilyIndex
+                                                                                  : UINT32_MAX;
+    if (fd_on()) fd_on_device(inst, phys, *pDev, gipa, gdpa, sdld, sole_family);
+    if (ip_on()) ip_on_device(inst, phys, *pDev, gipa, gdpa, sdld, sole_family, ip_ext_enabled);
     return r;
 }
 
@@ -1086,6 +1134,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocat
     DevDisp d;
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return; d = it->second; g_dev.erase(it); }
     fd_on_destroy_device(dev);   // 先写完在途帧、收掉 framedump 自建对象 (没开时空操作)
+    ip_on_destroy_device(dev);   // 收掉 interp 自建对象 (没开时空操作)
     write_marker();  // 收尾再落一次最终计数
     {
         std::lock_guard<std::mutex> lk(g_mtx);
@@ -1587,20 +1636,26 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateSwapchainKHR(
     if (!dev_of(key(dev), &d) || !d.CreateSwapchainKHR) {
         RK_LOG_ONCE("CreateSwapchainKHR: 查不到下层函数"); return VK_ERROR_INITIALIZATION_FAILED;
     }
-    // framedump: 读回要求送显图带 TRANSFER_SRC。加上后建不成就退回原参数 (画面照常, 只是不抓)。
-    VkSwapchainCreateInfoKHR fd_ci;
-    bool fd_usage = false;
+    // framedump: 读回要求送显图带 TRANSFER_SRC。interp: 多要几张图 + TRANSFER_SRC|DST + FIFO。
+    // 改过的参数建不成就退回原参数 (画面照常, 只是不抓 / 不插)。
+    VkSwapchainCreateInfoKHR mod_ci;
+    bool fd_usage = false, ip_patched = false;
     VkResult r;
-    if (fd_on() && ci) {
-        fd_ci = *ci;
-        fd_usage = fd_patch_swapchain_ci(dev, &fd_ci);
-        r = d.CreateSwapchainKHR(dev, fd_usage ? &fd_ci : ci, a, out);
-        if (r != VK_SUCCESS && fd_usage) {
-            RK_LOG("framedump: 加 TRANSFER_SRC 后建 swapchain 失败 (%d), 退回原参数", (int)r);
-            fd_usage = false;
+    if ((fd_on() || ip_on()) && ci) {
+        mod_ci = *ci;
+        if (fd_on()) fd_usage = fd_patch_swapchain_ci(dev, &mod_ci);
+        if (ip_on()) ip_patched = ip_patch_swapchain_ci(dev, &mod_ci);
+        bool patched = fd_usage || ip_patched;
+        r = d.CreateSwapchainKHR(dev, patched ? &mod_ci : ci, a, out);
+        if (r != VK_SUCCESS && patched) {
+            RK_LOG("改参数后建 swapchain 失败 (%d; framedump=%d interp=%d), 退回原参数", (int)r, (int)fd_usage, (int)ip_patched);
+            fd_usage = false; ip_patched = false;
             r = d.CreateSwapchainKHR(dev, ci, a, out);
         }
-        if (r == VK_SUCCESS) fd_on_swapchain(dev, *out, ci, fd_usage);
+        if (r == VK_SUCCESS) {
+            if (fd_on()) fd_on_swapchain(dev, *out, ci, fd_usage);
+            if (ip_on()) ip_on_swapchain(dev, *out, ip_patched ? &mod_ci : ci, ip_patched);
+        }
     } else {
         r = d.CreateSwapchainKHR(dev, ci, a, out);
     }
@@ -3635,6 +3690,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
     if ((f % 300) == 0) write_marker();  // 周期落盘, 无需等退出
     VkPresentInfoKHR fd_pi;
     if (fd_on()) pi = fd_on_present(q, pi, &fd_pi, f);   // 抓帧窗口内: 先拷贝, present 改等我们的信号量
+    if (ip_on()) return ip_on_present(q, pi, d.QueuePresentKHR, f);   // 两帧之间多送一张合成帧 (interp.cpp)
     return d.QueuePresentKHR(q, pi);
 }
 
@@ -3870,6 +3926,7 @@ static bool lower_optional_device(VkDevice dev,const char* name) {
 
 static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* name) {
     RK_HOOK("vkGetInstanceProcAddr", dispatch_instance);
+    if (PFN_vkVoidFunction p = ip_hook(name)) return p;   // interp 没开时恒为空; 同名钩子由它往下转给 framedump
     if (PFN_vkVoidFunction p = fd_hook(name)) return p;   // framedump 没开时恒为空
     // 注意: vkEnumerateInstance{Layer,Extension}Properties 这里**不挂**。那两个导出符号
     // 只为加载器 dlsym 发现层而存在; 应用调的是加载器自己的全局版本, 挂上去只会把
@@ -3977,6 +4034,7 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
 
 static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     RK_HOOK("vkGetDeviceProcAddr", dispatch_device);
+    if (PFN_vkVoidFunction p = ip_hook(name)) return p;   // interp 没开时恒为空; 同名钩子由它往下转给 framedump
     if (PFN_vkVoidFunction p = fd_hook(name)) return p;   // framedump 没开时恒为空
     RK_HOOK("vkDestroyDevice", rk_DestroyDevice);
     RK_HOOK("vkQueuePresentKHR", rk_QueuePresentKHR);

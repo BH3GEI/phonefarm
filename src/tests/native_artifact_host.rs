@@ -68,6 +68,8 @@ fn host_native_counters_and_actual_layer_hooks() {
             .arg(root.join("layer/npuprobe.cpp"))
             // ruler 侧 framedump 档 (build_layer.sh 一起编), 宿主测试同样链进来
             .arg(root.join("layer/framedump.cpp"))
+            // interp (I6 层内多 present), build_layer.sh 一起编
+            .arg(root.join("layer/interp.cpp"))
             .arg("-o")
             .arg(&exe)
             .output()
