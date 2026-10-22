@@ -634,11 +634,12 @@ pub fn execute_script(cfg: &ScriptRunConfig) -> Result<ScriptResult, String> {
                 }
 
                 // 计算瞬时 FPS
-                if let Some(ft) = t.frames_total {
+                if let Some((ft, kind)) = t.frame_counter() {
                     if let Some((pf, pt)) = tele_prev_frames {
                         let dt = now.duration_since(pt).as_secs_f32();
                         if dt > 0.3 && ft >= pf {
                             t.fps = Some(((ft - pf) as f32 / dt * 10.0).round() / 10.0);
+                            t.fps_source = Some(kind);
                         }
                     }
                     tele_prev_frames = Some((ft, now));

@@ -35,7 +35,7 @@ const POLL: Duration = Duration::from_secs(45);
 const HEARTBEAT: Duration = Duration::from_secs(60);
 
 /// 会碰设备、要拿锁的子命令。
-const LOCKED: [&str; 23] = [
+const LOCKED: [&str; 24] = [
     "run",
     "onboard",
     "benchmark",
@@ -59,6 +59,7 @@ const LOCKED: [&str; 23] = [
     "selftest",
     "frame-audit",
     "preflight",
+    "frame-sources",
 ];
 
 /// 从参数里剥下来的锁选项。
@@ -91,6 +92,10 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
     }
     // frame-audit: capture / storeop-check 碰设备, analyze 纯离线
     if sub == "frame-audit" && !matches!(rest.first().map(|s| s.as_str()), Some("capture") | Some("storeop-check")) {
+        return false;
+    }
+    // perf --from-csv: 离线解析已拉回的 SP_daemon CSV, 不碰设备
+    if sub == "perf" && rest.iter().any(|a| a == "--from-csv") {
         return false;
     }
     if matches!(sub, "eval" | "gpu-op") {
@@ -379,6 +384,14 @@ mod tests {
         std::fs::remove_file(&f).ok();
         // --unlock 回滚锁频态是写设备
         assert!(needs_lock("gpu-op", &v(&["--serial", "S", "--unlock"])));
+    }
+
+    /// perf --from-csv 只读盘上的 CSV, 不拿锁; frame-sources 是只读探测但碰设备, 要拿锁
+    #[test]
+    fn perf_from_csv_is_offline_and_frame_sources_locks() {
+        assert!(!needs_lock("perf", &v(&["--from-csv", "x.csv", "--json"])));
+        assert!(needs_lock("perf", &v(&["--serial", "S", "--source", "sflatency"])));
+        assert!(needs_lock("frame-sources", &v(&["--serial", "S"])));
     }
 
     /// eval --validate-only 是离线 dry-run: 请求文件在也不排队拿锁
