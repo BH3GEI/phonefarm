@@ -326,3 +326,9 @@ tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campa
 - 一个功能或修复的完整说明、验证方法、实验数字、截图：写在 PR 描述。
 - 长期文档（设计、规格、架构图、进展汇报）：提交到 https://github.com/HGamey/docs ，本仓库的旧文档在那里的 `repos/<仓库名>/` 下。
 - 允许的例外：根目录 README.md（40 行以内）、AGENTS.md、skills/、许可证、程序或测试要读的数据。CI 检查 `code-only` 会拦下其他文档类文件。
+
+## 分支与 PR
+
+- 每次都从最新的 `main` 开分支，PR 的目标只能是 `main`。不要叠 PR，不要开“集成基线”之类的中间分支。
+- 一个 PR 只做一件事，做完尽快合并；合并后分支会自动删除。
+- 动手前和开 PR 前各同步一次 `main`。CI 检查 `code-only` 会拦下目标不是 `main`、或落后 `main` 超过 50 个提交的 PR。
