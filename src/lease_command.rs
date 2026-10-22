@@ -7,7 +7,7 @@ use std::os::unix::{
     fs::OpenOptionsExt,
     process::{CommandExt, ExitStatusExt},
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -28,6 +28,8 @@ pub(crate) struct Output {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// Original bounded bytes, including non-UTF-8 screenshot output.
+    pub stdout_path: PathBuf,
 }
 
 fn group_gone(pid: u32) -> bool {
@@ -229,6 +231,7 @@ fn supervise(
             .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
         stdout: read_output(out)?,
         stderr: read_output(err)?,
+        stdout_path: dir.join(format!("{stem}.stdout")),
     })
 }
 

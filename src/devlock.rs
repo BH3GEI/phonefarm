@@ -321,6 +321,7 @@ mod tests {
         assert!(needs_lock("frame-audit", &v(&["capture", "--out", "x"])));
         assert!(needs_lock("frame-audit", &v(&["storeop-check", "--rule", "a:1"])));
         assert!(!needs_lock("frame-audit", &v(&["analyze", "f.json"])));
+        assert!(!needs_lock("frame-audit", &v(&["recover", "--session", "session", "--serial", "S"])));
         assert!(!needs_lock("frame-audit", &v(&[])));
     }
 

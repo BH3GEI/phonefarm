@@ -57,6 +57,7 @@ mod frameaudit;
 mod preflight;
 mod grayab;
 mod graylayer;
+mod gray_session;
 mod grayartifact;
 mod upopabi;
 mod storageadapter;
@@ -251,6 +252,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop|frameaudit|frameaudit-ts [pkg] | target <pkg> | status | off} [--keep-prop] [--so 层.so]
        (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
        frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 层.so]   (只读层抓原神一帧步骤清单)
+       frame-audit recover --session <会话目录> --serial S [--json]   (核验并恢复本次灰层抓帧范围)
        frame-audit analyze <knobs_frameaudit.json>... [--md F] [--json F]           (离线: 步骤总览 + 白存/白读/白清/白画)
 工件:  gray-artifact {build (--source sampled.comp | --adapted-artifact DIR) --out DIR [--ndk DIR] [--timeout-seconds 1..120] [--process-supervision own-helper-groups|inherited-group] | inspect --spirv FILE | verify --artifact DIR | adapt-storage --source original.comp --spirv original.spv --out DIR | verify-adaptation --artifact DIR} [--json]
        (离线编译/ABI/摘要门禁; deployable=false, 不构成真机部署资格)

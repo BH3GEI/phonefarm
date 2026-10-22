@@ -20,7 +20,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::Path;
 
-const LAYER_NAME: &str = "VK_LAYER_refknobs_readonly";
+pub(crate) const LAYER_NAME: &str = "VK_LAYER_refknobs_readonly";
 const LOADOP_PROP: &str = "debug.knobs.loadop"; // 1 = 层把 loadOp LOAD 改写成 DONT_CARE
 const DUMP_PROP: &str = "debug.knobs.passdump"; // 1 = 层导出 render pass 形状表
 const CP_PROP: &str = "debug.knobs.copyprobe"; // 1 = 1:1 拷贝探针 (隐含 passdump 追踪)
@@ -34,8 +34,12 @@ pub(crate) const FA_GO_PROP: &str = "debug.knobs.frameaudit_go"; // 改成新编
 pub(crate) const STOREOP_PROP: &str = "debug.knobs.storeop"; // "<sig>:<i>,..." / "ds" / 0 (#91)
 pub(crate) const STOREOP_LIVE_PROP: &str = "debug.knobs.storeop_live"; // 1 = 孪生 pass 现场切换
 pub(crate) const STOREOP_ON_PROP: &str = "debug.knobs.storeop_on"; // 现场切换时的开/关
-const SO: &str = "libVkLayer_refknobs.so";
-const STATE: &str = "/data/local/tmp/knobs_layer_state"; // "把 .so 推进了哪个包"
+pub(crate) const SO: &str = "libVkLayer_refknobs.so";
+pub(crate) const STATE: &str = "/data/local/tmp/knobs_layer_state"; // "把 .so 推进了哪个包"
+pub(crate) const LAYER_PROPERTIES: [&str; 12] = [
+    "debug.vulkan.layers", LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, NPUPROBE_PROP,
+    FA_PROP, FA_TS_PROP, FA_GO_PROP, STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP,
+];
 
 const USAGE: &str = "用法: phonefarm gray-layer {probe|loadop [pkg]|passdump [pkg]|copyprobe [pkg]|upop [pkg]|frameaudit [pkg]|frameaudit-ts [pkg]|target <pkg>|status|off [pkg] [--json]} [--serial S] [--keep-prop] [--so 本机.so]";
 
@@ -471,14 +475,14 @@ fn root_command(command: &str) -> String {
     format!("su -c {}", shell_quote(&format!("{command} 2>&1")))
 }
 
-fn valid_package(package: &str) -> bool {
+pub(crate) fn valid_package(package: &str) -> bool {
     !package.is_empty() && package.split('.').all(|part| {
         !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
             && part.as_bytes()[0].is_ascii_alphabetic()
     })
 }
 
-fn valid_install_dir(dir: &str) -> bool {
+pub(crate) fn valid_install_dir(dir: &str) -> bool {
     dir.starts_with('/') && dir[1..].split('/').all(|part| {
         !part.is_empty() && part != "." && part != ".."
             && !part.chars().any(|c| c.is_control())
@@ -553,9 +557,8 @@ fn deactivate(
         if names.any(|name| name == target || name.starts_with(&format!("{target}:"))) {
             return Err("target process remains after force-stop".into());
         }
-        for (property, value) in std::iter::once(("debug.vulkan.layers", "")).chain(
-            [LOADOP_PROP, DUMP_PROP, CP_PROP, UPOP_PROP, NPUPROBE_PROP, FA_PROP, FA_TS_PROP, FA_GO_PROP,
-                STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP].into_iter().map(|p| (p, "0"))) {
+        for property in LAYER_PROPERTIES {
+            let value = if property == "debug.vulkan.layers" { "" } else { "0" };
             run(root_command(&format!("setprop {property} {}", shell_quote(value))))?;
             if run(format!("getprop {property} 2>&1"))?.trim() != value {
                 return Err(format!("property readback differs after deactivation: {property}"));
@@ -596,7 +599,7 @@ fn deactivate(
 const DEV_TMP_SO: &str = "/data/local/tmp/libVkLayer_refknobs.so";
 
 /// 层 .so 的解析: knobs/gray/build/out/ (build_layer.sh 的产物位)。
-fn layer_so_path() -> String {
+pub(crate) fn layer_so_path() -> String {
     match resolve_path("knobs/gray/build/out/libVkLayer_refknobs.so") {
         Some(p) => p.to_string_lossy().into_owned(),
         None => "knobs/gray/build/out/libVkLayer_refknobs.so".into(),

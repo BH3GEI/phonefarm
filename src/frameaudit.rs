@@ -31,11 +31,12 @@ use std::path::{Path, PathBuf};
 
 const USAGE: &str = "用法:
   phonefarm frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 本机层.so] [--pkg 包名] [--serial S]
-      [--tap \"x,y;x,y\"] [--settle 秒] [--extras \"intent extras\"]
+      [--tap \"x,y;x,y\"] [--settle 秒] [--extras \"intent extras\"] [--json] [--evidence-origin device|synthetic]
       (非原神: 不判大世界, 确认层在出帧后依次点击再等 settle 秒; Megacity 例:
        --pkg com.unity.megacity.metro --extras \"--es scene city_static --es frames 100000\")
   phonefarm frame-audit storeop-check --rule <sig:i,...> --out <目录> [--rounds N] [--so 本机层.so] [--serial S]
       (storeop 开关机制验证: 同一局里现场开/关, 同位置同视角截图逐像素比对 + effective 命中 + 不崩)
+  phonefarm frame-audit recover --session <capture会话目录> --serial S [--json]
   phonefarm frame-audit analyze <knobs_frameaudit.json>... [--md 输出.md] [--json 输出.json]";
 
 // ── VkFormat → 每像素字节 (颜色或深度部分, 模板部分) ──
@@ -1024,59 +1025,112 @@ fn screencap(serial: &str, dst: &Path) {
     su(serial, "rm -f /data/local/tmp/fa_shot.png", 15);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn capture(serial: &str, out: &Path, so: Option<String>, ts: bool, captures: u32, gap: u64, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>) -> Result<(), String> {
-    std::fs::create_dir_all(out).map_err(|e| format!("建 {}: {e}", out.display()))?;
-    let gl = GrayLayer::new(serial).with_so(so).with_launch_extras(extras);
-    let before = gl.off(Some(pkg));
-    crate::graylayer::record_deactivation(out, "before", &before)?;
-    before.map_err(|e| e.to_string())?;
-    let mode = if ts { "frameaudit-ts" } else { "frameaudit" };
-    let res = (|| -> Result<Vec<Value>, String> {
-        gl.mount_mode(mode, pkg, false)?;
-        reach_scene(serial, pkg, taps, settle)?;
-        let mut got = Vec::new();
-        for go in 1..=captures {
-            let t0 = chrono::Local::now().to_rfc3339();
-            screencap(serial, &out.join(format!("fa_{go}.png")));
-            su(serial, &format!("setprop {FA_GO_PROP} {go}"), 15);
-            let dst = out.join(format!("fa_{go}.json"));
-            match pull_audit(serial, pkg, go, &dst) {
-                Ok(()) => {
-                    eprintln!("  抓帧 {go}/{captures} -> {}", dst.display());
-                    got.push(json!({"go": go, "file": dst.file_name().map(|x| x.to_string_lossy().to_string()), "wall": t0}));
-                }
-                Err(e) => {
-                    eprintln!("  抓帧 {go} 失败: {e}");
-                    got.push(json!({"go": go, "error": e, "wall": t0}));
-                }
-            }
-            if go < captures {
-                std::thread::sleep(std::time::Duration::from_secs(gap));
+// This finite capture owns every transport, including scene input and trigger writes.
+// The legacy storeop-check caller still has a separate migration obligation.
+fn capture_scene(
+    session: &crate::gray_session::Session,
+    pkg: &str,
+    taps: &[(u32, u32)],
+    settle: u64,
+) -> Result<(), String> {
+    let mut first = None;
+    for attempt in 0..40 {
+        if let Some(marker) = session.marker()? {
+            if marker["frames"].as_u64().is_some() {
+                first = Some(marker);
+                break;
             }
         }
-        // 层自报 (marker) 一并留档
-        let m = su(serial, &format!("cat /storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json 2>/dev/null"), 30);
-        let _ = std::fs::write(out.join("layer_marker.json"), GrayLayer::adb_stdout(&m));
-        Ok(got)
-    })();
-    // 收尾无论成败: 摘层 + 关游戏 (进程里的层不随 .so 删除而卸载)
-    let ver = adb(serial, &["shell", &format!("dumpsys package {pkg} | grep -m1 versionName")], 30);
-    let off = gl.off(Some(pkg));
-    let off_record = crate::graylayer::record_deactivation(out, "after", &off)?;
-    let meta = json!({
-        "serial": serial, "pkg": pkg, "mode": mode, "captures": captures, "gap_s": gap,
-        "pkg_version": GrayLayer::adb_stdout(&ver).trim(),
-        "result": match &res { Ok(v) => json!(v), Err(e) => json!({"error": e}) },
-        "restore": off_record, "job_recovery_complete": false, "game_state_restored": false,
-    });
-    std::fs::write(out.join("capture_meta.json"), serde_json::to_vec_pretty(&meta).unwrap()).map_err(|e| e.to_string())?;
-    match (res, off) {
-        (Ok(_), Ok(_)) => Ok(()),
-        (Err(e), Ok(_)) => Err(e),
-        (Ok(_), Err(e)) => Err(format!("layer deactivation failed: {e}")),
-        (Err(e), Err(off)) => Err(format!("{e}; layer deactivation failed: {off}")),
+        if attempt < 39 { std::thread::sleep(std::time::Duration::from_secs(2)); }
     }
+    let first = first.ok_or("layer marker did not appear; capture not started")?;
+    // Keep the global loader exposure only until this target proves it loaded the layer.
+    session.narrow()?;
+    if pkg == crate::plugins::genshin::PACKAGE && taps.is_empty() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        session.tap(1342, 651)?;
+        for _ in 0..18 {
+            let a = session.marker()?.ok_or("layer marker disappeared")?;
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let b = session.marker()?.ok_or("layer marker disappeared")?;
+            let frames = b["frames"].as_i64().unwrap_or(0) - a["frames"].as_i64().unwrap_or(0);
+            let passes = b["render_pass_begins"].as_i64().unwrap_or(0)
+                - a["render_pass_begins"].as_i64().unwrap_or(0);
+            if frames > 0 && passes / frames >= 25 {
+                std::thread::sleep(std::time::Duration::from_secs(settle.min(60)));
+                return Ok(());
+            }
+        }
+        return Err("target did not reach the existing world-scene criterion".into());
+    }
+    for &(x, y) in taps {
+        session.tap(x, y)?;
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(settle));
+    let last = session.marker()?.ok_or("layer marker disappeared")?;
+    if last["frames"].as_u64().zip(first["frames"].as_u64()).is_some_and(|(b,a)| b > a) {
+        Ok(())
+    } else {
+        Err("target present count did not advance".into())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture(serial: &str, out: &Path, so: Option<String>, ts: bool, captures: u32, gap: u64, pkg: &str, taps: &[(u32, u32)], settle: u64, extras: Option<String>, origin: &str) -> Result<Value, String> {
+    let lease = crate::devlease::Lease::target(Some(serial), "frame-audit-capture")?;
+    let session = crate::gray_session::Session::new(lease, out, pkg, origin)?;
+    let mut frames = Vec::new();
+    let collected: Result<(), String> = (|| {
+        session.prepare()?;
+        session.install(so.as_deref(), ts, extras.as_deref())?;
+        capture_scene(&session, pkg, taps, settle)?;
+        for go in 1..=captures {
+            let image = session.dir.join(format!("fa_{go}.png"));
+            session.screenshot(&image)?;
+            session.trigger(go)?;
+            let mut audit = None;
+            for attempt in 0..45 {
+                if let Some(value) = session.audit(go)? { audit = Some(value); break; }
+                if attempt < 44 { std::thread::sleep(std::time::Duration::from_secs(2)); }
+            }
+            let audit = audit.ok_or_else(|| format!("capture trigger {go} produced no matching audit"))?;
+            let path = session.dir.join(format!("fa_{go}.json"));
+            crate::confirmation_transport::new_file(&path, &serde_json::to_vec_pretty(&audit).map_err(|e| e.to_string())?)?;
+            frames.push(json!({"go":go,"file":path,"image":image,"wall":chrono::Utc::now().to_rfc3339()}));
+            if go < captures { std::thread::sleep(std::time::Duration::from_secs(gap)); }
+        }
+        Ok(())
+    })();
+    let mut error = collected.err();
+    let collection = json!({"schema":"phonefarm/gray-capture-collection@1","serial":serial,"package":pkg,
+        "session":session.dir,"evidence_origin":origin,"frames":frames,"error":error,
+        "request":{"timestamp_queries":ts,"captures":captures,"gap_s":gap,"taps":taps,
+            "settle_s":settle,"launch_extras":extras,"layer_source":so},
+        "collection_ok":error.is_none(),"game_state_restored":false});
+    let record = session.dir.join("collection.json");
+    if let Err(e) = crate::confirmation_transport::new_file(&record, &serde_json::to_vec_pretty(&collection).unwrap()) {
+        error = Some(match error {Some(prior)=>format!("{prior}; collection evidence: {e}"),None=>e});
+    }
+    // No local evidence failure may skip the safe recovery attempt.
+    let recovery = match session.finish(error.as_deref()) {
+        Ok(v) => v,
+        Err(e) => json!({"status":"required","error":e,"session":session.dir}),
+    };
+    let meta = session.dir.join("capture_meta.json");
+    let mut report = json!({"schema":"phonefarm/gray-capture@1","serial":serial,"package":pkg,
+        "out":session.dir,"session":session.dir,"collection":record,"frames":frames,
+        "collection_ok":error.is_none(),"error":error,"recovery":recovery,
+        "capture_meta_path":meta,"game_state_restored":false,"evidence_origin":origin});
+    if let Err(e) = crate::confirmation_transport::new_file(&meta, &serde_json::to_vec_pretty(&report).unwrap()) {
+        report["report_persistence_error"] = json!(e);
+    }
+    Ok(report)
+}
+
+fn capture_exit(report: &Value) -> i32 {
+    if report["recovery"]["status"] != "reported_complete" || report["report_persistence_error"].is_string() { 2 }
+    else if report["collection_ok"] == true { 0 } else { 1 }
 }
 
 // ── storeop 开关的画面验证 ──
@@ -1285,6 +1339,7 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
             let (mut out, mut so, mut ts, mut captures, mut gap) = (None, None, false, 3u32, 20u64);
             let mut pkg = "com.miHoYo.Yuanshen".to_string();
             let (mut taps, mut settle, mut extras) = (Vec::new(), None::<u64>, None::<String>);
+            let (mut json_output, mut origin) = (false, "device".to_string());
             let mut it = rest.iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -1298,6 +1353,8 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                     "--tap" => taps = it.next().map(|s| parse_taps(s)).unwrap_or_default(),
                     "--settle" => settle = it.next().and_then(|x| x.parse().ok()),
                     "--extras" => extras = it.next().cloned(),
+                    "--json" => json_output = true,
+                    "--evidence-origin" => origin = it.next().cloned().unwrap_or_default(),
                     other => {
                         eprintln!("不认识的参数 {other:?}\n{USAGE}");
                         return 2;
@@ -1309,11 +1366,53 @@ pub fn run_frame_audit(args: &[String]) -> i32 {
                 eprintln!("{USAGE}");
                 return 2;
             };
-            match capture(&serial, Path::new(&out), so, ts, captures.max(1), gap, &pkg, &taps, settle, extras) {
-                Ok(()) => 0,
+            if !matches!(origin.as_str(), "device" | "synthetic") {
+                eprintln!("--evidence-origin must be device or synthetic"); return 2;
+            }
+            match capture(&serial, Path::new(&out), so, ts, captures.max(1), gap, &pkg, &taps, settle, extras, &origin) {
+                Ok(report) => {
+                    if json_output { println!("{}", serde_json::to_string_pretty(&report).unwrap()); }
+                    else {
+                        println!("采集结果: {}, 恢复: {}, 证据 {}", report["collection_ok"], report["recovery"]["status"], report["out"]);
+                        if let Some(error) = report["error"].as_str() { eprintln!("{error}"); }
+                        if let Some(error) = report["recovery"]["error"].as_str() { eprintln!("{error}"); }
+                        if let Some(error) = report["report_persistence_error"].as_str() { eprintln!("{error}"); }
+                    }
+                    capture_exit(&report)
+                }
                 Err(e) => {
-                    eprintln!("{e}");
-                    1
+                    if json_output { println!("{}", json!({"error":e,"collection_ok":false,"recovery":{"status":"unknown"}})); }
+                    else { eprintln!("{e}"); }
+                    2
+                }
+            }
+        }
+        "recover" => {
+            let (mut dir, mut serial, mut json_output) = (None, None, false);
+            let mut it = rest.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--session" => dir = it.next().cloned(),
+                    "--serial" => serial = it.next().cloned(),
+                    "--json" => json_output = true,
+                    other => { eprintln!("不认识的参数 {other:?}\n{USAGE}"); return 2; }
+                }
+            }
+            let (Some(dir), Some(serial)) = (dir, serial) else { eprintln!("{USAGE}"); return 2; };
+            let result = crate::gray_session::Session::resume(Path::new(&dir), &serial).and_then(|s| s.finish(None));
+            match result {
+                Ok(value) => {
+                    if json_output { println!("{}", serde_json::to_string_pretty(&value).unwrap()); }
+                    else {
+                        println!("恢复状态 {}，范围 {}；原件 {}", value["status"], value["scope"], value["report_path"]);
+                        if let Some(error) = value["error"].as_str() { eprintln!("{error}"); }
+                    }
+                    if value["status"] == "reported_complete" { 0 } else { 2 }
+                }
+                Err(e) => {
+                    if json_output { println!("{}", json!({"status":"required","session":dir,"error":e})); }
+                    else { eprintln!("{e}"); }
+                    2
                 }
             }
         }
