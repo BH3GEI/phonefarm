@@ -125,15 +125,19 @@ def plan_text(cap, stock=None):
 
 # ══════════════ 请求 ══════════════
 
-def make_request(cid, params, whitelist, cap, stage, rounds, cool_c, seed, why):
+# SoC 中止温度: 2026-10-21 用户定为 80 °C (连续两次采样确认), 原 70 °C 作废
+TEMP_CAP_C = 80.0
+
+
+def make_request(cid, params, whitelist, cap, stage, rounds, cool_c, seed, why, seconds=30):
     req = {
         "version": 2, "kind": "sysparam", "candidate_id": cid, "package": PKG,
-        "workload": {"carrier": "game_replay", "seconds": 30, "script": WORKLOAD,
+        "workload": {"carrier": "game_replay", "seconds": seconds, "script": WORKLOAD,
                      "render_comm": "UnityGfxDeviceW"},
-        "conditions": {"cool_c": cool_c, "temp_cap_c": 70.0, "require_root": True,
+        "conditions": {"cool_c": cool_c, "temp_cap_c": TEMP_CAP_C, "require_root": True,
                        "require_discharging": True,
                        "charging_suspend": {"enabled": True, "node": CHARGE_NODE}, "fan": "off"},
-        "protocol": {"cool_c": cool_c, "replay_seconds": 30, "rounds": rounds, "alternating": True,
+        "protocol": {"cool_c": cool_c, "replay_seconds": seconds, "rounds": rounds, "alternating": True,
                      "p_threshold": 0.05, "stat": "exact_permutation",
                      "multiple_comparison": "bonferroni_on_wins",
                      "metrics": [{"id": "fps_p95_ms", "better": "lower"}, {"id": "fps_mean", "better": "higher"},
@@ -292,7 +296,8 @@ class Dev:
 
     def pull_su(self, remote, local):
         """root 才读得到的文件: su cat 出来写到本机新文件 (adb pull 以 shell 身份读不到)。"""
-        argv = ["adb", "-s", self.serial, "exec-out", "su", "-c", shlex.quote(f"cat {remote}")]
+        # exec-out 不经设备端 sh 拆参数: su -c 与命令必须合成一个参数 (2026-10-22 真机, 分开传会把引号原样交给 su)
+        argv = ["adb", "-s", self.serial, "exec-out", "su -c " + shlex.quote(f"cat {remote}")]
         self.note("$ " + " ".join(argv) + f" > {local}")
         if self.dry:
             return
@@ -300,6 +305,9 @@ class Dev:
             raise RuntimeError(f"{local} 已存在, 不覆盖")
         with open(local, "wb") as f:
             subprocess.run(argv, stdout=f, timeout=300, check=True)
+        head = Path(local).read_bytes()[:200]
+        if head.startswith(b"/system/bin/sh:") or b"inaccessible or not found" in head:
+            raise RuntimeError(f"从设备读 {remote} 失败, 拿到的是报错: {head[:120]!r}")
 
     def push_su(self, local, remote):
         """推到 root 目录: 先推到 /data/local/tmp 下的中转名, 再 su cp 过去 (中转件留着, 不删)。"""
@@ -310,7 +318,7 @@ class Dev:
     def pull_dir_su(self, remote, local_dir):
         """root 目录整个打包拉回并解开到本机新目录。"""
         tar = Path(local_dir).with_suffix(".tar")
-        argv = ["adb", "-s", self.serial, "exec-out", "su", "-c", shlex.quote(f"tar -C {remote} -cf - .")]
+        argv = ["adb", "-s", self.serial, "exec-out", "su -c " + shlex.quote(f"tar -C {remote} -cf - .")]
         self.note("$ " + " ".join(argv) + f" > {tar}  (再解到 {local_dir})")
         if self.dry:
             return
@@ -594,7 +602,7 @@ def run_staircase(s, wl, stock):
 
     def screen_one(cid, params, why):
         seed = random.SystemRandom().randrange(1 << 31)
-        req = make_request(cid, params, wl, cap, "screen", 2, s.a.cool_c, seed, why)
+        req = make_request(cid, params, wl, cap, "screen", 2, s.a.cool_c, seed, why, s.a.seconds)
         rep = s.eval(req)
         if s.a.dry_run:
             rec = {"cid": cid, "params": params, "desc": describe(params), "verdict": "pass", "why": "dry-run: 按通过展开"}
@@ -710,7 +718,7 @@ def cmd_confirm(a):
         for i, p in enumerate(cands, 1):
             seed = random.SystemRandom().randrange(1 << 31)
             req = make_request(f"conf{a.cap}_{i}", p, wl, a.cap, "full", a.rounds, a.cool_c, seed,
-                               f"O2 确认: 锁 {a.cap} 帧时 {describe(p)} 对厂商原样")
+                               f"O2 确认: 锁 {a.cap} 帧时 {describe(p)} 对厂商原样", a.seconds)
             s.battery_gate(max(a.battery_min, 50), 95)
             rep = s.eval(req)
             if a.dry_run:
@@ -809,11 +817,14 @@ def main():
     p.add_argument("--attrib", type=int, default=0)
     p = sub.add_parser("screen")
     common(p)
+    p.add_argument("--seconds", type=int, default=30, help="每臂采集秒数")
     p = sub.add_parser("confirm")
     common(p)
     p.add_argument("--from-screen")
     p.add_argument("--cand", action="append")
     p.add_argument("--rounds", type=int, default=6)
+    # 电池电量计电流有十几秒平滑 (2026-10-20 实测), 确认阶段每臂 60 秒, 初筛 30 秒只作粗筛
+    p.add_argument("--seconds", type=int, default=60, help="每臂采集秒数")
     p.add_argument("--p95-rel-tol", type=float, default=0.02)
     p = sub.add_parser("restore")
     common(p, cap=False)
