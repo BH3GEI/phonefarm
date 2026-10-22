@@ -170,7 +170,12 @@ Web/CLI共读持久manifest；采集完成不代表同场景或画质通过。
 旧genshin_quality客户端只连接显式既有session/job，要求尺寸/方向/坐标profile，每个输入前重新截图；
 它不启动或重启游戏。重复完整调用返回旧原件，partial/未知不自动重走导航；远程状态缺失与断网分别处理。
 合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-QUALITY.md。
-旧 gray-layer/reference 脚本迁移仍待完成；合同见
+REF_ARM=1参考客户端也只连接显式既有passdump会话，按profile和供电期望执行capture/sample/marker。
+默认保留40秒有限输入与30秒采样，WL/CAPDUR可给默认值，LEAD仅支持现有owner固定的6秒；
+不安装/重启/停止会话、不推断世界场景或极高精度。完整重复返回旧结果，partial不自动重采。
+网页可手动调用三动作，整组profile/epoch/label校验仍待CTRL-06；合同见
+https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-REFERENCE-CLIENT.md。
+旧四臂refbench与gray-layer挂层入口迁移仍待完成；合同见
 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
 
 **Compute Shader 算子标尺**（零 Token，需 root）
