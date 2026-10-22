@@ -91,6 +91,8 @@
       <div class="row"><span>设备</span><span id="serial">—</span></div>
       <div class="row"><span>分辨率</span><span id="res">—</span></div>
       <div class="row"><span>预览</span><span id="fps">—</span></div>
+      <div class="row"><span>最后画面</span><span id="age">尚未收到</span></div>
+      <div class="row"><span>正在观看</span><span id="viewers">—</span></div>
     </div>
 
     <div class="panel">
@@ -100,8 +102,10 @@
         <button id="shot">存图</button>
       </div>
       <div class="note">
-        观战窗口，只读。它不改设备状态，但**每秒一次 screencap 会影响帧时与功耗** ——
-        做判定性测量时别开着它。
+        观战窗口，只读。暂停、隐藏或关闭本窗口后停止订阅；其他窗口仍可观看。
+        连接丢失后订阅在 5 秒内过期，已开始的截图可能随后完成。<br>
+        <strong>screencap 会影响帧时与功耗，测量期间请关闭全部观战窗口。</strong>
+        当前尚未与测量租约自动互斥。
       </div>
     </div>
 
@@ -114,61 +118,144 @@
 
 <script>
 // ── 配置由服务端注入(没注入就用默认) ──
-const CFG = window.__PF__ || { interval_ms: 700, actions_wired: false };
-
+const CFG = { interval_ms: 700, heartbeat_ms: 1000, viewer_ttl_ms: 5000,
+              fresh_for_ms: 2100, actions_wired: false, ...(window.__PF__ || {}) };
 const $ = (id) => document.getElementById(id);
 const frame = $("frame"), ph = $("ph"), layer = $("layer"), screenEl = $("screen");
-let paused = false;
-let lastFrameAt = 0, frameCount = 0, fpsAt = Date.now();
-let lastEventSeq = 0;
-// 帧的像素尺寸 → 用它在图层上定位涟漪
+let paused = false, pageClosed = false, viewerId = null, generation = 0;
+let maintenanceInFlight = false, frameRequest = null;
+let afterSeq = 0, lastFrameSeq = 0, lastFrameAt = 0, lastFrameAge = 0;
+let frameCount = 0, fpsAt = Date.now(), lastEventSeq = 0;
 let frameW = 0, frameH = 0;
+const wantsFrames = () => !paused && !pageClosed && document.visibilityState !== "hidden";
 
 function setStatus(text, cls) {
-  $("status").innerHTML = `<i class="dot ${cls || ""}"></i>${text}`;
+  const dot = document.createElement("i");
+  dot.className = `dot ${cls || ""}`;
+  $("status").replaceChildren(dot, document.createTextNode(text));
 }
 
-// ── 取帧: 轮询 + 缓存穿透, 不叠请求 ──
-let inflight = false;
-async function tick() {
-  if (paused || inflight) return;
-  inflight = true;
-  try {
-    const r = await fetch(`/frame.jpg?t=${Date.now()}`, { cache: "no-store" });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
-    frameW = img.naturalWidth; frameH = img.naturalHeight;
-    const old = frame.src;
-    frame.src = url;
-    frame.hidden = false; ph.hidden = true;
-    screenEl.classList.remove("stale");
-    if (old && old.startsWith("blob:")) URL.revokeObjectURL(old);
-    lastFrameAt = Date.now();
-    frameCount++;
-    if (Date.now() - fpsAt > 2000) {
-      const fps = frameCount / ((Date.now() - fpsAt) / 1000);
-      $("fps").textContent = fps.toFixed(1) + " fps";
-      frameCount = 0; fpsAt = Date.now();
-    }
-    setStatus("直播中", "");
-  } catch (e) {
-    screenEl.classList.add("stale");
-    setStatus("断开", "off");
-  } finally {
-    inflight = false;
+function release(id) {
+  if (!id) return;
+  const url = `/watch/stop?id=${encodeURIComponent(id)}`;
+  // Beacon can survive pagehide; if it is lost the server's TTL is the fallback.
+  if (!navigator.sendBeacon || !navigator.sendBeacon(url)) {
+    fetch(url, { method: "POST", keepalive: true }).catch(() => {});
   }
 }
 
-// ── 设备信息 ──
+function stopWatching() {
+  generation++;
+  const id = viewerId;
+  viewerId = null;
+  if (frameRequest) frameRequest.abort();
+  release(id);
+  screenEl.classList.add("stale");
+  setStatus(paused ? "本窗口已暂停" : "本窗口未观看", "paused");
+}
+
+async function maintainSubscription() {
+  if (!wantsFrames() || maintenanceInFlight) return;
+  maintenanceInFlight = true;
+  const revision = generation, id = viewerId;
+  try {
+    const path = id ? `/watch/heartbeat?id=${encodeURIComponent(id)}` : "/watch/start";
+    const r = await fetch(path, { method: "POST", signal: AbortSignal.timeout(3000) });
+    if (id && r.status === 410) {
+      if (revision === generation && viewerId === id) {
+        viewerId = null;
+        screenEl.classList.add("stale");
+        setStatus("订阅已过期，重新连接", "off");
+      }
+      return;
+    }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!id) {
+      const j = await r.json();
+      // A start reply may arrive after pause/pagehide. Release its new handle;
+      // heartbeats never recreate a released subscription on the server.
+      if (revision !== generation || !wantsFrames()) { release(j.id); return; }
+      viewerId = j.id;
+      afterSeq = j.after_seq;
+      lastFrameSeq = afterSeq;
+      frameCount = 0; fpsAt = Date.now();
+      screenEl.classList.add("stale");
+      setStatus("等待新画面", "paused");
+      tick();
+    }
+  } catch (e) {
+    if (revision === generation && wantsFrames()) setStatus("连接中断，正在重试", "off");
+  } finally {
+    maintenanceInFlight = false;
+  }
+}
+
+// GET requests do not renew a subscription. An abandoned frame request cannot
+// keep the producer alive, and a late frame cannot undo the user's pause.
+async function tick() {
+  if (!wantsFrames() || !viewerId || frameRequest) return;
+  const revision = generation, id = viewerId, started = Date.now();
+  const controller = new AbortController();
+  frameRequest = controller;
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  let url = null;
+  try {
+    const r = await fetch(`/frame.jpg?after=${afterSeq}`, { cache: "no-store", signal: controller.signal });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const seq = Number(r.headers.get("X-Frame-Seq"));
+    let age = Number(r.headers.get("X-Frame-Age-Ms")) + Date.now() - started;
+    if (!Number.isFinite(seq) || !Number.isFinite(age) || age >= CFG.fresh_for_ms) throw new Error("stale frame");
+    if (seq <= lastFrameSeq) return; // Cached repeats are not new frames or new FPS.
+    url = URL.createObjectURL(await r.blob());
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+    if (revision !== generation || !wantsFrames() || viewerId !== id) return;
+    age = Number(r.headers.get("X-Frame-Age-Ms")) + Date.now() - started;
+    if (age >= CFG.fresh_for_ms) throw new Error("frame expired during transfer");
+    frameW = img.naturalWidth; frameH = img.naturalHeight;
+    const old = frame.src;
+    frame.src = url;
+    url = null;
+    frame.hidden = false; ph.hidden = true;
+    if (old && old.startsWith("blob:")) URL.revokeObjectURL(old);
+    lastFrameSeq = seq;
+    lastFrameAt = Date.now(); lastFrameAge = age;
+    frameCount++;
+    if (Date.now() - fpsAt > 2000) {
+      $("fps").textContent = (frameCount / ((Date.now() - fpsAt) / 1000)).toFixed(1) + " fps";
+      frameCount = 0; fpsAt = Date.now();
+    }
+    screenEl.classList.remove("stale");
+    setStatus("观看中", "");
+  } catch (e) {
+    if (revision === generation && wantsFrames()) {
+      screenEl.classList.add("stale");
+      setStatus("等待新画面", "off");
+    }
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+    clearTimeout(timeout);
+    frameRequest = null;
+  }
+}
+
+function freshness() {
+  if (!lastFrameAt) return;
+  const age = Date.now() - lastFrameAt + lastFrameAge;
+  $("age").textContent = (age / 1000).toFixed(1) + " 秒前";
+  if (age >= CFG.fresh_for_ms) {
+    screenEl.classList.add("stale");
+    if (wantsFrames()) setStatus("画面已过期，等待更新", "off");
+  }
+}
+
 async function state() {
   try {
-    const s = await (await fetch("/state.json", { cache: "no-store" })).json();
+    const s = await (await fetch("/state.json", { cache: "no-store", signal: AbortSignal.timeout(3000) })).json();
     $("serial").textContent = s.serial || "—";
     $("res").textContent = s.width ? `${s.width}×${s.height}` : "—";
-    if (s.error) setStatus("采集失败", "off");
+    $("viewers").textContent = `${s.active_viewers} 个窗口`;
+    if (s.error && wantsFrames()) setStatus("采集失败", "off");
   } catch (e) {}
 }
 
@@ -197,7 +284,7 @@ function ripple(ev) {
 }
 
 async function events() {
-  if (!CFG.actions_wired) return;
+  if (!CFG.actions_wired || !wantsFrames() || !viewerId) return;
   try {
     const es = await (await fetch(`/events.json?since=${lastEventSeq}`, { cache: "no-store" })).json();
     for (const ev of es.events || []) {
@@ -224,7 +311,7 @@ function renderEvents(list) {
 $("pause").onclick = () => {
   paused = !paused;
   $("pause").textContent = paused ? "继续" : "暂停";
-  if (paused) setStatus("已暂停", "paused"); else tick();
+  if (paused) stopWatching(); else maintainSubscription();
 };
 $("shot").onclick = async () => {
   try {
@@ -237,11 +324,19 @@ $("shot").onclick = async () => {
 // 窗口尺寸变了, 涟漪的定位基准跟着变 —— 清掉旧的
 addEventListener("resize", () => { layer.innerHTML = ""; });
 
+document.addEventListener("visibilitychange", () => {
+  if (!wantsFrames()) stopWatching(); else maintainSubscription();
+});
+addEventListener("pagehide", () => { pageClosed = true; stopWatching(); });
+addEventListener("pageshow", () => { pageClosed = false; maintainSubscription(); });
+
 // ── 主循环 ──
+setInterval(maintainSubscription, CFG.heartbeat_ms);
 setInterval(tick, CFG.interval_ms);
 setInterval(state, 3000);
 setInterval(events, 500);
-tick(); state(); events();
+setInterval(freshness, 500);
+maintainSubscription(); state(); events();
 </script>
 </body>
 </html>
