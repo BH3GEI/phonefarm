@@ -14,14 +14,13 @@
 //!
 //! # 三条纪律
 //!
-//! 1. **只读**。它不改设备状态, 也不拿设备锁 —— 拿锁会让它没法在别人跑局时观战,
-//!    而观战正是它的全部用途。
-//! 2. **但它不是免费的**。每秒一次 `screencap` 会动 GPU 与 CPU。**做判定性测量时不要开着它**,
-//!    这一条写在 `--help`、HTML 页面上和这里, 三处都写。
+//! 1. **只读**。每帧通过独立观察 worker 取得覆盖设备调用的实际租约；测量占用时暂缓。
+//!    帧与帧之间释放租约，不因浏览器保持打开就占用设备。
+//! 2. **但它不是免费的**。每次 `screencap` 会动 GPU 与 CPU；只有取得观察租约才采样。
 //! 3. **不重放**。流断了就如实显示「断开」并继续重试取帧, 不去补历史帧。
 //!    看到的就是当下 —— 与 `collect` 的不重放同源。
 //!    只有未过期的观看订阅才触发采集。暂停/隐藏/关闭释放本页订阅；丢失关闭通知时
-//!    最多再采集 5 秒（已开始的设备调用可能随后完成）。这不是设备 lease 或测量互斥。
+//!    最多再启动 5 秒采集。已开始的 worker 有 20 秒总上限；超时保留恢复屏障。
 
 use crate::device::Device;
 use serde_json::{json, Value};
@@ -43,6 +42,7 @@ const EVENT_KEEP: usize = 64;
 const VIEWER_TTL: Duration = Duration::from_secs(5);
 const VIEWER_HEARTBEAT_MS: u64 = 1000;
 const MAX_VIEWERS: usize = 128;
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
 
 // ══════════════ 共享状态 ══════════════
 
@@ -54,10 +54,20 @@ struct Shared {
     dev_w: AtomicU64,
     dev_h: AtomicU64,
     serial: Mutex<String>,
-    error: Mutex<Option<String>>,
+    capture: Mutex<CaptureState>,
     interval_ms: u64,
     /// 动作喂给谁: None = 没接(m页面不画涟漪)
     feed: Option<Arc<Feed>>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct CaptureState {
+    state: &'static str,
+    reason: Option<String>,
+}
+
+impl CaptureState {
+    fn new(state: &'static str) -> Self { Self { state, reason: None } }
 }
 
 struct Frame {
@@ -119,10 +129,12 @@ impl Shared {
 
     /// The gate is shared by production capture and the fake-source tests below.
     /// Do not hold the viewer mutex across a device call: stop must remain responsive.
-    fn sample(&self, now: Instant, capture: impl FnOnce() -> Result<Vec<u8>, String>) -> bool {
+    fn sample(&self, now: Instant, capture: impl FnOnce() -> Result<Vec<u8>, crate::observation::Failure>) -> bool {
         if self.viewers.lock().unwrap().active(now) == 0 {
+            *self.capture.lock().unwrap() = CaptureState::new("idle");
             return false;
         }
+        *self.capture.lock().unwrap() = CaptureState::new("capturing");
         match capture() {
             Ok(jpeg) if !jpeg.is_empty() => {
                 let mut frame = self.frame.lock().unwrap();
@@ -133,14 +145,98 @@ impl Shared {
                     at: Instant::now(),
                     at_ms: now_ms(),
                 });
-                *self.error.lock().unwrap() = None;
+                *self.capture.lock().unwrap() = CaptureState::new("ready");
             }
             result => {
-                *self.error.lock().unwrap() =
-                    Some(result.err().unwrap_or_else(|| "截图为空".into()));
+                let failure = result.err().unwrap_or_else(|| capture_error("截图为空"));
+                *self.capture.lock().unwrap() = CaptureState {
+                    state: failure.state, reason: Some(failure.reason),
+                };
             }
         }
         true
+    }
+}
+
+fn capture_error(reason: impl Into<String>) -> crate::observation::Failure {
+    crate::observation::Failure { state: "error", reason: reason.into() }
+}
+
+/// Each attempt owns one local directory; read/cleanup happens only after run has
+/// observed the worker exit. HTTP handlers never invoke this path.
+fn capture_sample(sh: &Shared, tmp: &str, selected: &mut Option<String>) -> Result<Vec<u8>, crate::observation::Failure> {
+    let work = std::path::Path::new(tmp).join(format!("screen-frame-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| capture_error(e.to_string()))?.as_nanos()));
+    std::fs::create_dir(&work).map_err(|e| capture_error(format!("创建截图临时目录失败: {e}")))?;
+    let result = (|| {
+        let work = work.canonicalize().map_err(|e| capture_error(e.to_string()))?;
+        let mut args = vec!["--work-dir".into(), work.to_string_lossy().into_owned(),
+            "--width".into(), sh.dev_w.load(Ordering::Relaxed).to_string(),
+            "--height".into(), sh.dev_h.load(Ordering::Relaxed).to_string()];
+        if let Some(serial) = selected.as_ref() { args.extend(["--serial".into(), serial.clone()]); }
+        let out = crate::observation::run("screen", &args, &crate::lease_storage::resolve(), CAPTURE_TIMEOUT)?;
+        if !out.status.success() {
+            return Err(capture_error(format!("截图 worker 失败: {}", String::from_utf8_lossy(&out.stderr).trim())));
+        }
+        let meta: Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| capture_error(format!("截图 worker 回包无效: {e}")))?;
+        let path = work.join("capture.jpg");
+        if meta["jpeg_path"].as_str() != path.to_str() {
+            return Err(capture_error("截图 worker 返回了非本次截图路径"));
+        }
+        let dimension = |key: &str| meta[key].as_u64().filter(|n| *n > 0 && *n <= i32::MAX as u64)
+            .ok_or_else(|| capture_error(format!("截图 worker 缺少有效{key}")));
+        let (width, height) = (dimension("width")?, dimension("height")?);
+        let serial = meta["serial"].as_str().filter(|s| !s.is_empty())
+            .ok_or_else(|| capture_error("截图 worker 缺少实际设备身份"))?;
+        let jpeg = std::fs::read(path).map_err(|e| capture_error(format!("读取截图失败: {e}")))?;
+        sh.dev_w.store(width, Ordering::Relaxed);
+        sh.dev_h.store(height, Ordering::Relaxed);
+        *sh.serial.lock().unwrap() = serial.into();
+        *selected = Some(serial.into());
+        if let Some(feed) = &sh.feed {
+            feed.dev_w.store(width, Ordering::Relaxed);
+            feed.dev_h.store(height, Ordering::Relaxed);
+        }
+        Ok(jpeg)
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// Invoked only by the observation worker after the shared ownership barrier.
+pub(crate) fn capture_worker(args: &[String]) -> i32 {
+    if !crate::observation::in_worker() {
+        eprintln!("screen capture requires an observation worker");
+        return 2;
+    }
+    let capture = || -> Result<Value, String> {
+        let mut serial = None;
+        let mut work = None;
+        let (mut width, mut height) = (0, 0);
+        let mut it = args.iter();
+        while let Some(flag) = it.next() {
+            let value = it.next().ok_or_else(|| format!("missing value for {flag}"))?;
+            match flag.as_str() {
+                "--serial" => serial = Some(value.clone()),
+                "--work-dir" => work = Some(std::path::PathBuf::from(value)),
+                "--width" => width = value.parse::<i32>().map_err(|e| e.to_string())?,
+                "--height" => height = value.parse::<i32>().map_err(|e| e.to_string())?,
+                _ => return Err(format!("unknown capture argument {flag}")),
+            }
+        }
+        let work = work.filter(|p| p.is_absolute() && p.is_dir()).ok_or("capture work directory unavailable")?;
+        let serial = crate::device::resolve_serial(serial.as_deref()).ok_or("cannot resolve exactly one screen device")?;
+        let phone = Device::new(Some(serial.clone()), work.to_string_lossy().into_owned());
+        if width <= 0 || height <= 0 { (width, height) = phone.size(); }
+        let path = work.join("capture.jpg");
+        phone.screen(&path.to_string_lossy()).ok_or("screen capture failed")?;
+        Ok(json!({"jpeg_path":path,"width":width,"height":height,"serial":serial}))
+    };
+    match capture() {
+        Ok(meta) => { println!("{meta}"); 0 }
+        Err(e) => { eprintln!("{e}"); 1 }
     }
 }
 
@@ -216,8 +312,8 @@ fn usage() -> &'static str {
      \x20 --from-start : 从头读动作(默认为实时, 只读新产生的)\n\
      \x20 --out        : 「存图」按钮把截图写到哪(缺省 <tmp>/screen-shots)\n\
      \x20 暂停/隐藏/关闭释放本页订阅；无观看者不采集，失联订阅 5 秒后过期。\n\
-     \x20 ⚠ 不做判定性测量时再开它: 每秒一次 screencap 会影响帧时与功耗。\n\
-     \x20 ⚠ 它不拿设备锁 —— 拿锁就没法在别人跑局时观战, 而观战正是它的用途。"
+     \x20 screencap 会影响帧时与功耗；每帧取得观察租约，测量占用时自动暂缓。\n\
+     \x20 帧间释放租约；单帧 worker 最多 20 秒，超时/执行不确定保留恢复屏障。"
 }
 
 pub fn run_screen(args: &[String]) -> i32 {
@@ -303,7 +399,7 @@ pub fn run_screen(args: &[String]) -> i32 {
         dev_w: AtomicU64::new(0),
         dev_h: AtomicU64::new(0),
         serial: Mutex::new(serial.clone().unwrap_or_else(|| "自动".into())),
-        error: Mutex::new(None),
+        capture: Mutex::new(CaptureState::new("idle")),
         interval_ms,
         feed: feed.clone(),
     });
@@ -313,28 +409,9 @@ pub fn run_screen(args: &[String]) -> i32 {
         let sh = Arc::clone(&sh);
         let tmp = tmp.clone();
         std::thread::spawn(move || {
-            let mut phone = None;
-            let path = format!("{tmp}/screen-widget.jpg");
+            let mut selected = serial;
             loop {
-                let sampled = sh.sample(Instant::now(), || {
-                    // Construction and size() can query a device (HDC size even takes a
-                    // screenshot). Both therefore belong inside the subscription gate.
-                    let phone =
-                        phone.get_or_insert_with(|| Device::new(serial.clone(), tmp.clone()));
-                    if sh.dev_w.load(Ordering::Relaxed) == 0 {
-                        let (dw, dh) = phone.size();
-                        sh.dev_w.store(dw.max(1) as u64, Ordering::Relaxed);
-                        sh.dev_h.store(dh.max(1) as u64, Ordering::Relaxed);
-                        if let Some(feed) = &sh.feed {
-                            feed.dev_w.store(dw.max(1) as u64, Ordering::Relaxed);
-                            feed.dev_h.store(dh.max(1) as u64, Ordering::Relaxed);
-                        }
-                    }
-                    phone.screen(&path).ok_or_else(|| {
-                        "取帧失败: 设备可能离线、被别的进程占着, 或 adb 不在 PATH".to_string()
-                    })?;
-                    std::fs::read(&path).map_err(|e| format!("读取截图失败: {e}"))
-                });
+                let sampled = sh.sample(Instant::now(), || capture_sample(&sh, &tmp, &mut selected));
                 std::thread::sleep(Duration::from_millis(if sampled {
                     sh.interval_ms
                 } else {
@@ -401,7 +478,7 @@ pub fn run_screen(args: &[String]) -> i32 {
         }
     );
     println!(
-        "  ⚠ 只读, 不拿设备锁; 但每秒一次 screencap 会影响帧时与功耗 —— 做判定性测量时别开着它。"
+        "  每帧持有观察租约，测量占用时暂缓；帧间释放。截图超时保留恢复屏障。"
     );
     println!("  Ctrl-C 退出。");
 
@@ -552,6 +629,7 @@ fn handle(mut c: TcpStream, sh: &Shared, shots: &str) -> std::io::Result<()> {
             let active = sh.viewers.lock().unwrap().active(Instant::now());
             let frame = sh.frame.lock().unwrap();
             let age_ms = frame.as_ref().map(|f| f.at.elapsed().as_millis());
+            let capture = sh.capture.lock().unwrap().clone();
             let body = json!({
                 "serial": sh.serial.lock().unwrap().clone(),
                 "width": sh.dev_w.load(Ordering::Relaxed),
@@ -564,7 +642,8 @@ fn handle(mut c: TcpStream, sh: &Shared, shots: &str) -> std::io::Result<()> {
                 "last_frame_ms": frame.as_ref().map(|f| f.at_ms),
                 "frame_age_ms": age_ms,
                 "frame_fresh": age_ms.is_some_and(|age| age < sh.fresh_for().as_millis()),
-                "error": sh.error.lock().unwrap().clone(),
+                "error": if capture.state == "error" { capture.reason.clone() } else { None },
+                "capture": capture,
             });
             drop(frame);
             respond(&mut c, 200, "application/json", body.to_string().as_bytes())
@@ -667,7 +746,7 @@ mod tests {
             dev_w: AtomicU64::new(0),
             dev_h: AtomicU64::new(0),
             serial: Mutex::new("fake-device".into()),
-            error: Mutex::new(None),
+            capture: Mutex::new(CaptureState::new("idle")),
             interval_ms: DEFAULT_INTERVAL_MS,
             feed: None,
         }
@@ -815,6 +894,29 @@ mod tests {
         assert!(request(sh.clone(), "GET", "/frame.jpg", None).starts_with("HTTP/1.1 503"));
         let state = response_json(&request(sh, "GET", "/state.json", None));
         assert_eq!(state["frame_fresh"], false);
+    }
+
+    #[test]
+    fn lease_deferral_and_capture_failure_keep_the_last_frame_and_its_age() {
+        let sh = Arc::new(shared());
+        let now = Instant::now();
+        let viewer = sh.viewers.lock().unwrap().start(now).unwrap();
+        sample_count(&sh, now, &mut 0);
+        let captured_at = sh.frame.lock().unwrap().as_ref().unwrap().at_ms;
+        for state in ["deferred", "error"] {
+            assert!(sh.sample(now, || Err(crate::observation::Failure {
+                state, reason: "fixture reason".into(),
+            })));
+            let response = response_json(&request(sh.clone(), "GET", "/state.json", None));
+            assert_eq!(response["capture"]["state"], state);
+            assert_eq!(response["capture"]["reason"], "fixture reason");
+            assert_eq!(response["error"].is_string(), state == "error");
+            assert_eq!(response["frames"], 1);
+            assert_eq!(response["last_frame_ms"], captured_at);
+        }
+        sh.viewers.lock().unwrap().stop(viewer);
+        assert!(!sh.sample(now, || panic!("no viewer must not acquire ownership")));
+        assert_eq!(response_json(&request(sh, "GET", "/state.json", None))["capture"]["state"], "idle");
     }
 
     #[test]

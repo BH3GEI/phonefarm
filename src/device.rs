@@ -8,6 +8,16 @@ use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+// The observation supervisor owns the process group and keeps its recovery
+// barrier when a transport's completion cannot be established. Never let the
+// worker turn a timed-out transport into an apparently completed empty result.
+fn observation_transport_uncertain(reason: &str) {
+    if crate::observation::in_worker() {
+        eprintln!("observation transport completion unknown: {reason}");
+        std::process::exit(90);
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Node {
     pub t: String,
@@ -249,7 +259,9 @@ impl Adb {
         if let Some(s) = &self.serial {
             cmd.arg("-s").arg(s);
         }
-        cmd.args(args).output().map(|o| o.stdout).unwrap_or_default()
+        cmd.args(args).output().map(|o| {
+            if crate::observation::in_worker() && !o.status.success() { vec![] } else { o.stdout }
+        }).unwrap_or_default()
     }
 
     /// 限时执行(uiautomator 偶发卡死 2~11s, 超时即杀); stdout 走临时文件避免管道阻塞
@@ -269,13 +281,17 @@ impl Adb {
                 Ok(Some(_)) => return std::fs::read(&outfile).unwrap_or_default(),
                 Ok(None) => {
                     if t0.elapsed() > Duration::from_millis(ms) {
+                        observation_transport_uncertain("adb deadline exceeded");
                         let _ = child.kill();
                         let _ = child.wait();
                         return vec![];
                     }
                     sleep(Duration::from_millis(50));
                 }
-                Err(_) => return vec![],
+                Err(_) => {
+                    observation_transport_uncertain("adb child wait failed");
+                    return vec![];
+                }
             }
         }
     }
@@ -783,24 +799,30 @@ impl Hdc {
     /// 限时执行(hdc 同样会卡死): 与 Adb::run_timeout 同构,但输出文件带 tag——
     /// capture 里 els_full 与 quick_thumb 在两个线程并行,共用一个文件会互相截胡
     fn run_timeout(&self, args: &[&str], ms: u64, tag: &str) -> Vec<u8> {
+        self.run_timeout_status(args, ms, tag).map(|(_, bytes)| bytes).unwrap_or_default()
+    }
+
+    fn run_timeout_status(&self, args: &[&str], ms: u64, tag: &str) -> Option<(std::process::ExitStatus, Vec<u8>)> {
         let outfile = format!("{}/_hdc_{tag}.out", self.tmp);
-        let Ok(f) = std::fs::File::create(&outfile) else { return vec![] };
-        let Ok(mut child) = self.base().args(args).stdout(f).stderr(Stdio::null()).spawn() else {
-            return vec![];
-        };
+        let f = std::fs::File::create(&outfile).ok()?;
+        let mut child = self.base().args(args).stdout(f).stderr(Stdio::null()).spawn().ok()?;
         let t0 = Instant::now();
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return std::fs::read(&outfile).unwrap_or_default(),
+                Ok(Some(status)) => return Some((status, std::fs::read(&outfile).unwrap_or_default())),
                 Ok(None) => {
                     if t0.elapsed() > Duration::from_millis(ms) {
+                        observation_transport_uncertain("hdc deadline exceeded");
                         let _ = child.kill();
                         let _ = child.wait();
-                        return vec![];
+                        return None;
                     }
                     sleep(Duration::from_millis(50));
                 }
-                Err(_) => return vec![],
+                Err(_) => {
+                    observation_transport_uncertain("hdc child wait failed");
+                    return None;
+                }
             }
         }
     }
@@ -907,9 +929,19 @@ impl Hdc {
 
     /// 截屏到本地(整幅 jpeg): snapshot_display 强制 .jpeg 后缀(实测),再 file recv
     fn shot(&self, local: &str, tag: &str) -> bool {
-        const REMOTE: &str = "/data/local/tmp/pf_shot.jpeg";
-        self.run_timeout(&["shell", "snapshot_display", "-f", REMOTE], 8000, tag);
-        self.recv(REMOTE, local, 8000, tag)
+        let remote = format!("/data/local/tmp/pf_shot-{}-{}.jpeg", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_nanos());
+        let captured = self.run_timeout_status(&["shell", "snapshot_display", "-f", &remote], 8000, tag)
+            .is_some_and(|(status, _)| status.success());
+        let received = if captured {
+            let _ = std::fs::remove_file(local);
+            self.run_timeout_status(&["file", "recv", &remote, local], 8000, tag)
+                .is_some_and(|(status, _)| status.success()) && std::path::Path::new(local).is_file()
+        } else { false };
+        // Only this invocation's remote file is eligible for cleanup or download.
+        self.run_timeout(&["shell", "rm", "-f", &remote], 3000, tag);
+        received
     }
 
     /// 截屏并压成 672 宽 jpg 写到 out_jpg; 返回 (宽, 高)——与 Adb::screen 同契约

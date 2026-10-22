@@ -93,6 +93,7 @@
       <div class="row"><span>预览</span><span id="fps">—</span></div>
       <div class="row"><span>最后画面</span><span id="age">尚未收到</span></div>
       <div class="row"><span>正在观看</span><span id="viewers">—</span></div>
+      <div class="note" id="capture-reason" role="status"></div>
     </div>
 
     <div class="panel">
@@ -104,8 +105,8 @@
       <div class="note">
         观战窗口，只读。暂停、隐藏或关闭本窗口后停止订阅；其他窗口仍可观看。
         连接丢失后订阅在 5 秒内过期，已开始的截图可能随后完成。<br>
-        <strong>screencap 会影响帧时与功耗，测量期间请关闭全部观战窗口。</strong>
-        当前尚未与测量租约自动互斥。
+        <strong>screencap 会影响帧时与功耗；每帧取得观察租约，测量占用时自动暂缓。</strong>
+        帧间释放租约，单帧最多 20 秒；截图超时会保留恢复屏障。旧图保留并显示时间。
       </div>
     </div>
 
@@ -127,12 +128,26 @@ let maintenanceInFlight = false, frameRequest = null;
 let afterSeq = 0, lastFrameSeq = 0, lastFrameAt = 0, lastFrameAge = 0;
 let frameCount = 0, fpsAt = Date.now(), lastEventSeq = 0;
 let frameW = 0, frameH = 0;
+let captureInfo = { state: "idle", reason: null, frames: 0 };
 const wantsFrames = () => !paused && !pageClosed && document.visibilityState !== "hidden";
 
 function setStatus(text, cls) {
   const dot = document.createElement("i");
   dot.className = `dot ${cls || ""}`;
   $("status").replaceChildren(dot, document.createTextNode(text));
+}
+
+function captureStatus(fallback, cls) {
+  if (!wantsFrames()) return;
+  if (captureInfo.state === "deferred" || captureInfo.state === "error") {
+    screenEl.classList.add("stale");
+    setStatus(captureInfo.state === "deferred" ? "租约暂缓" : "采集失败",
+              captureInfo.state === "deferred" ? "paused" : "off");
+    $("capture-reason").textContent = captureInfo.reason || "等待采集状态更新";
+    return;
+  }
+  $("capture-reason").textContent = "";
+  if (fallback) setStatus(fallback, cls);
 }
 
 function release(id) {
@@ -180,7 +195,7 @@ async function maintainSubscription() {
       lastFrameSeq = afterSeq;
       frameCount = 0; fpsAt = Date.now();
       screenEl.classList.add("stale");
-      setStatus("等待新画面", "paused");
+      captureStatus("等待新画面", "paused");
       tick();
     }
   } catch (e) {
@@ -225,12 +240,13 @@ async function tick() {
       $("fps").textContent = (frameCount / ((Date.now() - fpsAt) / 1000)).toFixed(1) + " fps";
       frameCount = 0; fpsAt = Date.now();
     }
+    if (seq > captureInfo.frames) captureInfo = { state: "ready", reason: null, frames: seq };
     screenEl.classList.remove("stale");
-    setStatus("观看中", "");
+    captureStatus("观看中", "");
   } catch (e) {
     if (revision === generation && wantsFrames()) {
       screenEl.classList.add("stale");
-      setStatus("等待新画面", "off");
+      captureStatus("等待新画面", "off");
     }
   } finally {
     if (url) URL.revokeObjectURL(url);
@@ -245,7 +261,7 @@ function freshness() {
   $("age").textContent = (age / 1000).toFixed(1) + " 秒前";
   if (age >= CFG.fresh_for_ms) {
     screenEl.classList.add("stale");
-    if (wantsFrames()) setStatus("画面已过期，等待更新", "off");
+    if (wantsFrames()) captureStatus("画面已过期，等待更新", "off");
   }
 }
 
@@ -255,7 +271,11 @@ async function state() {
     $("serial").textContent = s.serial || "—";
     $("res").textContent = s.width ? `${s.width}×${s.height}` : "—";
     $("viewers").textContent = `${s.active_viewers} 个窗口`;
-    if (s.error && wantsFrames()) setStatus("采集失败", "off");
+    // A delayed state response must not overwrite a newer frame's state.
+    if (Number(s.frames) >= lastFrameSeq) {
+      captureInfo = { ...(s.capture || { state: s.error ? "error" : "idle", reason: s.error }), frames: Number(s.frames) };
+      captureStatus();
+    }
   } catch (e) {}
 }
 
