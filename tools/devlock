@@ -6,18 +6,77 @@
 #   devlock release <label>
 #   devlock run <label> -- <cmd…>  拿锁→后台每60秒续期→跑命令→释放; 没拿到返回1
 #   devlock queue <l1> <l2> …      lead 预排队列(覆盖); 不带参数则清空
-# 队列非空时只有队首能拿锁。心跳超过 STALE 秒(默认600)视为废弃可接管; 队首超过 STALE 秒没来重试会被跳过。
+# 队列非空时只有队首能拿锁。普通旧锁心跳超过 STALE 秒(默认600)可接管; 强 lease/恢复记录必须显式核查。
 # 文件格式与 phonefarm/src/fleet.rs 只读的三个文件一致: devlock.d/owner, devlock.queue, devlock.log。
 # run 会把 DEVLOCK_LABEL=<label> 传给命令: 里面再调 phonefarm / game_opt_loop 时它们认得这把锁是自己这一侧的,
 # 不会再去排一次队 (否则自己等自己)。phonefarm 与 game_opt_loop 碰设备的入口会自己拿锁, 一般不必再包 run。
 B=${DEVLOCK_DIR:-/private/tmp/claude-501}; mkdir -p $B
 D=$B/devlock.d; LOG=$B/devlock.log; Q=$B/devlock.queue; SEEN=$B/devlock.seen; M=$B/devlock.qmutex
+N=$B/phonefarm-lease.d
 STALE=${DEVLOCK_STALE:-600}
 now(){ date +%s; }
 ts(){ date '+%F %T'; }
 age(){ echo $(( $(now) - $(stat -f %m "$D/owner") )); }
 owner(){ cat "$D/owner" 2>/dev/null; }
 mine(){ [[ "$(owner)" == "$1 "* ]]; }
+strong(){ [[ -e "$D/phonefarm-lease.json" || -L "$D/phonefarm-lease.json" || "$(owner)" == *token=* ]]; }
+nested(){ [[ -e "$N" || -L "$N" ]]; }
+barrier(){ strong || nested; }
+# Only renew the ordinary outer owner, never its nested marker. The live bridge
+# plus a matching lease owner in this process tree permits parent heartbeats and
+# nested commands; an unrelated caller cannot bypass recovery using the label.
+nested_renewable(){
+  python3 - "$N" "$B/phonefarm-bridge.lock" "$1" <<'PY'
+import fcntl, json, os, pathlib, subprocess, sys, time
+try:
+    directory, bridge, caller = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), int(sys.argv[3])
+    marker, owner = directory / "phonefarm-lease.json", directory / "owner"
+    if any(p.is_symlink() for p in (directory, marker, owner, bridge)):
+        sys.exit(1)
+    m = json.loads(marker.read_text())
+    pid = m["pid"]
+    if (type(m["format"]) is not int or m["format"] != 1 or m["producer"] != "phonefarm" or type(pid) is not int or pid <= 1
+            or not isinstance(m["token"], str) or not m["token"]
+            or m["owner"] != owner.read_text() or f'token={m["token"]}' not in m["owner"]
+            or not 0 <= time.time() - owner.stat().st_mtime <= 10):
+        sys.exit(1)
+    with bridge.open("rb") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            sys.exit(1)  # No current lease owns the bridge; a live PID alone is not enough.
+    def ancestor(parent, child):
+        for _ in range(128):
+            if child <= 1:
+                return False
+            if parent == child:
+                return True
+            child = int(subprocess.check_output(["ps", "-p", str(child), "-o", "ppid="], text=True))
+        return False
+    sys.exit(0 if ancestor(pid, caller) or ancestor(caller, pid) else 1)
+except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+    sys.exit(1)
+PY
+}
+renew(){
+  mine "$1" || { echo "not owner: $(owner)"; return 1; }
+  strong && { echo "lease protected: legacy renew cannot renew a strong owner"; return 1; }
+  if nested && ! nested_renewable "$2"; then
+    echo "lease protected: nested owner is not verifiably active in this process tree"; return 1
+  fi
+  touch "$D/owner"
+}
+release(){
+  mine "$1" || { echo "not owner: $(owner)"; return 1; }
+  strong && { echo "lease protected: legacy release cannot clear a strong owner"; return 1; }
+  # Leave nested restoration records for native reconciliation. Never recursively
+  # delete this directory either: unexpected files are not ours to clean up.
+  rm "$D/owner" || return 1
+  rmdir "$D" || return 1
+  echo "$(ts) release $1" >> $LOG
+}
 qlock(){ local i=0; until mkdir $M 2>/dev/null; do (( ++i > 100 )) && { rm -rf $M; }; sleep 0.1; done; }
 qunlock(){ rm -rf $M; }
 qhead(){ [[ -s $Q ]] && grep -v '^[[:space:]]*$' $Q | head -1; }
@@ -26,19 +85,23 @@ qappend(){ qhas $1 || echo $1 >> $Q; }
 qdrop(){ [[ -f $Q ]] && { grep -vx -- "$1" $Q > $Q.tmp; mv $Q.tmp $Q; }; }
 seen(){ grep -v "^$1 " $SEEN 2>/dev/null > $SEEN.tmp; echo "$1 $(now)" >> $SEEN.tmp; mv $SEEN.tmp $SEEN; }
 seen_age(){ local t=$(grep "^$1 " $SEEN 2>/dev/null | tail -1 | cut -d' ' -f2); [[ -n $t ]] && echo $(( $(now) - t )) || echo 0; }
-take(){ echo "$1 since $(ts)" > "$D/owner"; echo "$(ts) acquire $1" >> $LOG; qdrop $1; }
+take(){
+  barrier && { qappend "$1"; echo "lease protected: strong/nested records require explicit reconciliation"; return 1; }
+  echo "$1 since $(ts)" > "$D/owner"; echo "$(ts) acquire $1" >> $LOG; qdrop $1; return 0
+}
 acquire(){
-  local L=$1 h a
+  local L=$1 h a rc
   qlock; seen $L
+  if barrier; then qappend $L; qunlock; echo "lease protected: strong/nested records require explicit reconciliation"; return 1; fi
   h=$(qhead)
   while [[ -n $h && $h != $L ]] && (( $(seen_age $h) > STALE )); do
     echo "$(ts) skip $h (queue head idle $(seen_age $h)s)" >> $LOG; qdrop $h; h=$(qhead)
   done
   if [[ -n $h && $h != $L ]]; then qappend $L; qunlock; echo "not your turn (已自动排进队尾): head=$h"; return 1; fi
-  if mkdir "$D" 2>/dev/null; then take $L; qunlock; return 0; fi
-  [[ -f "$D/owner" ]] || { sleep 1; [[ -f "$D/owner" ]] || { take $L; qunlock; return 0; }; }
+  if mkdir "$D" 2>/dev/null; then take $L; rc=$?; qunlock; return $rc; fi
+  [[ -f "$D/owner" ]] || { sleep 1; [[ -f "$D/owner" ]] || { take $L; rc=$?; qunlock; return $rc; }; }
   a=$(age)
-  if (( a > STALE )); then echo "$(ts) steal by $L from [$(owner)] idle ${a}s" >> $LOG; take $L; qunlock; return 0; fi
+  if (( a > STALE )); then echo "$(ts) steal by $L from [$(owner)] idle ${a}s" >> $LOG; take $L; rc=$?; qunlock; return $rc; fi
   qappend $L; qunlock
   echo "busy: $(owner) (heartbeat ${a}s ago); queued as $L"; return 1
 }
@@ -47,11 +110,11 @@ case $1 in
     [[ -d $D ]] && echo "held: $(owner) (heartbeat $(age)s ago)" || echo free
     [[ -s $Q ]] && echo "queue: $(grep -v '^[[:space:]]*$' $Q | tr '\n' ' ')"; true ;;
   acquire) acquire $2 ;;
-  renew) mine $2 && touch "$D/owner" || { echo "not owner: $(owner)"; exit 1; } ;;
-  release) mine $2 && { rm -rf $D; echo "$(ts) release $2" >> $LOG; } || { echo "not owner: $(owner)"; exit 1; } ;;
+  renew) renew "$2" "$PPID" ;;
+  release) release "$2" ;;
   queue) shift; qlock; : > $Q; for l in "$@"; do echo $l >> $Q; seen $l; done; qunlock; echo "$(ts) queue set: $*" >> $LOG ;;
   run) L=$2; shift 3; acquire $L || exit 1
-       ( while mine $L; do touch "$D/owner"; sleep 60; done ) & HB=$!
-       DEVLOCK_LABEL=$L "$@"; rc=$?; kill $HB 2>/dev/null; mine $L && { rm -rf $D; echo "$(ts) release $L" >> $LOG; }; exit $rc ;;
+       ( while renew "$L" "$$"; do sleep 60; done ) & HB=$!
+       DEVLOCK_LABEL=$L "$@"; rc=$?; kill $HB 2>/dev/null; release "$L"; exit $rc ;;
   *) sed -n 2,10p $0 ;;
 esac
