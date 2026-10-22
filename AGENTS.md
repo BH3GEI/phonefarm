@@ -173,9 +173,14 @@ Web/CLI共读持久manifest；采集完成不代表同场景或画质通过。
 REF_ARM=1参考客户端也只连接显式既有passdump会话，按profile和供电期望执行capture/sample/marker。
 默认保留40秒有限输入与30秒采样，WL/CAPDUR可给默认值，LEAD仅支持现有owner固定的6秒；
 不安装/重启/停止会话、不推断世界场景或极高精度。完整重复返回旧结果，partial不自动重采。
-网页可手动调用三动作，整组profile/epoch/label校验仍待CTRL-06；合同见
+网页已补整组profile/epoch/label校验及同组回执查询，隐藏或离开页面停止后续提交；合同见
 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-REFERENCE-CLIENT.md。
-旧四臂refbench与gray-layer挂层入口迁移仍待完成；合同见
+四臂refbench已完成源码与宿主替身验收，`gray-layer refbench-loadop --serial S --out DIR` 使用一个Session，
+A/B确实未安装层，C/D才安装改写；所有extras为字符串，八份原件与started事实保留。
+自然退出、应用自报、改写预期及资源恢复分开；D的创建期effective可以非空，实际begins必须为0。
+不测FPS/功耗；恢复入口`gray-layer refbench-recover --session DIR --serial S --json`仅接续原上下文。
+实现合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-REFBENCH-SESSION.md。
+旧gray-layer挂层入口迁移仍待完成；合同见
 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
 
 **Compute Shader 算子标尺**（零 Token，需 root）

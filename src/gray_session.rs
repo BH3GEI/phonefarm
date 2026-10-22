@@ -20,6 +20,29 @@ const SCRIPT_OWNER: &str = "gray_eval_script";
 const LOADOP_OWNER: &str = "gray_ab_loadop";
 const CONTROL_OWNER: &str = "gray_layer_control";
 const CONTROL_SCOPE: &str = "gray_layer_control_owned_installation_properties_target_stopped";
+const REFBENCH_OWNER: &str = "gray_refbench_loadop";
+const REFBENCH_PACKAGE: &str = "io.github.hgamey.refbench";
+const REFBENCH_SCOPE: &str = "gray_refbench_loadop_owned_installation_properties_outputs_target_stopped";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefbenchArm { BaselineOff, BaselineOn, RewriteOff, RewriteOn }
+impl RefbenchArm {
+    pub const ALL: [Self; 4] = [Self::BaselineOff, Self::BaselineOn, Self::RewriteOff, Self::RewriteOn];
+    pub fn label(self) -> &'static str { match self {
+        Self::BaselineOff => "A_noloayer_off", Self::BaselineOn => "B_nolayer_on",
+        Self::RewriteOff => "C_rewrite_off", Self::RewriteOn => "D_rewrite_on",
+    }}
+    pub fn knob(self) -> &'static str { if matches!(self, Self::BaselineOn | Self::RewriteOn) { "on" } else { "off" } }
+    pub fn layered(self) -> bool { matches!(self, Self::RewriteOff | Self::RewriteOn) }
+    fn index(self) -> u64 { Self::ALL.iter().position(|arm| *arm == self).unwrap() as u64 }
+}
+
+pub(crate) struct RefbenchOutput { pub bytes: Vec<u8>, pub source_path: String }
+pub(crate) struct RefbenchOutputs {
+    pub refbench: Option<RefbenchOutput>,
+    pub layer: Option<RefbenchOutput>,
+    pub started: Option<RefbenchOutput>,
+}
 const CAP: u64 = 8 * 1024 * 1024;
 
 pub(crate) struct Session {
@@ -47,6 +70,10 @@ impl Session {
 
     pub fn new_loadop(lease: Lease, out: &Path, pkg: &str, origin: &str) -> Result<Self,String> {
         Self::new_owned(lease,out,pkg,origin,LOADOP_OWNER,None)
+    }
+
+    pub fn new_refbench_loadop(lease: Lease, out: &Path, origin: &str) -> Result<Self, String> {
+        Self::new_owned(lease, out, REFBENCH_PACKAGE, origin, REFBENCH_OWNER, None)
     }
 
     pub fn new_control(lease: Lease, out: &Path, pkg: &str, origin: &str) -> Result<Self, String> {
@@ -97,6 +124,10 @@ impl Session {
     }
 
     pub fn resume_loadop(dir:&Path,serial:&str)->Result<Self,String> {Self::resume_owned(dir,serial,LOADOP_OWNER)}
+
+    pub fn resume_refbench_loadop(dir: &Path, serial: &str) -> Result<Self, String> {
+        Self::resume_owned(dir, serial, REFBENCH_OWNER)
+    }
 
     pub fn resume_control(dir: &Path, serial: &str) -> Result<Self, String> {
         Self::resume_owned(dir, serial, CONTROL_OWNER)
@@ -397,6 +428,27 @@ impl Session {
         if !metadata.is_file() || metadata.len() == 0 { return Err("layer SO must be a nonempty regular file".into()); }
         let extras = intent_extras(extras.unwrap_or(""))?;
         let component = self.launch_component()?;
+        self.activate_outputs()?;
+        self.install_owned_layer(&local)?;
+        for (index, property) in LAYER_PROPERTIES.into_iter().enumerate().filter(|(_, p)| *p != "debug.vulkan.layers") {
+            let value = if let Some(values) = &control { values[index] } else { match property {
+                "debug.knobs.passdump" if completion_owner(&self.state.borrow())? != LOADOP_OWNER => "1",
+                "debug.knobs.frameaudit" if frameaudit => "1",
+                "debug.knobs.frameaudit_ts" if ts => "1",
+                graylayer::STOREOP_PROP => storeop.unwrap_or("0"),
+                graylayer::STOREOP_LIVE_PROP if storeop.is_some() => "1",
+                _ => "0",
+            }};
+            self.set_property(property, value)?;
+        }
+        self.set_property("debug.vulkan.layers", LAYER_NAME)?;
+        self.launch_target(&component, &extras)
+    }
+
+    // Activation owns the target/output obligations even before a layer exists.
+    fn activate_outputs(&self) -> Result<(), String> {
+        self.ready()?;
+        if self.state.borrow()["stage"] != "prepared" { return Err("gray outputs must be prepared before activation".into()); }
         self.hold()?;
         self.state.borrow_mut()["stage"] = json!("active");
         if let Err(error) = self.save() { return self.stop(format!("active intent persistence failed: {error}")); }
@@ -420,6 +472,17 @@ impl Session {
                 if let Err(error) = self.save() { return self.stop(format!("output ownership persistence failed: {error}")); }
             }
         }
+        Ok(())
+    }
+
+    fn install_owned_layer(&self, local: &Path) -> Result<(), String> {
+        self.ready()?;
+        let state = self.state.borrow();
+        if state["stage"] != "active" || ["installation_owned", "state_owned", "staging_created"].iter().any(|key| state[*key] != false)
+            || state["files"].as_array().is_none_or(|files| files.iter().any(|f| f["acquired"] != true || f["restored"] == true)) {
+            return Err("layer installation requires active outputs and no existing owned installation".into());
+        }
+        drop(state);
         let remote = self.remote();
         // adb push runs as shell; a root-owned 0755 directory would reject it.
         self.write_update("create_staging", &["shell".into(), format!("mkdir -- {}", q(&remote))], |s| s["staging_created"] = json!(true))?;
@@ -440,19 +503,7 @@ impl Session {
         if self.root_read("registration_readback", &format!("cat {}", q(STATE)))?.trim_end_matches('\n') != registration {
             return self.stop("layer registration readback differs".into());
         }
-        for (index, property) in LAYER_PROPERTIES.into_iter().enumerate().filter(|(_, p)| *p != "debug.vulkan.layers") {
-            let value = if let Some(values) = &control { values[index] } else { match property {
-                "debug.knobs.passdump" if completion_owner(&self.state.borrow())? != LOADOP_OWNER => "1",
-                "debug.knobs.frameaudit" if frameaudit => "1",
-                "debug.knobs.frameaudit_ts" if ts => "1",
-                graylayer::STOREOP_PROP => storeop.unwrap_or("0"),
-                graylayer::STOREOP_LIVE_PROP if storeop.is_some() => "1",
-                _ => "0",
-            }};
-            self.set_property(property, value)?;
-        }
-        self.set_property("debug.vulkan.layers", LAYER_NAME)?;
-        self.launch_target(&component, &extras)
+        Ok(())
     }
 
     fn launch_component(&self) -> Result<String, String> {
@@ -481,6 +532,94 @@ impl Session {
         require_owner(&self.state.borrow(),LOADOP_OWNER)?;
         self.restart_mode(label,Some("0"),rewrite,"")
     }
+
+    pub fn start_refbench_arm(&self, arm: RefbenchArm, frames: u32, intensity: u32, so: Option<&str>) -> Result<(), String> {
+        require_owner(&self.state.borrow(), REFBENCH_OWNER)?;
+        refbench_next_arm(&self.state.borrow(), arm)?;
+        self.ready()?;
+        if !(60..=100000).contains(&frames) || !(1..=64).contains(&intensity) {
+            return Err("refbench frames must be 60..100000 and intensity 1..64".into());
+        }
+        let extras = intent_extras(&format!("--es scene bw_pingpong --es run_id {} --es frames {frames} --es intensity {intensity} --es knob.loadop {}", arm.label(), arm.knob()))?;
+        let local = if arm == RefbenchArm::RewriteOff {
+            let path = so.map(str::to_owned).unwrap_or_else(graylayer::layer_so_path);
+            let path = crate::eval::resolve_path(&path).ok_or("layer SO not found")?;
+            let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
+            if !metadata.is_file() || metadata.len() == 0 { return Err("layer SO must be a nonempty regular file".into()); }
+            Some(path)
+        } else { None };
+        let state = self.state.borrow().clone();
+        let native = state["native_dir"].as_str().ok_or("refbench is not prepared")?;
+        if self.read("refbench_boot", "cat /proc/sys/kernel/random/boot_id")?.trim() != state["boot_id"].as_str().unwrap_or("") {
+            return self.stop("device boot changed before refbench arm".into());
+        }
+        if self.native_dir()? != native { return self.stop("target installation changed before refbench arm".into()); }
+        if arm == RefbenchArm::RewriteOn {
+            if state["installation_owned"] != true || state["state_owned"] != true {
+                return Err("last refbench arm requires the original owned installation".into());
+            }
+            self.check_registration()?;
+            self.expect_presence(&format!("{native}/{SO}"), true)?;
+            if self.property("debug.vulkan.layers")? != "" { return self.stop("previous refbench layer has not been narrowed".into()); }
+        } else {
+            // A/B are genuinely uninstalled; C proves the same condition before
+            // its first install. Merely turning loadop off is not this baseline.
+            if state["installation_owned"] != false || state["state_owned"] != false || state["staging_created"] != false {
+                return Err("unlayered refbench arm already owns an installation".into());
+            }
+            self.expect_presence(&format!("{native}/{SO}"), false)?;
+            self.expect_presence(STATE, false)?;
+            if self.property("debug.vulkan.layers")? != "" { return self.stop("refbench unlayered condition is not clear".into()); }
+        }
+        let component = self.launch_component()?;
+        if arm == RefbenchArm::BaselineOff {
+            self.activate_outputs()?;
+        } else {
+            if self.target_alive()? { return Err("previous refbench target has not exited; no next arm launched".into()); }
+            self.stop_target()?;
+            self.clear_round_outputs()?;
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            for file in state["files"].as_array_mut().unwrap() { file["archive"] = Value::Null; }
+            state["generation"] = json!(arm.index());
+            state["round_label"] = json!(arm.label());
+        }
+        if let Err(error) = self.save() { return self.stop(format!("refbench arm intent persistence failed: {error}")); }
+        journal(&self.dir, json!({"event":"refbench_arm","label":arm.label(),"layered":arm.layered(),
+            "frames":frames,"intensity":intensity,"knob_loadop":arm.knob(),"extras":extras}))?;
+        if let Some(local) = local { self.install_owned_layer(&local)?; }
+        if arm.layered() {
+            for (property, value) in LAYER_PROPERTIES.into_iter().zip(control_properties("loadop")?) {
+                if property != "debug.vulkan.layers" { self.set_property(property, value)?; }
+            }
+            self.set_property("debug.vulkan.layers", LAYER_NAME)?;
+        }
+        self.launch_target(&component, &extras)
+    }
+
+    pub fn refbench_outputs(&self) -> Result<RefbenchOutputs, String> {
+        require_owner(&self.state.borrow(), REFBENCH_OWNER)?;
+        self.ready()?;
+        if self.state.borrow()["stage"] != "active" || self.state.borrow()["round_label"].is_null() {
+            return Err("refbench outputs require a started arm".into());
+        }
+        Ok(RefbenchOutputs {
+            refbench: self.refbench_raw([launch_marker_path(REFBENCH_PACKAGE, "refbench_out.json")])?,
+            layer: self.refbench_raw(output_paths(REFBENCH_PACKAGE).into_iter().filter(|p| p.contains("knobs_layer_out")))?,
+            started: self.refbench_raw([launch_marker_path(REFBENCH_PACKAGE, "refbench_started")])?,
+        })
+    }
+
+    fn refbench_raw(&self, paths: impl IntoIterator<Item=String>) -> Result<Option<RefbenchOutput>, String> {
+        for path in paths {
+            if !self.present(&path)? { continue; }
+            let output = self.command("refbench_output", &["shell".into(), format!("su -c {}", q(&format!("cat {}", q(&path))))], 30_000)?;
+            return Ok(Some(RefbenchOutput { bytes: bounded(&output.stdout_path, CAP)?, source_path: path }));
+        }
+        Ok(None)
+    }
+
     fn restart_mode(&self, label: &str, rule: Option<&str>, loadop: bool, extras: &str) -> Result<(), String> {
         self.eval_ready()?;
         if !valid_label(label) { return Err("invalid eval round label".into()); }
@@ -504,16 +643,7 @@ impl Session {
         let component = self.launch_component()?;
         self.stop_target()?;
         self.narrow()?;
-        let files = self.state.borrow()["files"].as_array().unwrap().clone();
-        for (index, file) in files.iter().enumerate() {
-            let path = file["path"].as_str().unwrap();
-            self.expect_presence(file["backup"].as_str().unwrap(), file["original_present"] == true)?;
-            if self.present(path)? {
-                self.archive(index, path)?;
-                self.root_update("clear_round_output", &format!("rm -f -- {}", q(path)), |s| s["files"][index]["archive"] = Value::Null)?;
-                self.expect_presence(path, false)?;
-            }
-        }
+        self.clear_round_outputs()?;
         {
             let mut state = self.state.borrow_mut();
             for file in state["files"].as_array_mut().unwrap() { file["archive"] = Value::Null; }
@@ -533,6 +663,20 @@ impl Session {
         }
         self.set_property("debug.vulkan.layers", if rule.is_some() { LAYER_NAME } else { "" })?;
         self.launch_target(&component, &extras)
+    }
+
+    fn clear_round_outputs(&self) -> Result<(), String> {
+        let files = self.state.borrow()["files"].as_array().unwrap().clone();
+        for (index, file) in files.iter().enumerate() {
+            let path = file["path"].as_str().unwrap();
+            self.expect_presence(file["backup"].as_str().unwrap(), file["original_present"] == true)?;
+            if self.present(path)? {
+                self.archive(index, path)?;
+                self.root_update("clear_round_output", &format!("rm -f -- {}", q(path)), |s| s["files"][index]["archive"] = Value::Null)?;
+                self.expect_presence(path, false)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn narrow(&self) -> Result<(), String> { self.set_property("debug.vulkan.layers", "") }
@@ -622,6 +766,10 @@ impl Session {
         if self.state.borrow()["boot_id"].as_str() != Some(boot.trim()) { return self.stop("device boot changed; original values cannot be applied automatically".into()); }
         let expected_native = self.state.borrow()["native_dir"].as_str().ok_or("missing native directory")?.to_owned();
         if expected_native != self.native_dir()? { return self.stop("target installation directory changed; recovery refused".into()); }
+        let uninstalled_refbench = completion_owner(&self.state.borrow())? == REFBENCH_OWNER && self.state.borrow()["installation_owned"] == false;
+        if uninstalled_refbench {
+            self.expect_presence(&format!("{expected_native}/{SO}"), false)?;
+        }
         let state_owned = self.state.borrow()["state_owned"] == true;
         if self.present(STATE)? {
             if !state_owned { return self.stop("unowned layer registration appeared; recovery refused".into()); }
@@ -660,7 +808,7 @@ impl Session {
         let originals = self.state.borrow()["properties"].clone();
         for property in LAYER_PROPERTIES { self.set_property(property, originals[property].as_str().ok_or("missing original property")?)?; }
         if !local_errors.is_empty() { return Err(local_errors.join("; ")); }
-        let scope = if completion_owner(&self.state.borrow())? == CONTROL_OWNER { CONTROL_SCOPE } else { SCOPE };
+        let (_, scope) = local_recovery_contract(completion_owner(&self.state.borrow())?);
         Ok(json!({"scope":scope,"target_stopped":true,
             "app_check":"force-stop succeeded; exact package/package:child names absent from ps NAME",
             "property_values_restored":true,"owned_installation_absent":true,
@@ -678,6 +826,10 @@ impl Session {
 
     pub fn finish(&self, error: Option<&str>) -> Result<Value, String> {
         self.finish_owned(error, "standalone")
+    }
+
+    pub fn finish_refbench_loadop(&self, error: Option<&str>) -> Result<Value, String> {
+        self.finish_owned(error, REFBENCH_OWNER)
     }
 
     pub fn finish_control(&self, error: Option<&str>) -> Result<Value, String> {
@@ -737,11 +889,11 @@ impl Session {
     }
 
     fn restore_report(&self, error: Option<&str>) -> Result<Value, String> {
-        let control = completion_owner(&self.state.borrow())? == CONTROL_OWNER;
+        let (schema, default_scope) = local_recovery_contract(completion_owner(&self.state.borrow())?);
         let checks = self.restore();
-        let scope = checks.as_ref().ok().and_then(|v| v["scope"].as_str()).unwrap_or(if control { CONTROL_SCOPE } else { SCOPE }).to_owned();
+        let scope = checks.as_ref().ok().and_then(|v| v["scope"].as_str()).unwrap_or(default_scope).to_owned();
         let report_path = self.dir.join(format!("recovery-{}-{}.json", std::process::id(), stamp()?));
-        let value = json!({"schema":if control { "phonefarm/gray-control-recovery@1" } else { "phonefarm/gray-capture-recovery@1" },"status":if checks.is_ok(){"verified"}else{"required"},
+        let value = json!({"schema":schema,"status":if checks.is_ok(){"verified"}else{"required"},
             "scope":scope,"serial":self.lease.borrow().serial,"token":self.state.borrow()["token"],
             "completion_owner":completion_owner(&self.state.borrow())?,"package":self.package(),"session":self.dir,
             "checks":checks.as_ref().ok(),"error":checks.as_ref().err(),"experiment_error":error,
@@ -784,13 +936,16 @@ fn session_output_paths(state: &Value) -> Result<Vec<String>, String> {
         if !valid_marker(marker) { return Err("invalid gray launch marker filename".into()); }
         paths.push(launch_marker_path(package, marker));
     }
+    if completion_owner(state)? == REFBENCH_OWNER {
+        paths.extend(["refbench_out.json", "refbench_started"].map(|name| launch_marker_path(package, name)));
+    }
     Ok(paths)
 }
 fn completion_owner(state: &Value) -> Result<&str, String> {
     match state["schema"].as_str() {
         Some(LEGACY_SCHEMA) if state.get("completion_owner").is_none() || state["completion_owner"] == "standalone" => Ok("standalone"),
         Some(SCHEMA) => match state["completion_owner"].as_str() {
-            Some(owner @ ("standalone" | EVAL_OWNER | SCRIPT_OWNER | LOADOP_OWNER | CONTROL_OWNER)) => Ok(owner),
+            Some(owner @ ("standalone" | EVAL_OWNER | SCRIPT_OWNER | LOADOP_OWNER | CONTROL_OWNER | REFBENCH_OWNER)) => Ok(owner),
             _ => Err("gray session has no recognized completion owner".into()),
         },
         Some(CONTROL_RESOURCE_SCHEMA) if state["completion_owner"] == CONTROL_OWNER
@@ -839,6 +994,25 @@ fn read_local_report(path: &Path, dir: &Path) -> Result<Value, String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if !metadata.is_file() { return Err("recovery report is not a regular file".into()); }
     serde_json::from_slice(&bounded(path, 1024 * 1024)?).map_err(|e| format!("invalid recovery report: {e}"))
+}
+fn local_recovery_contract(owner: &str) -> (&'static str, &'static str) {
+    match owner {
+        CONTROL_OWNER => ("phonefarm/gray-control-recovery@1", CONTROL_SCOPE),
+        REFBENCH_OWNER => ("phonefarm/gray-refbench-loadop-recovery@1", REFBENCH_SCOPE),
+        _ => ("phonefarm/gray-capture-recovery@1", SCOPE),
+    }
+}
+fn refbench_next_arm(state: &Value, arm: RefbenchArm) -> Result<(), String> {
+    let index = arm.index();
+    let ordered = if index == 0 {
+        state["stage"] == "prepared" && state["round_label"].is_null() && state["generation"] == 0
+    } else {
+        state["stage"] == "active" && state["generation"] == index - 1
+            && state["round_label"] == RefbenchArm::ALL[index as usize - 1].label()
+            && state["files"].as_array().is_some_and(|files| !files.is_empty()
+                && files.iter().all(|file| file["acquired"] == true && file["restored"] == false))
+    };
+    if ordered { Ok(()) } else { Err("refbench arms must run once in A/B/C/D order; partial attempts only support recovery".into()) }
 }
 fn report_matches(report: &Value, state: &Value, dir: &Path) -> bool {
     ["serial", "token", "evidence_origin"].iter().all(|key| report[*key] == state[*key])
@@ -920,13 +1094,21 @@ fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
         || ["staging_created", "installation_owned", "state_owned"].iter().any(|key| !state[*key].is_boolean()) {
         return Err("invalid or mismatched gray session identity".into());
     }
+    if owner == REFBENCH_OWNER {
+        if package != REFBENCH_PACKAGE || !state["base_recovery"].is_null()
+            || (state["round_label"].is_null() && state["generation"] != 0)
+            || (!state["round_label"].is_null() && !RefbenchArm::ALL.iter().any(|arm|
+                state["round_label"] == arm.label() && state["generation"] == arm.index())) {
+            return Err("invalid refbench package or arm sequence".into());
+        }
+    }
     if state["schema"] == SCHEMA || state["schema"] == CONTROL_RESOURCE_SCHEMA {
         if state.get("launch_marker").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|s| !valid_marker(s)))
             || state["generation"].as_u64().is_none()
             || state.get("round_label").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|s| !valid_label(s)))
             || state.get("base_recovery").is_none_or(|v| !v.is_null() && v.as_str().is_none_or(|p| Path::new(p).parent() != Some(dir)))
             || (matches!(owner, "standalone" | CONTROL_OWNER) && (!state["launch_marker"].is_null() || state["generation"] != 0 || !state["round_label"].is_null() || (state["schema"] != CONTROL_RESOURCE_SCHEMA && !state["base_recovery"].is_null())))
-            || (matches!(owner,SCRIPT_OWNER|LOADOP_OWNER) && !state["launch_marker"].is_null())
+            || (matches!(owner,SCRIPT_OWNER|LOADOP_OWNER|REFBENCH_OWNER) && !state["launch_marker"].is_null())
             || (state["stage"] != "active" && (state["generation"] != 0 || !state["round_label"].is_null())) {
             return Err("invalid gray session generation, marker or recovery evidence".into());
         }
@@ -1037,6 +1219,21 @@ mod tests {
         assert!(target_in_process_list("", "com.example.fixture").is_err());
     }
     #[test]
+    fn refbench_arm_order_refuses_replay_and_skips() {
+        let mut state = json!({"stage":"prepared","generation":0,"round_label":null,
+            "files":[{"acquired":true,"restored":false}]});
+        assert!(refbench_next_arm(&state, RefbenchArm::BaselineOff).is_ok());
+        state["stage"] = json!("active");
+        // Activation without a completed launch-intent save cannot be replayed.
+        assert!(refbench_next_arm(&state, RefbenchArm::BaselineOff).is_err());
+        state["round_label"] = json!(RefbenchArm::BaselineOff.label());
+        assert!(refbench_next_arm(&state, RefbenchArm::BaselineOn).is_ok());
+        assert!(refbench_next_arm(&state, RefbenchArm::BaselineOff).is_err());
+        assert!(refbench_next_arm(&state, RefbenchArm::RewriteOff).is_err());
+        state["files"][0]["restored"] = json!(true);
+        assert!(refbench_next_arm(&state, RefbenchArm::BaselineOn).is_err());
+    }
+    #[test]
     fn control_modes_do_not_inherit_capture_flags() {
         for (mode, enabled) in [
             ("probe", vec![]), ("target", vec![]),
@@ -1082,6 +1279,16 @@ mod tests {
         let loadop=json!({"schema":SCHEMA,"completion_owner":LOADOP_OWNER});
         assert!(require_parent(&loadop).is_ok());assert!(require_owner(&loadop,SCRIPT_OWNER).is_err());
         assert_eq!(parent_recovery_contract(LOADOP_OWNER).unwrap(),("phonefarm/gray-ab-loadop-recovery@1","gray_ab_loadop_owned_resources"));
+        let refbench=json!({"schema":SCHEMA,"completion_owner":REFBENCH_OWNER,"package":REFBENCH_PACKAGE,"launch_marker":null});
+        assert!(require_parent(&refbench).is_err());
+        assert!(require_local_completion(&refbench, REFBENCH_OWNER).is_ok());
+        assert!(require_owner(&refbench, LOADOP_OWNER).is_err());
+        let refbench_paths=session_output_paths(&refbench).unwrap();
+        assert_eq!(refbench_paths.len(),8);
+        assert_eq!(&refbench_paths[6..], &[
+            launch_marker_path(REFBENCH_PACKAGE,"refbench_out.json"),
+            launch_marker_path(REFBENCH_PACKAGE,"refbench_started")]);
+        assert_eq!(local_recovery_contract(REFBENCH_OWNER),("phonefarm/gray-refbench-loadop-recovery@1",REFBENCH_SCOPE));
         let control = json!({"schema":SCHEMA,"completion_owner":CONTROL_OWNER});
         assert!(require_owner(&control, CONTROL_OWNER).is_ok());
         assert!(require_parent(&control).is_err());

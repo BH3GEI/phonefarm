@@ -90,7 +90,7 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
         return false;
     }
     if sub == "gray-layer" && matches!(rest.first().map(String::as_str),
-        Some("session-status" | "session-action" | "session-recover")) {
+        Some("session-status" | "session-action" | "session-recover" | "refbench-recover")) {
         return false;
     }
     // preflight: 只读核查不拿锁; --fix 要写风扇/音量，跟测量一样排队
@@ -156,7 +156,7 @@ pub fn strip_lock_args(args: &mut Vec<String>) -> Result<LockOpts, String> {
         let gray_value = match sub.as_str() {
             "gray-layer" => matches!(a.as_str(), "--serial" | "--so" | "--mode" | "--package" |
                 "--out" | "--max-seconds" | "--actor-id" | "--evidence-origin" | "--power-policy" |
-                "--request-id" | "--request" | "--session"),
+                "--request-id" | "--request" | "--session" | "--frames" | "--intensity" | "--timeout-seconds"),
             "gray-ab" => matches!(a.as_str(), "--serial" | "--out" | "--pairs" | "--mode" | "--evidence-origin"),
             _ => false,
         };

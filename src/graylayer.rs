@@ -665,6 +665,7 @@ pub(crate) fn cli_admission(sub: &str, args: &[String]) -> Result<GrayCliAdmissi
     crate::devlock::strip_lock_args(&mut stripped)?;
     let args = &stripped[1..];
     if sub == "gray-layer" {
+        if crate::gray_refbench::handles(args) { return crate::gray_refbench::admission(args); }
         if crate::gray_control::handles(args) { return crate::gray_control::admission(args); }
         let parsed = layer_args(args)?;
         if parsed.help { return Ok(GrayCliAdmission::Help); }
@@ -700,6 +701,7 @@ pub(crate) fn cli_admission(sub: &str, args: &[String]) -> Result<GrayCliAdmissi
 }
 
 pub fn run_gray_layer(args: &[String]) -> i32 {
+    if crate::gray_refbench::handles(args) { return crate::gray_refbench::run(args); }
     if crate::gray_control::handles(args) { return crate::gray_control::run(args); }
     let parsed = match layer_args(args) {
         Ok(parsed) => parsed,
@@ -780,7 +782,7 @@ pub(crate) fn needs_queue(sub: &str, args: &[String]) -> bool {
     if crate::devlock::strip_lock_args(&mut stripped).is_err() { return true; }
     !matches!((sub, stripped.get(1).map(String::as_str)),
         ("gray-ab", Some("recover")) |
-        ("gray-layer", Some("session-status" | "session-action" | "session-recover")))
+        ("gray-layer", Some("session-status" | "session-action" | "session-recover" | "refbench-recover")))
 }
 
 #[cfg(test)]
@@ -831,7 +833,7 @@ mod mode_admission_tests {
     #[test]
     fn control_clients_do_not_queue_behind_their_owner() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        for command in ["session-status", "session-action", "session-recover"] {
+        for command in ["session-status", "session-action", "session-recover", "refbench-recover"] {
             assert!(!needs_queue("gray-layer", &args(&["--lock-label", "control", command, "--out", "--help"])));
         }
         assert!(needs_queue("gray-layer", &args(&["session", "--mode", "passdump", "--serial", "--help", "--out", "--no-devlock"])));
@@ -842,6 +844,12 @@ mod mode_admission_tests {
         assert!(!crate::devlock::strip_lock_args(&mut power).unwrap().disabled);
         assert_eq!(power, args(&["gray-layer", "session", "--power-policy", "--no-devlock"]));
         assert!(crate::gray_control::admission(&args(&["session", "--mode", "frameaudit", "--serial", "S", "--package", "com.example.fixture", "--out", "unused", "--power-policy", "unknown"])).is_err());
+        let mut refbench = args(&["gray-layer", "refbench-loadop", "--frames", "--no-devlock"]);
+        assert!(!crate::devlock::strip_lock_args(&mut refbench).unwrap().disabled);
+        assert!(cli_admission("gray-layer", &refbench[1..]).is_err());
+        assert_eq!(admission("gray-layer", &["refbench-loadop", "--serial", "S", "--out", "unused", "--frames", "60"]).unwrap(), GrayCliAdmission::Proceed);
+        assert!(admission("gray-layer", &["refbench-loadop", "--serial", "S", "--out", "unused", "--frames", "1"]).is_err());
+        assert_eq!(admission("gray-layer", &["refbench-recover", "--serial", "S", "--session", "old"]).unwrap(), GrayCliAdmission::Proceed);
     }
 }
 

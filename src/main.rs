@@ -58,6 +58,7 @@ mod preflight;
 mod grayab;
 mod graylayer;
 mod gray_session;
+mod gray_refbench;
 mod gray_control;
 mod gray_quality;
 mod gray_script;
@@ -259,6 +260,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        gray-layer session-status --out DIR [--request-id ID] --json
        gray-layer session-action --out DIR --request REQUEST.json|- --json
        gray-layer session-recover --session DIR --serial S --json
+       gray-layer refbench-loadop --serial S --out DIR [--frames 1800] [--intensity 8] [--timeout-seconds 150] [--so 层.so] [--evidence-origin device|synthetic] [--json]
+       gray-layer refbench-recover --session DIR --serial S --json
        (Vulkan 层挂/摘/查; copyprobe/upop 当前不支持执行，包括自定义 SO；历史证据可离线分析)
        frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 层.so]   (只读层抓原神一帧步骤清单)
        frame-audit recover --session <会话目录> --serial S [--json]   (核验并恢复本次灰层抓帧范围)
