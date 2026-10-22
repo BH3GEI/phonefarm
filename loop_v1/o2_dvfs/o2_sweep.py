@@ -449,6 +449,32 @@ class Session:
                 if lvl >= lo + 25 or time.time() - t0 > 3 * 3600:
                     break
 
+    def thermal_gate(self, timeout_s=1800):
+        """开每个请求前: 停充, 并等 GPU 温控档回到 0 (连续两次, 间隔 30 秒)。
+
+        2026-10-22 红魔实测: 满电还接着充电时, 厂商温控在 SoC 只有 44 °C 时就把 GPU 压到
+        thermal_pwrlevel 7、CPU 上限压到最低档; 在这种状态下探出来的「厂商起点」与停充后的
+        测量条件不是一回事, 整轮初筛作废。停充由 eval 结束时 / restore 恢复 (do_restore 会把
+        charging_enabled 改回 1)。"""
+        if self.a.dry_run:
+            self.dev.note("(dry-run) 温控关: 停充, 等 thermal_pwrlevel 连续两次为 0")
+            return
+        node = "/sys/class/kgsl/kgsl-3d0/thermal_pwrlevel"
+        if self.dev.su(f"cat {CHARGE_NODE}").strip() != "0":
+            self.dev.su(f"echo 0 > {CHARGE_NODE}")
+            self.dev.note("温控关: 先停充 (充电发热会让厂商温控提前压频)")
+        t0, ok = time.time(), 0
+        while True:
+            lv = self.dev.su(f"cat {node}").strip()
+            ok = ok + 1 if lv == "0" else 0
+            if ok >= 2:
+                return
+            if time.time() - t0 > timeout_s:
+                raise RuntimeError(f"等了 {timeout_s // 60} 分钟 GPU 温控档还是 {lv}, 手机在温控降频, 不开跑")
+            if ok == 0:
+                self.dev.note(f"温控关: GPU thermal_pwrlevel={lv}, 等它回到 0 ...")
+            time.sleep(30)
+
     # ── 白名单 (游戏运行时探) ──
     def probe(self):
         if not self.game_up():
@@ -463,6 +489,10 @@ class Session:
         missing = [AXES[ax][0] for ax in self.axes() if AXES[ax][0] not in wl]
         self.state["probe"] = {"missing": missing, "stock": {k: (wl.get(k) or {}).get("current") for k, _ in AXES.values()}}
         self.save()
+        gpu_stock = (wl.get("gpu.max_pwrlevel") or {}).get("current")
+        if not self.a.dry_run and gpu_stock not in (None, "0"):
+            raise RuntimeError(f"探到的厂商起点里 gpu.max_pwrlevel={gpu_stock} 不是 0: 起点被温控压低, "
+                               "这样定出的阶梯没有意义, 整轮不跑 (等手机凉下来、停充后重开)")
         if missing:
             self.dev.note(f"游戏运行时这些节点没进白名单 (厂商服务抢回或不可写): {missing}。"
                           "要扫它们得先用 vendor_override.sh 接管厂商配置, 再重开会话 (--override)。")
@@ -480,6 +510,7 @@ class Session:
         if not self.a.dry_run and not self.game_up():
             self.enter_world()
         self.battery_gate(self.a.battery_min, 99)
+        self.thermal_gate()
         env_note = f"PF_REPO_ROOT={pf_root()} "
         self.dev.note(env_note + "(eval 在下一行)")
         argv = [pf_bin(), "eval", "--request", str(rq), "--serial", self.a.serial, "--out", str(self.out / "evid" / cid)]
