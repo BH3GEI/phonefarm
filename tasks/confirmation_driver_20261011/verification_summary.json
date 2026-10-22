@@ -1,0 +1,355 @@
+{
+  "schema": "phonefarm/confirmation_driver_verification_summary@1",
+  "source_commit": "f526b314032ae3744dbc81b2ec7abe20b7b6136e",
+  "dependencies": {
+    "base_raw_producer": "516b7dd (PR22 codex/confirmation-observation)",
+    "lease_import": "d03af6c (PR19 src/devlease.rs + SPEC only; extended here)",
+    "excluded_prs": [
+      20,
+      21
+    ],
+    "lease_followup": "2657af9 definite spawn Err cancellation imported as dec0c51; fb1a152 strict marker consumption imported as f526b31"
+  },
+  "scope": "host scheduling, fake protocol, raw producer and GOL consumer interoperability; not Android worker/device acceptance",
+  "device_executed": false,
+  "sdk_installed": false,
+  "model_api_calls": 0,
+  "evidence_origin": "synthetic",
+  "test": {
+    "argv": [
+      "cargo",
+      "test",
+      "--offline",
+      "--manifest-path",
+      "src/Cargo.toml"
+    ],
+    "cwd": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver",
+    "source_head": "f526b314032ae3744dbc81b2ec7abe20b7b6136e",
+    "environment": {
+      "PHONEFARM_DRIVER_GOL_BIN": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/game_opt_loop-snapshot",
+      "PHONEFARM_DRIVER_TEST_ARTIFACT_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures"
+    },
+    "exit": 0,
+    "elapsed_seconds": 935.9458179473877,
+    "groups": [
+      {
+        "name": "unit",
+        "passed": 535,
+        "seconds": 2.6
+      },
+      {
+        "name": "confirmation_driver_cli",
+        "passed": 10,
+        "seconds": 926.27
+      },
+      {
+        "name": "confirmation_observation_cli",
+        "passed": 14,
+        "seconds": 2.54
+      },
+      {
+        "name": "qualification_cli",
+        "passed": 9,
+        "seconds": 4.3
+      }
+    ],
+    "total_passed": 568,
+    "failed": 0,
+    "log": "tasks/confirmation_driver_20261011/final_v5/cargo-test.log",
+    "log_sha256": "68fd589c8a736bf4feac304bc3841f93cb62bd5fc16bd054b52b7017bae0788a"
+  },
+  "clippy": {
+    "argv": [
+      "cargo",
+      "clippy",
+      "--offline",
+      "--manifest-path",
+      "src/Cargo.toml",
+      "--all-targets"
+    ],
+    "cwd": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver",
+    "source_head": "f526b314032ae3744dbc81b2ec7abe20b7b6136e",
+    "environment": {
+      "PHONEFARM_DRIVER_GOL_BIN": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/game_opt_loop-snapshot",
+      "PHONEFARM_DRIVER_TEST_ARTIFACT_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures"
+    },
+    "exit": 0,
+    "elapsed_seconds": 5.312225103378296,
+    "strict_clean": false,
+    "warning_summary_lines": [
+      "warning: `phonefarm` (bin \"phonefarm\") generated 53 warnings (run `cargo clippy --fix --bin \"phonefarm\" -p phonefarm` to apply 23 suggestions)",
+      "warning: `phonefarm` (bin \"phonefarm\" test) generated 58 warnings (46 duplicates) (run `cargo clippy --fix --bin \"phonefarm\" -p phonefarm --tests` to apply 5 suggestions)"
+    ],
+    "log": "tasks/confirmation_driver_20261011/final_v5/clippy.log",
+    "log_sha256": "01fab048dfb2a33615de303ee9e036e1f128c212e12a5d5908be36986cb608d2"
+  },
+  "syntax": {
+    "shell": "PASS (sh -n bootstrap/probe_readonly/worker)",
+    "python": "PASS (ast.parse fake transport and verification helper)"
+  },
+  "tools": {
+    "gol_binary_build_source_head_confirmed_by_root": "5149a3335c957984c5005ceafe25c99b74322c21",
+    "gol_binary_sha256": "589667fa4675a2bc73c36eebe239cdeaa637c52604a357bd79b260d7647890d3",
+    "phonefarm_source_commit": "f526b314032ae3744dbc81b2ec7abe20b7b6136e",
+    "phonefarm_binary_sha256": "336be8d105ce90bbf3dce326151ea78d8c6fc24b06d79024542a8bb5f6f4e47b",
+    "device_executed": false
+  },
+  "fixture": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1",
+  "fixture_request": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/request.json",
+  "frozen_request": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/request.json",
+  "fixture_note": "Test deliberately mutates original workload/candidate after prepare; frozen session bytes are the executed inputs. Do not repeat prepare into an existing session. Regenerate a fresh fixture with the test command.",
+  "commands": [
+    {
+      "argv": [
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/src/target/debug/phonefarm",
+        "confirmation-driver",
+        "prepare",
+        "--request",
+        "request.json",
+        "--out",
+        "session"
+      ],
+      "cwd": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1",
+      "environment_overrides": {
+        "DEVLOCK_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/legacy",
+        "PHONEFARM_FAKE_DEVICE_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1",
+        "PHONEFARM_FAKE_FAIL": "",
+        "PHONEFARM_LEASE_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/lease",
+        "PHONEFARM_LEASE_TIMEOUT_MS": "100"
+      },
+      "exit": 0,
+      "receipt": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/host-cli-20-prepare.exit.json",
+      "receipt_sha256": "00aa30a2415c9f285ab728edfdadbc738a567c73065b599eaf30eb018a22f063",
+      "stdout_sha256": "d985608a79425745fd38ba8fd769630fe8ec5e080069018004ed47512cbaab7b",
+      "status": "SIMULATED_BLOCKED"
+    },
+    {
+      "argv": [
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/game_opt_loop-snapshot",
+        "confirm",
+        "freeze",
+        "--plan",
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/plan.json",
+        "--out",
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/frozen.json"
+      ],
+      "cwd": null,
+      "environment_overrides": {},
+      "exit": 0,
+      "receipt": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/host-cli-21-gol-freeze.exit.json",
+      "receipt_sha256": "5d320dadc45b2954ddec28ece4a6d0e762c6f73357556208a48b79c28a0b06df",
+      "stdout_sha256": "fb265f4569684134c460be41befe9b0993129fe009364a493f30f65b6e3f7a85",
+      "status": "frozen registration only"
+    },
+    {
+      "argv": [
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/src/target/debug/phonefarm",
+        "confirmation-driver",
+        "collect",
+        "--session",
+        "session",
+        "--frozen",
+        "frozen.json"
+      ],
+      "cwd": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1",
+      "environment_overrides": {
+        "DEVLOCK_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/legacy",
+        "PHONEFARM_FAKE_DEVICE_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1",
+        "PHONEFARM_FAKE_FAIL": "",
+        "PHONEFARM_LEASE_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/lease",
+        "PHONEFARM_LEASE_TIMEOUT_MS": "100"
+      },
+      "exit": 0,
+      "receipt": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/host-cli-30-collect.exit.json",
+      "receipt_sha256": "8b5a02ad5418ab5aee4a80207343349eb025915aed3644fa2da003843f000d8a",
+      "stdout_sha256": "24a5cb07b36fd897b043ed59dd0168770ebaa5538661cf1d3b12ca4f8c40986e",
+      "status": "SIMULATED_BLOCKED"
+    },
+    {
+      "argv": [
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/phonefarm-snapshot",
+        "confirmation-observation",
+        "--bundle",
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/a0-bundle.json",
+        "--out",
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/independent_verification/a0.json"
+      ],
+      "exit": 1,
+      "receipt": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/independent_verification/a0-cli.exit.json",
+      "receipt_sha256": "353eb50d636041512d02ac2467277de93e6d58256c8bb5e4d3ae78c72934b2f4"
+    },
+    {
+      "argv": [
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/game_opt_loop-snapshot",
+        "confirm",
+        "judge",
+        "--frozen",
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/frozen.json",
+        "--samples",
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/samples.json",
+        "--out",
+        "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/independent_verification/gol-report.json"
+      ],
+      "exit": 1,
+      "receipt": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/independent_verification/gol-judge.exit.json",
+      "receipt_sha256": "a1fef3a665f996c51e8ee4c8c2f68329df962fb66652c6e2e8d9326e9e462dd9"
+    }
+  ],
+  "fake_environment": {
+    "DEVLOCK_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/legacy",
+    "PHONEFARM_FAKE_DEVICE_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1",
+    "PHONEFARM_FAKE_FAIL": "",
+    "PHONEFARM_LEASE_DIR": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/lease",
+    "PHONEFARM_LEASE_TIMEOUT_MS": "100"
+  },
+  "artifacts": {
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/request.json": "ddb992cbb5fbb1e136074222280753d4f67c25c9176157f9a042d4cdeab8bed0",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/sampling-contract.json": "cfa817f8c690ebe99015c8e415bd9ffd242598c9c80f6be2b6cc7eeaeeaa65d9",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/plan.json": "700a1b242671e5d4692042b03cc2eab8740458a40b89468ac13d07bc053999a3",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/frozen.json": "4461ad38e56f74b1c5fafac73afebdca13d2d85050ed3c7196c70dfcb4ea36f4",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/samples.json": "67e8f973ea3a93c27200cbbadd35cb98e706fe4d340fef3c689ac497b480f32f",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/inputs.manifest.json": "df2d9dc73650a81a7c647b23a4fb4ddc9899306e7ac59a5f285603c0d37c8873",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/prepared.manifest.json": "6373d2de32cb1927aa4c9892f243ae0092213cb0c308c0c29a5eef7fb6663f55",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/argv.jsonl": "1554c765fc208133d749b0176c0bc13ccfc17076c8d1290fad143dd4d3b1e522",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-1/session/journal.jsonl": "42705297261cf28ce3f2398bf895524bed898b9e9632fbf3b17892ecda399007",
+    "tasks/confirmation_driver_20261011/final_v5/independent_verification/summary.json": "0b77a355d528c5de3011fa9f363c637277b8e068c3584e30638de3346e403c4f",
+    "tasks/confirmation_driver_20261011/final_v5/independent_verification/gol-report.json": "75dd665358355e065ae55a3fae4faca6697e77fd506fb68ccf2201227b945f16"
+  },
+  "cross_cli": {
+    "schema": "phonefarm/confirmation_driver_offline_verification@1",
+    "evidence_origin": "synthetic",
+    "device_executed": false,
+    "phonefarm_sha256": "336be8d105ce90bbf3dce326151ea78d8c6fc24b06d79024542a8bb5f6f4e47b",
+    "gol_sha256": "589667fa4675a2bc73c36eebe239cdeaa637c52604a357bd79b260d7647890d3",
+    "baseline_runs": 3,
+    "heldout_reports": [
+      {
+        "run_id": "a0",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "b347682a392616f2dcca9fcb31ee828e6941114f40b277ac8ee4f6132b3fab47"
+      },
+      {
+        "run_id": "b0",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "64aa62042d878990bb72fc752a332a873a09401362543352ebf147cfa8e097cb"
+      },
+      {
+        "run_id": "a1",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "9a92fff118fb3f967c98ea38bb789f3ce049fd78178edf2579e6daaafcd86490"
+      },
+      {
+        "run_id": "b1",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "ce0850f7ac80adbad1f7611109c15c323b8849e3f8bac74d0575ea560ff9603b"
+      },
+      {
+        "run_id": "a2",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "26ce783ddf6c0754e892e26e39602ef1caff3f593d38673700b51e51cfb1a7c7"
+      },
+      {
+        "run_id": "b2",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "0a345117e91744955fb6fd46748782b7cebead69a9cb1f3927169cbf5005464f"
+      },
+      {
+        "run_id": "a3",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "324d281bf9fd53691acb4f8dea8c54f965a905d54b99a66493befe852ae41a88"
+      },
+      {
+        "run_id": "b3",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "8b7cb865ddadc985108354b13692000f8a68463e5e08cfd4637f978623339b72"
+      },
+      {
+        "run_id": "a4",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "770d00722ea7eb1e240e7c0c50120734d9651690a8b313edd67dea01076c2e1a"
+      },
+      {
+        "run_id": "b4",
+        "exit": 1,
+        "status": "BLOCKED",
+        "report_sha256": "f7a9205f5c7ad2744db878e0617f447a40f9ac15c96f007aeaa2a40bc5d22ba4"
+      }
+    ],
+    "gol_exit": 1,
+    "gol_verdict": "BLOCKED",
+    "real_game_optimization_proven": false,
+    "promotion_allowed": false,
+    "scope": "host orchestration and raw/consumer interoperability only; Android shell/root/GPU not run"
+  },
+  "independent_receipts_glob": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver/tasks/confirmation_driver_20261011/final_v5/independent_verification/*-cli.exit.json",
+  "persistent_failure_barriers": [
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-0/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-10/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-11/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-12/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-13/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-14/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-15/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-3/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-4/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-6/legacy/devlock.d/phonefarm-lease.json",
+    "tasks/confirmation_driver_20261011/final_v5/fixtures/confirmation-driver-70680-9/legacy/devlock.d/phonefarm-lease.json"
+  ],
+  "independent_reviews": [
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/system_handoff_20261011/probe_output_review/verification.json",
+      "sha256": "30965901abf20eb5bacffbf1242430a6229138cc0319016c9eb5acb927c3f508",
+      "scope": "actual host fake root/nonroot and private scratch; no device",
+      "android_executed": false
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/system_handoff_20261011/confirmation_driver_independent_review/ledger-final-after-x2tpskj8/result.json",
+      "sha256": "fca86b43ac2ee9237319434b733efd27b87c97ae13e18e5ee178c14bb266aaeb",
+      "scope": "17 extracted production shell parser/reader cases with owned host process group",
+      "android_executed": false
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/system_handoff_20261011/confirmation_driver_independent_review/master-matrix-4tmvweys/result.json",
+      "sha256": "be278403c09c0ac112bef11fb681c0b5eab59365eee4377da7fdfc4a6c58e28e",
+      "scope": "master grammar/group cases; host extraction and controlled tool faults",
+      "android_executed": false
+    },
+    {
+      "path": "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/system_handoff_20261011/confirmation_driver_independent_review/host-marker-after-9burx774/result.json",
+      "sha256": "43c2bdfbb6fff7966c441d251a808789c5a69da5e0f894a155df63bc3a7ae3b9",
+      "scope": "6 actual host lease CLI malformed-ledger cases with owned surviving group",
+      "android_executed": false
+    }
+  ],
+  "historical_runs": [
+    {
+      "source_commit": "7ced9b4",
+      "result": "PASS historical source only",
+      "total_passed": 561,
+      "log": "tasks/confirmation_driver_20261011/final_v3/cargo-test.log",
+      "gol_binary_sha256": "a152ba2a255fcde32383c4fd832a8049b4138ce7a7e8e1a8f07157f922148e05"
+    },
+    {
+      "source_commit": "d44fb88",
+      "result": "partial PASS then qualification CLI FAILED on shared capability probe output; preserved before fix",
+      "log": "tasks/confirmation_driver_20261011/final_v4_default_tmp/cargo-test.log"
+    },
+    {
+      "result": "actual host fake nonroot shared-output root false-positive before private scratch fix",
+      "path": "tasks/confirmation_driver_20261011/root_output_collision_before"
+    }
+  ],
+  "hardware_acceptance": "NOT_RUN: Android setsid/procfs/root, node support and sustained effect, whole-window power/KGSL, display/present and game scene repeatability",
+  "acquisition_attestation": "NOT_PROVEN: trusted local transport + raw hashes only",
+  "real_game_optimization_proven": false,
+  "promotion_allowed": false
+}

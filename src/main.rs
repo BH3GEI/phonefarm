@@ -7,6 +7,7 @@ mod autoloop;
 mod bench;
 mod ftrace;
 mod gpuop;
+mod shaderplan;
 mod gpustat;
 mod hwcond;
 mod brain;
@@ -25,6 +26,7 @@ mod crosscheck;
 mod framecheck;
 mod llm;
 mod looptrace;
+mod render_attribution;
 mod sysparam;
 mod curtail;
 mod vksreport;
@@ -33,15 +35,26 @@ mod parallel;
 mod device;
 mod platform;
 mod devlock;
+mod devlease;
 mod eval;
 mod onboard;
+mod qualification;
+mod thermal_profile;
+mod confirmation_observation;
+mod confirmation_control;
+mod confirmation_driver;
+mod confirmation_transport;
 mod fold;
 mod gamepad;
 mod frameaudit;
 mod preflight;
 mod grayab;
 mod graylayer;
+mod grayartifact;
+mod upopabi;
+mod storageadapter;
 mod shotdiff;
+mod sequence_quality;
 mod hypo;
 mod mtools;
 mod caps;
@@ -214,6 +227,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        vks-report --root <A/B目录> --sample S --config-a N --config-b N   (两臂判读面, 判读哈希自证)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
+资格:  qualify --from evidence.json --json (纯离线资格评估；通过不等于优化成功)
+       confirmation-observation --bundle B.json --out R.json (单轮原始记录验收，始终不授优化结论)
 评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
        (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
         shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
@@ -230,8 +245,12 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
        frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 层.so]   (只读层抓原神一帧步骤清单)
        frame-audit analyze <knobs_frameaudit.json>... [--md F] [--json F]           (离线: 步骤总览 + 白存/白读/白清/白画)
+工件:  gray-artifact {build (--source sampled.comp | --adapted-artifact DIR) --out DIR [--ndk DIR] [--timeout-seconds 1..120] [--process-supervision own-helper-groups|inherited-group] | inspect --spirv FILE | verify --artifact DIR | adapt-storage --source original.comp --spirv original.spv --out DIR | verify-adaptation --artifact DIR} [--json]
+       (离线编译/ABI/摘要门禁; deployable=false, 不构成真机部署资格)
        gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
        (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)
+画质:  sequence-quality --reference R.json --candidate C.json --rules frozen.json [--out tasks/quality/report.json]
+       (配对连续帧 RGB PSNR/色偏/残差变化, 零 Token 离线; PASS 只覆盖冻结指标, 不证明无鬼影)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
        (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
 性能:  perf [--serial S] [--app 包名] [--rounds 10] [--source sysfs|smartperf] [--power-rail usb|battery] [--xpower-out 目录] [--json]
@@ -372,6 +391,9 @@ fn main() {
         }
     }
     match args.first().map(|s| s.as_str()) {
+        Some("lease") => {
+            std::process::exit(devlease::run_lease(&args[1..]));
+        }
         Some("serve") => {
             // MCP stdio 工具服务(SPEC_MCP_SERVE): octos 等客户端的外部工具契约
             std::process::exit(serve::run_serve(&args[1..]));
@@ -742,6 +764,9 @@ fn main() {
             // copyprobe 验收 ②: 截帧逐像素比对 (控制对基线)
             std::process::exit(shotdiff::run_shot_diff(&args[1..]));
         }
+        Some("sequence-quality") => {
+            std::process::exit(sequence_quality::run_sequence_quality(&args[1..]));
+        }
         Some("gray-ab") => {
             // 灰档 A/B 采集编排 (两臂都挂层只切属性; 每臂重启原神)
             std::process::exit(grayab::run_gray_ab(&args[1..]));
@@ -750,6 +775,7 @@ fn main() {
             // 一帧步骤清单: capture 真机抓 (只读层) / analyze 离线找多余步骤
             std::process::exit(frameaudit::run_frame_audit(&args[1..]));
         }
+        Some("gray-artifact") => std::process::exit(grayartifact::run(&args[1..])),
         Some("gray-layer") => {
             // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)
             std::process::exit(graylayer::run_gray_layer(&args[1..]));
@@ -766,6 +792,13 @@ fn main() {
         Some("onboard") => {
             // 新游戏零人工接入: 进门 → 进游戏探针 → 生成负载 → 实测可重复 → 游戏档案
             std::process::exit(onboard::run_onboard(&args[1..]));
+        }
+        Some("qualify") => {
+            std::process::exit(qualification::run_qualify(&args[1..]));
+        }
+        Some("confirmation-driver") => { std::process::exit(confirmation_driver::run_confirmation_driver(&args[1..])); }
+        Some("confirmation-observation") => {
+            std::process::exit(confirmation_observation::run_confirmation_observation(&args[1..]));
         }
         Some("eval") => {
             // game_opt_loop 评测请求的唯一入口 (v2 信封 shader/sysparam/gray; v1 扁平兼容)

@@ -803,8 +803,8 @@ mod tests {
         );
     }
 
-    /// serde_json 的浮点解析不是正确舍入的, 这三个数经它一趟就差 1 ulp。
-    /// 标准库与 CPython 一致 —— 这正是本模块自带读入器的理由之一。
+    /// serde_json 未开 float_roundtrip 时曾差 1 ulp；目前冻结计划需要启用该 feature。
+    /// 自带读入器和开启 roundtrip 的 serde 必须都与 CPython/标准库一致。
     /// sort_keys + indent=1: autoloop 的 whitelist.json / metrics.json 的形状。
     #[test]
     fn dumps_indent_sorted_matches_python() {
@@ -820,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_is_correctly_rounded_where_serde_json_is_not() {
+    fn loads_and_roundtrip_serde_are_correctly_rounded() {
         for s in [
             "-3.9348497207249924",
             "45.872057483182004",
@@ -828,7 +828,7 @@ mod tests {
         ] {
             assert_eq!(dumps(&loads(s).unwrap()), s, "{s} 解析后打印不回来");
             let via_serde: f64 = serde_json::from_str::<f64>(s).unwrap();
-            assert_ne!(py_repr_f64(via_serde), s, "{s} 上 serde_json 居然对了?");
+            assert_eq!(py_repr_f64(via_serde), s, "{s} 的 frozen JSON 往返不应改变浮点位");
         }
     }
 

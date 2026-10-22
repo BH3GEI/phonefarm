@@ -12,6 +12,7 @@ const THRESH: i32 = 8;
 
 struct Raw {
     w: usize,
+    h: usize,
     px: Vec<u8>,
 }
 
@@ -21,25 +22,28 @@ fn load_raw(p: &Path) -> Result<Raw, String> {
         return Err(format!("{}: 太短, 不像 screencap 裸帧", p.display()));
     }
     let w = u32::from_le_bytes(d[0..4].try_into().unwrap()) as usize;
-    let _h = u32::from_le_bytes(d[4..8].try_into().unwrap()) as usize;
+    let h = u32::from_le_bytes(d[4..8].try_into().unwrap()) as usize;
     let fmt = u32::from_le_bytes(d[8..12].try_into().unwrap());
     if fmt != 1 {
         return Err(format!("{}: 不是 RGBA_8888 (fmt={fmt})", p.display()));
     }
-    let px = d[12..12 + w * _h * 4].to_vec();
-    if px.len() != w * _h * 4 {
+    let size = w.checked_mul(h).and_then(|v| v.checked_mul(4)).and_then(|v| v.checked_add(12));
+    if w == 0 || h == 0 || size != Some(d.len()) {
         return Err(format!("{}: 长度不符", p.display()));
     }
-    Ok(Raw { w, px })
+    let px = d[12..].to_vec();
+    Ok(Raw { w, h, px })
 }
 
 /// [x0,y0,x1,y1) 区域内差异像素占比; excl 是要排除的子矩形列表。
 fn diff(a: &[u8], b: &[u8], (x0, y0, x1, y1): (usize, usize, usize, usize), w: usize, excl: &[(usize, usize, usize, usize)]) -> f64 {
+    if w == 0 { return 0.0; }
+    let h = a.len().min(b.len()) / 4 / w;
     let mut total = 0usize;
     let mut diffn = 0usize;
-    for y in y0..y1 {
+    for y in y0.min(h)..y1.min(h) {
         let row = y * w * 4;
-        for x in x0..x1 {
+        for x in x0.min(w)..x1.min(w) {
             if excl.iter().any(|(ex0, ey0, ex1, ey1)| *ex0 <= x && x < *ex1 && *ey0 <= y && y < *ey1) {
                 continue;
             }
@@ -66,22 +70,26 @@ pub fn report(run: &Path) -> Result<String, String> {
     }
     let mut imgs: Vec<(String, Vec<u8>)> = Vec::new();
     let mut w = 0usize;
+    let mut h = 0usize;
     for a in &arms {
         let r = load_raw(&run.join(a).join("shot2.raw"))?;
-        w = r.w;
+        if w != 0 && (w != r.w || h != r.h) {
+            return Err("各臂截图尺寸不同; 不做隐式缩放".into());
+        }
+        w = r.w; h = r.h;
         imgs.push((a.clone(), r.px));
     }
-    let mut l = vec![format!("臂: {arms:?}  分辨率: {w}x?")];
+    let mut l = vec![format!("臂: {arms:?}  分辨率: {w}x{h}")];
 
     // 区域 (按 3200x1440 全屏; UID 在右下角 —— 按比例换算)
-    let (sx, sy) = (w as f64 / 3200.0, w as f64 / 1440.0); // sy 原版用的是 w/1440 —— 保持一致
+    let (sx, sy) = (w as f64 / 3200.0, h as f64 / 1440.0);
     let rr = |a: f64, b: f64, c: f64, d: f64| -> (usize, usize, usize, usize) {
         ((a * sx) as usize, (b * sy) as usize, (c * sx) as usize, (d * sy) as usize)
     };
     let uid = rr(2600.0, 1330.0, 3200.0, 1440.0);
     type Region = (&'static str, (usize, usize, usize, usize), bool);
     let regions: Vec<Region> = vec![
-        ("全屏(除UID)", (0, 0, w, w), true), // 原版全屏 y 用 w —— 逐字照搬
+        ("全屏(除UID)", (0, 0, w, h), true),
         ("左上小地图", rr(60.0, 60.0, 500.0, 330.0), false),
         ("右上图标条", rr(2300.0, 30.0, 3180.0, 140.0), false),
         ("右下技能区", rr(2100.0, 700.0, 3180.0, 1330.0), false),
@@ -210,12 +218,7 @@ mod tests {
                     *v = 52;
                 }
             }
-            let mut f = Vec::new();
-            f.extend_from_slice(&4u32.to_le_bytes());
-            f.extend_from_slice(&4u32.to_le_bytes());
-            f.extend_from_slice(&1u32.to_le_bytes());
-            f.extend_from_slice(&px);
-            std::fs::write(dir.join("shot2.raw"), &f).unwrap();
+            std::fs::write(dir.join("shot2.raw"), &px).unwrap();
         }
         let out = report(&d).unwrap();
         assert!(out.contains("控制对 none1~none2"), "{out}");
@@ -225,5 +228,22 @@ mod tests {
         let probe = j["probe1~none1"]["全屏(除UID)"].as_f64().unwrap();
         assert!(probe > ctrl * 10.0, "probe {probe} 应远大于控制对 {ctrl}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn landscape_and_portrait_are_safe() {
+        for (w, h) in [(8, 3), (3, 8)] {
+            let root = std::env::temp_dir().join(format!("pf-shot-dims-{}-{w}-{h}", std::process::id()));
+            for name in ["none1", "none2", "probe1"] {
+                let dir = root.join(name);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("shot2.raw"), raw(w, h, |_, _| [40, 40, 40])).unwrap();
+            }
+            assert!(report(&root).unwrap().contains(&format!("{w}x{h}")));
+            let p = root.join("none1/shot2.raw");
+            std::fs::write(&p, raw(w, h, |_, _| [40, 40, 40])[..13].to_vec()).unwrap();
+            assert!(load_raw(&p).is_err());
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

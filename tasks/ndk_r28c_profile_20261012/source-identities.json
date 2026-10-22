@@ -1,0 +1,5 @@
+{
+  "tools/export_ndk_profile.py": "7bb7ee2d613690f83e5b8588135d62bc435b4c9e9f9d09a1c11f866c775a212f",
+  "tools/tests/test_ndk_profile.py": "c013d15ca2cef713137a13f768dede4c76b78b3cfd23f17d7771d492e9a15acf",
+  "docs/SPEC_NDK_R28C_PROFILE.md": "8192b459776bb79af45da40861ff1e0854aa3b0c49bc587a2a32dd8d0b4fc214"
+}

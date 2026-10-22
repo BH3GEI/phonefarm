@@ -24,11 +24,11 @@
 //! probe_only 起步。
 
 use crate::device;
-use crate::hwcond;
 use crate::loopstat::{self, Run};
 use crate::pyjson::{dumps as py_dumps, PyVal};
 use crate::curtail;
 use crate::sysparam;
+use crate::qualification::{self, Evidence, Goal, Policy, Stage};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -88,12 +88,14 @@ struct EvalArgs {
     out: Option<String>,
     /// 确定性截断 (src/curtail.rs): 缺省开。`--no-curtail` 跑满全部轮次。
     curtail: bool,
+    qualify_from: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
     let mut it = args.iter();
     let (mut request, mut serial, mut power_rail, mut out) = (None, None, None, None);
     let mut curtail = true;
+    let mut qualify_from = None;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--request" => request = it.next().cloned(),
@@ -101,6 +103,7 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
             "--power-rail" => power_rail = it.next().cloned(),
             "--out" => out = it.next().cloned(),
             "--no-curtail" => curtail = false,
+            "--qualify-from" => qualify_from = it.next().cloned(),
             "--json" => {} // eval 的回包恒为 JSON, 收下这个旗子仅为兼容接口形状
             other => return Err(format!("不认识的参数 {other}\n{USAGE}")),
         }
@@ -111,6 +114,7 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
         power_rail,
         out,
         curtail,
+        qualify_from,
     })
 }
 
@@ -138,6 +142,10 @@ pub fn run_eval(args: &[String]) -> i32 {
     };
     let version = req.get("version").and_then(|v| v.as_i64()).unwrap_or(1);
     let kind = req.get("kind").and_then(|v| v.as_str()).unwrap_or("shader");
+    if version == 1 && a.qualify_from.is_some() {
+        eprintln!("--qualify-from 仅支持 v2 显式目标请求");
+        return 2;
+    }
     if version == 1 {
         // v1 扁平格式: gpu-op 就是它的消费者, 行为一字不动地转交
         return delegate_gpu_op(
@@ -152,8 +160,21 @@ pub fn run_eval(args: &[String]) -> i32 {
         return 2;
     }
     if let Err(e) = validate_v2(&req) {
-        eprintln!("eval_request v2 校验失败: {e}");
+        if kind == "shader" {
+            println!("{}", crate::shaderplan::abort(&req, &e, None));
+        } else {
+            eprintln!("eval_request v2 校验失败: {e}");
+        }
         return 2;
+    }
+    if let Some(path) = &a.qualify_from {
+        return match offline_qualification(&req, Path::new(path)) {
+            Ok(report) => {
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+                if report["qualification"]["conclusion_allowed"] == true { 0 } else { 1 }
+            }
+            Err(e) => { eprintln!("{e}"); 2 }
+        };
     }
     let evidence = a
         .out
@@ -165,8 +186,22 @@ pub fn run_eval(args: &[String]) -> i32 {
         .serial
         .clone()
         .or_else(|| req["serial"].as_str().map(String::from));
+    if kind == "shader" {
+        return eval_shader_v2(&req, &a);
+    }
+    let _lease = match crate::devlease::Lease::target(serial.as_deref(), "eval") {
+        Ok(v) => v,
+        Err(e) => {
+            let mut r = base_report(&req, kind);
+            r["verdict"]["reason"] = json!(e);
+            r["qualification"] = json!({"stage":"experiment","eligible":false,"can_claim_improvement":false,"status":"INELIGIBLE","blockers":[e]});
+            println!("{r}");
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let serial = Some(_lease.serial.clone());
     let report = match kind {
-        "shader" => return eval_shader_v2(&req, &a),
         "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail),
         "gray" => gray_eval(&req, serial.as_deref(), Path::new(&evidence)),
         "whitebox" => crate::whitebox::whitebox_eval(&req, serial.as_deref(), Path::new(&evidence)),
@@ -177,6 +212,10 @@ pub fn run_eval(args: &[String]) -> i32 {
     };
     match report {
         Ok(r) => {
+            if let Err(e) = _lease.check() {
+                eprintln!("{e}");
+                return 2;
+            }
             println!("{r}");
             0
         }
@@ -190,106 +229,60 @@ pub fn run_eval(args: &[String]) -> i32 {
 /// v2 shader: 契约规定的收端降级 —— 合成等价的 v1 请求转交 gpu-op,
 /// 回包补上 version/kind/conditions_observed。
 fn eval_shader_v2(req: &Value, a: &EvalArgs) -> i32 {
-    let dir = a
-        .out
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
-    let _ = std::fs::create_dir_all(&dir);
-    // v1 的 cool_c 与 quality_baseline_db 是必填数字, 表达不了 "null = 不等冷 /
-    // 没给地板"。冻结条件纪律下不允许接收端偷偷挑数值顶替, 缺了就明说降级失败。
-    let cool_c = req["conditions"]["cool_c"]
-        .as_f64()
-        .or(req["protocol"]["cool_c"].as_f64());
-    let Some(cool_c) = cool_c.filter(|x| *x > 0.0 && *x < 100.0) else {
-        eprintln!(
-            "v2 shader 降级失败: conditions.cool_c={} 而 v1 (gpu-op) 必须有一个等冷目标温度 (0,100)。\n\
-             冻结条件纪律下收端不代填数值, 请在请求里显式给 conditions.cool_c",
-            serde_json::to_string(&req["conditions"]["cool_c"]).unwrap_or_default()
-        );
-        return 2;
-    };
-    let Some(qbase) = req["payload"]["quality_baseline_db"].as_f64() else {
-        eprintln!("v2 shader 降级失败: payload.quality_baseline_db=null 而 v1 (gpu-op) 必须有画质地板数值。\n\
-                   收端不代填, 请显式给出");
-        return 2;
-    };
-    let v1 = json!({
-        "version": 1,
-        "candidate_id": req["candidate_id"],
-        "track": req["payload"]["track"],
-        "package": req["package"],
-        // workload: headless 载体量的是算子自身耗时, replay_seconds 不参与;
-        // refbench 载体每臂渲染 frames 帧
-        "replay_script": req["workload"]["script"].as_str().unwrap_or(""),
-        "shader_path": req["payload"]["shader_path"],
-        "spirv_path": req["payload"]["spirv_path"],
-        "budget_ms": req["payload"]["budget_ms"],
-        "quality_baseline_db": qbase,
-        "incumbent_latency_ms": req["payload"]["incumbent_latency_ms"],
-        "quality_reference": req["payload"]["quality_reference"]
-            .as_str()
-            .or(req["conditions"]["quality_reference"].as_str()),
-        "protocol": {
-            "cool_c": cool_c,
-            "replay_seconds": req["workload"]["seconds"].as_i64()
-                .or(req["protocol"]["replay_seconds"].as_i64())
-                .unwrap_or(30),
-            "rounds": req["protocol"]["rounds"],
-            "alternating": req["protocol"]["alternating"],
-            "p_threshold": req["protocol"]["p_threshold"],
-        }
-    });
-    let v1_path = Path::new(&dir).join("_eval_v1_request.json");
-    if let Err(e) = std::fs::write(&v1_path, serde_json::to_string(&v1).unwrap_or_default()) {
-        eprintln!("写不了降级请求 {}: {e}", v1_path.display());
-        return 2;
-    }
-    // 转交 gpu-op, 捕获 stdout (回包是纯 JSON; 进度走 stderr)
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm"));
-    let mut cmd = Command::new(&exe);
-    cmd.arg("gpu-op")
-        .arg("--request")
-        .arg(&v1_path)
-        .arg("--json");
-    if let Some(s) = &a.serial {
-        cmd.arg("--serial").arg(s);
-    }
-    if let Some(r) = &a.power_rail {
-        cmd.arg("--power-rail").arg(r);
-    }
-    if let Some(o) = &a.out {
-        cmd.arg("--out").arg(o);
-    }
-    let out = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("起不了 gpu-op: {e}");
-            return 2;
-        }
-    };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    if !out.status.success() {
-        // gpu-op 校验/预检失败: 它的 stderr 已经把原因说清了, 原样透传退出码
-        eprint!("{}", String::from_utf8_lossy(&out.stderr));
-        return out.status.code().unwrap_or(2);
-    }
-    // 回包补 v2 字段: 上层按 kind 对账, 对不上要整份作废, 所以必须补
-    let mut report: Value = match serde_json::from_str(stdout.trim()) {
+    let plan = match crate::shaderplan::build(req, a.serial.as_deref(), a.power_rail.as_deref()) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("gpu-op 回包不是合法 JSON: {e}\n{stdout}");
+            println!("{}", crate::shaderplan::abort(req, &e, None));
             return 2;
         }
     };
-    if let Some(obj) = report.as_object_mut() {
-        obj.insert("version".into(), json!(2));
-        obj.insert("kind".into(), json!("shader"));
-        // conditions 是意图, conditions_observed 是事实; shader 通路暂只回显意图,
-        // 真值 (起跑温度/等冷是否超时) 由 gpu-op 的进度日志给出, 尚未结构化
-        obj.insert("conditions_observed".into(), json!(req["conditions"]));
+    let dir = a.out.clone().map(PathBuf::from).unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("phonefarm-eval-{}", std::process::id()))
+    });
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        println!(
+            "{}",
+            crate::shaderplan::abort(
+                req,
+                &format!("evidence directory: {e}"),
+                Some(&plan.resolved)
+            )
+        );
+        return 2;
     }
-    println!("{report}");
-    0
+    let path = dir.join(format!("_eval_v1_request_{}.json", std::process::id()));
+    if let Err(e) = std::fs::write(&path, plan.request.to_string()) {
+        println!(
+            "{}",
+            crate::shaderplan::abort(
+                req,
+                &format!("adapter request write: {e}"),
+                Some(&plan.resolved)
+            )
+        );
+        return 2;
+    }
+    let mut args = plan.args;
+    args.extend([
+        "--request".into(),
+        path.to_string_lossy().into_owned(),
+        "--out".into(),
+        dir.to_string_lossy().into_owned(),
+    ]);
+    // Same process: gpu-op owns one lease and emits the v2 envelope on measured outcomes.
+    // Exit 1 is still a valid non-PASS report. Exit 2 means unverified conditions, hence ABORT.
+    let rc = crate::gpuop::run_gpu_op(&args);
+    if rc == 2 {
+        println!(
+            "{}",
+            crate::shaderplan::abort(
+                req,
+                "gpu-op execution/conditions failed; see stderr",
+                Some(&plan.resolved)
+            )
+        );
+    }
+    rc
 }
 
 fn delegate_gpu_op(
@@ -341,8 +334,8 @@ fn validate_v2(req: &Value) -> Result<(), String> {
     }
     let pt = p.get("p_threshold").and_then(|v| v.as_f64());
     match pt {
-        Some(x) if x > 0.0 && x <= 1.0 => {}
-        _ => return Err("protocol.p_threshold 必须 (0, 1]".into()),
+        Some(x) if x > 0.0 && x <= 0.05 => {}
+        _ => return Err("protocol.p_threshold 必须 (0, .05]（收端不接受更宽门槛）".into()),
     }
     match kind {
         "shader" => {
@@ -380,7 +373,84 @@ fn validate_v2(req: &Value) -> Result<(), String> {
         }
         other => return Err(format!("不认识的 kind {other:?}")),
     }
+    if matches!(kind,"sysparam"|"gray") { policy_for_request(req)?; }
     Ok(())
+}
+
+/// Objective selects receiver-owned requirements. Incoming required_metrics cannot weaken them.
+fn policy_for_request(req: &Value) -> Result<Policy, String> {
+    let goal = Goal::parse(req["qualification"]["goal"].as_str().unwrap_or("render_efficiency"))?;
+    let pairs = req["protocol"]["rounds"].as_u64().ok_or("缺 protocol.rounds")?;
+    let pairs = u32::try_from(pairs).map_err(|_| "rounds 溢出")?;
+    let mut policy = Policy::new(goal, pairs, req["kind"] == "gray");
+    policy.temp_cap_c=req["conditions"]["temp_cap_c"].as_f64();
+    policy.cool_c=req["conditions"]["cool_c"].as_f64();
+    policy.alpha=req["protocol"]["p_threshold"].as_f64().ok_or("缺 p_threshold")?;
+    policy.validate()?;
+    if let Some(ms) = req["qualification"]["required_metrics"].as_array() {
+        if json!(policy.required_metrics) != Value::Array(ms.clone()) {
+            return Err("请求 required_metrics 不得缩窄收端目标合同".into());
+        }
+    }
+    Ok(policy)
+}
+
+fn offline_qualification(req: &Value, path: &Path) -> Result<Value, String> {
+    validate_v2(req)?;
+    let mut evidence = qualification::read(path)?;
+    evidence.policy = policy_for_request(req)?;
+    let q = qualification::evaluate(&evidence)?;
+    let mut report = base_report(req, req["kind"].as_str().unwrap_or(""));
+    report["qualification"] = serde_json::to_value(q).map_err(|e|e.to_string())?;
+    report["qualification_only"] = json!(true);
+    report["verdict"]["reason"] = json!("离线资格评估，不应用候选，不作优化 PASS 判定");
+    Ok(report)
+}
+
+fn record_qualification(report: &mut Value, evidence: &Path, facts: &Evidence) -> Result<qualification::Report,String> {
+    let q = qualification::evaluate(facts)?;
+    std::fs::create_dir_all(evidence).map_err(|e|e.to_string())?;
+    qualification::write(&evidence.join("qualification.json"), &q)?;
+    std::fs::write(evidence.join("qualification_evidence.json"),serde_json::to_string_pretty(facts).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    report["qualification"] = serde_json::to_value(&q).map_err(|e|e.to_string())?;
+    Ok(q)
+}
+
+pub(crate) fn snapshots_identical(before: &str, after: &str) -> bool {
+    adb_ok(before) && adb_ok(after) && before.lines().any(|l|l.contains('=')) && before == after
+}
+
+fn probe_report(report: &mut Value, before: &str, after: &str, wl: &sysparam::Whitelist) {
+    let identical = snapshots_identical(before,after);
+    report["status"] = json!(if identical {"REVERTED"} else {"ABORT"});
+    report["verdict"]["reason"] = json!(if identical {"probe_only: 探测写入已验证还原"} else {"probe_only: 快照缺失/读取失败或不一致，不能声称已还原"});
+    report["conditions_observed"] = json!({"snapshot_identical":identical,"restored":identical,"whitelist":wl_pyval(wl)});
+}
+
+/// Verify the supplied workload, rather than injecting a separate hard-coded gesture.
+pub(crate) fn verify_workload(serial: &str, workload: &Path, pkg: &str, outdir: &Path) -> Value {
+    let _ = std::fs::create_dir_all(outdir);
+    let mut child = match Command::new(std::env::current_exe().unwrap_or_default())
+        .args(["script", "--serial", serial, "--task", "qualification_workload", "--app", pkg])
+        .arg(workload).current_dir(repo_root()).stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null()).spawn() {
+        Ok(c)=>c,Err(e)=>return json!({"verified":false,"reason":e.to_string()})
+    };
+    let capture = || Command::new(adb_path()).args(["-s",serial,"exec-out","screencap"]).output().ok()
+        .filter(|o|o.status.success()).map(|o|o.stdout).unwrap_or_default();
+    std::thread::sleep(std::time::Duration::from_secs(3)); let a=capture();
+    std::thread::sleep(std::time::Duration::from_secs(5)); let b=capture();
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(65);
+    let success=loop {match child.try_wait() {
+        Ok(Some(s))=>break s.success(),
+        Ok(None) if std::time::Instant::now()<deadline=>std::thread::sleep(std::time::Duration::from_millis(100)),
+        _=>{let _=child.kill();let _=child.wait();break false;}
+    }};
+    let _=std::fs::write(outdir.join("frame_a.raw"),&a); let _=std::fs::write(outdir.join("frame_b.raw"),&b);
+    let motion=to_serde(&crate::framecheck::verdict(&a,&b));
+    let result=json!({"verified":success && motion["spinning"]==true,"script_exit_success":success,"motion":motion});
+    let _=std::fs::write(outdir.join("workload_check.json"),serde_json::to_string_pretty(&result).unwrap());
+    result
 }
 
 // ══════════════ 设备助手 ══════════════
@@ -687,32 +757,6 @@ pub(crate) fn unavailable(metrics: &mut Value, field: &str, reason: &str) {
 
 // ══════════════ sysparam ══════════════
 
-/// payload.whitelist (有序 [键, spec] 列表过桥) → sysparam::Whitelist
-fn whitelist_from_payload(req: &Value) -> Option<sysparam::Whitelist> {
-    let obj = req["payload"]["whitelist"].as_object()?;
-    Some(
-        obj.iter()
-            .map(|(pid, s)| {
-                let get = |k: &str| s[k].as_str().unwrap_or("").to_string();
-                (
-                    pid.clone(),
-                    sysparam::Spec {
-                        kind: get("kind"),
-                        path: get("path"),
-                        values: s["values"]
-                            .as_array()
-                            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                            .unwrap_or_default(),
-                        current: get("current"),
-                        group: s["group"].as_str().map(String::from),
-                        effect: get("effect"),
-                    },
-                )
-            })
-            .collect(),
-    )
-}
-
 fn deny_keywords(req: &Value) -> Vec<String> {
     match req["payload"]["deny_keywords"].as_array() {
         Some(a) if !a.is_empty() => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
@@ -900,21 +944,17 @@ pub(crate) fn run_one_launch(
     std::fs::write(outdir.join("capture.log"), &cap).ok();
     let _ = adb(serial, &["pull", &tr, &outdir.join("trace.txt").to_string_lossy()], 120);
     let _ = adb(serial, &["shell", &format!("rm -f {tr}")], 15);
-    if let Ok(mut s) = sampler {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-        loop {
-            match s.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() > deadline => {
-                    let _ = s.kill();
-                    let _ = s.wait();
-                    break;
-                }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
-                Err(_) => break,
-            }
-        }
-    }
+    // 自驱动负载没有脚本退出码: 采集结束时应用仍活着记 0, 否则 1
+    let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
+    let workload_exit = Some(if adb_ok(&alive) && !crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty() { 0 } else { 1 });
+    let sampler_success=if let Ok(mut s)=sampler {
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(90);
+        loop {match s.try_wait() {
+            Ok(Some(status))=>break status.success(),
+            Ok(None) if std::time::Instant::now()<deadline=>std::thread::sleep(std::time::Duration::from_millis(200)),
+            _=>{let _=s.kill();let _=s.wait();break false;}
+        }}
+    } else {false};
     if relaunch {
         // 量完就停掉, 别让它在还原、等冷的时候接着烧
         let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
@@ -929,6 +969,7 @@ pub(crate) fn run_one_launch(
     if let Ok(t) = std::fs::read_to_string(&env_path) {
         m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats(&t))).unwrap_or(Value::Null);
     }
+    bind_run_evidence(&mut m, label, outdir, &env_path, sampler_success, dur, seconds, workload_exit)?;
     Ok(m)
 }
 
@@ -1020,23 +1061,14 @@ pub(crate) fn run_one_with(
         )
         .env("PF_BIN", std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm")))
         .output();
-    if let Ok(mut s) = sampler {
-        // 采样器卡死不能把整个 eval 挂住: 等一段时间, 超时就杀 (负载收尾后的
-        // env 尾巴本来就只要几秒)
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-        loop {
-            match s.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() > deadline => {
-                    let _ = s.kill();
-                    let _ = s.wait();
-                    break;
-                }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
-                Err(_) => break,
-            }
-        }
-    }
+    let sampler_success=if let Ok(mut s)=sampler {
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(90);
+        loop {match s.try_wait() {
+            Ok(Some(status))=>break status.success(),
+            Ok(None) if std::time::Instant::now()<deadline=>std::thread::sleep(std::time::Duration::from_millis(200)),
+            _=>{let _=s.kill();let _=s.wait();break false;}
+        }}
+    } else {false};
     let rc = match rc {
         Ok(o) if o.status.success() => 0,
         Ok(o) => {
@@ -1067,11 +1099,97 @@ pub(crate) fn run_one_with(
         m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats(&t)))
             .unwrap_or(Value::Null);
     }
+    let workload_exit=std::fs::read_to_string(outdir.join("workload_exit.txt")).ok().and_then(|t|t.trim().parse::<i64>().ok());
+    bind_run_evidence(&mut m, label, outdir, &env_path, sampler_success, dur, seconds, workload_exit)?;
+    if rc != 0 { return Err(format!("{label}: 负载失败 rc={rc}，旧 summary 不能补成成功")); }
     Ok(m)
 }
 
+/// 单轮证据绑定 (实验资格要用): 采样器正常退出、采样窗覆盖 ftrace 采集窗、负载正常退出,
+/// 否则功耗/温度窗不作数; 附帧证据与 trace 摘要。
+#[allow(clippy::too_many_arguments)]
+fn bind_run_evidence(
+    m: &mut Value,
+    label: &str,
+    outdir: &Path,
+    env_path: &Path,
+    sampler_success: bool,
+    dur: u64,
+    seconds: u64,
+    workload_exit: Option<i64>,
+) -> Result<(), String> {
+    m["workload_exit"]=json!(workload_exit);
+    let env_text=std::fs::read_to_string(env_path).unwrap_or_default();
+    let trace_text=std::fs::read_to_string(outdir.join("trace.txt")).unwrap_or_default();
+    let window=sysparam::sample_window(&env_text);
+    let bound=sampler_success && window.duration_s==Some(dur as f64) && window.interval_s==Some(2.0)
+        && sysparam::trace_window_covered(&window,&trace_text,seconds);
+    m["env"]["sampler_exit_success"]=json!(sampler_success);
+    m["env"]["trace_window_verified"]=json!(bound);
+    m["env"]["power_observation_scope"]=json!("whole sampler window including lead/tail; covers trace capture window");
+    if !bound {m["env"]["power_w_mean"]=Value::Null;m["env"]["power_window_verified"]=json!(false);m["env"]["thermal_window_verified"]=json!(false);}
+    m["frame_evidence"] = qualification::frame_evidence(&m["summary"]);
+    {use sha2::{Digest,Sha256};m["frame_evidence"]["trace_sha256"]=json!(format!("{:x}",Sha256::digest(trace_text.as_bytes())));}
+    if workload_exit!=Some(0) {return Err(format!("{label}: 逐轮负载退出失败/未知: {workload_exit:?}"));}
+    if let Some(t) = m["env"]["soc_temp_max_c"].as_f64() { m["summary"]["soc_temp_max_c"] = json!(t); }
+    Ok(())
+}
+
+/// 按负载形态跑一轮: 自驱动 (launch) 走 [`run_one_launch`] (带 extras 重启), 否则 [`run_one_with`]。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_one_for(
+    serial: &str,
+    label: &str,
+    outdir: &Path,
+    seconds: u64,
+    workload: &Path,
+    pkg: &str,
+    comm: Option<&str>,
+    launch: Option<&LaunchSpec>,
+) -> Result<Value, String> {
+    match launch {
+        Some(l) => run_one_launch(serial, label, outdir, seconds, pkg, comm, l, true),
+        None => run_one_with(serial, label, outdir, seconds, workload, pkg, comm),
+    }
+}
+
+/// 资格用的负载自检。脚本负载走 [`verify_workload`]; 自驱动负载 (launch) 带 extras 冷启动,
+/// 进入被测窗口后隔 5 秒截两帧: 应用全程活着且画面在动才算。
+pub(crate) fn verify_workload_for(
+    serial: &str,
+    workload: &Path,
+    launch: Option<&LaunchSpec>,
+    pkg: &str,
+    outdir: &Path,
+) -> Value {
+    let Some(l) = launch else {
+        return verify_workload(serial, workload, pkg, outdir);
+    };
+    let _ = std::fs::create_dir_all(outdir);
+    let started = start_with_extras(serial, pkg, &l.extras, l.marker.as_deref(), &[], outdir)
+        .and_then(|_| wait_launch_window(serial, pkg, "qualification_workload", l.marker.as_deref()));
+    let result = match started {
+        Err(e) => json!({"verified": false, "reason": e, "launch": true}),
+        Ok(()) => {
+            let capture = || Command::new(adb_path()).args(["-s",serial,"exec-out","screencap"]).output().ok()
+                .filter(|o|o.status.success()).map(|o|o.stdout).unwrap_or_default();
+            let a = capture();
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let b = capture();
+            let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
+            let alive = adb_ok(&alive) && !crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty();
+            let _=std::fs::write(outdir.join("frame_a.raw"),&a); let _=std::fs::write(outdir.join("frame_b.raw"),&b);
+            let motion=to_serde(&crate::framecheck::verdict(&a,&b));
+            json!({"verified": alive && motion["spinning"]==true, "app_alive": alive, "motion": motion, "launch": true})
+        }
+    };
+    let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    let _=std::fs::write(outdir.join("workload_check.json"),serde_json::to_string_pretty(&result).unwrap());
+    result
+}
+
 /// [`run_one`] 回包里并进判定视图的 env 字段 (sample_env.sh → [`sysparam::env_stats`])。
-pub(crate) const RUN_ENV_KEYS: [&str; 23] = [
+pub(crate) const RUN_ENV_KEYS: [&str; 30] = [
     "power_w_mean",
     "power_w_median",
     "power_now_w_mean",
@@ -1082,6 +1200,13 @@ pub(crate) const RUN_ENV_KEYS: [&str; 23] = [
     "voltage_now_uv_mean",
     "power_rail",
     "battery_status",
+    "battery_status_after",
+    "power_window_verified",
+    "thermal_window_verified",
+    "trace_window_verified",
+    "sampler_complete",
+    "sampler_exit_success",
+    "power_observation_scope",
     "battery_charging",
     "power_usable_reason",
     "on_battery",
@@ -1143,6 +1268,13 @@ pub(crate) fn all_on_battery(knob_runs: &[Value], ctrl_runs: &[Value]) -> bool {
 /// 跑满时**可能**进入判定的「显著改善」检验, 各取最宽的 alpha_win:
 /// 帧时/帧率至少在 2 指标表里 (alpha/2); 功耗只有在已跑的轮全在放电态时才可能进表,
 /// 进表时是 3 指标 (alpha/3)。覆盖所有可能的指标表, 截断只会更保守。
+/// 冻结 policy 的判定指标对应的截断检验 (与 [`judge_runs_with`] 同一张表、同一个 alpha_win)。
+fn policy_win_tests(required: &[String], alpha: f64) -> Vec<curtail::WinTest> {
+    let n = required.len().max(1) as f64;
+    required.iter().map(|m| curtail::WinTest::new(m, m != "fps_mean", alpha / n)).collect()
+}
+
+#[allow(dead_code)]
 fn sysparam_win_tests(alpha: f64, power_possible: bool) -> Vec<curtail::WinTest> {
     let mut t = vec![
         curtail::WinTest::new("frame_p95", true, alpha / 2.0),
@@ -1180,32 +1312,27 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let _ = std::fs::create_dir_all(evidence);
     let probe_only = req["payload"]["probe_only"].as_bool().unwrap_or(false);
 
-    // ── 白名单: 请求带着就用它的 (但结构上仍按本端 Spec 解析), 没带就真机探 ──
-    let wl = match whitelist_from_payload(req) {
-        Some(w) if !w.is_empty() => w,
-        _ => probe_whitelist(serial, evidence)?,
-    };
-
-    // ── probe_only: 只探白名单, 不跑候选 ──
-    if probe_only {
-        push_tools(serial)?;
-        let before = snapshot(serial);
-        std::fs::write(evidence.join("snap_before.txt"), &before).map_err(|e| e.to_string())?;
-        let wl2 = probe_whitelist(serial, evidence)?; // 探测本身要写节点, 重探一遍拿全量
-        let after = snapshot(serial);
-        std::fs::write(evidence.join("snap_after.txt"), &after).map_err(|e| e.to_string())?;
-        let identical = before == after;
-        report["status"] = json!("REVERTED");
-        report["verdict"]["reason"] =
-            json!("probe_only: 只探白名单不跑候选, 探测过程的写入已还原");
-        report["conditions_observed"] = json!({
-            "snapshot_identical": identical,
-            "restored": identical,
-            // schema 未列但允许附加: 探测结果就是这一步的全部产出
-            "whitelist": wl_pyval(&wl2),
-        });
-        report["evidence_dir"] = json!(evidence.display().to_string());
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
+    let policy = policy_for_request(req)?;
+    std::fs::write(evidence.join("qualification_policy.json"),serde_json::to_string_pretty(&policy).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    let mut facts=Evidence::new(Stage::Probe,policy,qualification::inspect_device(serial));
+    let preflight=record_qualification(&mut report,evidence,&facts)?;
+    if !preflight.probe_allowed {
+        report["verdict"]["reason"]=json!("root/目标 trace 能力未确认，禁止差异写探测");
+        return Ok(serde_json::to_string_pretty(&report).unwrap());
+    }
+    push_tools(serial)?;
+    let before_probe=snapshot(serial);
+    std::fs::write(evidence.join("snap_before_probe.txt"),&before_probe).map_err(|e|e.to_string())?;
+    let wl=probe_whitelist(serial,evidence)?; // Caller whitelist is a proposal, never evidence of actual effectiveness.
+    let after_probe=snapshot(serial);
+    std::fs::write(evidence.join("snap_after_probe.txt"),&after_probe).map_err(|e|e.to_string())?;
+    let probe_restored=snapshots_identical(&before_probe,&after_probe);
+    facts.device.control_verified=Some(!wl.is_empty()); facts.restored=Some(probe_restored);
+    record_qualification(&mut report,evidence,&facts)?;
+    if probe_only {probe_report(&mut report,&before_probe,&after_probe,&wl);record_qualification(&mut report,evidence,&facts)?;return Ok(serde_json::to_string_pretty(&report).unwrap());}
+    if !probe_restored {
+        report["verdict"]["reason"]=json!("差异写探测未验证恢复，禁止开始候选实验");
+        return Ok(serde_json::to_string_pretty(&report).unwrap());
     }
 
     // ── 接收端再校验: 越界整份拒绝, 一个字节都不写 ──
@@ -1236,31 +1363,6 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     };
     let _ = std::fs::create_dir_all(evidence);
     std::fs::write(evidence.join("plan.txt"), &plan).map_err(|e| e.to_string())?;
-
-    // ── 设备准备 ──
-    if !hwcond::root_ok(&device::Device::new(Some(serial.into()), std::env::temp_dir().to_string_lossy().into_owned())) {
-        report["verdict"]["reason"] = json!("设备无 root: 系统参数与 ftrace 采集都需要 root");
-        report["evidence_dir"] = json!(evidence.display().to_string());
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    push_tools(serial)?;
-
-    // 停充尝试: 请求要求且节点没指定时由接收端自己探 (charge_suspend.sh 内置节点表)。
-    // 失败不致命 —— 拿不到放电态就只是功耗不进判定, 帧时帧率照常测。
-    let want_suspend = req["conditions"]["charging_suspend"]["enabled"].as_bool().unwrap_or(false);
-    let mut suspended_via: Option<String> = None;
-    if want_suspend {
-        let out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
-        std::fs::write(evidence.join("charge_suspend.log"), &out).map_err(|e| e.to_string())?;
-        if adb_ok(&out) && out.contains("CHARGE_SUSPENDED") {
-            // 脚本自己回显用的哪个节点; 原样记进报告
-            suspended_via = out
-                .lines()
-                .find(|l| l.contains("node="))
-                .map(|l| l.trim().to_string())
-                .or_else(|| Some("/sys/class/qcom-battery/charging_enabled".into()));
-        }
-    }
 
     let plan_local = evidence.join("plan.txt");
     let push = adb(serial, &["push", &plan_local.to_string_lossy(), &format!("{DEV_TMP}/loop_v1_sysparam.plan")], 60);
@@ -1295,6 +1397,63 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         }
     };
 
+    let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false,"reason"=>"conditions.cool_c 未知"}};
+    facts.cold_ok=cold.get("ok").and_then(|v|v.as_bool());
+    if facts.cold_ok!=Some(true) {
+        facts.stage=Stage::Experiment;let _=record_qualification(&mut report,evidence,&facts)?;
+        report["verdict"]["reason"]=json!("冷机条件未通过，禁止候选测量");
+        return Ok(serde_json::to_string_pretty(&report).unwrap());
+    }
+    let workload_check=verify_workload_for(serial,&workload_path,launch.as_ref(),pkg,&evidence.join("workload_check"));
+    facts.workload_verified=workload_check["verified"].as_bool();
+    // 停充尝试: 请求要求且节点没指定时由接收端自己探 (charge_suspend.sh 内置节点表)。
+    // 停充失败保留证据；能效目标缺整窗放电功耗时资格失败，不能缩窄目标。
+    let want_suspend = req["conditions"]["charging_suspend"]["enabled"].as_bool().unwrap_or(false);
+    let mut suspended_via: Option<String> = None;
+    if want_suspend {
+        let out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
+        if let Err(e)=std::fs::write(evidence.join("charge_suspend.log"),&out) {
+            let _=su(serial,&format!("sh {DEV_TMP}/charge_suspend.sh restore"),60);
+            return Err(e.to_string());
+        }
+        if adb_ok(&out) && out.contains("CHARGE_SUSPENDED") {
+            // 脚本自己回显用的哪个节点; 原样记进报告
+            suspended_via = out
+                .lines()
+                .find(|l| l.contains("node="))
+                .map(|l| l.trim().to_string())
+                .or_else(|| Some("/sys/class/qcom-battery/charging_enabled".into()));
+        }
+    }
+
+    for i in 1..=3 {
+        let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false}};
+        let _=std::fs::write(evidence.join(format!("cold_baseline{i}.json")),py_dumps(&cold));
+        if cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {facts.cold_ok=Some(false);break;}
+        match run_one_for(serial,&format!("baseline{i}"),&evidence.join(format!("baseline{i}")),seconds,&workload_path,pkg,req["workload"]["render_comm"].as_str(),launch.as_ref()) {
+            Ok(m)=>facts.baseline.push(m),Err(e)=>{report["verdict"]["reason"]=json!(e);break;}
+        }
+    }
+    let baseline_restore=su(serial,&format!("sh {DEV_TMP}/charge_suspend.sh restore"),60);
+    std::fs::write(evidence.join("baseline_charge_restore.log"),&baseline_restore).ok();
+    let baseline_after=snapshot(serial);
+    std::fs::write(evidence.join("snap_after_baseline.txt"),&baseline_after).ok();
+    facts.restored=Some(snapshots_identical(&snap_before,&baseline_after) && adb_ok(&baseline_restore)
+        && !baseline_restore.contains("CHARGE_RESTORE_FAIL"));
+    facts.stage=Stage::Experiment;
+    let before_candidates=record_qualification(&mut report,evidence,&facts)?;
+    if !before_candidates.experiment_allowed {
+        let restore=su(serial,&format!("sh {DEV_TMP}/charge_suspend.sh restore"),60);
+        std::fs::write(evidence.join("charge_restore.log"),restore).ok();
+        report["verdict"]["reason"]=json!("基线/供电/来源/负载资格未通过，禁止候选实验");
+        return Ok(serde_json::to_string_pretty(&report).unwrap());
+    }
+    if want_suspend {
+        let out=su(serial,&format!("sh {DEV_TMP}/charge_suspend.sh suspend"),90);
+        std::fs::write(evidence.join("candidate_charge_suspend.log"),&out).ok();
+        // Always attempt restore after a requested suspend, even when its acknowledgement failed.
+        suspended_via=Some(suspended_via.unwrap_or_else(||"requested; acknowledgement unknown".into()));
+    }
     const BAD_APPLY_TOKENS: [&str; 4] = [
         "KNOB_FAIL",
         "KNOB_REFUSE",
@@ -1309,13 +1468,19 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let mut apply_ok = true;
     let mut restore_fail: Option<String> = None;
     let mut apply_logs: Vec<String> = Vec::new();
-    let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
+    // 冻结的资格合同: alpha 即 protocol.p_threshold, 判定指标即 policy.required_metrics
+    let alpha = facts.policy.alpha;
     let mut curtailed: Option<Value> = None;
 
     let mut contested: Vec<Value> = Vec::new();
     let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
     let mut cool_log: Vec<Value> = Vec::new();
     'pairs: for i in 1..=rounds {
+        let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false}};
+        let _=std::fs::write(evidence.join(format!("cold_pair{i}.json")),py_dumps(&cold));
+        if cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {
+            facts.cold_ok=Some(false);abort_reason=Some("候选对冷机失败，禁止继续".into());break;
+        }
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 风扇按死在关 (owner 规矩), 再等冷 —— 风扇状态会改等冷的结果
             let fan = arm_fan_off(serial);
@@ -1339,7 +1504,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                     apply_ok = false;
                     abort_reason = Some("旋钮未全部生效 (apply 回包有 FAIL 令牌)".into());
                     let r = restore(serial);
-                    if r.contains("KNOB_RESTORE_FAIL") {
+                    if !adb_ok(&r) || r.contains("KNOB_RESTORE_FAIL") {
                         restore_fail = Some(r);
                     }
                     break;
@@ -1396,7 +1561,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             }
             if arm == "knob" {
                 let r = restore(serial);
-                if r.contains("KNOB_RESTORE_FAIL") && restore_fail.is_none() {
+                if (!adb_ok(&r) || r.contains("KNOB_RESTORE_FAIL")) && restore_fail.is_none() {
                     restore_fail = Some(r.clone());
                 }
             }
@@ -1435,7 +1600,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             // 确定性截断: 剩下的臂无论量出什么, 都不可能有指标显著改善 → 跑满也必然不是
             // KEEP, 现在停 (论证见 src/curtail.rs)。KEEP 一侧永远不提前锁定。
             if curtail {
-                let tests = sysparam_win_tests(alpha, all_on_battery(&knob_runs, &ctrl_runs));
+                let tests = policy_win_tests(&facts.policy.required_metrics, alpha);
                 let (left_a, left_b) = (
                     (rounds as usize).saturating_sub(ctrl_runs.len()),
                     (rounds as usize).saturating_sub(knob_runs.len()),
@@ -1455,21 +1620,27 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     if suspended_via.is_some() {
         let cr = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         std::fs::write(evidence.join("charge_restore.log"), &cr).map_err(|e| e.to_string())?;
-        if !adb_ok(&cr) {
+        if !adb_ok(&cr) || cr.contains("CHARGE_RESTORE_FAIL") {
             restore_fail = Some(restore_fail.clone().unwrap_or_else(|| "停充还原失败".into()));
         }
     }
     let restore_log = restore(serial);
-    if restore_log.contains("KNOB_RESTORE_FAIL") && restore_fail.is_none() {
+    if (!adb_ok(&restore_log) || restore_log.contains("KNOB_RESTORE_FAIL")) && restore_fail.is_none() {
         restore_fail = Some(restore_log);
     }
+    let final_cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false}};
+    let _=std::fs::write(evidence.join("cold_final.json"),py_dumps(&final_cold));
+    if final_cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {facts.cold_ok=Some(false);abort_reason=Some("收尾冷机失败，撤销可保留结论".into());}
     let snap_after = snapshot(serial);
     std::fs::write(evidence.join("snap_after.txt"), &snap_after).map_err(|e| e.to_string())?;
-    let snapshot_identical = snap_before == snap_after;
+    let snapshot_identical = snapshots_identical(&snap_before,&snap_after);
     // 快照对不上时分两类: 厂商性能服务自己会改的频率边界 (它在游戏过程中主动压/抬, 与我们
     // 无关; 我们写过的节点由 restore 逐项写回并回读核对, 失败另有 KNOB_RESTORE_FAIL), 和其余。
     // 只有其余的键变了才判留痕作废。前者如实记进报告。
     let (vendor_drift, other_drift) = split_snapshot_diff(&snap_before, &snap_after);
+    // 资格里的「已还原」: 两次快照都读成功, 且除厂商自管的频率边界外逐项相等
+    let snapshot_restored = snapshot_identical
+        || (adb_ok(&snap_before) && adb_ok(&snap_after) && snap_before.lines().any(|l| l.contains('=')) && other_drift.is_empty());
 
     let (cool_reached, cool_timeout) = cool_summary(&cool_log);
     report["conditions_observed"] = json!({
@@ -1495,6 +1666,14 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     report["evidence_dir"] = json!(evidence.display().to_string());
     std::fs::write(evidence.join("apply_log.txt"), apply_logs.join("\n---\n")).ok();
 
+    facts.stage=Stage::Conclusion;facts.control=ctrl_runs.clone();facts.candidate=knob_runs.clone();
+    facts.device.control_verified=Some(apply_ok);
+    facts.restored=Some(snapshot_restored && restore_fail.is_none());
+    let qualified=record_qualification(&mut report,evidence,&facts)?;
+    if !qualified.conclusion_allowed {
+        report["verdict"]["reason"]=json!("实验结论资格未通过；数字保留，禁止 PASS/KEEP");
+        return Ok(serde_json::to_string_pretty(&report).unwrap());
+    }
     // ── 判定 ──
     if let Some(reason) = abort_reason.clone().or_else(|| restore_fail.clone().map(|r| format!("旋钮还原失败: {r}"))) {
         if suspended_via.is_some() {
@@ -1528,7 +1707,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         }
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
-    let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds);
+    let (verdict, keep, on_battery_all) = judge_runs_with(&ctrl_runs, &knob_runs, alpha, rounds, Some(&facts.policy.required_metrics));
     report["verdict"] = verdict;
     if !contested.is_empty() {
         let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
@@ -1556,6 +1735,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     // 一轮, 交替设计要抹掉的热漂移就全进了头条指标
     let mut m = report["metrics"].take();
     let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
+    let rail = knob_runs.first().and_then(|r| r["env"]["power_source"].as_str()).unwrap_or("battery");
+    report["metric_provenance"] = json!({"frame_p95_ms": {"per_run":qualified.frame_evidence,"display_verified":false},"fps_mean":{"semantics":"gpu_submit_proxy","display_verified":false},"fps_p95_ms":{"semantics":"gpu_submit_proxy","display_verified":false},"power_watt":{"rail":rail,"window_verified":knob_runs.iter().all(|r|r["env"]["power_window_verified"]==true)}});
     m["psnr_db"] = Value::Null;
     unavailable(&mut m, "psnr_db", "sysparam 不动画面, 无画质可量");
     if power.is_none() {
@@ -1688,17 +1869,34 @@ pub(crate) fn aux_compare(a_runs: &[Run], b_runs: &[Run]) -> Value {
 /// ABBA 两臂的统计判定 (sysparam / gray 共用): 帧时 p95、平均帧率, 两臂都放电时加功耗。
 /// 回 (verdict JSON, 是否保留, 两臂是否都在放电态)。
 pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, rounds: u32) -> (Value, bool, bool) {
+    judge_runs_with(ctrl_runs, knob_runs, alpha, rounds, None)
+}
+
+/// 同 [`judge_runs`]; `required` 给了 (实验资格冻结的 policy.required_metrics) 就按它判,
+/// 功耗是否进判定由目标合同决定, 不随这一轮量没量到功耗而缩窄。
+pub(crate) fn judge_runs_with(
+    ctrl_runs: &[Value],
+    knob_runs: &[Value],
+    alpha: f64,
+    rounds: u32,
+    required: Option<&[String]>,
+) -> (Value, bool, bool) {
     let primary = "frame_p95";
     let (a_runs, b_runs) = (eval_runs(ctrl_runs), eval_runs(knob_runs));
     // 与 autoloop 一致的判定指标表: 功耗只在两臂轨道一致且都量到时才进判定。
     // 一致 ≠ 一定是放电态: 停充后拿 USB 旁路轨的两臂相减也成立 (同一轨、同一套损耗),
     // 但那个绝对值不能跨任务比, 回包里用 power.rail / cross_run_comparable 标清楚。
     let on_battery_all = all_on_battery(knob_runs, ctrl_runs);
-    let mut metrics_list: Vec<(String, &str)> =
-        vec![("frame_p95".into(), "lower"), ("fps_mean".into(), "higher")];
-    if on_battery_all {
-        metrics_list.push(("power_w_mean".into(), "lower"));
-    }
+    let metrics_list: Vec<(String, &str)> = match required {
+        Some(ms) => ms.iter().map(|m| (m.clone(), if m == "fps_mean" { "higher" } else { "lower" })).collect(),
+        None => {
+            let mut l: Vec<(String, &str)> = vec![("frame_p95".into(), "lower"), ("fps_mean".into(), "higher")];
+            if on_battery_all {
+                l.push(("power_w_mean".into(), "lower"));
+            }
+            l
+        }
+    };
     let mut p_primary = 1.0f64;
     let mut wins: Vec<String> = Vec::new();
     let mut regressions: Vec<String> = Vec::new();
@@ -1749,6 +1947,7 @@ pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, r
         "is_pareto_improvement": keep,
         "p_value": p_primary,
         "stat": "exact_permutation",
+        "alpha_actual": alpha,
         "alpha_win": alpha_win,
         "alpha_regression": alpha,
         // 轮数下界: alpha_win 是否够得着 (2/C(2n,n) < alpha_win)
@@ -1979,6 +2178,10 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
     let Some(serial) = serial else {
         return Err("kind=gray 需要真机: 请加 --serial".into());
     };
+    let policy=policy_for_request(req)?;
+    let mut facts=Evidence::new(Stage::Probe,policy,qualification::inspect_device(serial));
+    let q=record_qualification(&mut report,evidence,&facts)?;
+    if !q.probe_allowed {report["verdict"]["reason"]=json!("root/trace 未验证，禁止灰档写入");return Ok(serde_json::to_string_pretty(&report).unwrap());}
     let require_hit = req["payload"]["require_hit"].as_bool().unwrap_or(true);
     let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen").to_string();
     let min_psnr = req["payload"]["image_check"]["min_psnr_db"]
@@ -2081,6 +2284,29 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
             return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
         }
         live_check = Some(v);
+    }
+    // 实验资格: 不挂层的冷机 + 负载自检 + 3 轮基线, 资格不过不上挂层候选实验
+    push_tools(serial)?;
+    let baseline_before=snapshot(serial);
+    let _ = gl.off();
+    let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false,"reason"=>"conditions.cool_c 未知"}};
+    facts.cold_ok=cold.get("ok").and_then(|v|v.as_bool());
+    if facts.cold_ok==Some(true) {
+        let workload_check=verify_workload_for(serial,&workload_path,launch.as_ref(),&pkg,&evidence.join("workload_check"));
+        facts.workload_verified=workload_check["verified"].as_bool();
+        if facts.workload_verified==Some(true) {for i in 1..=3 {
+            match run_one_for(serial,&format!("baseline{i}"),&evidence.join(format!("baseline{i}")),seconds,&workload_path,&pkg,req["workload"]["render_comm"].as_str(),launch.as_ref()) {
+                Ok(m)=>facts.baseline.push(m),Err(_)=>break,
+            }
+        }}
+    }
+    facts.device.control_verified=None; // layer effectiveness remains unverified before mount; no assumed capability
+    facts.restored=Some(snapshots_identical(&baseline_before,&snapshot(serial)));
+    facts.stage=Stage::Experiment;
+    let experiment=record_qualification(&mut report,evidence,&facts)?;
+    if !experiment.experiment_allowed {
+        report["verdict"]["reason"]=json!("灰档基线/冷机/负载/供电资格未通过，禁止挂层候选实验");
+        return Ok(serde_json::to_string_pretty(&report).unwrap());
     }
     let mut knob_runs: Vec<Value> = Vec::new();
     let mut ctrl_runs: Vec<Value> = Vec::new();
@@ -2298,6 +2524,10 @@ fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<Strin
         report["verdict"]["reason"] = json!("摘层没摘干净 (见 restore.log), 后续数据不可信");
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
+    facts.stage=Stage::Conclusion;facts.control=ctrl_runs.clone();facts.candidate=knob_runs.clone();
+    facts.device.control_verified=Some(hits>0);facts.restored=Some(restore_clean);
+    // Missing baseline/cold/workload/quality evidence remains unknown, never a complete optimizer.
+    let _=record_qualification(&mut report,evidence,&facts)?;
     // require_hit 缺省为真: 改写一次都没命中 = 拿 A 去和 A 比, 整轮作废
     if require_hit && hits == 0 {
         report["verdict"]["reason"] =
@@ -2400,6 +2630,16 @@ mod tests {
 
     fn validate_ok(req: &Value) -> bool { validate_v2(req).is_ok() }
     fn validate_err(req: &Value) -> String { validate_v2(req).unwrap_err() }
+
+    #[test]
+    fn probe_only_never_claims_reverted_from_failed_or_missing_snapshot() {
+        for (a,b) in [("",""),("x=1\n#adb_exit=1","x=1\n#adb_exit=1"),("x=1\n#adb_exit=0","x=2\n#adb_exit=0")] {
+            let mut r=base_report(&v2_req("sysparam",json!({"params":{}})),"sysparam");
+            probe_report(&mut r,a,b,&vec![]);
+            assert_eq!(r["status"],"ABORT");assert_eq!(r["conditions_observed"]["restored"],false);
+        }
+        assert!(snapshots_identical("x=1\n#adb_exit=0","x=1\n#adb_exit=0"));
+    }
 
     #[test]
     fn v2_envelope_needs_all_required_fields() {
@@ -2533,12 +2773,13 @@ bus.DDR.boost_freq.effect=live\n";
                         "incumbent_latency_ms": null, "quality_reference": null}
         });
         assert!(validate_ok(&req));
-        // 与 eval_shader_v2 里同一份映射, 这里直接复刻关键字段核对
-        let v1_cool = req["conditions"]["cool_c"].as_f64().or(req["protocol"]["cool_c"].as_f64());
-        assert_eq!(v1_cool, Some(42.0)); // conditions 优先
-        assert_eq!(req["payload"]["budget_ms"], json!(4.0));
-        let qref = req["payload"]["quality_reference"].as_str().or(req["conditions"]["quality_reference"].as_str());
-        assert_eq!(qref, Some("/tmp/ref_dir")); // payload 优先, 两者取其有
+        let plan = crate::shaderplan::build(&req,None,None).unwrap();
+        assert_eq!(plan.request["protocol"]["cool_c"],42.0);
+        assert_eq!(plan.request["budget_ms"],4.0);
+        assert_eq!(plan.request["quality_reference"],"/tmp/ref_dir");
+        let args=crate::gpuop::parse_args(&[plan.args,vec!["--request".into(),"x".into()]].concat()).unwrap();
+        assert_eq!(args.carrier,crate::gpuop::Carrier::Refbench);
+        assert_eq!(args.frames,300); assert_eq!(args.intensity,2);
     }
 
     // ── 报告装配 ──

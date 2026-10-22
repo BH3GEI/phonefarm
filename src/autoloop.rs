@@ -13,7 +13,6 @@
 //! → 收尾: 强制还原 + 等冷 + 全局快照按「我们写过什么」判留痕。
 
 use crate::eval::{adb, adb_ok, push_tools, run_one, run_soc_temp_max, run_view, snapshot, su, DEV_TMP, RUN_ENV_KEYS};
-use crate::framecheck;
 use crate::llm::{self, Candidate};
 use crate::loopreport::snapshot_diff;
 use crate::loopstat::{self, Run};
@@ -22,6 +21,7 @@ use crate::curtail;
 use crate::sysparam::{self, DecideCtx};
 use crate::pyobj;
 use serde_json::Value;
+use crate::qualification::{self, Evidence, Goal, Policy, Stage};
 use std::path::{Path, PathBuf};
 
 /// 等冷门槛的下界。真正的门槛在基线之后定: 目标是「回到基线是在什么热态下量的」。
@@ -48,6 +48,7 @@ pub struct Args {
     /// 每 N 组候选等冷一次 (缺省 1 = 每组都等, 与旧版一致)。N>1 时同一次降温后连跑 N 组,
     /// 批内后面的组不再等冷 —— 组内 ABBA 照样对消热漂移, 但这几组开跑时比基线热, 见 README。
     pub cool_every: u32,
+    pub goal: Goal,
 }
 
 const USAGE: &str = "用法: phonefarm autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]\n\
@@ -61,8 +62,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let (mut no_llm, mut probe_only) = (false, false);
     let mut curtail = true;
     let mut cool_every = 1u32;
-    let mut baseline_runs = 2u32;
+    let mut baseline_runs = 5u32;
     let mut power_in_verdict = "auto".to_string();
+    let mut goal = None;
     let mut serial = std::env::var("SERIAL").unwrap_or_else(|_| "91253241019A".into());
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -80,17 +82,21 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     .filter(|n: &u32| *n >= 1)
                     .ok_or(format!("--cool-every 要一个 >= 1 的整数\n{USAGE}"))?
             }
-            "--baseline-runs" => baseline_runs = it.next().and_then(|v| v.parse().ok()).unwrap_or(2),
+            "--baseline-runs" => baseline_runs = it.next().and_then(|v| v.parse().ok()).unwrap_or(5),
             "--power-in-verdict" => {
                 power_in_verdict = it.next().cloned().unwrap_or_else(|| "auto".into())
             }
             "--serial" => serial = it.next().cloned().unwrap_or(serial),
+            "--goal" => goal=Some(Goal::parse(&it.next().cloned().ok_or("缺 --goal 值")?)?),
             other => return Err(format!("不认识的参数 {other}\n{USAGE}")),
         }
     }
     if !matches!(power_in_verdict.as_str(), "auto" | "on" | "off") {
         return Err(format!("--power-in-verdict 只认 auto|on|off, got {power_in_verdict}"));
     }
+    let goal=goal.unwrap_or(if power_in_verdict=="off" {Goal::RenderCadence}else{Goal::RenderEfficiency});
+    if goal==Goal::RenderEfficiency && power_in_verdict=="off" {return Err("能效目标不得关闭必需功耗指标；显式 --goal render_cadence 可只研究提交节奏".into());}
+    Policy::new(goal,pairs,false).validate()?;
     Ok(Args {
         out: out.ok_or(format!("缺少 --out\n\n{USAGE}"))?,
         generations,
@@ -103,6 +109,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         serial,
         curtail,
         cool_every,
+        goal,
     })
 }
 
@@ -148,7 +155,7 @@ pub(crate) fn read_soc_temp(serial: &str) -> Option<(String, f64)> {
     best.map(|(ty, t)| (ty, t as f64 / 1000.0))
 }
 
-fn wait_cool(serial: &str, cool_c: f64, timeout_s: u64) -> PyVal {
+pub(crate) fn wait_cool(serial: &str, cool_c: f64, timeout_s: u64) -> PyVal {
     let t0 = std::time::Instant::now();
     loop {
         let Some(cur) = read_soc_temp(serial) else {
@@ -199,6 +206,7 @@ pub fn snapshot_key_of(kind: &str, path: &str) -> Option<String> {
     {
         return Some(format!("kgsl.{}_pwrlevel", &m[1]));
     }
+    if let Some(m) = re(r"^/sys/class/kgsl/kgsl-3d0/devfreq/(governor|min_freq|max_freq)$").and_then(|r| r.captures(path)) { return Some(format!("kgsl.devfreq_{}", &m[1])); }
     if let Some(m) = re(r"^/sys/devices/system/cpu/bus_dcvs/(\w+)/boost_freq$")
         .and_then(|r| r.captures(path))
     {
@@ -225,6 +233,8 @@ pub fn touched_keys(cand: &[(String, String)], wl: &sysparam::Whitelist) -> Vec<
                     format!("{d}/scaling_min_freq"),
                 ];
             }
+        } else if spec.path.starts_with("/sys/class/kgsl/kgsl-3d0/devfreq/") {
+            paths = vec!["/sys/class/kgsl/kgsl-3d0/devfreq/governor".into(),"/sys/class/kgsl/kgsl-3d0/devfreq/max_freq".into(),"/sys/class/kgsl/kgsl-3d0/devfreq/min_freq".into()];
         } else if spec.path.ends_with("min_pwrlevel") || spec.path.ends_with("max_pwrlevel") {
             paths = vec![
                 "/sys/class/kgsl/kgsl-3d0/min_pwrlevel".into(),
@@ -283,54 +293,6 @@ pub fn classify_diff(sd: &PyVal, ours_keys: Option<&[String]>) -> PyVal {
         "ours_diffs" => PyVal::List(ours),
         "environment_diffs" => PyVal::List(env),
     }
-}
-
-// ══════════════ 负载自检 ══════════════
-
-fn screencap_raw(serial: &str) -> Vec<u8> {
-    let out = Command::new(crate::eval::adb_path())
-        .args(["-s", serial, "exec-out", "screencap"])
-        .output();
-    out.map(|o| o.stdout).unwrap_or_default()
-}
-
-use std::process::Command;
-
-/// 跑一次拖拽, 中途抓两帧, 确认画面真的在转 (判据在 src/framecheck.rs)。
-fn check_spin(serial: &str, outdir: &Path) -> PyVal {
-    let _ = std::fs::create_dir_all(outdir);
-    let mut drag = Command::new(crate::eval::adb_path())
-        .args(["-s", serial, "shell", "input swipe 900 400 2000 400 12000"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok();
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    let a = screencap_raw(serial);
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    let b = screencap_raw(serial);
-    if let Some(mut d) = drag.take() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while matches!(d.try_wait(), Ok(None)) {
-            if std::time::Instant::now() > deadline {
-                let _ = d.kill();
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-    let mut paths = Vec::new();
-    for (name, buf) in [("spin_a.raw", a), ("spin_b.raw", b)] {
-        let p = outdir.join(name);
-        std::fs::write(&p, &buf).ok();
-        paths.push(p);
-    }
-    // 判据在 src/framecheck.rs; 裸帧走文件路径不走 JSON —— 一张 13MB, 过桥不划算
-    let va = std::fs::read(&paths[0]).unwrap_or_default();
-    let vb = std::fs::read(&paths[1]).unwrap_or_default();
-    let v = framecheck::verdict(&va, &vb);
-    std::fs::write(outdir.join("spin_check.json"), dumps_indent(&v, 1)).ok();
-    v
 }
 
 // ══════════════ 停充 ══════════════
@@ -424,6 +386,7 @@ struct CandidateRun<'a> {
     curtail: bool,
     /// false = 批内连跑, 本组不等冷 (`--cool-every`)
     cool_wait: bool,
+    qualification: &'a Evidence,
 }
 
 fn run_candidate(r: &CandidateRun) -> PyVal {
@@ -455,7 +418,8 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
     let snap_before = snapshot(serial);
     std::fs::write(outdir.join("snap_before.txt"), &snap_before).ok();
 
-    // 等冷超时不作废本组: 组内 ABBA 已让两臂承受同样的残余热漂移, 只如实记录
+    // 冷机失败/未知即作废本组 (实验资格要求每组、每对都从冷机开始)。
+    // `--cool-every` 批内连跑时只跳过组首这一次等冷, 开跑温度如实记录; 每对前的冷机门禁照旧。
     let cool = if r.cool_wait {
         wait_cool(serial, cool_c, COOL_TIMEOUT_S)
     } else {
@@ -468,11 +432,8 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
             "waited_s" => 0.0,
         }
     };
-    if matches!(cool.get("ok"), Some(PyVal::Bool(false))) {
-        log(&format!(
-            "等冷未达标 ({}), 仍按 ABBA 交替继续, 已记进证据",
-            cool.get("reason").map(|v| v.py_str()).unwrap_or_default()
-        ));
+    if !matches!(cool.get("ok"),Some(PyVal::Bool(true))) {
+        return abort_result(params,cand,"冷机失败/未知，禁止继续候选测量",temp_cap_c,outdir);
     }
 
     let charge_log = charge_suspend(serial);
@@ -493,7 +454,11 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
     ];
     let restore = |s: &str| -> String { su(s, &format!("sh {DEV_TMP}/knob_sysparam.sh restore"), 120) };
 
+    let mut cold_all=true;
     'pairs: for i in 1..=pairs {
+        let pair_cold=wait_cool(serial,cool_c,COOL_TIMEOUT_S);
+        let _=std::fs::write(outdir.join(format!("cold_pair{i}.json")),dumps_indent(&pair_cold,1));
+        if pair_cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {cold_all=false;aborted=Some("候选对冷机失败".into());break;}
         // ABBA: 奇数对旋钮先跑, 偶数对对照先跑, 让残余漂移在两臂之间对消
         for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             if arm == "knob" {
@@ -591,6 +556,9 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
         log(&format!("旋钮还原失败:\n{restore_log}"));
     }
     let charge_restore_log = charge_restore(serial);
+    let final_cold=wait_cool(serial,cool_c,COOL_TIMEOUT_S);
+    let _=std::fs::write(outdir.join("cold_final.json"),dumps_indent(&final_cold,1));
+    cold_all &= final_cold.get("ok").and_then(|v|v.as_bool())==Some(true);
     let status_log = su(serial, &format!("sh {DEV_TMP}/knob_sysparam.sh status"), 60);
     let snap_after = snapshot(serial);
     std::fs::write(outdir.join("snap_after.txt"), &snap_after).ok();
@@ -623,6 +591,16 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
     if aborted.is_none() && restore_fail.is_some() {
         aborted = Some("收尾还原失败, 本组作废".into());
     }
+    let mut facts=r.qualification.clone();facts.stage=Stage::Conclusion;
+    facts.control=ctrl_runs.iter().map(|(_,m)|m.clone()).collect();
+    facts.candidate=knob_runs.iter().map(|(_,m)|m.clone()).collect();
+    facts.cold_ok=Some(cold_all && cool.get("ok").and_then(|v|v.as_bool())==Some(true));
+    facts.device.control_verified=Some(apply_ok);
+    facts.restored=Some(adb_ok(&snap_before) && adb_ok(&snap_after) && snap_before.lines().any(|l|l.contains('=')) && ours_identical && restore_fail.is_none() && adb_ok(&charge_restore_log) && !charge_restore_log.contains("CHARGE_RESTORE_FAIL"));
+    let qualified=qualification::evaluate(&facts).expect("receiver policy validated before device changes");
+    let _=qualification::write(&outdir.join("qualification.json"),&qualified);
+    let _=std::fs::write(outdir.join("qualification_evidence.json"),serde_json::to_string_pretty(&facts).unwrap());
+    if !qualified.conclusion_allowed && aborted.is_none() {aborted=Some("实验结论资格未通过（必需指标/供电/来源/恢复），禁止 KEEP".into());}
     let dec = if let Some(reason) = aborted {
         pyobj! {
             "verdict" => "ABORT", "reason" => reason,
@@ -637,7 +615,7 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
         }
     } else {
         let cmps_val = PyVal::Obj(comparisons.clone());
-        sysparam::decide(
+        sysparam::decide_required(
             &cmps_val,
             &DecideCtx {
                 temp_max_c: temp_max.map(PyVal::Float).unwrap_or(PyVal::Null),
@@ -647,6 +625,7 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
                 // 这一组里混了功耗口径 (电池放电 / USB 旁路) 或有轮没量到: 这组功耗不进判定
                 power_available: power_available && sysparam::power_group_ok(all_runs.iter().map(|(_, m)| &m["env"])),
             },
+            &facts.policy.required_metrics,
         )
     };
 
@@ -703,6 +682,7 @@ fn run_candidate(r: &CandidateRun) -> PyVal {
         .collect();
 
     let mut result: Vec<(String, PyVal)> = vec![
+        ("qualification".into(),to_pyval(&serde_json::to_value(&qualified).unwrap())),
         ("params".into(), params_pyval(params)),
         ("why".into(), PyVal::Str(cand.why.clone())),
         ("plan".into(), PyVal::Str(plan)),
@@ -807,13 +787,18 @@ fn abort_result(
 // ══════════════ 主流程 ══════════════
 
 pub fn run_autoloop(args: &[String]) -> i32 {
-    let a = match parse_args(args) {
+    let mut a = match parse_args(args) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
             return 2;
         }
     };
+    let _lease = match crate::devlease::Lease::target(Some(a.serial.as_str()), "autoloop") {
+        Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
+    };
+    a.serial = _lease.serial.clone();
+
     let out = if a.out.is_absolute() {
         a.out.clone()
     } else {
@@ -836,6 +821,12 @@ pub fn run_autoloop(args: &[String]) -> i32 {
         log("设备不在线");
         return 2;
     }
+    let policy=Policy::new(a.goal,a.pairs,false);
+    let mut facts=Evidence::new(Stage::Probe,policy,qualification::inspect_device(&serial));
+    let preflight=qualification::evaluate(&facts).expect("argument policy validated");
+    let _=qualification::write(&out.join("qualification.json"),&preflight);
+    let _=std::fs::write(out.join("qualification_policy.json"),serde_json::to_string_pretty(&facts.policy).unwrap());
+    if !preflight.probe_allowed {log("root/trace 未确认，禁止差异写探测与模型提名");return 1;}
     if let Err(e) = push_tools(&serial) {
         log(&e);
         return 2;
@@ -882,17 +873,32 @@ pub fn run_autoloop(args: &[String]) -> i32 {
         }
     ));
 
+    facts.device.control_verified=Some(!wl.is_empty());
+    facts.restored=Some(crate::eval::snapshots_identical(&snap_before,&snap_after_probe));
+    if facts.restored!=Some(true) {
+        log("探测快照缺失/不一致，禁止开始实验");
+        let _=std::fs::write(out.join("report.json"),"{\"status\":\"ABORT\",\"reason\":\"probe restore failed\"}");
+        return 1;
+    }
     if a.probe_only {
         let report = pyobj! {
             "whitelist" => sysparam::whitelist_to_pyval(&wl),
             "probe_residue" => probe_sd,
         };
+        if let Err(e) = _lease.check() {
+            log(&e);
+            std::fs::write(out.join("lease_failure.json"), serde_json::json!({"status":"ABORT","eligible":false,"reason":e}).to_string()).ok();
+            return 2;
+        }
         std::fs::write(out.join("report.json"), dumps_indent(&report, 1)).ok();
         return 0;
     }
 
     // 3) 负载自检: 视角真的在转才继续
-    let spin = check_spin(&serial, &out.join("spin_check"));
+    let motion=crate::eval::verify_workload(&serial,&workload,"com.miHoYo.Yuanshen",&out.join("spin_check"));
+    let mut spin=to_pyval(&motion["motion"]);
+    if motion["verified"]!=true {spin=pyobj! {"spinning"=>false,"note"=>"实际负载退出或画面变化未通过"};}
+    facts.workload_verified=motion["verified"].as_bool();
     log(&format!(
         "负载自检: 画面变化 {} (门槛 {}) → {}",
         spin.get("moved_fraction").map(|v| v.py_str()).unwrap_or_default(),
@@ -924,10 +930,15 @@ pub fn run_autoloop(args: &[String]) -> i32 {
     ));
     let cool = wait_cool(&serial, COOL_C_FLOOR, COOL_TIMEOUT_S);
     log(&format!("基线前等冷: {}", dumps_indent(&cool, 0).replace('\n', " ")));
+    facts.cold_ok=cool.get("ok").and_then(|v|v.as_bool());
+    if facts.cold_ok!=Some(true) {log("基线冷机失败，禁止提名候选");return 1;}
     let base_start_c = cool.get("c").and_then(|v| v.as_f64());
     let base_charge_log = charge_suspend(&serial);
     let mut base_runs: Vec<(String, Value)> = Vec::new();
     for i in 1..=a.baseline_runs {
+        let base_cold=wait_cool(&serial,COOL_C_FLOOR,COOL_TIMEOUT_S);
+        let _=std::fs::write(out.join(format!("cold_baseline{i}.json")),dumps_indent(&base_cold,1));
+        if base_cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {facts.cold_ok=Some(false);break;}
         let label = format!("sp_base{i}");
         let dir = out.join("baseline").join(format!("base{i}"));
         match run_one(&serial, &label, &dir, 30, &workload, "com.miHoYo.Yuanshen") {
@@ -968,11 +979,9 @@ pub fn run_autoloop(args: &[String]) -> i32 {
     power_reasons.dedup();
     // 基线轮全部量到同一口径的可信功耗 (全电池放电, 或全 USB 旁路)
     let on_battery_all = !base_runs.is_empty() && sysparam::power_group_ok(base_runs.iter().map(|(_, m)| &m["env"]));
-    let power_available = match a.power_in_verdict.as_str() {
-        "on" => true,
-        "off" => false,
-        _ => power_measurable && on_battery_all,
-    };
+    // Objective requirements are frozen before candidate data; unavailable power does not change the objective.
+    // (--power-in-verdict 经 Goal 冻结进 policy: off → render_cadence, 不要求功耗)
+    let power_available=facts.policy.required_metrics.iter().any(|m|m=="power_w_mean");
     let first_charge_line = base_charge_log.trim().lines().next().unwrap_or("?").to_string();
     let power_note = if power_available {
         format!("功耗计入判定 (基线轮全程放电态; 停充: {first_charge_line})")
@@ -986,6 +995,16 @@ pub fn run_autoloop(args: &[String]) -> i32 {
     let cool_target = (COOL_C_FLOOR.max(py_round(base_start_c.unwrap_or(COOL_C_FLOOR) + 1.0, 1)))
         .min(temp_cap - 2.0);
 
+    facts.policy.temp_cap_c=Some(temp_cap);facts.policy.cool_c=Some(cool_target);
+    let _=std::fs::write(out.join("qualification_policy.json"),serde_json::to_string_pretty(&facts.policy).unwrap());
+    facts.stage=Stage::Experiment;facts.baseline=base_runs.iter().map(|(_,m)|m.clone()).collect();
+    let base_after=snapshot(&serial);
+    facts.restored=Some(crate::eval::snapshots_identical(&snap_after_probe,&base_after)
+        && adb_ok(&base_charge_restore_log) && !base_charge_restore_log.contains("CHARGE_RESTORE_FAIL"));
+    let eligibility=match qualification::evaluate(&facts) {Ok(q)=>q,Err(e)=>{log(&format!("冻结基线规则无效: {e}"));return 1;}};
+    let _=qualification::write(&out.join("qualification.json"),&eligibility);
+    let _=std::fs::write(out.join("qualification_evidence.json"),serde_json::to_string_pretty(&facts).unwrap());
+    if !eligibility.experiment_allowed {log("基线/供电/来源/重复性/恢复资格不通过，禁止模型提名与候选实验");return 1;}
     // 5) **在看到任何候选数据之前**冻结判定规则
     let mut rule = match sysparam::rule_doc(
         &PyVal::Float(temp_cap),
@@ -996,6 +1015,8 @@ pub fn run_autoloop(args: &[String]) -> i32 {
         PyVal::Obj(kvs) => kvs,
         _ => Vec::new(),
     };
+    rule.push(("qualification_policy".into(),to_pyval(&serde_json::to_value(&facts.policy).unwrap())));
+    rule.push(("required_metrics".into(),PyVal::List(facts.policy.required_metrics.iter().map(|m|PyVal::Str(m.clone())).collect())));
     rule.push(("power_measurable".into(), PyVal::Bool(power_measurable)));
     rule.push(("power_in_verdict_mode".into(), PyVal::Str(a.power_in_verdict.clone())));
     rule.push(("baseline_on_battery".into(), PyVal::Bool(on_battery_all)));
@@ -1025,7 +1046,7 @@ pub fn run_autoloop(args: &[String]) -> i32 {
         pyobj! {
             "floor_c" => COOL_C_FLOOR, "baseline_start_c" => base_start_c,
             "formula" => "min(max(floor, baseline_start + 1), temp_cap - 2)",
-            "on_timeout" => "如实记录后继续 (组内 ABBA 交替已让两臂承受同样的残余热漂移), 不作废本组",
+            "on_timeout" => "资格不通过；禁止测量/保留候选",
         },
     ));
     let base_py = runs_as_pyval(&base_runs);
@@ -1167,6 +1188,7 @@ pub fn run_autoloop(args: &[String]) -> i32 {
                 workload: &workload,
                 curtail: a.curtail,
                 cool_wait: cand_seq.is_multiple_of(a.cool_every),
+                qualification: &facts,
             });
             cand_seq += 1;
             for k in touched_keys(&cand.params, &wl) {
@@ -1214,7 +1236,7 @@ pub fn run_autoloop(args: &[String]) -> i32 {
     let loop_wall_s = py_round(t_loop.elapsed().as_secs_f64(), 1);
 
     // 8) 收尾: 强制还原 (旋钮 + 充电) + 全局快照比对
-    let _ = charge_restore(&serial);
+    let fin_charge_restore = charge_restore(&serial);
     let fin_restore = su(&serial, &format!("sh {DEV_TMP}/knob_sysparam.sh restore"), 120);
     if fin_restore.contains("KNOB_RESTORE_FAIL") || fin_restore.contains("#adb_exit=") && !fin_restore.ends_with("#adb_exit=0") {
         // state 文件是「还原不成功时唯一的回滚依据」, 这时候删它等于把现场毁了
@@ -1241,6 +1263,36 @@ pub fn run_autoloop(args: &[String]) -> i32 {
     let ours_identical = matches!(final_sd.get("ours_identical"), Some(PyVal::Bool(true)));
     let strict_identical = matches!(final_sd.get("strict_identical"), Some(PyVal::Bool(true)));
 
+    let final_restored=adb_ok(&snap_before) && adb_ok(&snap_final) && snap_before.lines().any(|l|l.contains('='))
+        && ours_identical && adb_ok(&fin_restore) && !fin_restore.contains("KNOB_RESTORE_FAIL")
+        && adb_ok(&fin_charge_restore) && !fin_charge_restore.contains("CHARGE_RESTORE_FAIL");
+    let final_cold_ok=matches!(fin_cool.get("ok"),Some(PyVal::Bool(true)));
+    let session_qualified=final_restored && final_cold_ok;
+    if !session_qualified {
+        for r in &mut all_results {
+            let g=r.get("gen").and_then(|v|v.as_i64());
+            let c=r.get("cand").and_then(|v|v.as_i64());
+            let dir=g.zip(c).map(|(g,c)|out.join(format!("gen{g}/cand{c}")));
+            let mut q=PyVal::Null;
+            if let Some(dir)=&dir {
+                if let Ok(mut e)=qualification::read(&dir.join("qualification_evidence.json")) {
+                    e.restored=Some(final_restored);
+                    if !final_cold_ok {e.cold_ok=Some(false);}
+                    if let Ok(report)=qualification::evaluate(&e) {
+                        let _=qualification::write(&dir.join("qualification.json"),&report);
+                        q=to_pyval(&serde_json::to_value(report).unwrap());
+                        let _=std::fs::write(dir.join("qualification_evidence.json"),serde_json::to_string_pretty(&e).unwrap());
+                    }
+                }
+            }
+            if let PyVal::Obj(kvs)=r {for (k,v) in kvs {
+                if k=="verdict" {*v=PyVal::Str("ABORT".into());}
+                else if k=="reason" {*v=PyVal::Str("会话收尾恢复/冷机失败，撤销可保留结论".into());}
+                else if k=="qualification" {*v=q.clone();}
+            }}
+            if let Some(dir)=dir {let _=std::fs::write(dir.join("result.json"),dumps_indent(r,1));}
+        }
+    }
     let kept: Vec<&PyVal> = all_results
         .iter()
         .filter(|r| r.get("verdict").map(|v| v.py_str()) == Some("KEEP".into()))
@@ -1264,6 +1316,8 @@ pub fn run_autoloop(args: &[String]) -> i32 {
     };
     let report = pyobj! {
         "goal" => "系统参数全自动闭环 (原神实测)",
+        "qualification" => to_pyval(&serde_json::to_value(&eligibility).unwrap()),
+        "session_qualified" => session_qualified,
         "workload" => workload.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         "spin_check" => spin,
         "test_conditions" => pyobj! {
@@ -1310,6 +1364,11 @@ pub fn run_autoloop(args: &[String]) -> i32 {
             "curtail" => a.curtail,
         },
     };
+    if let Err(e) = _lease.check() {
+        log(&e);
+        std::fs::write(out.join("report.json"), serde_json::json!({"status":"ABORT","eligible":false,"reason":e,"kept":[]}).to_string()).ok();
+        return 2;
+    }
     std::fs::write(out.join("report.json"), dumps_indent(&report, 1)).ok();
     log(&format!(
         "完成。保留 {} 组 / 共 {} 组; 收尾快照一致 (我们写过的项): {}, 严格逐行一致: {}",
@@ -1318,7 +1377,7 @@ pub fn run_autoloop(args: &[String]) -> i32 {
         ours_identical,
         strict_identical
     ));
-    if ours_identical {
+    if session_qualified {
         0
     } else {
         1

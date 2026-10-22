@@ -1,0 +1,30 @@
+{
+  "scope": "controlled hanging --version fixture; full inherited stderr pipe not drained",
+  "timeout_seconds": 1,
+  "elapsed_to_launcher_exit_seconds": 1.0270942081697285,
+  "launcher_status_under_three_seconds": -9,
+  "group_observed_alive_immediately_after_reaping": false,
+  "group_absent_after_bounded_retirement": true,
+  "outer_kill_needed": false,
+  "pipe_prefill_bytes": 65536,
+  "stderr_bytes_drained_after_cleanup": 65536,
+  "binary_sha256": "db1721a7779741367f974b27d57e398b1392cd08fb4c16972e95015a5fe65005",
+  "launcher_pid": 1605,
+  "args": [
+    "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-build-supervision/src/target/debug/phonefarm",
+    "gray-artifact",
+    "build",
+    "--source",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/system_handoff_20261011/build_supervision_review/candidate.comp",
+    "--out",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/system_handoff_20261011/build_supervision_review/fixed-stderr-artifacts",
+    "--ndk",
+    "/Users/kamico/work/GOSIM/HGamey/phonefarm/tasks/system_handoff_20261011/build_supervision_review/blocked-stderr-ndk",
+    "--timeout-seconds",
+    "1",
+    "--process-supervision",
+    "inherited-group"
+  ],
+  "device_gpu_model_calls": 0,
+  "counterexample_fixed": true
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "local_refbench_android_build@1",
+  "source_commit": "ad251d87025e3d59da46516d10b59b2e68239f75",
+  "source_hashes": {
+    "app/AndroidManifest.xml": "5e3dcbbd011bcdcaedc142e043789a44bb7918e69fd51f297c9938de3e0602f3",
+    "app/shaders/alu.frag": "ec07143757932525e5764e258ccf89c0b71588d7d0cfd5433c51875c93a00edd",
+    "app/shaders/blit.frag": "19fc6fce62de458d4c151750b31900d2429a74ac7da53c1d0fe7d679b326705c",
+    "app/shaders/fullscreen.vert": "e9fbb72bff1741c7d6e91495d0e20f1cf46b990ed8f011365a7ee90fa71403f1",
+    "app/shaders/pingpong.frag": "213a6ba87852d11d1b5df314f3b9ccd02ea58fcdc88bee62d40f30dd2efaf9ad",
+    "app/shaders/tri.frag": "10526b8aaddc33ad09a2062b0dc81da89010790aa25e47ecd19bb945179e409a",
+    "app/shaders/tri.vert": "65bad70e750cd0564f4fffec643adf1d64005a077dbabed1562fb1daca92f5d2",
+    "app/src/main.cpp": "9d60637b4b907919827b3a467d81f477dfbe8b727177d309a21b083b5ff840de",
+    "app/src/paired_capture.h": "d405e56aa5f8a39f2db928f1373096f64be3bd976ce6a2d01efec17341d31832",
+    "build/build.sh": "c774458282c4413d390c64b52964ff1247433bad1f9b45ec487cd81ea7ffb874"
+  },
+  "argv": [
+    "bash",
+    "build/build.sh"
+  ],
+  "sdk_root": "/Users/kamico/Library/Android/sdk",
+  "started_unix": 1791738813.5415711,
+  "wall_budget_s": 600,
+  "source_kind": "controlled_whitebox_procedural",
+  "codegen_kind": "actual_android_ndk",
+  "device_validation": "not_run",
+  "gpu_validation": "not_run",
+  "model_api_calls": 0,
+  "device_calls": 0,
+  "process_group": 28127,
+  "exit_code": 0,
+  "elapsed_s": 10.66065788269043,
+  "source_unchanged": true,
+  "build/out/refbench.apk": {
+    "sha256": "cb59df213d2e3ff9ea433702aba36e9c10d6ebb4078a9c994a4dcf3d62858db7",
+    "bytes": 1405348
+  },
+  "build/out/stage/lib/arm64-v8a/librefbench.so": {
+    "sha256": "72475bde41e860b81dc0d4d272272b7023eeebd96877d6804d1eb82d7fa3c3a1",
+    "bytes": 5967888
+  }
+}

@@ -385,7 +385,10 @@ pub fn build_whitelist(probe: &ProbeMap) -> Whitelist {
         ("setting.system.min_refresh_rate", "min_refresh_rate"),
     ] {
         let cur = probe.s(&format!("setting.system.{skey}.cur")).to_string();
-        if cur.is_empty() || cur == "null" || modes.is_empty() {
+        // Known unset is reversible only with the controlled driver's actual read/hold/restore receipts.
+        let known_unset = cur == "null" && probe.s(&format!("{pid}.read_exit")) == "0"
+            && usable(probe,pid) && probe.s(&format!("{pid}.effect_restored")) == "yes";
+        if cur.is_empty() || (cur == "null" && !known_unset) || modes.is_empty() {
             continue;
         }
         b.add(
@@ -491,6 +494,7 @@ fn cross_val_f(cand: &[(String, String)], wl: &Whitelist, pid: &str, dflt: f64) 
         return v.parse().map_err(|_| format!("{pid}={v} 不是数字"));
     }
     match wl_get(wl, pid).map(|s| s.current.as_str()) {
+        Some("null") if pid.starts_with("setting.system.") => Ok(dflt),
         Some(c) if !c.is_empty() => c
             .parse()
             .map_err(|_| format!("{pid} 的探测原值 {c:?} 不是数字, 无法做跨项约束检查")),
@@ -814,11 +818,51 @@ pub fn power_cross_run_comparable<'a>(envs: impl IntoIterator<Item = &'a serde_j
     any
 }
 
+#[derive(Debug)]
+pub(crate) struct SampleWindow {
+    pub complete: bool,
+    pub duration_s: Option<f64>,
+    pub interval_s: Option<f64>,
+    pub first_uptime: Option<f64>,
+    pub last_uptime: Option<f64>,
+}
+
+/// Done marker, declared protocol and every uptime are required; one lucky row is not a window.
+pub(crate) fn sample_window(text:&str)->SampleWindow {
+    let field=|key:&str|text.lines().find(|l|l.starts_with("#sample_env v1 "))
+        .and_then(|l|l.split_whitespace().find_map(|t|t.strip_prefix(key)))
+        .and_then(|x|x.parse::<f64>().ok()).filter(|x|x.is_finite() && *x>0.0);
+    let duration_s=field("dur=");let interval_s=field("interval=");
+    let rows:Vec<&str>=text.lines().filter(|l|l.starts_with("ENV ")).collect();
+    let times:Vec<f64>=rows.iter().filter_map(|l|l.split_whitespace().nth(1)?.parse::<f64>().ok())
+        .filter(|x|x.is_finite() && *x>=0.0).collect();
+    let first_uptime=times.first().copied();let last_uptime=times.last().copied();
+    let done=text.lines().rfind(|l|!l.trim().is_empty())==Some("#sample_env done");
+    let complete=duration_s.zip(interval_s).is_some_and(|(dur,ivl)|
+        ivl<=dur && rows.len()>=2 && rows.len()==(dur/ivl).ceil() as usize
+        && times.len()==rows.len() && done && times.windows(2).all(|w|w[1]-w[0]>=ivl*0.5 && w[1]-w[0]<=ivl*2.0)
+        && last_uptime.zip(first_uptime).is_some_and(|(b,a)|b-a>=dur-ivl-0.1));
+    SampleWindow{complete,duration_s,interval_s,first_uptime,last_uptime}
+}
+
+/// ftrace capture metadata uses /proc/uptime too, so compare clocks without assuming event trace_clock.
+pub(crate) fn trace_window_covered(window:&SampleWindow,trace:&str,expected_capture_s:u64)->bool {
+    let field=|key:&str|trace.lines().find(|l|l.starts_with("#loop_v1_meta capture_start_uptime="))
+        .and_then(|l|l.split_whitespace().find_map(|t|t.strip_prefix(key)))
+        .and_then(|x|x.parse::<f64>().ok()).filter(|x|x.is_finite());
+    match (window.first_uptime,window.last_uptime,field("capture_start_uptime="),field("capture_end_uptime="),field("duration_req=")) {
+        (Some(a),Some(b),Some(start),Some(end),Some(dur))=>window.complete && dur==expected_capture_s as f64
+            && end-start>=dur-0.1 && end-start<=dur+5.0 && a<=start && b>=end,
+        _=>false,
+    }
+}
+
 pub fn env_stats(text: &str) -> PyVal {
     let (mut vi_watts, mut now_watts, mut usb_watts) = (vec![], vec![], vec![]);
     let (mut currents, mut voltages): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
     let mut temps: Vec<f64> = vec![];
     let mut status = String::new();
+    let mut status_after = String::new();
     let mut capacity: Option<String> = None;
     let mut charge_suspended = false;
     let mut charge_mode = String::new();
@@ -832,6 +876,10 @@ pub fn env_stats(text: &str) -> PyVal {
         let line = line.trim();
         if let Some(v) = line.strip_prefix("#battery_status=") {
             status = v.trim().to_string();
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("#battery_status_after=") {
+            status_after = v.trim().to_string();
             continue;
         }
         if let Some(v) = line.strip_prefix("#battery_capacity=") {
@@ -873,11 +921,9 @@ pub fn env_stats(text: &str) -> PyVal {
         }
         // ENV <uptime> <batt_uv> <batt_ua> <batt_uw|NA> <usb_uv> <usb_ua> <热区> <毫摄氏度>
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 9 {
-            continue;
-        }
-        // 计数在解析之前 —— 解析失败的样本照样算采到过 (与旧版一致)
+        // Every ENV row belongs to the claimed sample window, including malformed rows.
         n += 1;
+        if parts.len() != 9 { continue; }
         let (Ok(bv), Ok(bi)) = (parts[2].parse::<i64>(), parts[3].parse::<i64>()) else {
             continue;
         };
@@ -932,6 +978,13 @@ pub fn env_stats(text: &str) -> PyVal {
     // 2026-10-12 实测把 Full + -3 mA 当成放电, 交了 0.009 W 的「整机功耗」。
     let full_idle = status.eq_ignore_ascii_case("full") && cur_mean.is_some_and(|c| c.abs() < BYPASS_IDLE_UA);
     let on_battery = !charging && !full_idle && cur_mean.is_some_and(|c| c < 0.0);
+    // Every sample must support discharge; a negative average can hide charging intervals.
+    let statuses_ok = |st: &str| matches!(st.to_lowercase().as_str(), "discharging" | "not charging");
+    let coverage=sample_window(text);
+    let power_window_verified = coverage.complete && statuses_ok(&status) && statuses_ok(&status_after)
+        && n > 0 && currents.len() == n && vi_watts.len() == n
+        && currents.iter().all(|c| *c < 0.0)
+        && vi_watts.iter().all(|w| (crate::hwcond::POWER_MIN_W..=crate::hwcond::POWER_MAX_W).contains(w));
 
     let now_mean = avg(&now_watts);
     // 手机整机功耗合理区间。777W 这种读数只能说明单位不对, 不能进任何均值。
@@ -966,6 +1019,8 @@ pub fn env_stats(text: &str) -> PyVal {
             if status.is_empty() { "?" } else { &status },
             PyVal::from(cur_mean).py_str()
         )
+    } else if !power_window_verified {
+        "整窗放电证据不完整或采样越界：需要前后状态、每条负电流与可信 V×I；旧记录不代填通过".to_string()
     } else if vi_watts.is_empty() {
         "读不到 voltage_now/current_now".to_string()
     } else {
@@ -983,6 +1038,14 @@ pub fn env_stats(text: &str) -> PyVal {
     let mut out = pyobj! {
         "n_samples" => n,
         "battery_status" => status.clone(),
+        "battery_status_after" => status_after,
+        "power_window_verified" => power_window_verified,
+        "thermal_window_verified" => coverage.complete && n>0 && temps.len()==n,
+        "sampler_complete" => coverage.complete,
+        "sample_duration_s" => coverage.duration_s,
+        "sample_interval_s" => coverage.interval_s,
+        "sample_first_uptime" => coverage.first_uptime,
+        "sample_last_uptime" => coverage.last_uptime,
         "battery_capacity_pct" => capacity,
         "battery_charging" => charging,
         "charge_suspended" => charge_suspended,
@@ -1050,7 +1113,13 @@ pub struct DecideCtx {
 }
 
 pub fn decide(comparisons: &PyVal, ctx: &DecideCtx) -> PyVal {
-    let metrics = active_metrics(ctx.power_available);
+    let required: Vec<String> = active_metrics(ctx.power_available).iter().map(|(m,_)|m.to_string()).collect();
+    decide_required(comparisons, ctx, &required)
+}
+
+/// Required metrics are frozen by objective, never silently removed after measurement failure.
+pub fn decide_required(comparisons: &PyVal, ctx: &DecideCtx, required: &[String]) -> PyVal {
+    let metrics: Vec<(&str,&str)> = PRIMARY_METRICS.iter().copied().filter(|(m,_)|required.iter().any(|r|r==m)).collect();
     let k = metrics.len().max(1);
     let alpha_win = ALPHA / k as f64;
 
@@ -1081,6 +1150,22 @@ pub fn decide(comparisons: &PyVal, ctx: &DecideCtx) -> PyVal {
         };
     }
 
+    if metrics.is_empty() || metrics.len() != required.len() {
+        return pyobj! { "verdict" => "ABORT", "reason" => "冻结必需指标为空或包含未知项", "alpha_win" => alpha_win };
+    }
+    if ctx.temp_max_c.as_f64().is_none_or(|t| !t.is_finite() || t <= 0.0)
+        || ctx.temp_cap_c.as_f64().is_none_or(|t| !t.is_finite() || t <= 0.0) {
+        return pyobj! { "verdict" => "ABORT", "reason" => "温度证据或冻结上限缺失", "alpha_win" => alpha_win };
+    }
+    for (m,_) in &metrics {
+        let valid = comparisons.get(m).is_some_and(|c| c.get("error").is_none()
+            && ["diff_mean","a_mean","b_mean","perm_p_two_sided"].iter().all(|k|
+                c.get(k).and_then(|v|v.as_f64()).is_some_and(f64::is_finite))
+            && c.get("perm_p_two_sided").and_then(|v|v.as_f64()).is_some_and(|p|(0.0..=1.0).contains(&p)));
+        if !valid {
+            return pyobj! { "verdict" => "ABORT", "reason" => format!("必需指标 {m} 缺失或统计无效，禁止跳过后 KEEP"), "alpha_win" => alpha_win };
+        }
+    }
     let (mut wins, mut regressions): (Vec<String>, Vec<String>) = (vec![], vec![]);
     let mut detail: Vec<(String, PyVal)> = Vec::new();
     for (m, direction) in &metrics {
@@ -1441,13 +1526,23 @@ setting.system.refresh_rate_mode.mode1_fps=60 (readback=1)
         assert!(t1.contains("setting\tsystem:peak_refresh_rate\t60"));
     }
 
+    fn complete_stats(text:&str)->PyVal {
+        let mut rows:Vec<String>=text.lines().filter(|l|l.starts_with("ENV ")).map(String::from).collect();
+        // Explicit test sampler protocol. Single-point arithmetic fixtures get a second identical sample.
+        if rows.len()==1 {rows.push(rows[0].clone());}
+        let mut lines:Vec<String>=text.lines().filter(|l|!l.starts_with("ENV ") && !l.starts_with("#sample_env")).map(String::from).collect();
+        lines.insert(0,format!("#sample_env v1 dur={} interval=2",rows.len()*2));
+        for (i,row) in rows.iter().enumerate() {let mut parts:Vec<String>=row.split_whitespace().map(String::from).collect();parts[1]=(100+i*2).to_string();lines.push(parts.join(" "));}
+        lines.push("#sample_env done".into());env_stats(&lines.join("\n"))
+    }
+
     // ── 功耗温度解析 ──
 
     /// 本机 battery/power_now 单位有误 (读出过 777W), 所以以 |V x I| 为准。
     #[test]
     fn discharging_uses_volts_times_amps_not_power_now() {
-        let s = env_stats(
-            "#sample_env v1\n#battery_status=Discharging\n\
+        let s = complete_stats(
+            "#sample_env v1\n#battery_status=Discharging\n#battery_status_after=Discharging\n\
 ENV 100.0 4000000 -1500000 777000000 0 0 cpu-1-0 41000\n\
 ENV 102.0 4000000 -1500000 777000000 0 0 gpuss-0 43500\n",
         );
@@ -1464,7 +1559,7 @@ ENV 102.0 4000000 -1500000 777000000 0 0 gpuss-0 43500\n",
     /// 单个样本上两种写法看不出差别, 平均到四位小数上就差一个数 —— 这四行是实测出来的。
     #[test]
     fn watt_math_follows_python_left_to_right() {
-        let s = env_stats(
+        let s = complete_stats(
             "#battery_status=Discharging
 ENV 1.0 4000000 -1500000 NA 0 0 cpu-1-0 41000
 ENV 2.0 3800000 -1000000 NA 0 0 cpu-1-0 41000
@@ -1478,8 +1573,8 @@ ENV 4.0 3800000 771000 NA 0 0 cpu-1-0 41000
 
     #[test]
     fn plausible_power_now_is_still_only_recorded() {
-        let s = env_stats(
-            "#battery_status=Discharging\nENV 1.0 4000000 -1500000 5000000 0 0 cpu-1-0 40000\n",
+        let s = complete_stats(
+            "#battery_status=Discharging\n#battery_status_after=Discharging\nENV 1.0 4000000 -1500000 5000000 0 0 cpu-1-0 40000\n",
         );
         assert_eq!(s.get("power_now_plausible"), Some(&PyVal::Bool(true)));
         assert_eq!(s.get("power_now_w_mean").unwrap().as_f64(), Some(5.0));
@@ -1490,7 +1585,7 @@ ENV 4.0 3800000 771000 NA 0 0 cpu-1-0 41000
     /// 那个衰减会被当成「功耗随时间下降」混进 A/B 比较。所以如实报 None。
     #[test]
     fn charging_makes_power_unusable() {
-        let s = env_stats(
+        let s = complete_stats(
             "#battery_status=Charging\nENV 1.0 4000000 1000000 5000000 5000000 2000000 cpu-1-0 40000\n",
         );
         assert_eq!(s.get("power_w_mean"), Some(&PyVal::Null));
@@ -1503,14 +1598,14 @@ ENV 4.0 3800000 771000 NA 0 0 cpu-1-0 41000
 
     #[test]
     fn sentinel_temps_and_missing_fan_are_not_guessed() {
-        let s = env_stats(
-            "#battery_status=Discharging\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 0\n\
+        let s = complete_stats(
+            "#battery_status=Discharging\n#battery_status_after=Discharging\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 0\n\
 ENV 2.0 4000000 -1000000 NA 0 0 cpu-1-0 200000\n",
         );
         assert_eq!(s.get("soc_temp_max_c"), Some(&PyVal::Null));
-        let s = env_stats("#battery_status=Discharging\n#fan_state=\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n");
+        let s = complete_stats("#battery_status=Discharging\n#battery_status_after=Discharging\n#fan_state=\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n");
         assert_eq!(s.get("fan_state"), Some(&PyVal::Null));
-        let s = env_stats("#battery_status=Discharging\n#fan_state=speed=3,fan1_input=4200\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n");
+        let s = complete_stats("#battery_status=Discharging\n#battery_status_after=Discharging\n#fan_state=speed=3,fan1_input=4200\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n");
         assert_eq!(s.get("fan_state"), Some(&PyVal::Str("speed=3,fan1_input=4200".into())));
     }
 
@@ -1518,8 +1613,8 @@ ENV 2.0 4000000 -1000000 NA 0 0 cpu-1-0 200000\n",
     #[test]
     fn on_battery_needs_both_status_and_current_direction() {
         // 停充后内核仍写 "Not charging", 但电流确实在放 → 算放电态
-        let s = env_stats(
-            "#battery_status=Not charging\n#battery_capacity=88\n#charge_suspended=yes\n\
+        let s = complete_stats(
+            "#battery_status=Not charging\n#battery_status_after=Not charging\n#battery_capacity=88\n#charge_suspended=yes\n\
 ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
         );
         assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(true)));
@@ -1529,11 +1624,11 @@ ENV 1.0 4000000 -1500000 NA 5000000 100000 cpu-1-0 41000\n",
         assert!(matches!(s.get("power_usable_reason"), Some(PyVal::Str(r)) if r.contains("已停充")));
 
         // status 说 Not charging 但电流是正的 = 还在往电池里灌
-        let s = env_stats("#battery_status=Not charging\nENV 1.0 4000000 771000 NA 0 0 cpu-1-0 41000\n");
+        let s = complete_stats("#battery_status=Not charging\n#battery_status_after=Not charging\nENV 1.0 4000000 771000 NA 0 0 cpu-1-0 41000\n");
         assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(false)));
         assert_eq!(s.get("power_w_mean"), Some(&PyVal::Null));
         // 充放平衡的瞬间电流过零 —— 判不出放电态就不算
-        let s = env_stats("#battery_status=Not charging\nENV 1.0 4000000 0 NA 0 0 cpu-1-0 41000\n");
+        let s = complete_stats("#battery_status=Not charging\n#battery_status_after=Not charging\nENV 1.0 4000000 0 NA 0 0 cpu-1-0 41000\n");
         assert_eq!(s.get("on_battery"), Some(&PyVal::Bool(false)));
         assert_eq!(s.get("power_w_mean"), Some(&PyVal::Null));
     }
@@ -1595,8 +1690,11 @@ ENV 1.0 4400000 -900000 NA 0 0 cpu-0-0-1 42000\n");
     #[test]
     fn power_rail_names_the_rail_actually_used() {
         use serde_json::json;
+        // 电池轨的功耗要整窗放电证据 (采样协议头、逐条负电流、前后状态、done 标记) 才作数
         let battery = env_stats(
-            "#battery_status=Discharging\nENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n",
+            "#sample_env v1 dur=4 interval=2\n#battery_status=Discharging\n\
+ENV 1.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\nENV 3.0 4000000 -1000000 NA 0 0 cpu-1-0 41000\n\
+#battery_status_after=Discharging\n#sample_env done\n",
         );
         assert_eq!(battery.get("power_rail"), Some(&PyVal::Str("battery".into())));
         assert_eq!(battery.get("power_cross_run_comparable"), Some(&PyVal::Bool(true)));
@@ -1671,6 +1769,51 @@ ENV 1.0 4412000 -2000 NA 4920000 806000 cpu-0-4-1 44900\n",
         match v.get("verdict") {
             Some(PyVal::Str(s)) => s,
             _ => "",
+        }
+    }
+
+    #[test]
+    fn window_requires_done_count_span_and_bound_capture() {
+        let good="#sample_env v1 dur=6 interval=2\n#battery_status=Discharging\nENV 100 4000000 -1000000 NA 0 0 cpu-1-0 41000\nENV 102 4000000 -1000000 NA 0 0 cpu-1-0 41000\nENV 104 4000000 -1000000 NA 0 0 cpu-1-0 41000\n#battery_status_after=Discharging\n#sample_env done";
+        assert!(sample_window(good).complete);
+        let trace="#loop_v1_meta capture_start_uptime=100.5 capture_end_uptime=103.5 duration_req=3\n";
+        assert!(trace_window_covered(&sample_window(good),trace,3));
+        for bad in [good.replace("#sample_env done",""),good.replace("ENV 102 4000000 -1000000 NA 0 0 cpu-1-0 41000\n",""),good.replace("ENV 104","ENV 102.1"),good.replace("ENV 102","ENV broken")] {
+            let v=env_stats(&bad);assert!(!sample_window(&bad).complete);assert_eq!(v.get("power_w_mean"),Some(&PyVal::Null));
+        }
+        assert!(!trace_window_covered(&sample_window(good),trace,30));
+        assert!(!trace_window_covered(&sample_window(good),"#loop_v1_meta capture_start_uptime=102 capture_end_uptime=105 duration_req=3",3));
+        let one="#sample_env v1 dur=30 interval=2\n#battery_status=Discharging\nENV 100 4000000 -1000000 NA 0 0 cpu-1-0 41000\n#battery_status_after=Discharging\n#sample_env done";
+        assert!(!sample_window(one).complete);assert_eq!(env_stats(one).get("power_w_mean"),Some(&PyVal::Null));
+    }
+
+    #[test]
+    fn required_missing_metric_and_unknown_thermal_block_other_win() {
+        let incomplete=pyobj! {"frame_p95"=>cmp_of(-9.0,0.0001),"fps_mean"=>cmp_of(0.0,1.0)};
+        assert_eq!(verdict_of(&decide(&incomplete,&base_ctx())),"ABORT");
+        let complete=pyobj! {"frame_p95"=>cmp_of(-9.0,0.0001),"fps_mean"=>cmp_of(0.0,1.0),"power_w_mean"=>cmp_of(0.0,1.0)};
+        assert_eq!(verdict_of(&decide(&complete,&DecideCtx{temp_max_c:PyVal::Null,..base_ctx()})),"ABORT");
+    }
+
+    #[test]
+    fn negative_average_does_not_prove_full_window_discharge() {
+        let samples="ENV 1.0 4000000 -2000000 NA 0 0 cpu-1-0 41000\nENV 2.0 4000000 500000 NA 0 0 cpu-1-0 41000\n";
+        let s=env_stats(&format!("#battery_status=Discharging\n#battery_status_after=Discharging\n{samples}"));
+        assert!(s.get("current_now_ua_mean").unwrap().as_f64().unwrap()<0.0);
+        assert_eq!(s.get("power_window_verified"),Some(&PyVal::Bool(false)));
+        assert_eq!(s.get("power_w_mean"),Some(&PyVal::Null));
+    }
+
+    #[test]
+    fn old_or_partial_power_evidence_keeps_raw_but_not_verdict_metric() {
+        for text in [
+            "#battery_status=Discharging\nENV 1 4000000 -1000000 NA 0 0 cpu-1-0 41000\n",
+            "#battery_status=Discharging\n#battery_status_after=Charging\nENV 1 4000000 -1000000 NA 0 0 cpu-1-0 41000\n",
+            "#battery_status=Discharging\n#battery_status_after=Discharging\nENV 1 4000000 -1000000 NA 0 0 cpu-1-0 41000\nENV 2 NA NA NA 0 0 cpu-1-0 41000\n",
+        ] {
+            let s=env_stats(text);
+            assert!(s.get("power_vi_w_mean").unwrap().as_f64().is_some());
+            assert_eq!(s.get("power_w_mean"),Some(&PyVal::Null));
         }
     }
 

@@ -1,0 +1,89 @@
+{
+  "schema": "phonefarm/confirmation_driver_lease_schema_followup@1",
+  "source_commit": "22641c3f334308f9a0c320420b899c9c907429b6",
+  "shared_minimal_patch": "9a31be48a322e19f5a0368e8056e399c1347c005",
+  "change": "closed format-1 top-level recovery schema; retain unfamiliar keys/version in all marker consumers and Drop",
+  "source_files": {
+    "src/devlease.rs": "8e25bf3bdd6998922dd656bdb4718d5788ed788e903ba4808675cf54c9b21b4d",
+    "docs/SPEC_V2_CONDITIONS_LEASE.md": "fc75fca13ead1ad1077042735ac4c8bfb2f58894250b31e12151b378d7bf26cc"
+  },
+  "test": {
+    "argv": [
+      "cargo",
+      "test",
+      "--offline",
+      "--manifest-path",
+      "src/Cargo.toml"
+    ],
+    "cwd": "/Users/kamico/work/GOSIM/HGamey/worktrees/phonefarm-confirmation-driver",
+    "environment": {
+      "PHONEFARM_DRIVER_GOL_BIN": "/Users/kamico/work/GOSIM/HGamey/worktrees/game-loop-final-target/debug/game_opt_loop"
+    },
+    "exit": 0,
+    "groups": [
+      {
+        "passed": 535,
+        "seconds": 5.29,
+        "name": "unit"
+      },
+      {
+        "passed": 10,
+        "seconds": 634.13,
+        "name": "confirmation_driver_cli"
+      },
+      {
+        "passed": 14,
+        "seconds": 5.14,
+        "name": "confirmation_observation_cli"
+      },
+      {
+        "passed": 9,
+        "seconds": 3.58,
+        "name": "qualification_cli"
+      }
+    ],
+    "passed": 568,
+    "failed": 0,
+    "log": "tasks/confirmation_driver_20261011/final_v6/cargo-test.log",
+    "log_sha256": "ae8a9a04391468ad4c5ef99218a653b1141c86e615d08c51139c7bc80844d9d7",
+    "fixture_scope": "default temporary fixtures cleaned normally; this fresh run does not relabel historical final_v5 independent bundle archive"
+  },
+  "clippy": {
+    "argv": [
+      "cargo",
+      "clippy",
+      "--offline",
+      "--manifest-path",
+      "src/Cargo.toml",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "strict_clean": false,
+    "log": "tasks/confirmation_driver_20261011/final_v6/clippy.log",
+    "log_sha256": "37e4c6a4410ccd01c695a543b10856be84ca82e4d7ca3b718fba7f883df8a338",
+    "warnings": [
+      "warning: `phonefarm` (bin \"phonefarm\") generated 53 warnings (run `cargo clippy --fix --bin \"phonefarm\" -p phonefarm` to apply 23 suggestions)",
+      "warning: `phonefarm` (bin \"phonefarm\" test) generated 58 warnings (46 duplicates) (run `cargo clippy --fix --bin \"phonefarm\" -p phonefarm --tests` to apply 5 suggestions)"
+    ]
+  },
+  "tools": {
+    "phonefarm_binary_sha256": "c2cba01d5e82397620210f4e15d62d8d32d9c3351f179b9432bb038d7fbc8bb6",
+    "gol_build_source": "5149a3335c957984c5005ceafe25c99b74322c21",
+    "gol_sha256_before_and_after": "589667fa4675a2bc73c36eebe239cdeaa637c52604a357bd79b260d7647890d3"
+  },
+  "original_pr19_backport": {
+    "url": "https://github.com/HGamey/phonefarm/pull/19",
+    "source": "28a48687943f311c72dc908e3e01ca0719adf5ec",
+    "evidence_head": "4e171f73d17ec6d8781dbcf5397772df8b94a74d",
+    "passed": 533,
+    "scope": "generic lease, no driver import; parent routing unchanged"
+  },
+  "historical_full_archive_summary": "tasks/confirmation_driver_20261011/verification_summary.json (source f526b31)",
+  "device_executed": false,
+  "sdk_installed": false,
+  "model_api_calls": 0,
+  "hardware_acceptance": "NOT_RUN",
+  "evidence_origin": "synthetic",
+  "real_game_optimization_proven": false,
+  "promotion_allowed": false
+}
