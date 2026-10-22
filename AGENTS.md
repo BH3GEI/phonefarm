@@ -166,7 +166,9 @@ GPU submit proxy 不等于显示 FPS，首批不按不同窗口推算每帧能�
 同期trace电池能量/平均功率是V×I采样积分估计，缺覆盖或放电资格时null；每帧能耗仍待完整分组窗口。
 画质检查点使用同一owner的quality begin/checkpoint/finish动作，逐阶段保存当前控制epoch，
 完整原图与明确派生的半尺寸预览分开；缺marker保原图且阶段不前进，显式新请求可重采失败阶段。
-Web/CLI共读持久manifest；采集完成不代表同场景或画质通过，旧quality客户端迁移单列。
+Web/CLI共读持久manifest；采集完成不代表同场景或画质通过。
+旧genshin_quality客户端只连接显式既有session/job，要求尺寸/方向/坐标profile，每个输入前重新截图；
+它不启动或重启游戏。重复完整调用返回旧原件，partial/未知不自动重走导航；远程状态缺失与断网分别处理。
 合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-QUALITY.md。
 旧 gray-layer/reference 脚本迁移仍待完成；合同见
 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
