@@ -125,15 +125,19 @@ def plan_text(cap, stock=None):
 
 # ══════════════ 请求 ══════════════
 
-def make_request(cid, params, whitelist, cap, stage, rounds, cool_c, seed, why):
+# SoC 中止温度: 2026-10-21 用户定为 80 °C (连续两次采样确认), 原 70 °C 作废
+TEMP_CAP_C = 80.0
+
+
+def make_request(cid, params, whitelist, cap, stage, rounds, cool_c, seed, why, seconds=30):
     req = {
         "version": 2, "kind": "sysparam", "candidate_id": cid, "package": PKG,
-        "workload": {"carrier": "game_replay", "seconds": 30, "script": WORKLOAD,
+        "workload": {"carrier": "game_replay", "seconds": seconds, "script": WORKLOAD,
                      "render_comm": "UnityGfxDeviceW"},
-        "conditions": {"cool_c": cool_c, "temp_cap_c": 70.0, "require_root": True,
+        "conditions": {"cool_c": cool_c, "temp_cap_c": TEMP_CAP_C, "require_root": True,
                        "require_discharging": True,
                        "charging_suspend": {"enabled": True, "node": CHARGE_NODE}, "fan": "off"},
-        "protocol": {"cool_c": cool_c, "replay_seconds": 30, "rounds": rounds, "alternating": True,
+        "protocol": {"cool_c": cool_c, "replay_seconds": seconds, "rounds": rounds, "alternating": True,
                      "p_threshold": 0.05, "stat": "exact_permutation",
                      "multiple_comparison": "bonferroni_on_wins",
                      "metrics": [{"id": "fps_p95_ms", "better": "lower"}, {"id": "fps_mean", "better": "higher"},
@@ -292,7 +296,8 @@ class Dev:
 
     def pull_su(self, remote, local):
         """root 才读得到的文件: su cat 出来写到本机新文件 (adb pull 以 shell 身份读不到)。"""
-        argv = ["adb", "-s", self.serial, "exec-out", "su", "-c", shlex.quote(f"cat {remote}")]
+        # exec-out 不经设备端 sh 拆参数: su -c 与命令必须合成一个参数 (2026-10-22 真机, 分开传会把引号原样交给 su)
+        argv = ["adb", "-s", self.serial, "exec-out", "su -c " + shlex.quote(f"cat {remote}")]
         self.note("$ " + " ".join(argv) + f" > {local}")
         if self.dry:
             return
@@ -300,6 +305,9 @@ class Dev:
             raise RuntimeError(f"{local} 已存在, 不覆盖")
         with open(local, "wb") as f:
             subprocess.run(argv, stdout=f, timeout=300, check=True)
+        head = Path(local).read_bytes()[:200]
+        if head.startswith(b"/system/bin/sh:") or b"inaccessible or not found" in head:
+            raise RuntimeError(f"从设备读 {remote} 失败, 拿到的是报错: {head[:120]!r}")
 
     def push_su(self, local, remote):
         """推到 root 目录: 先推到 /data/local/tmp 下的中转名, 再 su cp 过去 (中转件留着, 不删)。"""
@@ -310,7 +318,7 @@ class Dev:
     def pull_dir_su(self, remote, local_dir):
         """root 目录整个打包拉回并解开到本机新目录。"""
         tar = Path(local_dir).with_suffix(".tar")
-        argv = ["adb", "-s", self.serial, "exec-out", "su", "-c", shlex.quote(f"tar -C {remote} -cf - .")]
+        argv = ["adb", "-s", self.serial, "exec-out", "su -c " + shlex.quote(f"tar -C {remote} -cf - .")]
         self.note("$ " + " ".join(argv) + f" > {tar}  (再解到 {local_dir})")
         if self.dry:
             return
@@ -365,6 +373,9 @@ class Session:
         d.su(f"cat {CHARGE_NODE} > {self.ddir}/charging_enabled_pre.txt")
         d.pull_su(f"{self.ddir}/nodes_pre.txt", str(self.out / "nodes_pre.txt"))
         self.state["nodes_pre"] = f"{self.ddir}/nodes_pre.txt"
+        # 先撤掉之前会话可能钉在 sysfs 上的约束, 游戏启动时厂商从干净状态下发配置 (见 o2_nodes.sh 头注释)
+        rel = d.su(f"sh {DEV}/o2_nodes.sh release {self.ddir}/nodes_pre.txt")
+        self.state["release_at_start"] = rel.strip()[-300:]
         # 2) 原神帧率设置: 原文件留底 (设备上一份、本机一份), 再写锁帧档
         d.su(f"cp -p {PREFS} {self.ddir}/prefs_orig.xml", check=not self.a.dry_run)
         d.pull_su(f"{self.ddir}/prefs_orig.xml", str(self.out / "prefs_orig.xml"))
@@ -441,6 +452,32 @@ class Session:
                 if lvl >= lo + 25 or time.time() - t0 > 3 * 3600:
                     break
 
+    def thermal_gate(self, timeout_s=1800):
+        """开每个请求前: 停充, 并等 GPU 温控档回到 0 (连续两次, 间隔 30 秒)。
+
+        2026-10-22 红魔实测: 满电还接着充电时, 厂商温控在 SoC 只有 44 °C 时就把 GPU 压到
+        thermal_pwrlevel 7、CPU 上限压到最低档; 在这种状态下探出来的「厂商起点」与停充后的
+        测量条件不是一回事, 整轮初筛作废。停充由 eval 结束时 / restore 恢复 (do_restore 会把
+        charging_enabled 改回 1)。"""
+        if self.a.dry_run:
+            self.dev.note("(dry-run) 温控关: 停充, 等 thermal_pwrlevel 连续两次为 0")
+            return
+        node = "/sys/class/kgsl/kgsl-3d0/thermal_pwrlevel"
+        if self.dev.su(f"cat {CHARGE_NODE}").strip() != "0":
+            self.dev.su(f"echo 0 > {CHARGE_NODE}")
+            self.dev.note("温控关: 先停充 (充电发热会让厂商温控提前压频)")
+        t0, ok = time.time(), 0
+        while True:
+            lv = self.dev.su(f"cat {node}").strip()
+            ok = ok + 1 if lv == "0" else 0
+            if ok >= 2:
+                return
+            if time.time() - t0 > timeout_s:
+                raise RuntimeError(f"等了 {timeout_s // 60} 分钟 GPU 温控档还是 {lv}, 手机在温控降频, 不开跑")
+            if ok == 0:
+                self.dev.note(f"温控关: GPU thermal_pwrlevel={lv}, 等它回到 0 ...")
+            time.sleep(30)
+
     # ── 白名单 (游戏运行时探) ──
     def probe(self):
         if not self.game_up():
@@ -455,6 +492,8 @@ class Session:
         missing = [AXES[ax][0] for ax in self.axes() if AXES[ax][0] not in wl]
         self.state["probe"] = {"missing": missing, "stock": {k: (wl.get(k) or {}).get("current") for k, _ in AXES.values()}}
         self.save()
+        # 注意: 红魔的 gpu.max_pwrlevel 是厂商每几秒改一次的动态值 (2026-10-22 实测 0↔17), 探测瞬间的
+        # current 不代表「厂商起点」; GPU 轴大概率会被 fix-B 的守住比例判成 contested。
         if missing:
             self.dev.note(f"游戏运行时这些节点没进白名单 (厂商服务抢回或不可写): {missing}。"
                           "要扫它们得先用 vendor_override.sh 接管厂商配置, 再重开会话 (--override)。")
@@ -472,6 +511,7 @@ class Session:
         if not self.a.dry_run and not self.game_up():
             self.enter_world()
         self.battery_gate(self.a.battery_min, 99)
+        self.thermal_gate()
         env_note = f"PF_REPO_ROOT={pf_root()} "
         self.dev.note(env_note + "(eval 在下一行)")
         argv = [pf_bin(), "eval", "--request", str(rq), "--serial", self.a.serial, "--out", str(self.out / "evid" / cid)]
@@ -528,10 +568,12 @@ def do_restore(dev, st, out):
         res[f"override:{ov['target']}"] = "ok" if dev.dry or "O2_RESTORE_OK" in o else f"FAIL {o[-300:]}"
     if st.get("nodes_pre"):
         time.sleep(0 if dev.dry else 10)
-        o = dev.su(f"sh {DEV}/o2_nodes.sh restore {st['nodes_pre']}")
-        res["nodes"] = "ok" if dev.dry or "O2_RESTORE_OK" in o else f"FAIL {o[-600:]}"
+        # 撤掉约束而不是写回快照: 快照可能是在厂商限频时记的, 写回去会把限频值钉住 (见 o2_nodes.sh 头注释)。
+        # 之后游戏再启动时厂商会重新下发它的游戏配置。
+        o = dev.su(f"sh {DEV}/o2_nodes.sh release {st['nodes_pre']}")
+        res["nodes"] = "ok" if dev.dry or "O2_RELEASED" in o else f"PARTIAL {o[-600:]}"
         o = dev.su(f"sh {DEV}/o2_nodes.sh check {st['nodes_pre']}")
-        res["nodes_check"] = o.strip()[-600:]
+        res["nodes_vs_snapshot"] = o.strip()[-600:]
     o = dev.su(f"cat {CHARGE_NODE}")
     res["charging_enabled_now"] = o.strip()
     if not dev.dry and o.strip() != "1":
@@ -594,7 +636,7 @@ def run_staircase(s, wl, stock):
 
     def screen_one(cid, params, why):
         seed = random.SystemRandom().randrange(1 << 31)
-        req = make_request(cid, params, wl, cap, "screen", 2, s.a.cool_c, seed, why)
+        req = make_request(cid, params, wl, cap, "screen", 2, s.a.cool_c, seed, why, s.a.seconds)
         rep = s.eval(req)
         if s.a.dry_run:
             rec = {"cid": cid, "params": params, "desc": describe(params), "verdict": "pass", "why": "dry-run: 按通过展开"}
@@ -710,7 +752,7 @@ def cmd_confirm(a):
         for i, p in enumerate(cands, 1):
             seed = random.SystemRandom().randrange(1 << 31)
             req = make_request(f"conf{a.cap}_{i}", p, wl, a.cap, "full", a.rounds, a.cool_c, seed,
-                               f"O2 确认: 锁 {a.cap} 帧时 {describe(p)} 对厂商原样")
+                               f"O2 确认: 锁 {a.cap} 帧时 {describe(p)} 对厂商原样", a.seconds)
             s.battery_gate(max(a.battery_min, 50), 95)
             rep = s.eval(req)
             if a.dry_run:
@@ -809,11 +851,14 @@ def main():
     p.add_argument("--attrib", type=int, default=0)
     p = sub.add_parser("screen")
     common(p)
+    p.add_argument("--seconds", type=int, default=30, help="每臂采集秒数")
     p = sub.add_parser("confirm")
     common(p)
     p.add_argument("--from-screen")
     p.add_argument("--cand", action="append")
     p.add_argument("--rounds", type=int, default=6)
+    # 电池电量计电流有十几秒平滑 (2026-10-20 实测), 确认阶段每臂 60 秒, 初筛 30 秒只作粗筛
+    p.add_argument("--seconds", type=int, default=60, help="每臂采集秒数")
     p.add_argument("--p95-rel-tol", type=float, default=0.02)
     p = sub.add_parser("restore")
     common(p, cap=False)
