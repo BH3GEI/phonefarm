@@ -3,7 +3,12 @@
 # The parent created this exclusive instance and owns its eventual removal.
 set -eu
 T=${1:?owned trace instance}; DUR=${2:?seconds}; OUT=${3:?owned round directory}
-[ "$#" = 3 ] || exit 70
+scripted=0
+if [ "$#" = 5 ]; then
+  [ "$4" = 6 ] || exit 70
+  qualify=$5; case "$qualify" in 0|1) ;; *) exit 70 ;; esac
+  scripted=1
+else [ "$#" = 3 ] || exit 70; fi
 case "$T" in /sys/kernel/tracing/instances/phonefarm_gray_*) ;; *) exit 70 ;; esac
 token=${T#/sys/kernel/tracing/instances/phonefarm_gray_}
 case "$token" in ''|*[!a-zA-Z0-9_:-]*) exit 70 ;; esac
@@ -17,6 +22,15 @@ case "$run" in ''|*[!a-zA-Z0-9_:-]*) exit 70 ;; esac
 for file in trace.txt trace-events.tsv; do
   [ ! -e "$OUT/$file" ] && [ ! -L "$OUT/$file" ] || exit 70
 done
+if [ "$scripted" = 1 ]; then
+  [ "$DUR" -le 594 ] || exit 70
+  R=$OUT; TOKEN=$token; BOOT=$(cat /proc/sys/kernel/random/boot_id)
+  . "$D/gray_child_guard.sh"
+  gray_child_begin trace "$((DUR+36))"
+  trap 'code=$?; trap - EXIT INT TERM; gray_child_finish "$code" || exit 75; exit "$code"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+fi
 
 set_checked() {
   printf '%s\n' "$2" > "$T/$1" || return 1
@@ -44,11 +58,33 @@ for event in kgsl_buslevel kgsl_pwrlevel kgsl_gpu_frequency kgsl_thermal_constra
   printf '%s\t%s\n' "$event" "$status" >> "$OUT/trace-events.tsv"
 done
 : > "$T/trace"
+if [ "$scripted" = 1 ]; then
+  if [ "$qualify" = 1 ]; then screencap -p > "$OUT/frame_a.png"; [ -s "$OUT/frame_a.png" ]; fi
+  printf 'TRACE_READY\n' > "$OUT/trace-ready.txt"; sync
+  n=0
+  while [ ! -f "$OUT/workload-start.txt" ]; do
+    [ "$n" -lt 200 ] || exit 76
+    n=$((n+1)); sleep .1
+  done
+  input_start=$(cat "$OUT/workload-start.txt")
+  wait_from_input() {
+    now=$(gray_uptime)
+    delay=$(awk -v start="$input_start" -v now="$now" -v offset="$1" 'BEGIN {if(start !~ /^[0-9]+([.][0-9]+)?$/ || now<start) exit 1; d=start+offset-now; printf "%.6f",(d>0?d:0)}')
+    sleep "$delay"
+  }
+  if [ "$qualify" = 1 ]; then
+    wait_from_input 5
+    screencap -p > "$OUT/frame_b.png"; [ -s "$OUT/frame_b.png" ]
+  fi
+  wait_from_input 6
+fi
 set_checked tracing_on 1
 start=$(cut -d' ' -f1 /proc/uptime)
+GRAY_WINDOW_START=$start
 sleep "$DUR"
 set_checked tracing_on 0
 end=$(cut -d' ' -f1 /proc/uptime)
+GRAY_WINDOW_END=$end
 
 {
   printf '#loop_v1_meta capture_start_uptime=%s capture_end_uptime=%s duration_req=%s\n' "$start" "$end" "$DUR"

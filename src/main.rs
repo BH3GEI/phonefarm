@@ -58,6 +58,7 @@ mod preflight;
 mod grayab;
 mod graylayer;
 mod gray_session;
+mod gray_script;
 mod gray_eval_session;
 mod grayartifact;
 mod upopabi;

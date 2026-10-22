@@ -6,6 +6,7 @@ The trace fixture substitutes tracefs paths and its selected-clock readback;
 ordinary files cannot validate Android tracefs or actual GPU event delivery.
 """
 import os
+import json
 from pathlib import Path
 import signal
 import subprocess
@@ -93,6 +94,129 @@ class GrayWorker(unittest.TestCase):
         self.assertNotIn("GRAY_SAMPLE_COMPLETE", stdout)
         self.assertTrue((self.host.d / "worker.lock/owner").is_file())
         self.assertFalse((self.host.d / "unknown/quiescence.txt").exists())
+
+    def test_script_three_children_natural_completion_and_independent_deadline(self):
+        host = self.host
+        guard = (bench_worker.REPO / "loop_v1/tools/gray_child_guard.sh").read_text()
+        (host.d / "gray_child_guard.sh").write_text(guard.replace("/proc/", str(host.proc) + "/"))
+        host.executable("cut", r"""
+import os, subprocess, sys, time
+if sys.argv[-1] == os.environ["HOST_PROC"] + "/uptime":
+    print("%.6f" % time.monotonic())
+else:
+    sys.exit(subprocess.call(["/usr/bin/cut", *sys.argv[1:]]))
+""")
+        (host.d / "sample_env.sh").write_text("""#!/bin/sh
+set -eu
+R=$3; TOKEN=$4; BOOT=$5; D=${R%/*}
+. "$D/gray_child_guard.sh"
+gray_child_begin sampler 5
+sleep .6
+gray_child_finish 0
+""")
+        (host.d / "trace.sh").write_text("""#!/bin/sh
+set -eu
+R=$3; D=${R%/*}; TOKEN=fixture-token; BOOT=fixture-boot
+. "$D/gray_child_guard.sh"
+gray_child_begin trace 5
+echo TRACE_READY > "$R/trace-ready.txt"
+while [ ! -f "$R/workload-start.txt" ]; do sleep .05; done
+sleep .2
+gray_child_finish 0
+""")
+        def sample(run, interrupted):
+            # Production guard, real PGID. Only the finite command/budget is a fixture.
+            workload = (bench_worker.REPO / "loop_v1/tools/gray_input_workload.sh").read_text()
+            budget = 1 if interrupted else 5
+            workload = workload.replace("# GRAY_PLAN_CONSTANTS", f"GRAY_BUDGET={budget}\nSTEPS=1; DECLARED_MS=10000")
+            workload = workload.replace("# GRAY_PLAN_ACTIONS", "sleep 30" if interrupted else "sleep .3")
+            (host.d / "workload.sh").write_text(workload)
+            argv = [str(host.bin / "setsid"), "/bin/sh", str(host.worker), str(host.d),
+                    "fixture-token", "fixture-boot", "gray_script_sample", run, "1", str(self.instance), "0"]
+            child = subprocess.Popen(argv, env=host.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                stdout, stderr = child.communicate(timeout=12)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.communicate(timeout=2)
+                raise
+            self.assertEqual((child.returncode, stdout.strip()), (0, "GRAY_SCRIPT_SAMPLE_COMPLETE"), stderr)
+            r = host.d / run
+            self.assertEqual({line.split("\t")[0] for line in (r / "children.tsv").read_text().splitlines()},
+                             {"workload", "trace", "sampler"})
+            self.assertEqual((r / "quiescence.txt").read_text().strip(), "OWNED_GROUPS_ABSENT")
+            for line in (r / "children.tsv").read_text().splitlines():
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(int(line.split("\t")[1]), 0)
+            for tag in ["trace", "sampler"] + ([] if interrupted else ["workload"]):
+                timing = json.loads((r / f"{tag}-time.json").read_text())
+                self.assertGreaterEqual(timing["end"], timing["start"])
+                self.assertEqual(timing["exit_code"], 0)
+            return r
+
+        r = sample("script_normal", False)
+        self.assertEqual((r / "workload_exit.txt").read_text().strip(), "0")
+        self.assertEqual(json.loads((r / "input-complete.json").read_text())["run"], "script_normal")
+        before = host.files()
+        self.assertEqual(host.call("verify_gray_idle", "verify")[:2], (0, "GRAY_IDLE_QUIESCENT\n"))
+        self.assertEqual(host.files(), before)
+        r = sample("script_deadline", True)
+        self.assertNotEqual((r / "workload_exit.txt").read_text().strip(), "0")
+        self.assertFalse((r / "input-complete.json").exists())
+        self.assertEqual(host.call("verify_gray_idle", "verify")[0], 77)
+        self.assertEqual(host.call("reconcile_bench", "reconcile")[0], 77)
+        self.assertFalse((host.d / "session.closed").exists())
+        self.assertTrue((host.d / "worker.lock/owner").exists())
+        self.assertFalse((host.d / "forbidden-restore").exists())
+
+    def test_script_trace_qualification_png_and_capture_window(self):
+        host = self.host
+        source = (bench_worker.REPO / "loop_v1/tools/gray_trace_workload.sh").read_text()
+        source = source.replace("/sys/kernel/tracing/instances/", str(self.instances) + "/")
+        source = source.replace("/data/local/tmp/", str(host.root) + "/")
+        source = source.replace("/proc/", str(host.proc) + "/")
+        script = host.d / "trace.sh"
+        script.write_text(source)
+        guard = (bench_worker.REPO / "loop_v1/tools/gray_child_guard.sh").read_text()
+        (host.d / "gray_child_guard.sh").write_text(guard.replace("/proc/", str(host.proc) + "/"))
+        (host.proc / "uptime").write_text("10.0 20.0\n")
+        host.executable("sed", r"""
+import os, subprocess, sys
+from pathlib import Path
+if sys.argv[-1] == os.environ.get("HOST_TRACE_CLOCK") and Path(sys.argv[-1]).read_text().strip() == "boot":
+    print("boot")
+else:
+    sys.exit(subprocess.call(["/usr/bin/sed", *sys.argv[1:]]))
+""")
+        host.executable("screencap", 'import sys\nsys.stdout.buffer.write(b"\\x89PNG\\r\\n\\x1a\\nfixture")\n')
+        for name, value in {"tracing_on": "0", "current_tracer": "nop", "buffer_size_kb": "16",
+                            "trace_clock": "[local] boot", "trace": ""}.items():
+            (self.instance / name).write_text(value + "\n")
+        for event in ["adreno_cmdbatch_submitted", "adreno_cmdbatch_retired"]:
+            enable = self.instance / "events/kgsl" / event / "enable"
+            enable.parent.mkdir(parents=True)
+            enable.write_text("0\n")
+        out = host.d / "script_trace"
+        out.mkdir()
+        # Clock substitution skips the six-second lead, not the trace duration.
+        (out / "workload-start.txt").write_text("4.0\n")
+        child = subprocess.Popen([str(host.bin / "setsid"), "/bin/sh", str(script), str(self.instance),
+                                  "1", str(out), "6", "1"],
+                                 env={**host.env, "HOST_TRACE_CLOCK": str(self.instance / "trace_clock")},
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            stdout, stderr = child.communicate(timeout=8)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.communicate(timeout=2)
+            raise
+        self.assertEqual((child.returncode, stdout.strip()), (0, "GRAY_TRACE_COMPLETE"), stderr)
+        for frame in ["frame_a.png", "frame_b.png"]:
+            self.assertEqual((out / frame).read_bytes(), b"\x89PNG\r\n\x1a\nfixture")
+        timing = json.loads((out / "trace-time.json").read_text())
+        self.assertEqual((timing["start"], timing["end"], timing["exit_code"]), (10.0, 10.0, 0))
+        self.assertIn("capture_start_uptime=10.0 capture_end_uptime=10.0", (out / "trace.txt").read_text())
+        self.assertEqual((self.instance / "tracing_on").read_text().strip(), "0")
 
     def test_trace_workload_uses_only_owned_instance_and_rejects_missing_capability(self):
         source = (bench_worker.REPO / "loop_v1/tools/gray_trace_workload.sh").read_text()

@@ -168,6 +168,11 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
 ```
 
+当前 gray eval 的 launch 与有限触控 script 走同一父会话；恢复用 `eval recover --session DIR --serial S`。
+有限脚本支持 sleep/tap/swipe 及精确旧 `input swipe` 数值格式；不支持 onboard、HID 或任意 shell。
+输入中断而缺自然完成收据时，进程消失也不能解除恢复屏障。当前验收层级为宿主替身，不能外推真机恢复。
+规格与限制见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-EVAL-SCRIPT-SESSION.md 。
+
 `game_opt_loop` 决策层的物理采样与统计裁决端，契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_GPU_OP.md`。
 设备条件化与功耗遥测在 `src/hwcond.rs`（与 `bench` 共享），统计在 `src/gpustat.rs`。
 设备侧 `vkop_runner` 已构建（`tools/vkop/android_aarch64_vkop_runner`，源码与 `build.sh` 同目录）。

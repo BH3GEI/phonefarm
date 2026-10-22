@@ -207,16 +207,15 @@ pub fn run_eval(args: &[String]) -> i32 {
         }
     };
     let serial = Some(_lease.serial.clone());
-    if kind=="gray" && launch_spec(&req).is_some() {
-        return match gray_eval_launch(&req, _lease, Path::new(&evidence), &a.evidence_origin) {
+    if kind=="gray" {
+        return match gray_eval_owned(&req, _lease, Path::new(&evidence), &a.evidence_origin) {
             Ok(r)=>{ let code=if r["recovery"]["status"]!="reported_complete" || !r["report_error"].is_null() || !r["qualification_error"].is_null() {2} else if r["status"]=="ABORT" {1} else {0}; println!("{}",serde_json::to_string_pretty(&r).unwrap()); code },
             Err(e)=>{eprintln!("{e}");2}
         };
     }
-    if a.evidence_origin!="device" {eprintln!("--evidence-origin is supported for gray workload.launch only");return 2;}
+    if a.evidence_origin!="device" {eprintln!("--evidence-origin is supported for owned gray eval only");return 2;}
     let report = match kind {
         "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail),
-        "gray" => gray_eval(&req, serial.as_deref(), Path::new(&evidence)),
         "whitebox" => crate::whitebox::whitebox_eval(&req, serial.as_deref(), Path::new(&evidence)),
         other => {
             eprintln!("不认识的 kind {other}");
@@ -2173,22 +2172,6 @@ pub(crate) fn psnr_rgba(a: &[u8], b: &[u8]) -> Option<f64> {
     Some(((10.0 * (255.0f64 * 255.0 / mse).log10()) * 100.0).round() / 100.0)
 }
 
-/// 截一张原始 RGBA 帧 (adb exec-out screencap, 不经 PNG)。回 (宽, 高, 像素)。
-fn grab_rgba(serial: &str) -> Result<(u32, u32, Vec<u8>), String> {
-    let out = Command::new(adb_path())
-        .args(["-s", serial, "exec-out", "screencap"])
-        .output()
-        .map_err(|e| format!("截图起不来: {e}"))?;
-    let (w, h, px) = crate::framecheck::parse_screencap(&out.stdout)?;
-    Ok((w, h, px.to_vec()))
-}
-
-fn save_png(path: &Path, shot: &(u32, u32, Vec<u8>)) {
-    if let Some(img) = image::RgbaImage::from_raw(shot.0, shot.1, shot.2.clone()) {
-        let _ = img.save(path);
-    }
-}
-
 fn recover_gray_eval(args:&[String])->i32 {
     let result=(||->Result<Value,String>{
         let (mut dir,mut serial)=(None,None);let mut it=args.iter();
@@ -2212,8 +2195,45 @@ fn wait_owned_launch(parent:&crate::gray_eval_session::Parent, launch:&LaunchSpe
     }
 }
 
-fn run_owned_gray(parent:&crate::gray_eval_session::Parent, label:&str, out:&Path, seconds:u64, comm:Option<&str>)->Result<Value,String> {
-    let (workload_ok,sampler_ok)=parent.sample(label,seconds,out)?;
+enum OwnedGrayWorkload { Launch(LaunchSpec), Script(crate::gray_script::Plan) }
+impl OwnedGrayWorkload {
+    fn plan(&self)->Option<&crate::gray_script::Plan> {match self {Self::Script(p)=>Some(p),_=>None}}
+    fn restart(&self,parent:&crate::gray_eval_session::Parent,label:&str,layered:bool,knobs:&GrayKnobs,candidate:bool)->Result<(),String> {
+        match self {
+            Self::Launch(l)=>{parent.base.restart_eval(label,layered.then_some(if candidate{knobs.storeop.as_str()}else{"0"}),&l.extras)?;wait_owned_launch(parent,l,layered)},
+            Self::Script(_)=>{
+                parent.base.restart_script(label,layered,candidate&&knobs.loadop,if candidate{&knobs.storeop}else{"0"})?;
+                std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
+                if !parent.base.target_alive()? {return Err("target exited before finite input".into());}
+                if layered {
+                    let start=std::time::Instant::now();
+                    loop {
+                        if parent.base.marker()?.is_some_and(|v|v["frames"].as_u64().is_some()) {parent.base.narrow()?;break;}
+                        if !parent.base.target_alive()? || start.elapsed().as_secs()>=LAUNCH_MARKER_TIMEOUT_S {return Err("current layer evidence unavailable before finite input".into());}
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+fn owned_shot(parent:&crate::gray_eval_session::Parent,path:&Path,plan:Option<&crate::gray_script::Plan>)->Result<(u32,u32,Vec<u8>),String> {
+    parent.base.screenshot(path)?;
+    let raw=crate::frameaudit::png_raw(path)?;
+    let (w,h,pixels)=crate::framecheck::parse_screencap(&raw)?;
+    if let Some(plan)=plan {plan.validate_screen(w,h)?;}
+    Ok((w,h,pixels.to_vec()))
+}
+fn shot_psnr(a:&(u32,u32,Vec<u8>),b:&(u32,u32,Vec<u8>))->Result<f64,String> {
+    if (a.0,a.1)!=(b.0,b.1) {return Err("original screen dimensions changed across comparison images".into());}
+    psnr_rgba(&a.2,&b.2).ok_or_else(||"image comparison bytes differ".into())
+}
+fn run_owned_gray(parent:&crate::gray_eval_session::Parent,workload:&OwnedGrayWorkload,label:&str,out:&Path,seconds:u64,comm:Option<&str>)->Result<Value,String> {
+    let (workload_ok,sampler_ok,input)=match workload {
+        OwnedGrayWorkload::Launch(_)=>{let(w,s)=parent.sample(label,seconds,out)?;(w,s,Value::Null)},
+        OwnedGrayWorkload::Script(_)=>parent.sample_script(label,seconds,out,false)?,
+    };
     let alive=parent.base.target_alive()?;
     parent.base.eval_stop_target()?;
     if !workload_ok {return Err(format!("{label}: trace workload failed; raw exit and log retained"));}
@@ -2223,9 +2243,9 @@ fn run_owned_gray(parent:&crate::gray_eval_session::Parent, label:&str, out:&Pat
     crate::confirmation_transport::new_file(&out.join("summary.json"),summary.as_bytes())?;
     let env_path=out.join("env.txt");
     let env=std::fs::read_to_string(&env_path).map_err(|e|e.to_string())?;
-    let mut result=json!({"label":label,"run_once_rc":0,"launch":true,"summary":serde_json::from_str::<Value>(&summary).map_err(|e|e.to_string())?,
-        "env":to_serde(&sysparam::env_stats(&env))});
-    bind_run_evidence(&mut result,label,out,&env_path,sampler_ok,seconds+4,seconds,Some(if alive {0}else{1}))?;
+    let mut result=json!({"label":label,"run_once_rc":0,"launch":workload.plan().is_none(),"input_window":input,
+        "summary":serde_json::from_str::<Value>(&summary).map_err(|e|e.to_string())?,"env":to_serde(&sysparam::env_stats(&env))});
+    bind_run_evidence(&mut result,label,out,&env_path,sampler_ok,seconds+if workload.plan().is_some(){10}else{4},seconds,Some(if alive {0}else{1}))?;
     crate::confirmation_transport::new_file(&out.join("run.json"),&serde_json::to_vec_pretty(&result).unwrap())?;
     Ok(result)
 }
@@ -2234,87 +2254,137 @@ fn effective_gray_hits(marker:&Value)->u64 {
     marker["effective"].as_array().map(|xs|xs.iter().filter_map(|e|e["begins"].as_u64()).sum()).unwrap_or(0)
 }
 
-fn gray_eval_launch(req:&Value, lease:crate::devlease::Lease, evidence:&Path, origin:&str)->Result<Value,String> {
-    let launch=launch_spec(req).ok_or("missing workload.launch")?;
+fn gray_eval_owned(req:&Value, lease:crate::devlease::Lease, evidence:&Path, origin:&str)->Result<Value,String> {
     let knobs=parse_gray_rewrites(&req["payload"])?;
-    if knobs.loadop {return Err("gray workload.launch supports storeop only".into());}
-    if req["workload"]["enter"].as_str()==Some("onboard") {return Err("owned launch eval requires a self-driven scene; onboard/script input is a separate route".into());}
-    let seconds=req["workload"]["seconds"].as_u64().unwrap_or(30);
-    if !(1..=86400).contains(&seconds) {return Err("workload.seconds must be 1..86400".into());}
+    if req["workload"]["enter"].as_str()==Some("onboard") {return Err("owned gray eval does not support onboard/HID input".into());}
+    let seconds=match req["workload"].get("seconds") {None=>30,Some(v)=>v.as_u64().ok_or("workload.seconds must be an integer")?};
+    let workload=if let Some(launch)=launch_spec(req) {
+        if knobs.loadop {return Err("gray workload.launch supports storeop only".into());}
+        if !(1..=86400).contains(&seconds) {return Err("workload.seconds must be 1..86400".into());}
+        OwnedGrayWorkload::Launch(launch)
+    } else {
+        let file=match req["workload"].get("script") {None|Some(Value::Null)=>"loop_v1/scripts/workload_spin_touch_v1.json",Some(v)=>v.as_str().ok_or("workload.script must be a local path")?};
+        let path=resolve_path(file).ok_or_else(||format!("finite input script not found: {file}"))?;
+        let input:Value=serde_json::from_slice(&crate::confirmation_transport::bounded(&path,4*1024*1024)?).map_err(|e|e.to_string())?;
+        OwnedGrayWorkload::Script(crate::gray_script::parse(&input,seconds)?)
+    };
     let policy=policy_for_request(req)?;
     let rounds=policy.required_pairs;let alpha=policy.alpha;let cap=policy.temp_cap_c;let cool=policy.cool_c;
+    let min_psnr=req["payload"]["image_check"]["min_psnr_db"].as_f64().unwrap_or(GRAY_MIN_PSNR_DB);
     let pkg=req["package"].as_str().ok_or("missing package")?;
-    let base=crate::gray_session::Session::new_eval(lease,evidence,pkg,origin,launch.marker.as_deref())?;
-    let parent=crate::gray_eval_session::Parent::new(base,req)?;
+    let parent=match &workload {
+        OwnedGrayWorkload::Launch(l)=>crate::gray_eval_session::Parent::new(crate::gray_session::Session::new_eval(lease,evidence,pkg,origin,l.marker.as_deref())?,req)?,
+        OwnedGrayWorkload::Script(p)=>crate::gray_eval_session::Parent::new_script(crate::gray_session::Session::new_script(lease,evidence,pkg,origin)?,req,p)?,
+    };
     let dir=parent.base.dir.clone();
     let mut report=base_report(req,"gray");
     report["session"]=json!(dir);report["evidence_dir"]=json!(dir);report["evidence_origin"]=json!(origin);
     let mut facts=Evidence::new(Stage::Probe,policy,qualification::Capabilities::default());
     if origin=="synthetic" {facts.evidence_origin="synthetic".into();}
-    let mut ctrl=Vec::new();let mut candidate=Vec::new();let mut cool_log=Vec::new();let mut frames=Vec::new();let mut live=Value::Null;
+    let mut ctrl=Vec::new();let mut candidate=Vec::new();let mut cool_log=Vec::new();let mut frames=Vec::new();let mut image_check=Value::Null;
+    let mut psnr_pairs=Vec::new();let mut psnr_controls=Vec::new();let mut noise_within=Vec::new();let mut previous_control=None;
     let result=(||->Result<(),String>{
         parent.stage("capability")?;
         facts.device=parent.capabilities()?;
         if !record_qualification(&mut report,&dir,&facts)?.probe_allowed {return Err("root/trace prerequisites not verified".into());}
         parent.base.prepare()?;
         parent.stage("image_check")?;
-        let static_extras=launch.static_extras.as_deref().unwrap_or(&launch.extras);
-        parent.base.install_storeop(req["payload"]["layer_so"].as_str(),&knobs.storeop,Some(static_extras))?;
-        let image_dir=dir.join("image_check");std::fs::create_dir(&image_dir).map_err(|e|e.to_string())?;
-        live=crate::frameaudit::collect_storeop(&parent.base,&image_dir,&knobs.storeop,2,pkg,&[],STATIC_SETTLE_S,&mut frames)?;
-        crate::confirmation_transport::new_file(&image_dir.join("result.json"),&serde_json::to_vec_pretty(&live).unwrap())?;
-        live_check_verdict(&live)?;facts.quality_verified=Some(true);
+        match &workload {
+            OwnedGrayWorkload::Launch(launch)=>{
+                let static_extras=launch.static_extras.as_deref().unwrap_or(&launch.extras);
+                parent.base.install_storeop(req["payload"]["layer_so"].as_str(),&knobs.storeop,Some(static_extras))?;
+                let image_dir=dir.join("image_check");std::fs::create_dir(&image_dir).map_err(|e|e.to_string())?;
+                let live=crate::frameaudit::collect_storeop(&parent.base,&image_dir,&knobs.storeop,2,pkg,&[],STATIC_SETTLE_S,&mut frames)?;
+                crate::confirmation_transport::new_file(&image_dir.join("result.json"),&serde_json::to_vec_pretty(&live).unwrap())?;
+                image_check=json!({"method":"storeop_check_live","result":live});
+                live_check_verdict(&live)?;facts.quality_verified=Some(true);
+            },
+            OwnedGrayWorkload::Script(_)=>parent.base.install_script(req["payload"]["layer_so"].as_str())?,
+        }
         parent.base.eval_stop_target()?;
         parent.stage("qualification")?;parent.deploy()?;
         let fan=parent.fan_off()?;
         let cold=parent.wait_cool(cool,420)?;facts.cold_ok=cold["ok"].as_bool();
         report["baseline_conditions"]=json!({"fan":fan,"cold":cold});
         if facts.cold_ok!=Some(true) {return Err("baseline cold condition not verified".into());}
-        parent.base.restart_eval("workload_check",None,&launch.extras)?;
-        wait_owned_launch(&parent,&launch,false)?;
+        workload.restart(&parent,"workload_check",false,&knobs,false)?;
         let motion_dir=dir.join("workload_check");std::fs::create_dir(&motion_dir).map_err(|e|e.to_string())?;
         let a=motion_dir.join("frame_a.png");let b=motion_dir.join("frame_b.png");
-        parent.base.screenshot(&a)?;
-        std::thread::sleep(std::time::Duration::from_secs(5));parent.base.screenshot(&b)?;
+        let input=match &workload {
+            OwnedGrayWorkload::Launch(_)=>{
+                parent.base.screenshot(&a)?;std::thread::sleep(std::time::Duration::from_secs(5));parent.base.screenshot(&b)?;Value::Null
+            },
+            OwnedGrayWorkload::Script(plan)=>{
+                owned_shot(&parent,&motion_dir.join("input_screen.png"),Some(plan))?;
+                let (trace_ok,sampler_ok,input)=parent.sample_script("workload_check",seconds,&motion_dir,true)?;
+                if !trace_ok||!sampler_ok {return Err("finite workload qualification child failed".into());}input
+            }
+        };
         let motion=to_serde(&crate::framecheck::verdict(&crate::frameaudit::png_raw(&a)?,&crate::frameaudit::png_raw(&b)?));
         let alive=parent.base.target_alive()?;parent.base.eval_stop_target()?;
         facts.workload_verified=Some(alive&&motion["spinning"]==true);
-        let check=json!({"verified":facts.workload_verified,"app_alive":alive,"motion":motion,"frames":[a,b],"launch":true});
+        let check=json!({"verified":facts.workload_verified,"app_alive":alive,"motion":motion,"frames":[a,b],"launch":workload.plan().is_none(),"input_window":input});
         crate::confirmation_transport::new_file(&motion_dir.join("workload_check.json"),&serde_json::to_vec_pretty(&check).unwrap())?;
-        if facts.workload_verified!=Some(true) {return Err("self-driven workload motion not verified".into());}
+        if facts.workload_verified!=Some(true) {return Err("workload motion not verified".into());}
         for i in 1..=3 {
             let label=format!("baseline{i}");parent.stage(&label)?;
-            parent.base.restart_eval(&label,None,&launch.extras)?;wait_owned_launch(&parent,&launch,false)?;
-            facts.baseline.push(run_owned_gray(&parent,&label,&dir.join(&label),seconds,req["workload"]["render_comm"].as_str())?);
+            workload.restart(&parent,&label,false,&knobs,false)?;
+            let out=dir.join(&label);std::fs::create_dir(&out).map_err(|e|e.to_string())?;
+            if let Some(plan)=workload.plan(){owned_shot(&parent,&out.join("input_screen.png"),Some(plan))?;}
+            facts.baseline.push(run_owned_gray(&parent,&workload,&label,&out,seconds,req["workload"]["render_comm"].as_str())?);
         }
-        // The parent still owns active restoration obligations. Keep them unknown
-        // while collecting, then require the final complete receipt for a conclusion.
         parent.admission_ready()?;facts.restored=None;facts.stage=Stage::Experiment;
         let q=qualification::evaluate_gray_session_collection(&facts)?;
         if !write_qualification(&mut report,&dir,&facts,q)?.experiment_allowed {return Err("gray baseline/workload/power qualification did not admit candidate collection".into());}
         for i in 1..=rounds {
+            let mut shots=std::collections::BTreeMap::new();
             for arm in if i%2==1 {["knob","ctrl"]}else{["ctrl","knob"]} {
                 let label=format!("{arm}{i}");parent.stage(&label)?;
                 let fan=parent.fan_off()?;let mut cold=parent.wait_cool(cool,arm_cool_timeout(&cool_log))?;
                 cold["arm"]=json!(label);cold["fan"]=fan;cool_log.push(cold);
-                parent.base.restart_eval(&label,Some(if arm=="knob" {&knobs.storeop}else{"0"}),&launch.extras)?;
-                wait_owned_launch(&parent,&launch,true)?;
-                let out=dir.join(&label);
-                let mut run=run_owned_gray(&parent,&label,&out,seconds,req["workload"]["render_comm"].as_str())?;
+                workload.restart(&parent,&label,true,&knobs,arm=="knob")?;
+                let out=dir.join(&label);std::fs::create_dir(&out).map_err(|e|e.to_string())?;
+                if let Some(plan)=workload.plan() {
+                    let path=out.join("image.png");let shot=owned_shot(&parent,&path,Some(plan))?;frames.push(json!(path));
+                    if arm=="ctrl" {
+                        std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
+                        let path=out.join("image-repeat.png");let repeat=owned_shot(&parent,&path,Some(plan))?;frames.push(json!(path));
+                        noise_within.push(shot_psnr(&shot,&repeat)?);
+                    }
+                    shots.insert(arm,shot);
+                }
+                let mut run=run_owned_gray(&parent,&workload,&label,&out,seconds,req["workload"]["render_comm"].as_str())?;
                 if let (Some(t),Some(limit))=(run_soc_temp_max(&run),cap) {if t>limit{return Err(format!("{label}: SoC temperature {t} exceeds {limit}"));}}
                 if arm=="knob" {
                     let marker=parent.base.marker()?.ok_or("candidate marker missing")?;
                     crate::confirmation_transport::new_file(&out.join("layer_marker.json"),&serde_json::to_vec_pretty(&marker).unwrap())?;
-                    run["layer_hits"]=json!(effective_gray_hits(&marker));
-                    candidate.push(run);
+                    run["layer_hits"]=json!(effective_gray_hits(&marker));candidate.push(run);
                 } else {ctrl.push(run);}
             }
+            if workload.plan().is_some() {
+                let c=shots.remove("ctrl").ok_or("missing control quality image")?;
+                let k=shots.remove("knob").ok_or("missing candidate quality image")?;
+                psnr_pairs.push(shot_psnr(&k,&c)?);
+                if let Some(previous)=&previous_control {psnr_controls.push(shot_psnr(previous,&c)?);}
+                previous_control=Some(c);
+            }
+        }
+        if workload.plan().is_some() {
+            let noise=noise_floor_db(noise_within.iter().chain(psnr_controls.iter()).copied().map(Some));
+            let gate=ImageGate::new(min_psnr,noise);
+            let used=noise_floor_db(psnr_pairs.iter().copied().map(Some));
+            let ruling=judge_image(&gate,used);
+            image_check=json!({"method":"same_spot_screenshot","min_psnr_db":min_psnr,"psnr_knob_vs_ctrl_db":psnr_pairs,
+                "psnr_ctrl_vs_ctrl_db":psnr_controls,"noise_within_round_db":noise_within,"noise_floor_db":noise,"psnr_db_used":used,
+                "gate":match &ruling {ImageRuling::Pass(by)=>gate.gate(by),ImageRuling::Fail(_)=>gate.gate("failed")}});
+            facts.quality_verified=Some(matches!(ruling,ImageRuling::Pass(_)));
+            if let ImageRuling::Fail(reason)=ruling {return Err(format!("画面出错: {reason}"));}
         }
         Ok(())
     })();
     let mut error=result.err();
-    let collection=json!({"schema":"phonefarm/gray-eval-launch-collection@1","session":dir,"evidence_origin":origin,
-        "baseline":facts.baseline,"control":ctrl,"candidate":candidate,"image_check":live,"frames":frames,"cool_per_arm":cool_log,"error":error});
+    let collection=json!({"schema":if workload.plan().is_some(){"phonefarm/gray-eval-script-collection@1"}else{"phonefarm/gray-eval-launch-collection@1"},"session":dir,"evidence_origin":origin,
+        "input_plan":workload.plan().map(|p|p.to_value()),"baseline":facts.baseline,"control":ctrl,"candidate":candidate,"image_check":if workload.plan().is_some(){&image_check}else{&image_check["result"]},"frames":frames,"cool_per_arm":cool_log,"error":error});
     if let Err(e)=crate::confirmation_transport::new_file(&dir.join("eval-collection.json"),&serde_json::to_vec_pretty(&collection).unwrap()) {
         error=Some(format!("{}; collection report: {e}",error.as_deref().unwrap_or("collection completed")));
     }
@@ -2325,423 +2395,27 @@ fn gray_eval_launch(req:&Value, lease:crate::devlease::Lease, evidence:&Path, or
     report["recovery"]=recovery;
     let (reached,timed_out)=cool_summary(&cool_log);
     report["conditions_observed"]=json!({"cool_c_target":cool,"cool_reached_c":reached,"cool_timeout":timed_out,"cool_per_arm":cool_log,
-        "hits":hits,"apply_ok":hits>0,"restored":complete,"game_state_restored":false,"image_check":{"method":"storeop_check_live","result":live}});
+        "hits":hits,"apply_ok":hits>0,"restored":complete,"game_state_restored":false,"image_check":image_check});
     let qualified=record_qualification(&mut report,&dir,&facts);
     if let Some(e)=error {report["verdict"]["reason"]=json!(e);}
     else if !complete {report["verdict"]["reason"]=json!("owned gray eval recovery not complete; evidence retained");}
     else if !qualified.as_ref().is_ok_and(|q|q.conclusion_allowed) {report["verdict"]["reason"]=json!("conclusion qualification not satisfied");}
     else if req["payload"]["require_hit"].as_bool().unwrap_or(true)&&hits==0 {report["verdict"]["reason"]=json!("candidate rewrite never hit");}
-    else {finish_gray_statistics(&mut report,&candidate,&ctrl,alpha,rounds,None,Some(&facts.policy.required_metrics))?;}
+    else {finish_gray_statistics(&mut report,&candidate,&ctrl,alpha,rounds,psnr_pairs.iter().copied().reduce(f64::min),&facts.policy.required_metrics)?;}
     if let Err(e)=qualified {report["qualification_error"]=json!(e);}
     let path=dir.join("eval-report.json");report["report_path"]=json!(path);
     if let Err(e)=crate::confirmation_transport::new_file(&path,&serde_json::to_vec_pretty(&report).unwrap()) {report["report_error"]=json!(e);}
     Ok(report)
 }
 
-fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
-    let kind = "gray";
-    let mut report = base_report(req, kind);
-    let Some(serial) = serial else {
-        return Err("kind=gray 需要真机: 请加 --serial".into());
-    };
-    let policy=policy_for_request(req)?;
-    let mut facts=Evidence::new(Stage::Probe,policy,qualification::inspect_device(serial));
-    let q=record_qualification(&mut report,evidence,&facts)?;
-    if !q.probe_allowed {report["verdict"]["reason"]=json!("root/trace 未验证，禁止灰档写入");return Ok(serde_json::to_string_pretty(&report).unwrap());}
-    let require_hit = req["payload"]["require_hit"].as_bool().unwrap_or(true);
-    let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen").to_string();
-    let min_psnr = req["payload"]["image_check"]["min_psnr_db"]
-        .as_f64()
-        .unwrap_or(GRAY_MIN_PSNR_DB);
-    let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
-    let temp_cap = req["conditions"]["temp_cap_c"].as_f64();
-
-    // 改写在碰设备之前解析: 不认识的开关直接 ABORT, 设备一下都不碰
-    let knobs = match parse_gray_rewrites(&req["payload"]) {
-        Ok(k) => k,
-        Err(e) => {
-            report["verdict"]["reason"] = json!(e);
-            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-        }
-    };
-
-    // knobs/gray 的调用层: src/graylayer.rs (enable_layer.sh 的 Rust 移植)。
-    // **两臂都挂层**, 唯一差别是改写属性 —— ctrl = 层+改写全关, knob = 层+这一组改写。
-    // 要判的是"这条改写"值不值, 不是"挂层这件事"值不值; 两臂都挂层才能把层本身的
-    // 开销消掉, 差值才干净地对应改写这一个改动。
-    let launch = launch_spec(req);
-    if launch.is_some() && knobs.loadop {
-        report["verdict"]["reason"] = json!("自驱动负载只支持 storeop_dont_care (画面比对走孪生 pass 现场切换, loadop 没有孪生)");
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    let extras = launch.as_ref().map(|l| l.extras.clone());
-    let gl = crate::graylayer::GrayLayer::new(serial).with_launch_extras(extras.clone());
-    let gl_knob = crate::graylayer::GrayLayer::new(serial)
-        .with_launch_extras(extras)
-        .with_storeop((knobs.storeop != "0").then(|| knobs.storeop.clone()), false);
-    let mount = |arm: &str| -> Result<(), String> {
-        if arm == "knob" {
-            gl_knob.mount_mode(if knobs.loadop { "loadop" } else { "probe" }, &pkg, false)?;
-            gl_knob.require_storeop()
-        } else {
-            gl.mount_mode("probe", &pkg, false)
-        }
-    };
-
-    // 改写先落盘再动设备 (证据纪律)
-    let _ = std::fs::create_dir_all(evidence);
-    std::fs::write(
-        evidence.join("rewrites.json"),
-        serde_json::to_string_pretty(&json!({
-            "rewrites": req["payload"]["rewrites"],
-            "debug.knobs.loadop": if knobs.loadop { "1" } else { "0" },
-            "debug.knobs.storeop": knobs.storeop,
-            "image_check_min_psnr_db": min_psnr,
-        }))
-        .unwrap_or_default(),
-    )
-    .map_err(|e| e.to_string())?;
-
-    // 测量与 sysparam 同一套 ABBA (负载必须触控版)
-    let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(1).max(1) as u32;
-    let seconds = req["workload"]["seconds"].as_i64().unwrap_or(30).max(1) as u64;
-    let wl_file = req["workload"]["script"]
-        .as_str()
-        .unwrap_or("loop_v1/scripts/workload_spin_touch_v1.json");
-    let workload_path = match (resolve_path(wl_file), &launch) {
-        (Some(p), _) => p,
-        (None, Some(_)) => PathBuf::new(),
-        (None, None) => {
-            report["verdict"]["reason"] =
-                json!(format!("负载脚本不在: {wl_file} (按 cwd 与仓库根都找不到)"));
-            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-        }
-    };
-    // 自驱动负载 (相机一直在飞) 没法在两臂之间截到同一画面: 画面比对改成上机前跑一次
-    // frame-audit storeop-check —— 同一局里用孪生 pass 现场开/关, 静态场景逐像素比。
-    // 开关之间的差异 (off_vs_on) 不能明显大于同状态之间的噪声 (same_state), 否则判画面出错。
-    let mut live_check: Option<Value> = None;
-    if let Some(l) = &launch {
-        let static_extras = l.static_extras.clone().unwrap_or_else(|| l.extras.clone());
-        // This caller still owns the outer eval lease. Its session/parent recovery
-        // migration must not use the standalone command's completion receipt.
-        let chk = crate::frameaudit::storeop_check_legacy(
-            serial,
-            &evidence.join("image_check"),
-            None,
-            &knobs.storeop,
-            2,
-            &pkg,
-            &[],
-            STATIC_SETTLE_S,
-            Some(static_extras),
-        );
-        let v = match chk {
-            Ok(v) => v,
-            Err(e) => {
-                report["verdict"]["reason"] = json!(format!("画面比对 (storeop-check) 没做成, 不上 A/B: {e}"));
-                report["evidence_dir"] = json!(evidence.display().to_string());
-                return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-            }
-        };
-        let verdict = live_check_verdict(&v);
-        if let Err(why) = &verdict {
-            report["conditions_observed"] = json!({"image_check": {"method": "storeop_check_live", "result": v}});
-            report["verdict"]["reason"] = json!(format!("画面出错: {why}"));
-            report["evidence_dir"] = json!(evidence.display().to_string());
-            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-        }
-        live_check = Some(v);
-    }
-    // 实验资格: 不挂层的冷机 + 负载自检 + 3 轮基线, 资格不过不上挂层候选实验
-    let before = gl.off(Some(&pkg));
-    let before_record = crate::graylayer::record_deactivation(evidence, "baseline-before", &before)?;
-    if let Err(e) = before {
-        report["conditions_observed"] = json!({"layer_deactivation":before_record,"restored":null});
-        report["verdict"]["reason"] = json!(format!("前置摘层失败，停止后续操作: {e}"));
-        return Ok(serde_json::to_string_pretty(&report).unwrap());
-    }
-    push_tools(serial)?;
-    let baseline_before=snapshot(serial);
-    let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false,"reason"=>"conditions.cool_c 未知"}};
-    facts.cold_ok=cold.get("ok").and_then(|v|v.as_bool());
-    if facts.cold_ok==Some(true) {
-        let workload_check=verify_workload_for(serial,&workload_path,launch.as_ref(),&pkg,&evidence.join("workload_check"));
-        facts.workload_verified=workload_check["verified"].as_bool();
-        if facts.workload_verified==Some(true) {for i in 1..=3 {
-            match run_one_for(serial,&format!("baseline{i}"),&evidence.join(format!("baseline{i}")),seconds,&workload_path,&pkg,req["workload"]["render_comm"].as_str(),launch.as_ref()) {
-                Ok(m)=>facts.baseline.push(m),Err(_)=>break,
-            }
-        }}
-    }
-    facts.device.control_verified=None; // Candidate collection will supply layer-hit evidence.
-    facts.restored=Some(snapshots_identical(&baseline_before,&snapshot(serial)));
-    facts.stage=Stage::Experiment;
-    let experiment=qualification::evaluate_gray_collection(&facts)?;
-    let experiment=write_qualification(&mut report,evidence,&facts,experiment)?;
-    if !experiment.experiment_allowed {
-        report["verdict"]["reason"]=json!("灰档基线/冷机/负载/供电资格未通过，禁止挂层候选实验");
-        return Ok(serde_json::to_string_pretty(&report).unwrap());
-    }
-    let mut knob_runs: Vec<Value> = Vec::new();
-    let mut ctrl_runs: Vec<Value> = Vec::new();
-    let mut abort_reason: Option<String> = None;
-    let mut failed_deactivation = None;
-    // 画面比对: 每一轮两臂各在负载开始前、同一位置截一张, 改写臂对对照臂算 PSNR。
-    // 对照臂相邻两轮之间也算一个, 当作"什么都没改时画面自己会差多少"的参照, 一起落进报告。
-    let mut psnr_knob_vs_ctrl: Vec<f64> = Vec::new();
-    let mut psnr_ctrl_vs_ctrl: Vec<f64> = Vec::new();
-    // 同设置重拍 (对照臂隔一段再拍一张): 单轮评测唯一的噪声底来源
-    let mut noise_within_round: Vec<f64> = Vec::new();
-    let mut prev_ctrl: Option<(u32, u32, Vec<u8>)> = None;
-    let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
-    let mut cool_log: Vec<Value> = Vec::new();
-    'rounds: for i in 1..=rounds {
-        let mut shots: std::collections::BTreeMap<&str, (u32, u32, Vec<u8>)> = Default::default();
-        for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
-            // 层是 CreateInstance 时读的, 切属性必须重启目标 —— force-stop 是两臂切换的一部分
-            let before = gl.off(Some(&pkg));
-            let before_record = crate::graylayer::record_deactivation(evidence, &format!("{arm}{i}-before"), &before)?;
-            if let Err(e) = &before {
-                abort_reason = Some(format!("{arm}{i} 前置摘层失败: {e}"));
-                failed_deactivation = Some((before, before_record));
-                break 'rounds;
-            }
-            let fan = arm_fan_off(serial);
-            // 游戏关着的时候等冷最快; 等到请求的 cool_c 或超时
-            let mut c = arm_wait_cool(serial, cool_c, &format!("{arm}{i}"), arm_cool_timeout(&cool_log));
-            c["arm"] = json!(format!("{arm}{i}"));
-            c["fan"] = fan.clone();
-            cool_log.push(c);
-            if let Some(e) = fan_still_on(&fan) {
-                abort_reason = Some(format!("{arm}{i}: {e}"));
-                break 'rounds;
-            }
-            if let Err(e) = mount(arm) {
-                abort_reason = Some(format!("{arm} 臂挂层失败: {e}"));
-                break 'rounds;
-            }
-            // 挂层 = 重启了游戏。有游戏档案的目标 (enter == "onboard") 自己走回游戏场景;
-            // 进不去这一臂就没法量, 整次评测作废, 不拿登录页 / 加载画面的帧凑数
-            if req["workload"]["enter"].as_str() == Some("onboard") {
-                if let Err(e) = crate::onboard::enter_scene(serial, &pkg, &evidence.join(format!("{arm}{i}_enter"))) {
-                    abort_reason = Some(format!("{arm}{i} 重启后没回到游戏场景: {e}"));
-                    break 'rounds;
-                }
-            }
-            if let Some(l) = &launch {
-                let res = run_one_launch(
-                    serial,
-                    &format!("gray_{arm}{i}"),
-                    &evidence.join(format!("{arm}{i}")),
-                    seconds,
-                    &pkg,
-                    req["workload"]["render_comm"].as_str(),
-                    l,
-                    false,
-                );
-                match res {
-                    Ok(mut m) => {
-                        if let (Some(t), Some(cap)) = (run_soc_temp_max(&m), temp_cap) {
-                            if t > cap {
-                                abort_reason = Some(format!("{arm} 臂第 {i} 轮 SoC 结温 {t}C 超过上限 {cap}C"));
-                                break 'rounds;
-                            }
-                        }
-                        if arm == "knob" {
-                            m["layer_hits"] = json!(layer_hits(serial, &pkg, evidence));
-                            knob_runs.push(m);
-                        } else {
-                            ctrl_runs.push(m);
-                        }
-                    }
-                    Err(e) => {
-                        abort_reason = Some(e);
-                        break 'rounds;
-                    }
-                }
-                continue;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
-            match grab_rgba(serial) {
-                Ok(shot) => {
-                    save_png(&evidence.join(format!("shot_{arm}{i}.png")), &shot);
-                    shots.insert(arm, shot);
-                }
-                Err(e) => {
-                    abort_reason = Some(format!("{arm}{i} 截图失败, 画面比对做不了: {e}"));
-                    break 'rounds;
-                }
-            }
-            // 对照臂多拍一张 (同样的等待再拍): 这一对就是本轮场景的噪声底。
-            // 只有轮数 ≥ 2 才拿得到跨轮对照对对照, 单轮评测以前没有任何噪声底可依 ——
-            // 固定 30 dB 阈值在会动的场景里比噪声底还高, 候选会被误判成「画面出错」。
-            if arm == "ctrl" {
-                std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
-                if let Ok(again) = grab_rgba(serial) {
-                    save_png(&evidence.join(format!("shot_ctrl{i}_repeat.png")), &again);
-                    if let Some(q) = psnr_rgba(&shots["ctrl"].2, &again.2) {
-                        noise_within_round.push(q);
-                    }
-                }
-            }
-            let res = run_one_with(
-                serial,
-                &format!("gray_{arm}{i}"),
-                &evidence.join(format!("{arm}{i}")),
-                seconds,
-                &workload_path,
-                &pkg,
-                req["workload"]["render_comm"].as_str(),
-            );
-            match res {
-                Ok(mut m) => {
-                    if let (Some(t), Some(cap)) = (run_soc_temp_max(&m), temp_cap) {
-                        if t > cap {
-                            abort_reason = Some(format!("{arm} 臂第 {i} 轮 SoC 结温 {t}C 超过上限 {cap}C"));
-                            break 'rounds;
-                        }
-                    }
-                    if arm == "knob" {
-                        // 命中 marker 要在**这一臂跑完后立刻**采: 下一次 mount_layer
-                        // 会把三个落点全删了重写, 拖到循环外读到的就是初始化的空表
-                        let hits_now = layer_hits(serial, &pkg, evidence);
-                        m["layer_hits"] = json!(hits_now);
-                        knob_runs.push(m);
-                    } else {
-                        ctrl_runs.push(m);
-                    }
-                }
-                Err(e) => {
-                    abort_reason = Some(e);
-                    break 'rounds;
-                }
-            }
-        }
-        if launch.is_some() {
-            continue; // 画面比对已在上机前用 storeop-check 做过
-        }
-        let (k, c) = (&shots["knob"], &shots["ctrl"]);
-        let Some(p) = psnr_rgba(&k.2, &c.2) else {
-            abort_reason = Some(format!("第 {i} 轮两臂截图尺寸不一样 ({}x{} vs {}x{}), 画面比对做不了", k.0, k.1, c.0, c.1));
-            break;
-        };
-        psnr_knob_vs_ctrl.push(p);
-        if let Some(prev) = &prev_ctrl {
-            if let Some(q) = psnr_rgba(&prev.2, &c.2) {
-                psnr_ctrl_vs_ctrl.push(q);
-            }
-        }
-        // 画面判定不在这里做: 噪声底要等所有轮拍完才知道 (单轮时靠对照臂的重复拍)。
-        // 先看就是拿一个还不知道噪声底多少的固定阈值去判, 会把候选误判成画面出错。
-        prev_ctrl = shots.remove("ctrl");
-    }
-    // 还原
-    let (retirement, retirement_record) = match failed_deactivation {
-        Some(result) => result,
-        None => {
-            let result = gl.off(Some(&pkg));
-            let record = crate::graylayer::record_deactivation(evidence, "after", &result)?;
-            (result, record)
-        }
-    };
-
-    // 画面判定: 拿同设置重拍的噪声底比, 而不是拿一个固定阈值硬卡。
-    let noise_floor = noise_floor_db(
-        noise_within_round
-            .iter()
-            .chain(psnr_ctrl_vs_ctrl.iter())
-            .map(|v| Some(*v)),
-    );
-    let image_gate = ImageGate::new(min_psnr, noise_floor);
-    let best_knob = noise_floor_db(psnr_knob_vs_ctrl.iter().map(|v| Some(*v)));
-    let image_ruling = if launch.is_some() {
-        None // 自驱动负载已用 storeop-check 判过画面
-    } else {
-        Some(judge_image(&image_gate, best_knob))
-    };
-
-    // 各 knob 臂采到的命中取最大 (require_hit 判的是"改写到底有没有真生效过一次")
-    let hits = knob_runs
-        .iter()
-        .filter_map(|r| r["layer_hits"].as_u64())
-        .max()
-        .unwrap_or(0);
-    let layer_deactivated = retirement.is_ok();
-    let min_of = |v: &[f64]| v.iter().cloned().reduce(f64::min);
-    let (cool_reached, cool_timeout) = cool_summary(&cool_log);
-    report["conditions_observed"] = json!({
-        "cool_c_target": cool_c,
-        "cool_reached_c": cool_reached,
-        "cool_timeout": cool_timeout,
-        "cool_per_arm": cool_log,
-        "hits": hits,
-        "apply_ok": hits > 0,
-        "restored": null,
-        "layer_deactivated": layer_deactivated,
-        "layer_deactivation": retirement_record,
-        "recovery_note": "Layer deactivation does not verify sampler, input, ftrace or charging recovery.",
-        "image_check": match &live_check {
-            Some(v) => json!({"method": "storeop_check_live", "result": v}),
-            None => json!({
-                "method": "same_spot_screenshot",
-                "min_psnr_db": min_psnr,
-                "psnr_knob_vs_ctrl_db": psnr_knob_vs_ctrl,
-                "psnr_ctrl_vs_ctrl_db": psnr_ctrl_vs_ctrl,
-                "noise_within_round_db": noise_within_round,
-                "noise_floor_db": noise_floor,
-                "psnr_db_used": best_knob,
-                "gate": image_ruling.as_ref().map(|r| match r {
-                    ImageRuling::Pass(by) => image_gate.gate(by),
-                    ImageRuling::Fail(_) => image_gate.gate("failed"),
-                }),
-            }),
-        },
-    });
-    report["evidence_dir"] = json!(evidence.display().to_string());
-
-    // 画面没通过就作废这一轮: 先于其它检查报出来, 因为它影响的是后面所有数据的意义。
-    if let Some(ImageRuling::Fail(reason)) = &image_ruling {
-        if abort_reason.is_none() {
-            abort_reason = Some(format!("画面出错: {reason} (截图见 evidence_dir)"));
-        }
-    }
-
-    if let Some(reason) = abort_reason {
-        report["verdict"]["reason"] = json!(reason);
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    if !layer_deactivated {
-        report["verdict"]["reason"] = json!("指定目标层停用失败 (见 layer_deactivation 原件)，完整恢复仍未核验");
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    facts.stage=Stage::Conclusion;facts.control=ctrl_runs.clone();facts.candidate=knob_runs.clone();
-    facts.device.control_verified=Some(hits>0);facts.restored=None;
-    // Missing baseline/cold/workload/quality evidence remains unknown, never a complete optimizer.
-    let qualified=record_qualification(&mut report,evidence,&facts)?;
-    if !qualified.conclusion_allowed {
-        report["verdict"]["reason"]=json!("完整恢复等结论资格尚未核验；层停用证据和采样原件保留，禁止 PASS/KEEP");
-        return Ok(serde_json::to_string_pretty(&report).unwrap());
-    }
-    // require_hit 缺省为真: 改写一次都没命中 = 拿 A 去和 A 比, 整轮作废
-    if require_hit && hits == 0 {
-        report["verdict"]["reason"] =
-            json!("require_hit=true 但改写一次都没命中 (层自报绑定计数为 0) —— 拿 A 去和 A 比, 整轮作废");
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-
-    finish_gray_statistics(&mut report, &knob_runs, &ctrl_runs, alpha, rounds, min_of(&psnr_knob_vs_ctrl), None)?;
-    Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
-}
-
 #[allow(clippy::too_many_arguments)]
-fn finish_gray_statistics(report:&mut Value, knob_runs:&[Value], ctrl_runs:&[Value], alpha:f64, rounds:u32, psnr:Option<f64>, required:Option<&[String]>)->Result<(),String> {
+fn finish_gray_statistics(report:&mut Value, knob_runs:&[Value], ctrl_runs:&[Value], alpha:f64, rounds:u32, psnr:Option<f64>, required:&[String])->Result<(),String> {
     if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
         report["verdict"]["reason"] = json!(e);
         return Ok(());
     }
     // 画面过了门槛: 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
-    let (verdict, keep, on_battery_all) = judge_runs_with(ctrl_runs, knob_runs, alpha, rounds, required);
+    let (verdict, keep, on_battery_all) = judge_runs_with(ctrl_runs, knob_runs, alpha, rounds, Some(required));
     report["verdict"] = verdict;
     let mut m = report["metrics"].take();
     let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
@@ -2755,53 +2429,6 @@ fn finish_gray_statistics(report:&mut Value, knob_runs:&[Value], ctrl_runs:&[Val
     report["metrics"] = m;
     report["status"] = json!(if keep { "PASS" } else { "REJECT" });
     Ok(())
-}
-
-/// 层自报的改写命中数 (契约 verdict 口径: "改写被绑定的次数")。
-///
-/// markers 在 knobs/gray/layer 的三个候选落点; su() 输出尾部带 #adb_exit=N 要剥掉。
-/// 命中的口径: **sum(effective[].begins)** —— 改写了但一次都没被绑定的 pass 不算命中
-/// (层自报 unavailable_reason = "rewritten pass never bound")。readonly 探针变体
-/// 没有改写, 退回 render_pass_begins (层确实看到了帧)。多个落点取最大。
-fn layer_hits(serial: &str, pkg: &str, evidence: &Path) -> Option<u64> {
-    if pkg.is_empty() {
-        return None;
-    }
-    let candidates = [
-        format!("/storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json"),
-        format!("/data/data/{pkg}/knobs_layer_out.json"),
-        format!("{DEV_TMP}/knobs_layer_out.{pkg}.json"),
-    ];
-    let mut best: Option<u64> = None;
-    for (i, path) in candidates.iter().enumerate() {
-        let out = su(serial, &format!("cat {path} 2>/dev/null"), 30);
-        if !out.contains("\"effective\"") {
-            continue;
-        }
-        std::fs::write(evidence.join(format!("knobs_layer_out.{i}.json")), &out).ok();
-        // su() 恒在尾部追 #adb_exit=N, 不剥掉 JSON 永远解析不出来
-        let body = match out.rfind("#adb_exit=") {
-            Some(i) => &out[..i],
-            None => &out[..],
-        };
-        let Ok(v) = serde_json::from_str::<Value>(body.trim()) else {
-            continue;
-        };
-        let begins: u64 = v["effective"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|e| e.get("begins").and_then(|b| b.as_u64()))
-                    .sum()
-            })
-            .unwrap_or(0);
-        let fallback = v["readonly_stats"]["render_pass_begins"]
-            .as_u64()
-            .unwrap_or(0);
-        let hits = if begins > 0 { begins } else { fallback };
-        best = Some(best.unwrap_or(0).max(hits));
-    }
-    best
 }
 
 #[cfg(test)]
@@ -3141,7 +2768,7 @@ mod path_tests {
         assert!(judge_runs(&ctrl,&knob,0.05,6).1); // old adaptive metric list would accept this
         let required=Goal::RenderCadence.metrics();
         let mut report=base_report(&json!({}),"gray");
-        finish_gray_statistics(&mut report,&knob,&ctrl,0.05,6,None,Some(&required)).unwrap();
+        finish_gray_statistics(&mut report,&knob,&ctrl,0.05,6,None,&required).unwrap();
         assert_eq!(report["status"],"REJECT");
         assert_eq!(report["verdict"]["alpha_win"],0.025);
         assert!(report["verdict"]["per_metric"].get("power_w_mean").is_none());
