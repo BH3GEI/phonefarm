@@ -53,6 +53,7 @@ mod graylayer;
 mod grayartifact;
 mod upopabi;
 mod storageadapter;
+mod npuop_device;
 mod shotdiff;
 mod sequence_quality;
 mod iqjudge;
