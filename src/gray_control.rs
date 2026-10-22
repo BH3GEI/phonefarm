@@ -572,14 +572,26 @@ fn descriptor(store: &Store) -> Result<Value> {
             "descriptor does not match its control session",
         ));
     }
+    if d["action_capabilities"]["sample"] == 2 && m["schema"] != "phonefarm/gray-capture-session@3"
+    {
+        return Err(err(
+            "invalid_request",
+            "finite input capability requires a bound resource parent",
+        ));
+    }
     if m["schema"] == "phonefarm/gray-capture-session@3" {
-        if m["control_resources"]
-            != json!({"path":"eval-session.json","schema":crate::gray_session::CONTROL_PARENT_SCHEMA})
+        let parent_schema = crate::gray_session::control_parent_schema(&m["control_resources"])
+            .map_err(|e| err("invalid_request", e))?;
+        if d["action_capabilities"]["sample"] == 2
+            && parent_schema != crate::gray_session::CONTROL_PARENT_SCHEMA
         {
-            return Err(err("invalid_request", "control resource binding differs"));
+            return Err(err(
+                "invalid_request",
+                "finite input capability does not match its resource parent",
+            ));
         }
         let parent = store.read_limit(&format!("{rel}/eval-session.json"), 8 * 1024 * 1024)?;
-        if parent["schema"] != crate::gray_session::CONTROL_PARENT_SCHEMA
+        if parent["schema"] != parent_schema
             || ["token", "serial", "completion_owner"]
                 .iter()
                 .any(|k| parent["identity"][*k] != m[*k])
@@ -667,14 +679,19 @@ fn validate_request(r: &Value) -> Result<()> {
     match string(r, "action")? {
         "capture" | "marker" | "narrow" | "release_control" | "stop" => exact(p, &[])?,
         "sample" => {
+            let mut fields = vec!["seconds"];
             if p.get("render_comm").is_some() {
-                exact(p, &["seconds", "render_comm"])?;
-            } else {
-                exact(p, &["seconds"])?;
+                fields.push("render_comm");
             }
-            if !(1..=120).contains(&number(p, "seconds")?) {
-                return Err(err("invalid_request", "sample seconds must be 1..120"));
+            if p.get("input").is_some() {
+                fields.extend(["input", "frame_id"]);
+                if !safe_id(string(p, "frame_id")?) {
+                    return Err(err("invalid_request", "invalid sample frame_id"));
+                }
             }
+            exact(p, &fields)?;
+            crate::gray_script::Plan::control(p.get("input"), number(p, "seconds")?)
+                .map_err(|e| err("invalid_request", e))?;
             if let Some(comm) = p.get("render_comm") {
                 let comm = comm
                     .as_str()
@@ -767,6 +784,37 @@ fn receipt(store: &Store, d: &Value, id: &str) -> Result<Value> {
     }
     Ok(v)
 }
+fn sample_capability(d: &Value, r: &Value) -> Result<()> {
+    if r["action"] != "sample" {
+        return Ok(());
+    }
+    if !d["allowed_actions"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|v| v == "sample"))
+    {
+        return Err(err(
+            "invalid_request",
+            "this session does not support sampling",
+        ));
+    }
+    if r["params"].get("input").is_some() && d["action_capabilities"]["sample"] != 2 {
+        return Err(err(
+            "invalid_request",
+            "this session does not support finite input sampling; start a newer control session",
+        ));
+    }
+    Ok(())
+}
+fn sample_budget(deadline: Instant, plan: &crate::gray_script::Plan) -> Result<()> {
+    let required_ms = plan.duration_ms().max((plan.seconds + 10) * 1000);
+    if deadline.saturating_duration_since(Instant::now()) < Duration::from_millis(required_ms) {
+        return Err(err(
+            "budget_exhausted",
+            "remaining session budget does not cover the full input plan and sampling window",
+        ));
+    }
+    Ok(())
+}
 fn publish(store: &Store, r: &Value) -> Result<Value> {
     validate_request(r)?;
     let _publisher = store.lock("publisher", Duration::from_secs(2))?;
@@ -787,16 +835,7 @@ fn publish(store: &Store, r: &Value) -> Result<Value> {
     if d["accepting"] != true {
         return Err(err("session_closed", "session is not accepting actions"));
     }
-    if r["action"] == "sample"
-        && !d["allowed_actions"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|v| v == "sample"))
-    {
-        return Err(err(
-            "invalid_request",
-            "this session does not support sampling",
-        ));
-    }
+    sample_capability(&d, r)?;
     let pending = store.requests()?;
     if pending.iter().any(|e| e["request"]["action"] == "stop") {
         return Err(err("session_closed", "stop is already queued"));
@@ -949,7 +988,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
     let deadline = Instant::now() + Duration::from_secs(a.seconds);
     let mut d = json!({"schema":SCHEMA,"producer":"phonefarm","session_id":sid,"session_path":sid,"job_id":job,
         "serial":a.serial,"package":a.package,"mode":a.mode,"phase":"starting","accepting":false,
-        "controller":{"actor_id":a.actor,"kind":"agent","epoch":1,"expires_at":null},"allowed_actions":allowed(&a.mode),
+        "controller":{"actor_id":a.actor,"kind":"agent","epoch":1,"expires_at":null},"allowed_actions":allowed(&a.mode),"action_capabilities":{"sample":2},
         "latest_image":null,"recovery":{"status":"not_reported","session_path":sid,"reports":[],"error":null},
         "created_at":now(),"updated_at":now(),"deadline_at":(chrono::Utc::now()+chrono::Duration::seconds(a.seconds as i64)).to_rfc3339(),
         "max_seconds":a.seconds,"frame_max_age_seconds":FRAME_AGE_SECONDS,"keep_prop":a.keep,"stop_reason":null});
@@ -1204,24 +1243,52 @@ fn execute(
     }
     match action {
         "sample" => {
+            sample_capability(d, r)?;
             let seconds = number(p, "seconds")?;
-            if deadline.saturating_duration_since(Instant::now())
-                < Duration::from_secs(seconds + 10)
-            {
-                return Err(err(
-                    "budget_exhausted",
-                    "remaining session budget does not cover sample seconds plus 10 seconds",
-                ));
-            }
+            let plan = crate::gray_script::Plan::control(p.get("input"), seconds)
+                .map_err(|e| err("invalid_request", e))?;
+            sample_budget(deadline, &plan)?;
+            let input_kind = if p.get("input").is_some() {
+                "finite"
+            } else {
+                "idle"
+            };
+            let initial_frame = if input_kind == "finite" {
+                let image = input_image(d, p)?;
+                let w = u32::try_from(number(image, "width")?)
+                    .map_err(|_| err("invalid_request", "invalid image width"))?;
+                let h = u32::try_from(number(image, "height")?)
+                    .map_err(|_| err("invalid_request", "invalid image height"))?;
+                plan.validate_screen(w, h)
+                    .map_err(|e| err("invalid_request", e))?;
+                image.clone()
+            } else {
+                Value::Null
+            };
             let label = format!("sample_{sequence}");
             let relative = format!("{CONTROL}/artifacts/{label}");
             let out = store.path.join(&relative);
             fs::create_dir(&out)?;
             d["phase"] = json!("measuring");
-            d["active_sample"] =
-                json!({"request_id":id,"seconds":seconds,"started_at":now(),"path":relative});
+            d["active_sample"] = json!({"request_id":id,"seconds":seconds,"input_kind":input_kind,"planned_input_ms":plan.duration_ms(),"started_at":now(),"path":relative});
             save_descriptor(store, d)?;
-            let collection = parent.sample_current(&label, seconds, &out);
+            store.write(&format!("{relative}/sample-request.json"), &json!({
+                "schema":"phonefarm/gray-control-sample-request@1", "request_id":id,
+                "input_kind":input_kind,"planned_input_ms":plan.duration_ms(),"initial_frame":initial_frame,
+            }), false)?;
+            let collection = parent.sample_current(&label, &plan, input_kind, &out, || {
+                require_controller(d, r).map_err(|e| e.message)?;
+                if input_kind == "finite" {
+                    verify_image(
+                        base,
+                        &initial_frame,
+                        &out.join("input-check.png"),
+                        Some(&out.join("input-frame.json")),
+                    )
+                    .map_err(|e| e.message)?;
+                }
+                sample_budget(deadline, &plan).map_err(|e| e.message)
+            });
             let (trace_ok, sampler_ok, input) = match collection {
                 Ok(result) => result,
                 Err(error) => {
@@ -1259,6 +1326,7 @@ fn execute(
                 );
             }
             let result = json!({"path":format!("{relative}/run.json"),"collection":collection,"requested_seconds":run["requested_seconds"],
+                "input_kind":input_kind,"planned_input_ms":plan.duration_ms(),"initial_frame":initial_frame,
                 "metrics":run["metrics"],"metric_provenance":run["metric_provenance"],"limitations":run["limitations"],"artifacts":artifacts});
             d["latest_sample"] = result.clone();
             d["active_sample"] = Value::Null;
@@ -1421,9 +1489,8 @@ fn frame_fresh(image: &Value) -> Result<()> {
     }
     Ok(())
 }
-fn check_frame(store: &Store, base: &Session, d: &Value, r: &Value) -> Result<()> {
+fn input_image<'a>(d: &'a Value, p: &Value) -> Result<&'a Value> {
     let image = &d["latest_image"];
-    let p = &r["params"];
     if image.is_null() || image["request_id"] != p["frame_id"] {
         return Err(err(
             "conflict",
@@ -1431,12 +1498,45 @@ fn check_frame(store: &Store, base: &Session, d: &Value, r: &Value) -> Result<()
         ));
     }
     frame_fresh(image)?;
-    let rotation = number(image, "rotation").map_err(|_| {
+    number(image, "rotation").map_err(|_| {
         err(
             "conflict",
             "image orientation is unknown; input is unavailable",
         )
     })?;
+    number(image, "width")?;
+    number(image, "height")?;
+    Ok(image)
+}
+fn verify_image(
+    base: &Session,
+    image: &Value,
+    verify: &Path,
+    evidence: Option<&Path>,
+) -> Result<()> {
+    frame_fresh(image)?;
+    base.screenshot(verify).map_err(device)?;
+    let (w, h) = png_dimensions(verify)?;
+    let rotation = base.display_rotation().map_err(device)?;
+    let matches = image["width"] == w && image["height"] == h && image["rotation"] == rotation;
+    if let Some(path) = evidence {
+        let value = json!({"schema":"phonefarm/gray-input-frame@1","source_image":image,
+            "verification_image":"input-check.png","observed_at":now(),
+            "observed":{"width":w,"height":h,"rotation":rotation},"geometry_matches":matches});
+        crate::confirmation_transport::new_file(path, &serde_json::to_vec_pretty(&value).unwrap())
+            .map_err(device)?;
+    }
+    if !matches {
+        return Err(err(
+            "conflict",
+            "display geometry changed; capture again before input",
+        ));
+    }
+    frame_fresh(image)
+}
+fn check_frame(store: &Store, base: &Session, d: &Value, r: &Value) -> Result<()> {
+    let p = &r["params"];
+    let image = input_image(d, p)?;
     let width = number(image, "width")?;
     let height = number(image, "height")?;
     let points = if r["action"] == "tap" {
@@ -1453,22 +1553,11 @@ fn check_frame(store: &Store, base: &Session, d: &Value, r: &Value) -> Result<()
             "coordinates are outside the captured image",
         ));
     }
-    // A real fresh image verifies orientation-dependent dimensions; wm size can
-    // report the panel's natural orientation and is insufficient for this check.
     let verify = store.path.join(format!(
         "{CONTROL}/artifacts/input-check-{}.png",
         string(r, "request_id")?
     ));
-    base.screenshot(&verify).map_err(device)?;
-    let (w, h) = png_dimensions(&verify)?;
-    let actual_rotation = base.display_rotation().map_err(device)?;
-    if u64::from(w) != width || u64::from(h) != height || u64::from(actual_rotation) != rotation {
-        return Err(err(
-            "conflict",
-            "display geometry changed; capture again before input",
-        ));
-    }
-    frame_fresh(image)
+    verify_image(base, image, &verify, None)
 }
 
 fn close_mailbox(store: &Store, d: &mut Value) -> Result<()> {
@@ -1670,6 +1759,39 @@ mod tests {
             publish(&store, &sample).unwrap_err().code,
             "invalid_request"
         );
+        let mut input_request = request("finite");
+        input_request["action"] = json!("sample");
+        input_request["params"] =
+            json!({"seconds":1,"frame_id":"frame-1","input":[{"action":"sleep","ms":11000}]});
+        validate_request(&input_request).unwrap();
+        let mut old = d.clone();
+        old["allowed_actions"] = json!(["sample"]);
+        store.write(DESCRIPTOR, &old, true).unwrap();
+        assert_eq!(
+            publish(&store, &input_request).unwrap_err().code,
+            "invalid_request"
+        );
+        assert_eq!(store.requests().unwrap().len(), 1);
+        let mut invalid = input_request.clone();
+        invalid["params"]
+            .as_object_mut()
+            .unwrap()
+            .remove("frame_id");
+        assert!(validate_request(&invalid).is_err());
+        invalid = input_request.clone();
+        invalid["params"]["input"] = Value::Null;
+        assert!(validate_request(&invalid).is_err());
+        invalid = input_request.clone();
+        invalid["params"].as_object_mut().unwrap().remove("input");
+        assert!(validate_request(&invalid).is_err());
+        invalid = input_request.clone();
+        invalid["params"]["input"][0]["ms"] = json!(10000);
+        assert!(validate_request(&invalid).is_err());
+        let mut spoofed = old.clone();
+        spoofed["action_capabilities"] = json!({"sample":2});
+        store.write(DESCRIPTOR, &spoofed, true).unwrap();
+        assert!(descriptor(&store).is_err());
+        store.write(DESCRIPTOR, &d, true).unwrap();
         let mut manifest = store.read("gray-session-test/session.json").unwrap();
         manifest["schema"] = json!("phonefarm/gray-capture-session@3");
         manifest["control_resources"] =
@@ -1678,6 +1800,25 @@ mod tests {
             .write("gray-session-test/session.json", &manifest, true)
             .unwrap();
         assert!(descriptor(&store).is_err()); // No parent: never fall back to C1.
+        manifest["control_resources"]["schema"] =
+            json!(crate::gray_session::LEGACY_CONTROL_PARENT_SCHEMA);
+        store
+            .write("gray-session-test/session.json", &manifest, true)
+            .unwrap();
+        store
+            .write(
+                "gray-session-test/eval-session.json",
+                &json!({"schema":crate::gray_session::LEGACY_CONTROL_PARENT_SCHEMA,
+            "identity":{"serial":"fake","completion_owner":"gray_layer_control"}}),
+                false,
+            )
+            .unwrap();
+        store.write(DESCRIPTOR, &old, true).unwrap();
+        assert!(descriptor(&store).is_ok()); // Original C2A remains readable.
+        assert!(publish(&store, &input_request).is_err());
+        store.write(DESCRIPTOR, &spoofed, true).unwrap();
+        assert!(descriptor(&store).is_err()); // Capability cannot upgrade an old parent.
+        store.write(DESCRIPTOR, &d, true).unwrap();
         manifest["schema"] = json!("phonefarm/gray-capture-session@2");
         store
             .write("gray-session-test/session.json", &manifest, true)
@@ -1724,6 +1865,11 @@ mod tests {
         let mut current = r;
         current["control_epoch"] = json!(3);
         assert!(require_controller(&d, &current).is_ok());
+        let plan =
+            crate::gray_script::Plan::control(Some(&json!([{"action":"sleep","ms":30000}])), 1)
+                .unwrap();
+        assert!(sample_budget(Instant::now() + Duration::from_secs(20), &plan).is_err());
+        assert!(sample_budget(Instant::now() + Duration::from_secs(31), &plan).is_ok());
         assert!(frame_fresh(&json!({"captured_at":now()})).is_ok());
         assert!(frame_fresh(
             &json!({"captured_at":(chrono::Utc::now()-chrono::Duration::seconds(31)).to_rfc3339()})

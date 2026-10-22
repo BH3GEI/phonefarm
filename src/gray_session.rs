@@ -10,7 +10,8 @@ use std::{cell::RefCell, collections::HashSet, fs, path::{Path, PathBuf}, time::
 const LEGACY_SCHEMA: &str = "phonefarm/gray-capture-session@1";
 const SCHEMA: &str = "phonefarm/gray-capture-session@2";
 const CONTROL_RESOURCE_SCHEMA: &str = "phonefarm/gray-capture-session@3";
-pub(crate) const CONTROL_PARENT_SCHEMA: &str = "phonefarm/gray-control-resources@1";
+pub(crate) const LEGACY_CONTROL_PARENT_SCHEMA: &str = "phonefarm/gray-control-resources@1";
+pub(crate) const CONTROL_PARENT_SCHEMA: &str = "phonefarm/gray-control-resources@2";
 const SCOPE: &str = "gray_capture_owned_installation_properties_target_stopped";
 const EVAL_OWNER: &str = "gray_eval_launch";
 const EVAL_SCOPE: &str = "gray_eval_launch_owned_resources";
@@ -202,6 +203,7 @@ impl Session {
         Ok(json!({"serial":state["serial"],"token":state["token"],"boot_id":state["boot_id"],
             "native_dir":state["native_dir"],"package":state["package"],"session":self.dir,
             "completion_owner":CONTROL_OWNER,"control_session_id":state["control_session_id"],
+            "control_parent_schema":state["control_resources"]["schema"],
             "evidence_origin":state["evidence_origin"]}))
     }
 
@@ -223,6 +225,7 @@ impl Session {
         Ok(json!({"serial":state["serial"],"token":state["token"],"boot_id":state["boot_id"],
             "native_dir":state["native_dir"],"package":state["package"],"session":self.dir,
             "completion_owner":completion_owner(&state)?,
+            "control_parent_schema":state["control_resources"]["schema"],
             "evidence_origin":state["evidence_origin"],"base_recovery":state["base_recovery"]}))
     }
     pub fn eval_ready(&self) -> Result<(), String> { self.require_eval()?; self.ready() }
@@ -787,9 +790,17 @@ fn completion_owner(state: &Value) -> Result<&str, String> {
             _ => Err("gray session has no recognized completion owner".into()),
         },
         Some(CONTROL_RESOURCE_SCHEMA) if state["completion_owner"] == CONTROL_OWNER
-            && state["control_resources"] == json!({"path":"eval-session.json","schema":CONTROL_PARENT_SCHEMA}) => Ok(CONTROL_OWNER),
+            && control_parent_schema(&state["control_resources"]).is_ok() => Ok(CONTROL_OWNER),
         _ => Err("unsupported gray session schema or completion owner".into()),
     }
+}
+/// Validates the base's durable binding, rather than inferring capabilities from
+/// the currently installed binary. C2A parents remain idle-only on recovery.
+pub(crate) fn control_parent_schema(binding:&Value)->Result<&'static str,String> {
+    for schema in [LEGACY_CONTROL_PARENT_SCHEMA,CONTROL_PARENT_SCHEMA] {
+        if *binding==json!({"path":"eval-session.json","schema":schema}) {return Ok(schema);}
+    }
+    Err("unrecognized control resource parent binding".into())
 }
 fn require_owner(state: &Value, expected: &str) -> Result<(), String> {
     let owner = completion_owner(state)?;
@@ -1071,6 +1082,11 @@ mod tests {
         let mut resources=json!({"schema":CONTROL_RESOURCE_SCHEMA,"completion_owner":CONTROL_OWNER,"control_resources":{"path":"eval-session.json","schema":CONTROL_PARENT_SCHEMA}});
         assert!(require_parent(&resources).is_ok());
         assert!(require_local_completion(&resources, CONTROL_OWNER).is_err());
+        assert_eq!(control_parent_schema(&resources["control_resources"]).unwrap(),CONTROL_PARENT_SCHEMA);
+        resources["control_resources"]["schema"]=json!(LEGACY_CONTROL_PARENT_SCHEMA);
+        assert!(require_parent(&resources).is_ok());
+        assert!(require_local_completion(&resources, CONTROL_OWNER).is_err());
+        assert_eq!(control_parent_schema(&resources["control_resources"]).unwrap(),LEGACY_CONTROL_PARENT_SCHEMA);
         resources["control_resources"]=Value::Null;
         assert!(require_owner(&resources,CONTROL_OWNER).is_err());
         for owner in ["standalone", EVAL_OWNER, SCRIPT_OWNER, LOADOP_OWNER] {

@@ -2275,6 +2275,8 @@ pub(crate) fn summarize_control_sample(
             if let Some(error) = value["error"].as_str() { errors.push(error.to_owned()); }
         }
     }
+    let sample_request = std::fs::read_to_string(out.join("sample-request.json")).ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok()).unwrap_or(Value::Null);
     let trace = std::fs::read_to_string(out.join("trace.txt"));
     let env_text = std::fs::read_to_string(out.join("env.txt"));
     if !trace_ok { errors.push("trace child failed; inspect its exit code and log".to_owned()); }
@@ -2291,6 +2293,7 @@ pub(crate) fn summarize_control_sample(
     }
     let mut run = json!({"schema":"phonefarm/gray-control-sample@1", "label":label,
         "requested_seconds":seconds,"evidence_origin":evidence_origin,"target_alive_after":target_alive,
+        "input_kind":sample_request["input_kind"],"planned_input_ms":sample_request["planned_input_ms"],"initial_frame":sample_request["initial_frame"],
         "input_window":input,"summary":summary.clone().unwrap_or_else(||json!({})),
         "env":env_text.as_ref().map(|text|to_serde(&sysparam::env_stats(text))).unwrap_or_else(|_|json!({}))});
     if trace_ok && trace.is_ok() && env_text.is_ok() {
@@ -2310,6 +2313,9 @@ pub(crate) fn summarize_control_sample(
         "power covers the whole sampler window including lead/tail, not only the trace window".to_owned(),
         "energy per frame is not calculated from these different windows".to_owned(),
     ];
+    if sample_request["input_kind"] == "finite" {
+        limitations.push("input geometry is verified at launch only; natural completion does not restore game state".into());
+    }
     if render_comm.is_none() {
         limitations.push("no render thread filter selected; raw trace is retained and frame metrics are unknown".into());
     } else if summary.as_ref().is_some_and(|s|s["n_frames"].as_u64().unwrap_or(0)==0) {
@@ -2351,7 +2357,7 @@ pub(crate) fn summarize_control_sample(
     run["limitations"] = json!(limitations);
     let names = ["trace.txt","summary.json","env.txt","capture.log","collection-error.json","input-plan.json","workload_exit.txt","trace_exit.txt","sampler_exit.txt",
         "quiescence.txt","workload.log","trace.log","workload-time.json","trace-time.json","sampler-time.json",
-        "input-complete.json","input-window.json"];
+        "input-complete.json","input-window.json","sample-request.json","input-frame.json","input-check.png"];
     run["artifact_path_base"] = json!("run_directory");
     run["artifacts"] = json!(names.into_iter().filter(|name|out.join(name).is_file())
         .map(|name|json!({"name":name,"path":name})).collect::<Vec<_>>());

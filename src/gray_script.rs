@@ -230,6 +230,15 @@ pub(crate) fn parse(input: &Value, seconds: u64) -> Result<Plan, String> {
     Ok(plan)
 }
 impl Plan {
+    pub fn control(input: Option<&Value>, seconds: u64) -> Result<Self, String> {
+        if !(1..=120).contains(&seconds) { return Err("control sample seconds must be 1..120".into()); }
+        let Some(input) = input else { return Self::idle(seconds); };
+        let plan = parse(input, seconds)?;
+        if plan.duration_ms() < (seconds + 10) * 1000 {
+            return Err("control input must cover sample seconds plus 10 seconds without implicit padding".into());
+        }
+        Ok(plan)
+    }
     /// Current-scene sampling owns a finite idle workload, never input.
     pub fn idle(seconds: u64) -> Result<Self, String> {
         if !(1..=120).contains(&seconds) { return Err("control sample seconds must be 1..120".into()); }
@@ -338,5 +347,15 @@ mod tests {
         assert!(parse(&json!([{"action":"sleep","ms":6000}]), 1).is_err());
         assert!(parse(&json!([{"action":"sleep","ms":7000}]), 595).is_err());
         assert!(parse(&json!([{"action":"sleep","ms":7000,"sec":-1}]), 1).is_err());
+        assert_eq!(Plan::control(None,1).unwrap(),Plan::idle(1).unwrap());
+        assert!(Plan::control(Some(&Value::Null),1).is_err());
+        let short=json!([{"action":"sleep","ms":7000}]);
+        assert!(parse(&short,1).is_ok()); // Preserve the original eval contract.
+        assert!(Plan::control(Some(&short),1).is_err());
+        let input=json!([{"action":"sleep","ms":6000},{"action":"tap","x":10,"y":5},{"action":"sleep","ms":5000}]);
+        let plan=Plan::control(Some(&input),1).unwrap();
+        assert_eq!(plan.duration_ms(),11000);
+        assert!(plan.validate_screen(11,6).is_ok());assert!(plan.validate_screen(10,6).is_err());
+        assert!(Plan::control(None,121).is_err());
     }
 }
