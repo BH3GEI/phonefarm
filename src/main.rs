@@ -41,6 +41,7 @@ mod platform;
 mod devlock;
 mod devlease;
 mod queue_owner;
+mod host_process;
 mod observation;
 mod lease_receipt;
 mod lease_storage;

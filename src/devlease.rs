@@ -1,4 +1,5 @@
 //! Host leases cover a whole experiment, including restoration. File locks are never unlinked.
+use crate::host_process::{self, Identity, InstanceState};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -14,6 +15,7 @@ pub struct Lease {
     legacy: PathBuf,
     token: String,
     outer_instance: Option<String>,
+    process_identity: Identity,
     stop: Option<mpsc::Sender<()>>,
     heartbeat: Option<JoinHandle<()>>,
     preserve_marker: bool,
@@ -110,6 +112,9 @@ fn marker_state(m: &Value) -> Result<(bool, bool), String> {
         "job_id",
         "lease_id",
         "outer_instance_id",
+        "host_boot_id",
+        "pid_start",
+        "child_start",
     ];
     if let Some(key) = m
         .as_object()
@@ -153,8 +158,134 @@ fn marker_state(m: &Value) -> Result<(bool, bool), String> {
         }
         _ => return Err("incomplete lease child PID/PGID pair; local group unknown".into()),
     }
+    let identity = marker_identity(m)?;
+    match (identity, m.get("child_pid"), m.get("child_start")) {
+        (Some(_), Some(_), Some(start)) if start.as_str().is_some_and(host_process::clean_identity) => {}
+        (Some(_), None, None) | (None, _, None) => {}
+        _ => return Err("invalid or incomplete lease child process identity".into()),
+    }
     Ok((pending, recovery))
 }
+
+fn marker_identity(m: &Value) -> Result<Option<Identity>, String> {
+    match (m.get("host_boot_id"), m.get("pid_start")) {
+        (None, None) => Ok(None),
+        (Some(boot), Some(start)) => {
+            let host_boot_id = boot
+                .as_str()
+                .filter(|s| host_process::clean_identity(s))
+                .ok_or("invalid lease host boot identity")?;
+            let start = start
+                .as_str()
+                .filter(|s| host_process::clean_identity(s))
+                .ok_or("invalid lease owner start identity")?;
+            let pid = m["pid"]
+                .as_u64()
+                .filter(|n| *n > 0 && *n <= i32::MAX as u64)
+                .ok_or("invalid lease owner PID")? as u32;
+            Ok(Some(Identity {
+                pid,
+                start: start.into(),
+                host_boot_id: host_boot_id.into(),
+            }))
+        }
+        _ => Err("incomplete lease host process identity".into()),
+    }
+}
+
+fn bind_identity(m: &mut Value, identity: &Identity) {
+    m["pid"] = json!(identity.pid);
+    m["pid_start"] = json!(identity.start);
+    m["host_boot_id"] = json!(identity.host_boot_id);
+}
+
+fn inspect_owner(m: &Value) -> Result<Option<InstanceState>, String> {
+    marker_identity(m)?
+        .as_ref()
+        .map(host_process::inspect)
+        .transpose()
+}
+
+fn owner_dead(m: &Value) -> Result<bool, String> {
+    match inspect_owner(m)? {
+        Some(InstanceState::Alive) => Ok(false),
+        Some(_) => Ok(true),
+        None => Ok(pid_dead(
+            m["pid"]
+                .as_u64()
+                .filter(|p| *p > 0 && *p <= i32::MAX as u64)
+                .ok_or("invalid lease owner PID")? as u32,
+        )),
+    }
+}
+
+/// Called only after validating marker shape and explicit recovery conditions.
+/// A same-boot leader change never proves the old group has disappeared.
+fn prior_processes_gone(m: &Value) -> Result<(), String> {
+    let identity = marker_identity(m)?;
+    match identity.as_ref().map(host_process::inspect).transpose()? {
+        Some(InstanceState::PreviousBoot) => return Ok(()),
+        Some(InstanceState::Alive) => return Err("lease owner process instance is alive".into()),
+        Some(_) => {}
+        None if !owner_dead(m)? => return Err("legacy owner is alive/unknown".into()),
+        None => {}
+    }
+    if let Some(child) = m.get("child_pid") {
+        let pid = child
+            .as_u64()
+            .filter(|p| *p > 0 && *p <= i32::MAX as u64)
+            .ok_or("invalid recovery child PID")? as u32;
+        let alive = if let Some(owner) = identity {
+            let child = Identity {
+                pid,
+                start: m["child_start"]
+                    .as_str()
+                    .ok_or("missing child start")?
+                    .into(),
+                host_boot_id: owner.host_boot_id,
+            };
+            host_process::inspect(&child)? == InstanceState::Alive
+        } else {
+            !pid_dead(pid)
+        };
+        if alive {
+            return Err("recovery child is alive/unknown".into());
+        }
+    }
+    #[cfg(unix)]
+    if let Some(group) = m.get("child_pgid") {
+        let group = group
+            .as_u64()
+            .filter(|p| *p > 0 && *p <= i32::MAX as u64)
+            .ok_or("invalid recovery group")? as i32;
+        if unsafe { libc::kill(-group, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        {
+            return Err("recovery process group is live/unknown".into());
+        }
+    }
+    Ok(())
+}
+
+/// Verify both actual process instances before the released worker touches a device.
+pub(crate) fn verify_worker_processes(m: &Value, parent: u32, child: u32) -> Result<(), String> {
+    marker_state(m)?;
+    let owner =
+        marker_identity(m)?.ok_or("worker requires a host process identity; upgrade its owner")?;
+    if owner.pid != parent || host_process::inspect(&owner)? != InstanceState::Alive {
+        return Err("worker owner process instance changed or exited".into());
+    }
+    let actual = host_process::capture(child)?;
+    if m["child_pid"] != child
+        || m["child_pgid"] != child
+        || m["child_start"] != actual.start
+        || owner.host_boot_id != actual.host_boot_id
+    {
+        return Err("worker child process instance mismatch".into());
+    }
+    Ok(())
+}
+
 fn owns(path: &Path, token: &str) -> bool {
     marker(path).is_some_and(|v| {
         v["token"].as_str() == Some(token)
@@ -230,6 +361,7 @@ impl Lease {
             return Err("lease requires a resolved device serial".into());
         }
         let receipt = crate::lease_receipt::JobReceipt::from_env(serial, label, Value::Null)?;
+        let process_identity = host_process::capture(std::process::id())?;
         fs::create_dir_all(root).map_err(|e| format!("lease directory: {e}"))?;
         fs::create_dir_all(legacy_root).map_err(|e| format!("devlock directory: {e}"))?;
         let deadline = Instant::now() + timeout;
@@ -282,7 +414,7 @@ impl Lease {
                             {
                                 if pid > 0
                                     && pid <= u32::MAX as u64
-                                    && pid_dead(pid as u32)
+                                    && owner_dead(&m)?
                                     && owns(&legacy, token)
                                 {
                                     return Err(format!("ABANDONED lease {}: parent exited; child/remote workload and device restoration are unverified. After verifying device idle/restored, use lease --recover-abandoned --confirm-device-idle --serial {serial}", legacy.display()));
@@ -312,6 +444,7 @@ impl Lease {
         );
         let mut info = json!({"format":1,"producer":"phonefarm","pid":std::process::id(),
                           "token":token,"serial":serial,"label":label,"owner":owner});
+        bind_identity(&mut info, &process_identity);
         let outer_instance = outer.map(|owner| owner.instance_id);
         if let Some(instance) = &outer_instance { info["outer_instance_id"] = json!(instance); }
         if let Some(r) = &receipt {
@@ -354,6 +487,7 @@ impl Lease {
             legacy,
             token,
             outer_instance,
+            process_identity,
             stop: Some(tx),
             heartbeat: Some(heartbeat),
             preserve_marker: false,
@@ -392,6 +526,10 @@ impl Lease {
         if current["outer_instance_id"].as_str() != self.outer_instance.as_deref() {
             return Err("lease outer instance reference changed".into());
         }
+        if marker_identity(&current)?.as_ref() != Some(&self.process_identity)
+            || self.process_identity.pid != std::process::id()
+            || host_process::inspect(&self.process_identity)? != InstanceState::Alive
+        { return Err("lease host process instance changed or is unverified".into()); }
         if !owns(&self.legacy, &self.token) {
             return Err("lease owner changed; experiment contaminated/unknown".into());
         }
@@ -421,10 +559,15 @@ impl Lease {
     }
     pub(crate) fn record_child(&self, pid: u32) -> Result<(), String> {
         self.check()?;
+        let child = host_process::capture(pid)?;
+        if child.host_boot_id != self.process_identity.host_boot_id {
+            return Err("child host boot differs from lease owner".into());
+        }
         let mut m = marker(&self.legacy).ok_or("lease marker unavailable")?;
         m["command_pending"] = json!(false);
         m["child_pid"] = json!(pid);
         m["child_pgid"] = json!(pid);
+        m["child_start"] = json!(child.start);
         durable_replace(
             &self.legacy.join("phonefarm-lease.json"),
             m.to_string().as_bytes(),
@@ -526,6 +669,7 @@ impl Lease {
         {
             return Err("worker lease identity mismatch".into());
         }
+        verify_worker_processes(&marker, parent as u32, pid)?;
         std::time::UNIX_EPOCH.checked_add(Duration::from_millis(deadline_ms))
             .ok_or("worker deadline is too large")?
             .duration_since(std::time::SystemTime::now())
@@ -538,6 +682,7 @@ impl Lease {
         if let Some(o) = m.as_object_mut() {
             o.remove("child_pid");
             o.remove("child_pgid");
+            o.remove("child_start");
         }
         durable_replace(
             &self.legacy.join("phonefarm-lease.json"),
@@ -630,10 +775,7 @@ impl Lease {
             recovery_of,
         )?;
         let prior_token = prior["token"].as_str().ok_or("missing recovery token")?;
-        let pid = prior["pid"]
-            .as_u64()
-            .filter(|p| *p > 0 && *p <= u32::MAX as u64)
-            .ok_or("invalid recovery PID")?;
+
         if prior["producer"] != "phonefarm"
             || prior["format"] != 1
             || prior["serial"] != serial
@@ -641,34 +783,14 @@ impl Lease {
             || prior["recovery_context"]
                 != json!(context.canonicalize().map_err(|e| e.to_string())?)
             || !owns(&legacy, prior_token)
-            || !pid_dead(pid as u32)
         {
             return Err("recovery owner/identity is live, unknown or mismatched".into());
         }
         if pending {
             return Err("unbound pending transport launch; future ADB activity unknown, requires manual reconciliation".into());
         }
-        if let Some(child) = prior.get("child_pid") {
-            let child = child
-                .as_u64()
-                .filter(|p| *p > 0 && *p <= u32::MAX as u64)
-                .ok_or("invalid recovery child")?;
-            if !pid_dead(child as u32) {
-                return Err("recovery child is live/unknown".into());
-            }
-        }
-        #[cfg(unix)]
-        if let Some(group) = prior.get("child_pgid") {
-            let group = group
-                .as_u64()
-                .filter(|p| *p > 0 && *p <= i32::MAX as u64)
-                .ok_or("invalid recovery group")?;
-            if unsafe { libc::kill(-(group as i32), 0) } == 0
-                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-            {
-                return Err("recovery process group is live/unknown".into());
-            }
-        }
+        prior_processes_gone(&prior)?;
+        let process_identity = host_process::capture(std::process::id())?;
         // Transfer only after all old local ownership checks; persistent uncertainty remains.
         let token = format!(
             "{}-{}",
@@ -680,7 +802,7 @@ impl Lease {
         );
         let owner = format!("phonefarm:confirmation-reconcile:{serial} token={token}\n");
         let mut next = prior.clone();
-        next["pid"] = json!(std::process::id());
+        bind_identity(&mut next, &process_identity);
         next["token"] = json!(token);
         next["owner"] = json!(owner);
         next["label"] = json!("confirmation-reconcile");
@@ -688,6 +810,7 @@ impl Lease {
         if let Some(o) = next.as_object_mut() {
             o.remove("child_pid");
             o.remove("child_pgid");
+            o.remove("child_start");
             o.remove("job_id");
             o.remove("lease_id");
         }
@@ -718,6 +841,7 @@ impl Lease {
             legacy,
             token,
             outer_instance: next["outer_instance_id"].as_str().map(str::to_owned),
+            process_identity,
             stop: Some(tx),
             heartbeat: Some(heartbeat),
             preserve_marker: true,
@@ -752,10 +876,7 @@ impl Lease {
         if recovery {
             return Err("confirmation driver barrier requires observed explicit reconcile; operator idle assertion cannot clear it".into());
         }
-        let pid = m["pid"]
-            .as_u64()
-            .filter(|p| *p > 0 && *p <= u32::MAX as u64)
-            .ok_or("invalid owner PID")?;
+
         let token = m["token"].as_str().ok_or("missing owner token")?;
         if m["producer"] != "phonefarm"
             || m["format"] != 1
@@ -764,30 +885,7 @@ impl Lease {
         {
             return Err("owner/serial identity mismatch; cannot recover".into());
         }
-        if !pid_dead(pid as u32) {
-            return Err("owner alive/unknown; cannot recover".into());
-        }
-        if let Some(child) = m.get("child_pid") {
-            let child = child
-                .as_u64()
-                .filter(|p| *p > 0 && *p <= u32::MAX as u64)
-                .ok_or("invalid child PID")?;
-            if !pid_dead(child as u32) {
-                return Err("child alive/unknown; cannot recover".into());
-            }
-        }
-        #[cfg(unix)]
-        if let Some(group) = m.get("child_pgid") {
-            let group = group
-                .as_u64()
-                .filter(|p| *p > 0 && *p <= i32::MAX as u64)
-                .ok_or("invalid recovery group")?;
-            if unsafe { libc::kill(-(group as i32), 0) } == 0
-                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-            {
-                return Err("local child group live/unknown; cannot clear idle assertion".into());
-            }
-        }
+        prior_processes_gone(&m)?;
         // Human confirmation is explicit and auditable; it is not a device observation.
         let mut log = File::options()
             .create(true)
@@ -832,6 +930,9 @@ impl Drop for Lease {
             Some("marker_unknown")
         } else if m["outer_instance_id"].as_str() != self.outer_instance.as_deref() {
             Some("outer_reference_changed")
+        } else if marker_identity(&m).ok().flatten().as_ref() != Some(&self.process_identity)
+            || self.process_identity.pid != std::process::id() {
+            Some("host_process_identity_changed")
         } else if !owns(&self.legacy, &self.token) {
             Some("ownership_changed")
         } else if m["command_pending"] == true {
@@ -862,6 +963,20 @@ impl Drop for Lease {
         }
         // File fields close after Drop, releasing both kernel locks on every return/unwind.
     }
+}
+
+fn host_process_fact(m: &Value, observed: &Result<Option<InstanceState>, String>) -> Value {
+    let (status, reason) = match observed {
+        Ok(Some(InstanceState::Alive)) => ("alive", "recorded host owner process instance is alive"),
+        Ok(Some(InstanceState::PreviousBoot)) => ("previous_boot", "host boot changed; old local processes are gone, device recovery remains unverified"),
+        Ok(Some(InstanceState::Exited)) => ("exited", "recorded owner exited; child group and device state are separate obligations"),
+        Ok(Some(InstanceState::Zombie)) => ("zombie", "recorded owner exited but is not reaped; child group and device state are separate obligations"),
+        Ok(Some(InstanceState::PidReused)) => ("pid_reused", "PID belongs to a different process instance; original group and device state remain unverified"),
+        Ok(None) => ("legacy", "old marker has no recorded host process instance; conservative legacy checks apply"),
+        Err(error) => ("unknown", error.as_str()),
+    };
+    json!({"status":status,"pid":m["pid"].as_u64(),"start":m["pid_start"].as_str(),
+           "host_boot_id":m["host_boot_id"].as_str(),"reason":reason})
 }
 
 /// Observe existing host state only. This is neither a recovery receipt nor write authorization.
@@ -953,6 +1068,14 @@ fn lease_status(legacy_root: &Path) -> Value {
                     .filter(|n| *n > 0 && *n <= u32::MAX as u64);
                 let identity = m["serial"].as_str().is_some_and(|s| !s.trim().is_empty())
                     && m["token"].as_str().is_some_and(|token| owns(&path, token));
+                let owner_observation = inspect_owner(&m);
+                entry["host_process"] = host_process_fact(&m, &owner_observation);
+                let owner_gone = match &owner_observation {
+                    Ok(Some(InstanceState::Alive)) => false,
+                    Ok(Some(_)) => true,
+                    Ok(None) => pid.is_some_and(|pid| pid_dead(pid as u32)),
+                    Err(_) => false,
+                };
                 let outer_ref = m["outer_instance_id"].as_str();
                 entry["outer_instance_id"] = outer_ref.map_or(Value::Null, |id| json!(id));
                 let outer_matches = outer_ref.is_none_or(|id| queue_owner.as_ref().ok().and_then(|v| v.as_ref())
@@ -969,10 +1092,12 @@ fn lease_status(legacy_root: &Path) -> Value {
                         "recovery_required",
                         "recorded recovery barrier requires reconciliation",
                     )
-                } else if pid_dead(pid.unwrap() as u32) {
+                } else if owner_observation.is_err() {
+                    ("unknown", "host process instance could not be verified")
+                } else if owner_gone {
                     (
                         "abandoned",
-                        "owner exited; remote workload and restoration remain unverified",
+                        "recorded host owner is gone or changed; group, remote workload and restoration remain unverified",
                     )
                 } else if !outer_matches {
                     ("unknown", "recorded outer instance is absent or does not match; strong owner may still finish restoration")
@@ -1407,6 +1532,8 @@ mod tests {
             ("recovery_required", json!(true)),
             ("owner", json!("replacement-owner")),
             ("outer_instance_id", json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
+            ("pid_start", json!("different-process")),
+            ("host_boot_id", json!("previous-boot")),
         ] {
             let scratch = Scratch::new();
             let mut lease = scratch.lease();
@@ -1450,6 +1577,9 @@ mod tests {
             ("child_pid", json!(123)),
             ("child_pgid", json!(123)),
             ("child_pid", Value::Null),
+            ("host_boot_id", Value::Null),
+            ("pid_start", json!("")),
+            ("child_start", json!("unbound-child")),
         ];
         for (key, value) in invalid {
             let scratch = Scratch::new();
@@ -1508,7 +1638,6 @@ mod tests {
         let scratch = Scratch::new();
         let lease = scratch.lease();
         let mut m = marker(&lease.legacy).unwrap();
-        // Older format-1 markers without extension fields remain accepted.
         assert_eq!(marker_state(&m).unwrap(), (false, false));
         for (pid, group) in [
             (0, 0),
@@ -1521,8 +1650,106 @@ mod tests {
         }
         m["child_pid"] = json!(123);
         m["child_pgid"] = json!(123);
+        assert!(marker_state(&m).is_err());
+        m["child_start"] = json!("recorded-start");
         assert!(marker_state(&m).is_ok());
+        // Only fully absent identity extensions use the conservative legacy path.
+        for key in ["host_boot_id", "pid_start", "child_start"] {
+            m.as_object_mut().unwrap().remove(key);
+        }
+        assert!(marker_state(&m).is_ok());
+        m["child_start"] = json!("partial-identity");
+        assert!(marker_state(&m).is_err());
         // Only the in-memory test value changed; the owned idle lease can release normally.
+        let legacy = lease.legacy.clone();
+        drop(lease);
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn previous_boot_transfers_only_the_matching_recovery_context() {
+        let scratch = Scratch::new();
+        let mut lease = scratch.lease();
+        lease.hold_for_recovery(&scratch.0).unwrap();
+        let legacy = lease.legacy.clone();
+        let identity = lease.process_identity.clone();
+        drop(lease);
+        let mut prior = marker(&legacy).unwrap();
+        prior["host_boot_id"] = json!("previous-boot-fixture");
+        prior["child_pid"] = json!(identity.pid);
+        prior["child_pgid"] = json!(identity.pid);
+        prior["child_start"] = json!(identity.start);
+        let path = legacy.join("phonefarm-lease.json");
+        let root = scratch.0.join("leases");
+        let bridge = scratch.0.join("legacy");
+        let timeout = Duration::from_millis(25);
+        durable_replace(&path, prior.to_string().as_bytes()).unwrap();
+        assert!(
+            Lease::recover_confirmed_idle(&root, &bridge, "fake-spawn-cancel", timeout).is_err()
+        );
+        let wrong = scratch.0.join("wrong-context");
+        fs::create_dir(&wrong).unwrap();
+        assert!(
+            Lease::acquire_recovery(&root, &bridge, "fake-spawn-cancel", &wrong, timeout).is_err()
+        );
+        prior["command_pending"] = json!(true);
+        durable_replace(&path, prior.to_string().as_bytes()).unwrap();
+        assert!(
+            Lease::acquire_recovery(&root, &bridge, "fake-spawn-cancel", &scratch.0, timeout)
+                .is_err()
+        );
+        prior["command_pending"] = json!(false);
+        durable_replace(&path, prior.to_string().as_bytes()).unwrap();
+        let recovered =
+            Lease::acquire_recovery(&root, &bridge, "fake-spawn-cancel", &scratch.0, timeout)
+                .unwrap();
+        recovered.check().unwrap();
+        let next = marker(&legacy).unwrap();
+        assert_eq!(next["previous_owner"], prior);
+        assert_eq!(marker_identity(&next).unwrap(), Some(identity));
+        assert_eq!(next["recovery_required"], true);
+        for key in ["child_pid", "child_pgid", "child_start"] {
+            assert!(next.get(key).is_none());
+        }
+        drop(recovered);
+        assert!(legacy.exists()); // A new owner is not evidence of device restoration.
+    }
+
+    #[test]
+    fn exited_unreaped_child_can_record_its_instance() {
+        use std::os::unix::process::CommandExt;
+        let scratch = Scratch::new();
+        let lease = scratch.lease();
+        lease.record_command_pending("short-child").unwrap();
+        let mut child = std::process::Command::new("/usr/bin/true")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let zombie = loop {
+            if host_process::process(child.id())
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.zombie)
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let recorded = lease.record_child(child.id());
+        let reaped = child.wait(); // Always reap our child before any assertion can panic.
+        assert!(zombie, "short child did not become an observable zombie");
+        recorded.unwrap();
+        assert!(reaped.unwrap().success());
+        let m = marker(&lease.legacy).unwrap();
+        assert_eq!(m["child_pid"], child.id());
+        assert!(m["child_start"]
+            .as_str()
+            .is_some_and(host_process::clean_identity));
+        lease.clear_child().unwrap();
         let legacy = lease.legacy.clone();
         drop(lease);
         assert!(!legacy.exists());

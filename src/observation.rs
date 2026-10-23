@@ -205,6 +205,7 @@ pub(crate) fn run_worker(args: &[String]) -> i32 {
         {
             return Err("observation worker lease identity mismatch".into());
         }
+        crate::devlease::verify_worker_processes(&marker, unsafe { libc::getppid() } as u32, pid)?;
         Ok(())
     };
     if let Err(e) = verify() {
