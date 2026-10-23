@@ -92,10 +92,15 @@ impl Session {
         let name = if owner == CONTROL_OWNER {
             format!("gray-session-{}-{}", std::process::id(), stamp()?)
         } else { format!("gray-{token}") };
-        let dir = out.canonicalize().map_err(|e| e.to_string())?.join(name);
+        let output_root = out.canonicalize().map_err(|e| e.to_string())?;
+        let shared_output = crate::shared_access::for_path(&output_root).map_err(|e| e.to_string())?.is_some();
+        let dir = output_root.join(name);
         crate::shared_access::create_dir(&dir).map_err(|e| e.to_string())?;
         for parent in dir.ancestors() {
             fs::File::open(parent).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+            // The privileged worker owns and persists the enclosing job tree.
+            // Its traversal-only directory is outside the producer's output.
+            if shared_output && parent == output_root { break; }
         }
         let mut state = json!({"schema":SCHEMA,"serial":lease.serial,"token":token,"package":pkg,
             "completion_owner":owner,"launch_marker":marker,"generation":0,"round_label":null,"base_recovery":null,
