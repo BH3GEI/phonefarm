@@ -180,10 +180,12 @@ pub(crate) fn wait_cool(serial: &str, cool_c: f64, timeout_s: u64) -> PyVal {
                 "zone" => cur.0, "c" => cur.1,
             };
         }
-        log(&format!(
-            "等冷: {}={}C >= {}C, 8s 后重测 (已等 {}s)",
+        // 走 stderr: eval (sysparam 基线/每对) 也调这里, 它的 stdout 只能是回包 JSON。
+        // 以前打在 stdout, 回包前面混进几十行等冷进度, 调用方解析失败 (2026-10-23 红魔确认实验)
+        eprintln!(
+            "[autoloop] 等冷: {}={}C >= {}C, 8s 后重测 (已等 {}s)",
             cur.0, cur.1, cool_c, t0.elapsed().as_secs()
-        ));
+        );
         std::thread::sleep(std::time::Duration::from_secs(8));
     }
 }
