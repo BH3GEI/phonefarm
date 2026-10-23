@@ -110,6 +110,8 @@ fn read_state(path: &Path) -> Result<Option<String>, String> {
             return Err(format!("recovery record is not a bounded regular file: {}", path.display())),
         Ok(_) => {},
     }
+    crate::shared_access::check_existing(path, false)
+        .map_err(|e| format!("read recovery record {}: {e}", path.display()))?;
     let text = fs::read_to_string(path).map_err(|e| format!("read recovery record {}: {e}", path.display()))?;
     if let Some(record) = text.strip_prefix("phonefarm-recovery@1 ") {
         let (length, body) = record.split_once('\n')
@@ -127,6 +129,9 @@ fn read_state(path: &Path) -> Result<Option<String>, String> {
 // Persist newly created directories as well as the record. A partial create is
 // deliberately retained on error: no device mutation has been allowed yet.
 fn ensure_state_parent(dir: &Path) -> std::io::Result<()> {
+    if crate::shared_access::for_path(dir)?.is_some() {
+        return crate::shared_access::create_dir_all(dir);
+    }
     if dir.is_dir() { return Ok(()); }
     let parent = dir.parent().ok_or_else(|| std::io::Error::other("state directory has no parent"))?;
     ensure_state_parent(parent)?;
@@ -143,6 +148,7 @@ fn save_state(path: &Path, text: &str) -> Result<(), String> {
         let parent = path.parent().ok_or_else(|| std::io::Error::other("state record has no parent"))?;
         ensure_state_parent(parent)?;
         let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        crate::shared_access::created_file(path, &file, false)?;
         write!(file, "phonefarm-recovery@1 {}\n{text}", text.len())?;
         file.sync_all()?;
         File::open(parent)?.sync_all()
@@ -1450,6 +1456,52 @@ mod tests {
         fs::write(&blocked, "not a directory").unwrap();
         assert!(save_state(&blocked.join("state"), "value").is_err());
         assert_eq!(fs::read_to_string(blocked).unwrap(), "not a directory");
+    }
+
+    #[test]
+    fn shared_recovery_records_keep_originals_and_reject_private_state() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        const CHILD_ROOT: &str = "PF_HWCOND_SHARED_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let gid = std::env::var("PHONEFARM_SHARED_GID").unwrap().parse::<u32>().unwrap();
+            let path = root.join("nested/charge");
+            let original = charge_ctl_state_text(CHARGE_CTL_CANDIDATES[0].path, "0");
+            save_state(&path, &original).unwrap();
+            let parent = fs::metadata(path.parent().unwrap()).unwrap();
+            let record = fs::metadata(&path).unwrap();
+            assert_eq!((parent.gid(), parent.mode() & 0o7777), (gid, 0o2770));
+            assert_eq!((record.gid(), record.mode() & 0o777), (gid, 0o640));
+            assert_eq!(read_state(&path).unwrap().as_deref(), Some(original.as_str()));
+            let bytes = fs::read(&path).unwrap();
+            assert!(save_state(&path, "replacement").is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(read_state(&path).unwrap_err().contains("offline migration"));
+            assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(save_state(&root.join("nested/other"), "value").is_err());
+            assert!(!root.join("nested/other").exists());
+            return;
+        }
+        // Only this isolated child receives sharing settings; parallel unit
+        // tests keep the process environment and default private behavior.
+        let fixture = RecoveryFixture::new();
+        let gid = unsafe { libc::getegid() };
+        assert!(gid > 0, "shared-profile fixture requires a nonroot primary group");
+        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o2770)).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "hwcond::tests::shared_recovery_records_keep_originals_and_reject_private_state", "--nocapture"])
+            .env(CHILD_ROOT, &fixture.0)
+            .env("PHONEFARM_STATE_DIR", &fixture.0)
+            .env("PHONEFARM_SHARED_GID", gid.to_string())
+            .env_remove("PF_JOB_OUT")
+            .env_remove("DEVLOCK_DIR")
+            .env_remove("PHONEFARM_LEASE_DIR")
+            .output().unwrap();
+        assert!(result.status.success(), "shared recovery fixture failed:\n{}\n{}",
+            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
     }
 
     #[test]

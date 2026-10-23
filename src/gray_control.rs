@@ -98,6 +98,9 @@ struct Store {
 }
 impl Store {
     fn open(path: &Path) -> Result<Self> {
+        Self::open_source(path, false)
+    }
+    fn open_source(path: &Path, recovery: bool) -> Result<Self> {
         if fs::symlink_metadata(path)?.file_type().is_symlink() {
             return Err(err("invalid_request", "out must not be a symlink"));
         }
@@ -106,7 +109,17 @@ impl Store {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)?;
-        let shared = crate::shared_access::Policy::from_env()?;
+        let mut shared = crate::shared_access::Policy::from_env()?;
+        if recovery && shared.is_some() {
+            if crate::shared_access::is_private_directory(&root)? {
+                shared = None;
+            } else if crate::shared_access::for_path(&path)?.is_none() {
+                return Err(err(
+                    "invalid_request",
+                    "shared recovery source must be declared in PF_RECOVERY_OUT",
+                ));
+            }
+        }
         if let Some(policy) = shared {
             policy.check(&root, 0o2770)?;
         }
@@ -1861,7 +1874,7 @@ fn recover(a: &Args) -> Result<(Value, i32)> {
     let out = session
         .parent()
         .ok_or_else(|| err("invalid_request", "session has no out parent"))?;
-    let store = Store::open(out)?;
+    let store = Store::open_source(out, true)?;
     let mut d = descriptor(&store)?;
     if session != store.path.join(string(&d, "session_path")?)
         || d["serial"] != a.serial.as_deref().unwrap()

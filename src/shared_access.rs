@@ -99,6 +99,13 @@ impl Policy {
     }
 }
 
+pub(crate) fn is_private_directory(file: &File) -> std::io::Result<bool> {
+    let metadata = file.metadata()?;
+    Ok(metadata.is_dir()
+        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.mode() & 0o7777 == 0o700)
+}
+
 /// Generic writers share only explicitly declared roots; callers never gain
 /// permissions on inputs, node metadata, installations or arbitrary HOME files.
 pub(crate) fn for_path(path: &Path) -> std::io::Result<Option<Policy>> {
@@ -107,6 +114,7 @@ pub(crate) fn for_path(path: &Path) -> std::io::Result<Option<Policy>> {
     };
     let path = absolute(path)?;
     for key in [
+        "PF_RECOVERY_OUT",
         "PF_JOB_OUT",
         "PHONEFARM_STATE_DIR",
         "DEVLOCK_DIR",
@@ -123,6 +131,11 @@ pub(crate) fn for_path(path: &Path) -> std::io::Result<Option<Policy>> {
                     .read(true)
                     .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
                     .open(&root)?;
+                // A completed contained job has been returned to the node.
+                // Its recovery must not reopen historical output to the job UID.
+                if key == "PF_RECOVERY_OUT" && is_private_directory(&file)? {
+                    return Ok(None);
+                }
                 policy.check(&file, 0o2770)?;
                 return Ok(Some(policy));
             }
