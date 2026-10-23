@@ -37,9 +37,11 @@ fi
 # 轮内起始快照 (证明旋钮确实生效, 也为回滚核验留底)
 adb -s "$SERIAL" shell "su -c 'sh /data/local/tmp/device_snapshot.sh'" > "$OUTDIR/snap_at_run.txt" 2>&1
 
-# 1) 负载后台起跑
+# 1) 负载后台起跑。不传 --app: script 模式的 --app 只用来开遥测, 每步之后跑 dumpsys meminfo /
+#    batterystats 等重活 —— 落在采集窗里就是额外功耗, 还把第一次转镜头推迟到 ~8 s 之后
+#    (2026-10-23 红魔实测: 带 --app 3×12 s 的脚本跑了 68 s, 第 3–8 s 镜头一动不动)
 ( cd "$ROOT" && "$PF" script --task "loop_v1_$LABEL" --serial "$SERIAL" \
-    --app "$PKG" --no-screen "$WL" ) > "$OUTDIR/workload.log" 2>&1 &
+    --no-screen "$WL" ) > "$OUTDIR/workload.log" 2>&1 &
 WL_PID=$!
 
 # 2) 等负载进入稳态后开采

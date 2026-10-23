@@ -128,8 +128,9 @@ if [ "$WORKLOAD" = refbench ]; then
   WL_PID=""
 else
   [ -f "$WL" ] || { echo "找不到负载脚本 $WL" >&2; exit 2; }
+  # 不传 --app: 那只是开 script 的遥测, 遥测本身耗电 (见 run_once.sh)
   ( cd "$ROOT" && "$PF" script --task "xcheck_$LABEL" --serial "$SERIAL" \
-      --app "$PKG" --no-screen "$WL" ) > "$OUTDIR/workload.log" 2>&1 &
+      --no-screen "$WL" ) > "$OUTDIR/workload.log" 2>&1 &
   WL_PID=$!
 fi
 

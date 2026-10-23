@@ -603,6 +603,7 @@ fn validate_v2(req: &Value) -> Result<(), String> {
         None | Some(Some("full")) | Some(Some("screen")) => {}
         _ => return Err("protocol.stage 只认 \"full\" / \"screen\" (省略 = full)".into()),
     }
+    baseline_plan(req)?;
     // 画质策略: gate (缺省, 画面不过门槛就停) / report (基于模型的候选: 只记差距, 性能照判)
     crate::scorecard::ImagePolicy::from_request(req)?;
     // 审计 #10: 每帧提交数由请求声明 (workload.spf), 不让各臂自己猜; 审查 R2 #9: 锁帧由请求声明 (workload.fps_cap)
@@ -764,7 +765,9 @@ fn probe_report(report: &mut Value, before: &str, after: &str, probe_txt: &str, 
 pub(crate) fn verify_workload(serial: &str, workload: &Path, pkg: &str, outdir: &Path) -> Value {
     let _ = std::fs::create_dir_all(outdir);
     let mut child = match Command::new(std::env::current_exe().unwrap_or_default())
-        .args(["script", "--serial", serial, "--task", "qualification_workload", "--app", pkg])
+        // 不传 --app: 那只开 script 的逐步遥测 (dumpsys 等), 会把第一次转镜头推迟到 ~8 s 之后,
+        // 恰好错过下面第 3 / 8 秒的两次截屏 (2026-10-22 verify1 两帧一样, 判负载没转)
+        .args(["script", "--serial", serial, "--task", "qualification_workload", "--no-screen"])
         .arg(workload).current_dir(repo_root()).stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null()).spawn() {
         Ok(c)=>c,Err(e)=>return json!({"verified":false,"reason":e.to_string()})
@@ -781,7 +784,9 @@ pub(crate) fn verify_workload(serial: &str, workload: &Path, pkg: &str, outdir: 
     }};
     let _=std::fs::write(outdir.join("frame_a.raw"),&a); let _=std::fs::write(outdir.join("frame_b.raw"),&b);
     let motion=to_serde(&crate::framecheck::verdict(&a,&b));
-    let result=json!({"verified":success && motion["spinning"]==true,"script_exit_success":success,"motion":motion});
+    let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
+    let alive = adb_ok(&alive) && !crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty();
+    let result=json!({"verified":success && alive && motion["spinning"]==true,"script_exit_success":success,"app_alive":alive,"motion":motion});
     let _=std::fs::write(outdir.join("workload_check.json"),serde_json::to_string_pretty(&result).unwrap());
     result
 }
@@ -2069,6 +2074,23 @@ fn curtail_note(knob: usize, ctrl: usize, rounds: u32, tests: &[curtail::WinTest
     })
 }
 
+/// 基线轮数与预热轮数 (protocol.baseline_runs 缺省 5, 3..=10; protocol.baseline_warmup 缺省 1, 0..=3)。
+/// 收端合同只冻结「至少三轮」和单调比 < 0.9: 只跑三轮时两步同向在纯噪声下就有 1/3 的概率,
+/// 两个指标叠起来一半以上的好基线被拒 (2026-10-22 红魔 fps 离散 0.15% 也被判单调)。五轮时纯噪声
+/// 四步同向只有 2/120。预热轮照常落盘 (baseline_warmup*/) 但不进资格证据: 实测重开游戏后第一轮
+/// 功耗偏高 (4.88 → 4.69 → 4.65 W)。
+pub(crate) fn baseline_plan(req: &Value) -> Result<(usize, usize), String> {
+    let p = &req["protocol"];
+    let field = |k: &str, dflt: u64, lo: u64, hi: u64| -> Result<usize, String> {
+        match p.get(k).filter(|v| !v.is_null()) {
+            None => Ok(dflt as usize),
+            Some(v) => v.as_u64().filter(|n| (lo..=hi).contains(n)).map(|n| n as usize)
+                .ok_or_else(|| format!("protocol.{k} 必须是 {lo}..={hi} 的整数")),
+        }
+    };
+    Ok((field("baseline_runs", 5, 3, 10)?, field("baseline_warmup", 1, 0, 3)?))
+}
+
 fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bool) -> Result<String, String> {
     let Some(serial) = serial else {
         return Err("kind=sysparam 需要真机: 请加 --serial (或设备唯一在线时省略)".into());
@@ -2230,7 +2252,14 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         charge_settle = suspended_via.as_ref().map(|_| wait_charge_settled(serial));
     }
 
-    for i in 1..=3 {
+    let (baseline_runs, baseline_warmup) = baseline_plan(req)?;
+    for w in 1..=baseline_warmup {
+        let label=format!("baseline_warmup{w}");
+        if let Err(e)=run_one_for(serial,&label,&evidence.join(&label),seconds,&workload_path,pkg,req["workload"]["render_comm"].as_str(),launch.as_ref(),spf) {
+            report["verdict"]["reason"]=json!(format!("预热轮失败: {e}"));
+        }
+    }
+    for i in 1..=baseline_runs {
         let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false}};
         let _=std::fs::write(evidence.join(format!("cold_baseline{i}.json")),py_dumps(&cold));
         if cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {facts.cold_ok=Some(false);break;}
@@ -4518,6 +4547,20 @@ mod tests {
         let mut sh = v2_req("shader", json!({"track": "sr", "shader_path": "a", "spirv_path": "b", "budget_ms": 1.0}));
         sh["protocol"]["rounds"] = json!(2);
         assert!(validate_ok(&sh), "shader 不走置换检验: {:?}", validate_v2(&sh));
+    }
+
+    #[test]
+    fn baseline_plan_defaults_to_five_runs_plus_one_warmup_and_never_below_contract() {
+        let mut r = json!({"protocol": {}});
+        assert_eq!(baseline_plan(&r).unwrap(), (5, 1));
+        r["protocol"]["baseline_runs"] = json!(3);
+        r["protocol"]["baseline_warmup"] = json!(0);
+        assert_eq!(baseline_plan(&r).unwrap(), (3, 0));
+        r["protocol"]["baseline_runs"] = json!(2);
+        assert!(baseline_plan(&r).is_err(), "收端合同至少三轮基线");
+        r["protocol"]["baseline_runs"] = json!(5);
+        r["protocol"]["baseline_warmup"] = json!(4);
+        assert!(baseline_plan(&r).is_err());
     }
 
     #[test]
