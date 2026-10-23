@@ -97,6 +97,8 @@ def describe(params):
     for k, v in params.items():
         if k == "gpu.max_pwrlevel":
             out.append(f"GPU≤{GPU_MHZ[int(v)]}MHz(lv{v})")
+        elif not str(v).isdigit():   # governor 之类的非频率键 (确认阶段 --cand 可以给任意白名单键)
+            out.append(f"{k}={v}")
         else:
             out.append(f"{k.split('.')[1]}≤{int(v) / 1e6:.2f}GHz")
     return " + ".join(out) if out else "厂商原样"
@@ -330,12 +332,18 @@ class Dev:
             t.extractall(local_dir, filter="data")
 
 
+# 缺省用本脚本所在仓库的根和二进制。以前写死指向旧 worktree (_wt/integration): eval 嵌套拿锁时走那边的
+# 旧 tools/devlock, 它直接改旧锁域, 把租约存储的退役围栏当过期锁抢走 (2026-10-23 两次), 所有设备锁随即失效;
+# 回放也用了那边带 --app 遥测的旧 run_once.sh。
+REPO = HERE.parent.parent
+
+
 def pf_bin():
-    return os.environ.get("PF_BIN", "/Users/yao/Desktop/code/agent/hgamey/_wt/integration/src/target/release/phonefarm")
+    return os.environ.get("PF_BIN", str(REPO / "src/target/release/phonefarm"))
 
 
 def pf_root():
-    return os.environ.get("PF_REPO_ROOT", "/Users/yao/Desktop/code/agent/hgamey/_wt/integration")
+    return os.environ.get("PF_REPO_ROOT", str(REPO))
 
 
 class Session:

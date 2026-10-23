@@ -38,8 +38,9 @@ import n3_judge  # noqa: E402
 
 HG = "/Users/yao/Desktop/code/agent/hgamey"
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-DEF_PF = os.environ.get("PF", f"{HG}/_wt/integration/src/target/release/phonefarm")
-DEF_CHAIN = os.environ.get("CHAIN", f"{HG}/_wt/integration/loop_v1")
+# 缺省用本仓库的二进制与 loop_v1: 旧 worktree 的工具会改旧锁域、拆掉租约存储的退役围栏
+DEF_PF = os.environ.get("PF", f"{REPO}/src/target/release/phonefarm")
+DEF_CHAIN = os.environ.get("CHAIN", f"{REPO}/loop_v1")
 AGENT = "/Users/yao/Desktop/code/agent"
 # N1 交付的构建产物 (R2F 修订版, 本地文件名带版本号; 推到手机上固定叫 LAYER_SO)
 DEF_SO = os.environ.get("LAYER_SO", f"{HG}/_tmp/npu/N1/bin/libVkLayer_refknobs-r2f-20261021.so")
@@ -65,7 +66,7 @@ def check_tools(a, need_layer, out, log):
     errs, warns = [], []
     pf = a.pf
     if not os.path.exists(pf):
-        errs.append(f"phonefarm 二进制不存在: {pf} (用整合分支 ruler/integration 编: cd {HG}/_wt/integration/src && cargo build --release)")
+        errs.append(f"phonefarm 二进制不存在: {pf} (在本仓库编: cd {REPO}/src && cargo build --release)")
     else:
         p = subprocess.run([pf, "iq-judge"], capture_output=True)
         if p.returncode != 2 or "iq-judge" not in p.stderr.decode("utf-8", "replace"):

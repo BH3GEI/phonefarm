@@ -39,7 +39,8 @@ PAIRS="${PAIRS:-8}"
 SECONDS_PER_ARM="${SECONDS_PER_ARM:-30}"
 O1_GROUPS="${O1_GROUPS:-g60:60:120:60 g30:30:max:60}"  # 不能叫 GROUPS: 那是 bash 内置变量, 赋值无效
 ORDER_SEED="${ORDER_SEED:-$(( $(date +%s) % 1000000 ))}"
-PF_ROOT="${PF_ROOT:-/Users/yao/Desktop/code/agent/hgamey/_wt/integration}"
+# 缺省用本仓库: 旧 worktree 的工具会改旧锁域、拆掉租约存储的退役围栏
+PF_ROOT="${PF_ROOT:-$(cd "$HERE/../.." && pwd)}"
 PF_BIN="${PF_BIN:-$PF_ROOT/src/target/release/phonefarm}"
 COOL_C="${COOL_C:-42}"
 TEMP_CAP_C="${TEMP_CAP_C:-70}"
