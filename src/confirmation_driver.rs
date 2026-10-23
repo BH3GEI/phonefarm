@@ -262,12 +262,7 @@ fn request(path: &Path) -> Result<(Request, Vec<u8>, Vec<u8>, Vec<u8>), String> 
     Ok((req, bytes, w, a))
 }
 fn roots() -> Result<(PathBuf, PathBuf, Duration), String> {
-    let root = std::env::var_os("PHONEFARM_LEASE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("phonefarm-device-leases"));
-    let legacy = std::env::var_os("DEVLOCK_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/private/tmp/claude-501"));
+    let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
     let ms = std::env::var("PHONEFARM_LEASE_TIMEOUT_MS")
         .unwrap_or("600000".into())
         .parse::<u64>()
@@ -996,7 +991,7 @@ fn reconcile_helper(dir: &Path) -> Result<Value, String> {
             dir,
             json!({"event":"helper_only_reconciliation_verified","old_samples_revalidated":false,"at":now()}),
         )?;
-        lease.complete_recovery()?;
+        lease.complete_recovery("helper_retirement_only", &t.origin, &[&dir.join("render-helper-removed.json"), &dir.join("journal.jsonl")])?;
         return Ok(
             json!({"status":if req.transport.kind=="fake"{"SIMULATED_HELPER_RECONCILED"}else{"HELPER_CLOSED_REQUIRES_NEW_SESSION"},"old_samples_revalidated":false,"control_restore_claimed":false,"eligible":false,"real_game_optimization_proven":false,"promotion_allowed":false}),
         );
@@ -1027,7 +1022,7 @@ fn reconcile_helper(dir: &Path) -> Result<Value, String> {
         dir,
         json!({"event":"helper_only_reconciliation_verified","old_samples_revalidated":false,"at":now()}),
     )?;
-    lease.complete_recovery()?;
+    lease.complete_recovery("helper_retirement_only", &t.origin, &[&dir.join("render-helper-removed.json"), &dir.join("journal.jsonl")])?;
     Ok(
         json!({"status":if req.transport.kind=="fake"{"SIMULATED_HELPER_RECONCILED"}else{"HELPER_CLOSED_REQUIRES_NEW_SESSION"},"old_samples_revalidated":false,"control_restore_claimed":false,"eligible":false,"real_game_optimization_proven":false,"promotion_allowed":false}),
     )
@@ -1872,11 +1867,11 @@ fn prepare(path: &Path, out: &Path, execute: bool) -> Result<Value, String> {
             &json!({"status":"SIMULATED_BLOCKED","error":qualification.err(),"eligible":false,"evidence_origin":"synthetic"}),
         )?;
     }
-    require(
-        current_snapshot(&mut t, &lease, &out, &policies)? == initial,
-        "final prepare restoration unknown",
-    )?;
-    lease.complete_recovery()?;
+    let final_snapshot = current_snapshot(&mut t, &lease, &out, &policies)?;
+    require(final_snapshot == initial, "final prepare restoration unknown")?;
+    save(&out, "prepare-final-restored.snapshot", &final_snapshot)?;
+    lease.complete_recovery("recorded_controls_and_owned_workload_quiescence", &t.origin,
+        &[&out.join("prepare-final-restored.snapshot"), &out.join("journal.jsonl"), &out.join("admission.json")])?;
     let mut committed = BTreeMap::new();
     for entry in fs::read_dir(&out).map_err(|e| e.to_string())? {
         let e = entry.map_err(|e| e.to_string())?;
@@ -2154,12 +2149,12 @@ fn collect(dir: &Path, frozen_path: &Path, execute: bool) -> Result<Value, Strin
     let pairs=req.schedule.iter().map(|p|json!({"pair_id":p.pair_id,"a_run_id":p.a_run_id,"b_run_id":p.b_run_id,"a_report":reports[&p.a_run_id]["path"],"b_report":reports[&p.b_run_id]["path"],"a_report_sha256":reports[&p.a_run_id]["sha256"],"b_report_sha256":reports[&p.b_run_id]["sha256"]})).collect::<Vec<_>>();
     let samples = json!({"frozen_plan_sha256":f["sha256"],"candidate_artifact_sha256":p["candidate_artifact_sha256"],"conditions_sha256":p["conditions_sha256"],"source_kind":if req.transport.kind=="fake"{"synthetic_fixture"}else{"recorded_receiver_reports"},"pairs":pairs});
     save_json(&dir, "samples.json", &samples)?;
-    require(
-        current_snapshot(&mut t, &lease, &dir, &policies)?
-            == bounded(&dir.join("initial.snapshot"), 2 * 1024 * 1024)?,
-        "final collect restoration unknown",
-    )?;
-    lease.complete_recovery()?;
+    let final_snapshot = current_snapshot(&mut t, &lease, &dir, &policies)?;
+    require(final_snapshot == bounded(&dir.join("initial.snapshot"), 2 * 1024 * 1024)?,
+        "final collect restoration unknown")?;
+    save(&dir, "collect-final-restored.snapshot", &final_snapshot)?;
+    lease.complete_recovery("recorded_controls_and_owned_workload_quiescence", &t.origin,
+        &[&dir.join("collect-final-restored.snapshot"), &dir.join("journal.jsonl"), &dir.join("samples.json")])?;
     Ok(
         json!({"status":if req.transport.kind=="fake"{"SIMULATED_BLOCKED"}else{"COLLECTED_OBSERVATIONS"},"samples":dir.join("samples.json"),"eligible":false,"evidence_origin":t.origin,"real_game_optimization_proven":false,"promotion_allowed":false}),
     )
@@ -2233,7 +2228,8 @@ fn reconcile(dir: &Path, execute: bool) -> Result<Value, String> {
         &dir,
         json!({"event":"reconciliation_verified","at":now(),"actual_serial":actual.0,"boot_id":actual.1,"restore_sha256":sha(&snapshot),"remote_session_revoked":true,"old_samples_revalidated":false,"source":t.origin}),
     )?;
-    lease.complete_recovery()?;
+    lease.complete_recovery("recorded_controls_and_revoked_session_quiescence", &t.origin,
+        &[&dir.join(format!("{run}-restored.txt")), &dir.join("journal.jsonl")])?;
     Ok(
         json!({"status":if req.transport.kind=="fake"{"SIMULATED_RECONCILED"}else{"RESTORED_REQUIRES_NEW_SESSION"},"old_samples_revalidated":false,"eligible":false,"real_game_optimization_proven":false,"promotion_allowed":false}),
     )

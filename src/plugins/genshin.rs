@@ -26,6 +26,39 @@ use crate::universal::{FrameContext, InputMode, ScenarioPlugin, UniversalAction}
 /// 本插件负责的应用包名。核心引擎不持有、也不得引用此常量。
 pub const PACKAGE: &str = "com.miHoYo.Yuanshen";
 
+/// The quest's device operations. Capture supplies owned, bounded transports;
+/// the ordinary Device keeps its existing behavior.
+pub trait QuestDevice {
+    fn shell(&self, cmd: &str, ms: u64) -> String;
+    fn screen_image(&self) -> Option<DynamicImage>;
+    fn gamepad_press(&self, btn: &str, duration_ms: u64) -> Result<(), String>;
+    fn gamepad_stick(&self, stick: &str, x: f32, y: f32, duration_ms: u64) -> Result<(), String>;
+    fn gamepad_wander(&self, duration_ms: u64) -> Result<(), String>;
+    fn gamepad_reset(&self) -> Result<(), String>;
+    fn gamepad_close(&self) -> Result<(), String>;
+
+    fn check(&self) -> Result<(), String> { Ok(()) }
+
+    fn shell_write(&self, cmd: &str, ms: u64) -> Result<(), String> {
+        self.shell(cmd, ms);
+        Ok(())
+    }
+}
+
+impl QuestDevice for Device {
+    fn shell(&self, cmd: &str, ms: u64) -> String { Device::shell(self, cmd, ms) }
+    fn screen_image(&self) -> Option<DynamicImage> { Device::screen_image(self) }
+    fn gamepad_press(&self, btn: &str, duration_ms: u64) -> Result<(), String> {
+        Device::gamepad_press(self, btn, duration_ms)
+    }
+    fn gamepad_stick(&self, stick: &str, x: f32, y: f32, duration_ms: u64) -> Result<(), String> {
+        Device::gamepad_stick(self, stick, x, y, duration_ms)
+    }
+    fn gamepad_wander(&self, duration_ms: u64) -> Result<(), String> { Device::gamepad_wander(self, duration_ms) }
+    fn gamepad_reset(&self) -> Result<(), String> { Device::gamepad_reset(self) }
+    fn gamepad_close(&self) -> Result<(), String> { Device::gamepad_close(self) }
+}
+
 /// 原神游戏画面状态分类
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenshinState {
@@ -75,7 +108,7 @@ impl Default for QuestConfig {
 
 /// 原神全自主剧情与任务 Agent
 pub struct GenshinQuestAgent<'a> {
-    device: &'a Device,
+    device: &'a dyn QuestDevice,
     cfg: QuestConfig,
     last_climb: Option<Instant>,
     consecutive_dialogue_ticks: u32,
@@ -85,7 +118,7 @@ pub struct GenshinQuestAgent<'a> {
 
 impl<'a> GenshinQuestAgent<'a> {
     /// 创建 Agent 实例
-    pub fn new(device: &'a Device, cfg: QuestConfig) -> Self {
+    pub fn new(device: &'a dyn QuestDevice, cfg: QuestConfig) -> Self {
         Self {
             device,
             cfg,
@@ -98,27 +131,32 @@ impl<'a> GenshinQuestAgent<'a> {
 
     /// 1. 会话预检与环境拉起：唤醒屏幕、解锁并启动游戏直到加载进入大世界
     pub fn ensure_game_ready(&mut self) -> Result<(), String> {
+        self.device.check()?;
         println!("[生命周期] 保持会话常亮策略 (svc power stayon true)...");
-        self.device.shell("svc power stayon true", 3000);
+        self.device.shell_write("svc power stayon true", 3000)?;
 
         println!("[生命周期] 检查设备状态与屏幕唤醒...");
         let pwr = self.device.shell("dumpsys power | grep mWakefulness", 3000);
+        self.device.check()?;
         if !pwr.contains("Awake") {
             println!("[生命周期] 设备处于休眠/息屏状态，正在自主唤醒并解锁屏幕 (KEYCODE_WAKEUP 224)...");
-            self.device.shell("input keyevent 224 && sleep 0.5 && input swipe 608 2000 608 500", 5000);
+            self.device.shell_write("input keyevent 224 && sleep 0.5 && input swipe 608 2000 608 500", 5000)?;
             sleep(Duration::from_millis(1000));
         }
 
         // 检查原神进程是否在前台运行
         let window_info = self.device.shell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'", 3000);
+        self.device.check()?;
         if !window_info.contains(PACKAGE) {
             println!("[生命周期] 原神未在前台运行，正在执行冷启动...");
-            self.device.shell(&format!("monkey -p {PACKAGE} -c android.intent.category.LAUNCHER 1"), 5000);
+            self.device.shell_write(&format!("monkey -p {PACKAGE} -c android.intent.category.LAUNCHER 1"), 5000)?;
             self.wait_until_in_world()?;
         } else {
             println!("[生命周期] 原神已在前台运行，检查当前画面状态...");
             // 如果在前台但卡在标题或加载界面，同样执行进门引导
-            if let Some(img) = self.device.screen_image() {
+            let img = self.device.screen_image();
+            self.device.check()?;
+            if let Some(img) = img {
                 let (state, _) = self.detect_state(&img);
                 if state == GenshinState::TitleScreen || state == GenshinState::LoadingOrCutscene {
                     self.wait_until_in_world()?;
@@ -126,7 +164,7 @@ impl<'a> GenshinQuestAgent<'a> {
             }
         }
 
-        Ok(())
+        self.device.check()
     }
 
     /// 等待原神加载并通过标题大门进入大世界
@@ -136,8 +174,11 @@ impl<'a> GenshinQuestAgent<'a> {
         let timeout = Duration::from_secs(120);
 
         while start.elapsed() < timeout {
+            self.device.check()?;
             sleep(Duration::from_millis(2500));
-            let Some(img) = self.device.screen_image() else {
+            let img = self.device.screen_image();
+            self.device.check()?;
+            let Some(img) = img else {
                 continue;
             };
 
@@ -145,12 +186,12 @@ impl<'a> GenshinQuestAgent<'a> {
             match state {
                 GenshinState::OpenWorldExplore | GenshinState::DialogueText | GenshinState::DialogueChoice => {
                     println!("[启动引导] 检测到游戏主界面/剧情已就绪，正式交由 Agent 控制。");
-                    return Ok(());
+                    return self.device.check();
                 }
                 GenshinState::TitleScreen => {
                     println!("[启动引导] 检测到标题天空岛大门，注入进门确认动作 (点击/A键)...");
                     // 点击横屏中央区域穿过大门
-                    self.device.shell("input tap 1344 700", 2000);
+                    self.device.shell_write("input tap 1344 700", 2000)?;
                     let _ = self.device.gamepad_press("a", 150);
                 }
                 GenshinState::LoadingOrCutscene => {
@@ -160,9 +201,10 @@ impl<'a> GenshinQuestAgent<'a> {
                 }
                 _ => {
                     // 其他过渡阶段，尝试点击中下部
-                    self.device.shell("input tap 1344 700", 2000);
+                    self.device.shell_write("input tap 1344 700", 2000)?;
                 }
             }
+            self.device.check()?;
         }
 
         Err("冷启动进入原神大世界超时 (120s)".into())
@@ -413,9 +455,12 @@ impl GenshinPerception {
 impl<'a> GenshinQuestAgent<'a> {
     /// 3. 单步决策与手柄动作执行
     pub fn step(&mut self) -> Result<(), String> {
-        let Some(img) = self.device.screen_image() else {
+        self.device.check()?;
+        let img = self.device.screen_image();
+        self.device.check()?;
+        let Some(img) = img else {
             sleep(Duration::from_millis(500));
-            return Ok(());
+            return self.device.check();
         };
 
         let (state, marker_x) = self.detect_state(&img);
@@ -503,14 +548,14 @@ impl<'a> GenshinQuestAgent<'a> {
                 // 若连续黑屏超过 10 帧 (超 10 秒)，发送幂等唤醒键 (KEYCODE_WAKEUP 224) 确保屏幕被点亮，绝不触发翻转熄屏
                 if self.consecutive_loading_ticks >= 10 && self.consecutive_loading_ticks % 5 == 0 {
                     println!("  [转场保活] 发送幂等点亮信号 (KEYCODE_WAKEUP 224)...");
-                    self.device.shell("input keyevent 224", 2000);
+                    self.device.shell_write("input keyevent 224", 2000)?;
                 }
                 sleep(Duration::from_millis(1000));
             }
         }
 
         self.last_action_time = Instant::now();
-        Ok(())
+        self.device.check()
     }
 
     /// 4. 退出清理与安全锁屏：杀死游戏进程，关闭手柄输入，自动将手机熄屏休眠
@@ -520,14 +565,14 @@ impl<'a> GenshinQuestAgent<'a> {
         let _ = self.device.gamepad_close();
 
         println!("[生命周期] 恢复系统正常休眠策略 (svc power stayon false)...");
-        self.device.shell("svc power stayon false", 3000);
+        let _ = self.device.shell_write("svc power stayon false", 3000);
 
         println!("[生命周期] 强制退出原神进程 (杜绝游戏息屏挂机与后台消耗)...");
-        self.device.shell(&format!("am force-stop {PACKAGE}"), 5000);
+        let _ = self.device.shell_write(&format!("am force-stop {PACKAGE}"), 5000);
         sleep(Duration::from_millis(800));
 
         println!("[生命周期] 执行幂等锁屏休眠 (KEYCODE_SLEEP 223)...");
-        self.device.shell("input keyevent 223", 3000);
+        let _ = self.device.shell_write("input keyevent 223", 3000);
     }
 
     /// 只读性能遥测采集 (内存与温度)

@@ -15,21 +15,9 @@
 //! 3. **读不到就留空**。每个字段都是 `Option`, 采不到记 `None` 并在 `unknown` 里写清楚
 //!    是哪一项、为什么。不拿 0 或空串冒充读数 —— 面板据此显示「未知」。
 //!
-//! 设备锁不是 phonefarm 的东西, 是农场上大家共用的一个文件锁 (`devlock`)。
-//! 这里**只读它的三个文件**, 不去 exec 那个脚本, 更不会去抢锁。
-//!
-//! # 别人占着手机的时候读什么
-//!
-//! 「只读」不等于「零影响」。一次 `dumpsys window` 会在设备上拉起一个进程,
-//! 而对面可能正在量 30 秒的帧时 —— 一个 CPU 尖峰就够多出一帧 jank。
-//! 所以探测分两档, 按设备锁自动选:
-//!
-//! - **锁空闲 / 锁是自己的 / 心跳已超期** → 完整档: getprop + dumpsys + settings get。
-//! - **锁被别人持有** → 轻量档: 只 `cat` 几个 sysfs 节点 (温度、电量、风扇、uptime)。
-//!   读文件不拉进程, 是这台机器正在跑测试时仍然安全的那部分。
-//!   dumpsys 才拿得到的字段 (前台应用、亮屏、保活策略) 照常留空并写明原因。
-//!
-//! `--probe-while-locked` 可以强制走完整档 —— 它会干扰对面的测量, 要用请自己清楚。
+//! 探测全程占有同一宿主租约域；短时 worker 覆盖枚举、shell 与截图。
+//! held / blocked / unknown 或存储未初始化时返回暂不可用，不把缓存或空列表当新快照。
+//! 标签和兼容参数 `--probe-while-locked` 不提供所有权，也不能绕过这个入口检查。
 
 use crate::device::Device;
 use crate::hwcond;
@@ -38,10 +26,6 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime};
-
-/// 设备锁默认所在目录。可用 `--lock-dir` 或 `DEVLOCK_DIR` 覆盖 ——
-/// 这个路径是本机农场的约定, 不是 phonefarm 的一部分。
-const DEFAULT_LOCK_DIR: &str = "/private/tmp/claude-501";
 
 /// `devlock` 脚本认为心跳多久没动就算废弃 (它的 `STALE` 缺省值)。
 const LOCK_STALE_SECS: u64 = 600;
@@ -58,6 +42,7 @@ const DEFAULT_SCREENSHOT_EVERY_S: u64 = 300;
 #[derive(Debug, Serialize)]
 pub struct Fleet {
     pub schema: &'static str,
+    pub observation: &'static str,
     pub tool: &'static str,
     pub version: &'static str,
     pub generated_at: String,
@@ -556,10 +541,14 @@ echo "-----PF:uptime-----"; cat /proc/uptime 2>/dev/null
 echo "-----PF:battery-----"; hidumper -s BatteryService -a -i 2>/dev/null
 echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done
 echo "-----PF:screen-----"; hidumper -s RenderService -a screen 2>/dev/null
+echo "-----PF:focus-----"; aa dump -l 2>/dev/null
 echo "-----PF:end-----""#
 }
 
 /// OH 的 `hidumper -s RenderService -a screen` → 亮屏没有。
+///
+/// 熄屏在真机 (EMA-AL00U, OH 6.1) 上报的是 `SUSPEND` 而不是 `OFF`; `STANDBY`/`DOZE`
+/// 也都是屏幕不亮。`ON_ADVANCED` / `OFF_FAKE` 这类带后缀的取下划线前的那段。
 pub fn parse_hdc_power_on(text: &str) -> Option<bool> {
     let i = text.find("powerStatus=POWER_STATUS_")?;
     let v: String = text[i + "powerStatus=POWER_STATUS_".len()..]
@@ -568,9 +557,33 @@ pub fn parse_hdc_power_on(text: &str) -> Option<bool> {
         .collect();
     match v.as_str() {
         "ON" => Some(true),
-        "OFF" => Some(false),
+        "OFF" | "SUSPEND" | "STANDBY" | "DOZE" => Some(false),
         _ => None,
     }
+}
+
+/// OH 的 BatteryService dump → (状态, 插线没有)。状态词与安卓侧对齐, 面板只认一套。
+///
+/// `chargingStatus`: 0 NONE / 1 ENABLE / 2 DISABLE / 3 FULL;
+/// `pluggedType`: 0 NONE / 1 AC / 2 USB / 3 WIRELESS。
+pub fn parse_battery_status_oh(text: &str) -> (Option<String>, Option<bool>) {
+    let num = |key: &str| -> Option<i64> {
+        let l = text.lines().map(str::trim).find(|l| l.starts_with(key))?;
+        l[key.len()..].trim().parse().ok()
+    };
+    let plugged = match num("pluggedType:") {
+        Some(0) => Some(false),
+        Some(1..=3) => Some(true),
+        _ => None,
+    };
+    let status = match (num("chargingStatus:"), plugged) {
+        (Some(1), _) => Some("Charging"),
+        (Some(2), _) => Some("Not charging"),
+        (Some(3), _) => Some("Full"),
+        (Some(0), Some(false)) => Some("Discharging"),
+        _ => None,
+    };
+    (status.map(str::to_string), plugged)
 }
 
 // ══════════════ 组装 ══════════════
@@ -719,9 +732,18 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
     let mut battery = Battery::default();
     if let Some(b) = sec(&ss, "battery") {
         let (level, mv, temp, _cur) = telemetry::parse_battery_oh(b);
+        let (status, plugged) = parse_battery_status_oh(b);
         battery.level_pct = level;
         battery.voltage_mv = mv;
         battery.temp_c = temp;
+        // 口径同安卓侧 card: 充电/充满一定不是放电态; 没插线才算整机靠电池。
+        battery.on_battery = match (&status, plugged) {
+            (Some(s), _) if s == "Charging" || s == "Full" => Some(false),
+            (_, Some(false)) => Some(true),
+            _ => None,
+        };
+        battery.status = status;
+        battery.plugged = plugged;
     } else {
         unknown.push("电池: hidumper BatteryService 没回值".into());
     }
@@ -744,6 +766,23 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
         unknown.push(
             "测量: 温度一个热区都读不到 (sysfs 无权限); SP_daemon 在 shell 权限下不出数, 未验证".into(),
         );
+    }
+
+    let screen_on = sec(&ss, "screen").and_then(parse_hdc_power_on);
+    if screen_on.is_none() {
+        unknown.push("亮屏: hidumper RenderService 没给出可识别的 powerStatus".into());
+    }
+    // aa dump -l 里 state #FOREGROUND 的那条 ability; 熄屏或停在桌面时一条都没有。
+    let foreground = sec(&ss, "focus")
+        .map(crate::device::parse_aa_dump)
+        .map(|(bundle, _)| bundle)
+        .filter(|b| !b.is_empty());
+    if foreground.is_none() {
+        unknown.push(match (sec(&ss, "focus"), screen_on) {
+            (None, _) => "前台应用: aa dump -l 没回值".into(),
+            (Some(_), Some(false)) => "前台应用: 熄屏中, 没有处于前台的应用".into(),
+            (Some(_), _) => "前台应用: 任务栈里没有前台 ability (可能停在桌面)".into(),
+        });
     }
 
     let root = sec(&ss, "root").map(|r| r.trim() == "0");
@@ -772,8 +811,8 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
         battery,
         thermal,
         fan: Fan::default(),
-        screen_on: sec(&ss, "screen").and_then(parse_hdc_power_on),
-        foreground: None,
+        screen_on,
+        foreground,
         keepalive: Keepalive::default(),
         uptime_s: sec(&ss, "uptime").and_then(parse_uptime_s),
         screenshot: None,
@@ -926,9 +965,9 @@ fn enumerate(adb: Option<&str>) -> (Vec<AdbEntry>, Vec<String>) {
 pub struct Opts {
     pub serial: Option<String>,
     pub timeout_ms: u64,
-    pub lock_dir: PathBuf,
+    pub lock_dir: Option<PathBuf>,
     pub screens: Option<Screens>,
-    /// 自己持有的设备锁标签。锁正是这个标签时按"锁是自己的"处理。
+    /// 兼容旧调用方的标签；不提供所有权证明或绕过租约状态。
     pub own_label: Option<String>,
     /// 别人持锁时也强行走完整档。会干扰对面的测量, 默认关。
     pub probe_while_locked: bool,
@@ -939,9 +978,7 @@ impl Default for Opts {
         Opts {
             serial: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
-            lock_dir: PathBuf::from(
-                std::env::var("DEVLOCK_DIR").unwrap_or_else(|_| DEFAULT_LOCK_DIR.to_string()),
-            ),
+            lock_dir: None,
             screens: None,
             own_label: None,
             probe_while_locked: false,
@@ -949,21 +986,15 @@ impl Default for Opts {
     }
 }
 
-/// 这一轮该走哪一档。
-///
-/// 判据只有一条: **这台手机现在是不是别人的**。锁空着、锁是自己的、
-/// 或者持锁方心跳已经超期 (那把锁本来就可以被接管了) —— 这三种情况才走完整档。
-pub fn depth_for(lock: Option<&Lock>, own_label: Option<&str>, force: bool) -> &'static str {
-    if force {
-        return "full";
+pub fn collect(opts: &Opts) -> Result<Fleet, String> {
+    let storage = opts.lock_dir.as_deref().map(crate::lease_storage::Storage::custom)
+        .unwrap_or_else(crate::lease_storage::resolve);
+    let lease = crate::devlease::storage_status(&storage);
+    if !crate::observation::in_worker() {
+        return Err(format!("lease {}: {}; no device probes performed",
+            lease["status"].as_str().unwrap_or("unknown"),
+            lease["error"].as_str().unwrap_or("host device domain is occupied or requires recovery")));
     }
-    match lock.and_then(|l| l.held_by.as_deref().map(|h| (h, l.stale))) {
-        Some((holder, false)) if Some(holder) != own_label => "light",
-        _ => "full",
-    }
-}
-
-pub fn collect(opts: &Opts) -> Fleet {
     let adb = crate::device::locate_adb();
     let mut notes = Vec::new();
     if adb.is_none() {
@@ -979,7 +1010,7 @@ pub fn collect(opts: &Opts) -> Fleet {
     if !hdc_ok {
         notes.push("没找到 hdc, 鸿蒙这一族整族跳过".to_string());
     }
-    let lock = read_lock(&opts.lock_dir);
+    let lock = storage.devlock_dir.as_deref().and_then(read_lock);
 
     let tmp = std::env::temp_dir()
         .join(format!("phonefarm-fleet-{}", std::process::id()))
@@ -988,14 +1019,7 @@ pub fn collect(opts: &Opts) -> Fleet {
     let _ = std::fs::create_dir_all(&tmp);
 
     let want = |s: &str| opts.serial.as_deref().is_none_or(|w| w == s);
-    let depth = depth_for(lock.as_ref(), opts.own_label.as_deref(), opts.probe_while_locked);
-    if depth == "light" {
-        notes.push(
-            "设备锁被别人持有: 这一轮只读了 sysfs (温度/电量/风扇/uptime), \
-没跑 dumpsys —— 跑了会给对面正在做的测量添噪声。--probe-while-locked 可强制完整档。"
-                .to_string(),
-        );
-    }
+    let depth = "full";
     let mut devices = Vec::new();
 
     for (serial, state, model_hint) in android.into_iter().filter(|(s, _, _)| want(s)) {
@@ -1018,7 +1042,9 @@ pub fn collect(opts: &Opts) -> Fleet {
             card.model = model_hint;
         }
         if let Some(screens) = &opts.screens {
-            let (shot, why) = shoot(&phone, &serial, screens, lock.as_ref());
+            // The worker already holds the domain lease; its own marker is not a
+            // competing owner. Screenshot rate limiting still applies.
+            let (shot, why) = shoot(&phone, &serial, screens, None);
             card.screenshot = shot;
             if let Some(w) = why {
                 card.unknown.push(w);
@@ -1035,8 +1061,9 @@ pub fn collect(opts: &Opts) -> Fleet {
         devices.push(card_from_oh(&serial, &raw, t0.elapsed().as_millis() as u64));
     }
 
-    Fleet {
+    Ok(Fleet {
         schema: "phonefarm/fleet@1",
+        observation: "sampled",
         tool: "phonefarm",
         version: env!("CARGO_PKG_VERSION"),
         generated_at: now_rfc3339(),
@@ -1047,7 +1074,7 @@ pub fn collect(opts: &Opts) -> Fleet {
         lock,
         devices,
         notes,
-    }
+    })
 }
 
 fn offline_card(serial: &str, transport: &'static str, state: &str, model: Option<String>) -> Card {
@@ -1084,9 +1111,9 @@ fn usage() -> &'static str {
      \x20            [--lock-dir 目录] [--screenshot-dir 目录] [--screenshot-every 秒] [--lock-label 标签]\n\
      \x20            [--probe-while-locked]\n\
      \x20  只读: 一趟 shell 把每台手机的在线/型号/电量/温度/风扇/亮屏/前台应用读齐。\n\
-     \x20  别人占着手机时自动降成轻量档 (只 cat sysfs, 不跑 dumpsys), 免得给对面的测量添噪声。\n\
-     \x20  截图默认关闭; 开了也受设备锁与最小间隔约束 (别人占着手机时不截)。\n\
-     \x20  退出码 0=至少读到一台 / 1=一台都没有 / 2=参数错。"
+     \x20  租约域必须明确空闲; 持锁、恢复待处理、未知或未初始化时不探测设备。\n\
+     \x20  截图默认关闭; 开了也受租约状态与最小间隔约束。标签/强制参数不绕过租约检查。\n\
+     \x20  退出码 0=至少读到一台 / 1=一台都没有 / 2=参数错 / 3=租约域不可探测。"
 }
 
 pub fn run_fleet(args: &[String]) -> i32 {
@@ -1116,7 +1143,7 @@ pub fn run_fleet(args: &[String]) -> i32 {
                     eprintln!("--lock-dir 需要一个目录\n{}", usage());
                     return 2;
                 };
-                opts.lock_dir = PathBuf::from(v);
+                opts.lock_dir = Some(PathBuf::from(v));
             }
             "--screenshot-dir" => screenshot_dir = it.next().map(PathBuf::from),
             "--screenshot-every" => {
@@ -1131,6 +1158,25 @@ pub fn run_fleet(args: &[String]) -> i32 {
         }
     }
     opts.own_label = own_label.clone();
+    if !crate::observation::in_worker() {
+        let storage = opts.lock_dir.as_deref().map(crate::lease_storage::Storage::custom)
+            .unwrap_or_else(crate::lease_storage::resolve);
+        return match crate::observation::run("fleet", args, &storage, std::time::Duration::from_secs(30)) {
+            Ok(output) => {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&output.stdout);
+                let _ = std::io::stderr().write_all(&output.stderr);
+                output.status.code().unwrap_or(3)
+            }
+            Err(e) => {
+                if json {
+                    println!("{}", serde_json::json!({"schema":"phonefarm/fleet@1",
+                        "observation":e.state,"reason":e.reason,"devices":null}));
+                } else { eprintln!("fleet {}: {}", e.state, e.reason); }
+                3
+            }
+        };
+    }
     if let Some(dir) = screenshot_dir {
         opts.screens = Some(Screens {
             dir,
@@ -1139,7 +1185,10 @@ pub fn run_fleet(args: &[String]) -> i32 {
         });
     }
 
-    let fleet = collect(&opts);
+    let fleet = match collect(&opts) {
+        Ok(fleet) => fleet,
+        Err(e) => { eprintln!("fleet: {e}"); return 3; }
+    };
     if json {
         match serde_json::to_string(&fleet) {
             Ok(s) => println!("{s}"),
@@ -1416,30 +1465,21 @@ mod tests {
         assert!(screens.may_shoot(Some(&free), Some(9999)).is_ok());
     }
 
-    /// 别人占着手机时不许跑 dumpsys —— 一次 `dumpsys window` 就够给
-    /// 对面那轮 30 秒帧时测量多出一帧 jank。
     #[test]
-    fn a_lock_held_by_someone_else_downgrades_the_probe() {
-        let held = |by: &str, stale: bool| Lock {
-            dir: "/x".into(), held_by: Some(by.into()), since: None,
-            heartbeat_age_s: Some(1), stale, queue: vec![], recent: vec![],
-        };
-        let other = held("wb-vksamples", false);
-        assert_eq!(depth_for(Some(&other), None, false), "light");
-        assert_eq!(depth_for(Some(&other), Some("gol-panel"), false), "light");
-        assert_eq!(
-            depth_for(Some(&other), None, true),
-            "full",
-            "--probe-while-locked 要能强制, 但那是明知会干扰"
-        );
-
-        // 自己持锁、锁空着、心跳超期(本来就可接管) —— 这三种才是完整档
-        assert_eq!(depth_for(Some(&held("gol-panel", false)), Some("gol-panel"), false), "full");
-        assert_eq!(depth_for(Some(&held("someone", true)), None, false), "full");
-        let free = Lock { dir: "/x".into(), held_by: None, since: None,
-                          heartbeat_age_s: None, stale: false, queue: vec![], recent: vec![] };
-        assert_eq!(depth_for(Some(&free), None, false), "full");
-        assert_eq!(depth_for(None, None, false), "full", "没配锁目录就照常读");
+    fn occupied_or_unknown_domain_refuses_before_device_probes() {
+        let root = std::env::temp_dir().join(format!("fleet-domain-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        let opts = Opts { lock_dir: Some(root.clone()), own_label: Some("mine".into()),
+            probe_while_locked: true, ..Opts::default() };
+        let bridge = std::fs::File::create(root.join("phonefarm-bridge.lock")).unwrap();
+        bridge.try_lock().unwrap();
+        assert!(collect(&opts).unwrap_err().contains("lease held"));
+        drop(bridge);
+        std::fs::create_dir(root.join("phonefarm-lease.d")).unwrap();
+        std::fs::write(root.join("phonefarm-lease.d/phonefarm-lease.json"), b"invalid").unwrap();
+        assert!(collect(&opts).unwrap_err().contains("lease unknown"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1511,6 +1551,7 @@ mod tests {
     fn text_render_marks_unknowns_with_question_marks() {
         let fleet = Fleet {
             schema: "phonefarm/fleet@1",
+            observation: "sampled",
             tool: "phonefarm",
             version: "0.2.0",
             generated_at: "now".into(),
@@ -1594,6 +1635,43 @@ mod tests {
         );
     }
 
+    /// 真机 (EMA-AL00U) 熄屏报 SUSPEND, 不能当成「判不出来」。
+    #[test]
+    fn oh_power_status_suspend_is_screen_off() {
+        let on = "screen[0]: id=0, powerStatus=POWER_STATUS_ON, backlight=223";
+        let suspend = "screen[0]: id=0, powerStatus=POWER_STATUS_SUSPEND, backlight=2039";
+        let adv = "screen[0]: id=0, powerStatus=POWER_STATUS_ON_ADVANCED, backlight=1";
+        assert_eq!(parse_hdc_power_on(on), Some(true));
+        assert_eq!(parse_hdc_power_on(suspend), Some(false));
+        assert_eq!(parse_hdc_power_on(adv), Some(true));
+        assert_eq!(parse_hdc_power_on("powerStatus=POWER_STATUS_BUTT"), None);
+    }
+
+    #[test]
+    fn oh_battery_status_and_foreground() {
+        let raw = "-----PF:props-----\nEMA-AL00U\nHUAWEI\nOpenHarmony 6.1\n\
+-----PF:battery-----\ncapacity: 100 \nchargingStatus: 3 \npluggedType: 1 \ntemperature: 270 \n\
+-----PF:screen-----\nscreen[0]: id=0, powerStatus=POWER_STATUS_ON, backlight=9\n\
+-----PF:focus-----\n    Mission ID #169\n        main name [UnityPlayerAbility]\n        bundle name [com.miHoYo.Yuanshen]\n        state #FOREGROUND  start time [1]\n";
+        let card = card_from_oh("hdc:abc", raw, 5);
+        assert_eq!(card.battery.status.as_deref(), Some("Full"));
+        assert_eq!(card.battery.plugged, Some(true));
+        assert_eq!(card.battery.on_battery, Some(false));
+        assert_eq!(card.screen_on, Some(true));
+        assert_eq!(card.foreground.as_deref(), Some("com.miHoYo.Yuanshen"));
+    }
+
+    /// 熄屏时任务栈全是 BACKGROUND: 前台留空, 但要写明为什么。
+    #[test]
+    fn oh_screen_off_explains_missing_foreground() {
+        let raw = "-----PF:screen-----\npowerStatus=POWER_STATUS_SUSPEND\n\
+-----PF:focus-----\n        bundle name [com.ohos.contacts]\n        state #BACKGROUND  start time [1]\n";
+        let card = card_from_oh("hdc:abc", raw, 5);
+        assert_eq!(card.screen_on, Some(false));
+        assert_eq!(card.foreground, None);
+        assert!(card.unknown.iter().any(|u| u.contains("熄屏")), "{:?}", card.unknown);
+    }
+
     /// 有电量/温度的时候不该凭空给 measure 加阻塞。
     #[test]
     fn oh_with_measurement_data_does_not_block_measure() {
@@ -1610,6 +1688,7 @@ mod tests {
     fn text_render_prints_the_layer_line() {
         let fleet = Fleet {
             schema: "phonefarm/fleet@1",
+            observation: "sampled",
             tool: "phonefarm",
             version: "0.2.0",
             generated_at: "now".into(),

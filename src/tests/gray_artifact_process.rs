@@ -67,7 +67,7 @@ fn ndk(temp: &Path, glslc_body: Option<&str>, native_body: Option<&str>) -> Path
         &n.join("shader-tools/linux-x86_64/glslc"),
         glslc_body.unwrap_or(&shader),
     );
-    let native = "out=pathlib.Path(sys.argv[sys.argv.index('-o')+1]);d=bytearray(64);d[:6]=b'\\x7fELF\\x02\\x01';d[16:20]=b'\\x03\\x00\\xb7\\x00';out.write_bytes(d)";
+    let native = "assert '-ldl' in sys.argv and '-Wl,-z,defs' in sys.argv\nassert any(a.endswith('/npuprobe.cpp') and pathlib.Path(a).is_file() for a in sys.argv)\nout=pathlib.Path(sys.argv[sys.argv.index('-o')+1]);d=bytearray(64);d[:6]=b'\\x7fELF\\x02\\x01';d[16:20]=b'\\x03\\x00\\xb7\\x00';out.write_bytes(d)";
     executable(
         &bin.join("aarch64-linux-android30-clang++"),
         native_body.unwrap_or(native),
@@ -515,6 +515,7 @@ fn fixture_build_archives_snapshot_checks_reuse_and_tampering() {
         true
     );
     assert!(m["descriptor"]["inputs"]["dispatch_ownership.h"].is_string());
+    assert!(m["descriptor"]["inputs"]["npuprobe.cpp"].is_string());
     let ownership = fs::read(dir.join("dispatch_ownership.h")).unwrap();
     fs::write(dir.join("dispatch_ownership.h"), b"changed ownership").unwrap();
     assert!(!cli(&["verify", "--artifact", path(&dir)]).status.success());

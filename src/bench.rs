@@ -2,7 +2,8 @@
 //!
 //! 职责边界: 锁频 → 等冷 → 推 benchmark_model (GPU Delegate) → 解析算子日志 → 出判定。
 //! 不侵入任何游戏进程, 不写持久化配置; 所有 sysfs 写入(CPU 调速器 / kgsl 功率档位 / 强制供电)
-//! 都在退出前恢复原值, 无论中途成功失败。判定全部由程序从真机日志产出, 不含人工评分。
+//! 尝试在退出前恢复原值；不能确认恢复时保留租约屏障和session证据。
+//! 判定全部由程序从设备日志产出, 不含人工评分。
 //!
 //! 两个延迟口径 (2026-09-09 NX809J 实测定论, 见 SPEC_SR_LOOP §3):
 //!   - gpu   : GPU Delegate 内核总时延 (OpenCL 事件计时, 只含模型算子) —— 结构进化的门禁口径
@@ -13,16 +14,15 @@
 //! 反例: 先锁再等冷, performance 调速器让 8 核待机在最高电压, 结温从 33C 爬到 48C 永远过不了
 //! 40C 门禁, 进程被杀后设备还停在锁频态。故锁前把快照存到本机状态文件, 下次启动/--unlock 先回滚。
 use crate::hwcond::{
-    dispersion_pct, lock_state_path, nearest_level, parse_samples, read_snapshot, read_thermal,
-    recover_stale_lock, root_ok, soc_max_c, wait_cool, Lock, Snapshot, BUS_DCVS, KGSL,
+    dispersion_pct, nearest_level, parse_samples, read_snapshot, read_thermal,
+    recover_stale_lock, root_ok, soc_max_c, wait_cool, Lock, Snapshot, Shell, BUS_DCVS, KGSL,
 };
 use serde_json::{json, Value};
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// 单轮内 GPU 内核时延变异系数 std/avg 超过此值 = 该轮受到干扰 (总线抢占 / 后台突发), 不计入判定窗口
 const CLEAN_CV_LIMIT_PCT: f64 = 5.0;
-const REMOTE_DIR: &str = "/data/local/tmp/phonefarm_bench";
 const DEFAULT_BIN: &str = "tools/tflite/android_aarch64_benchmark_model";
 const BIN_URL: &str = "https://storage.googleapis.com/tensorflow-nightly-public/prod/tensorflow/release/lite/tools/nightly/latest/android_aarch64_benchmark_model";
 /// 轮间离散度门槛 (Max-Min)/Median, 百分比 (SPEC_SR_LOOP Gate 0 验收判据)
@@ -34,9 +34,7 @@ fn progress(msg: &str) {
 
 fn emit(text: &str) {
     let mut out = std::io::stdout().lock();
-    if out.write_all(text.as_bytes()).is_err() || out.flush().is_err() {
-        std::process::exit(0);
-    }
+    let _ = out.write_all(text.as_bytes()).and_then(|_| out.flush());
 }
 
 // ══════════════ 参数 ══════════════
@@ -65,20 +63,24 @@ pub struct BenchArgs {
     out: Option<String>,
     keep: bool,
     unlock: bool,
+    recover: Option<String>,
+    evidence_origin: String,
 }
 
 const USAGE: &str = "用法: phonefarm bench --serial <设备> --model <PATH.tflite> [--runs 3] [--max-rounds 6] [--json]\n\
       [--num-runs 100] [--warmup 20] [--limit-ms 4.0] [--metric gpu|invoke] [--threads 1]\n\
       [--gpu-level N | --gpu-mhz M] [--no-lock] [--cool-c 40] [--cool-timeout-s 600]\n\
       [--fp32] [--bin <benchmark_model>] [--out <目录>] [--keep]\n\
-      phonefarm bench --serial <设备> --unlock      (回滚上次异常退出遗留的锁频态)";
+      phonefarm bench --serial <设备> --unlock      (旧锁频记录恢复)\n\
+      phonefarm bench --serial <设备> --recover <session目录> (受控session恢复)\n\
+      [--evidence-origin device|synthetic]";
 
 fn parse_args(args: &[String]) -> Result<BenchArgs, String> {
     let mut a = BenchArgs {
         serial: None, model: String::new(), runs: 3, max_rounds: 0, json: false, num_runs: 100, warmup: 20,
         limit_ms: 4.0, metric: Metric::Gpu, gpu_level: None, gpu_mhz: None, lock: true,
         cool_c: 40.0, cool_timeout_s: 600, fp16: true, threads: 1, bin: None, out: None, keep: false,
-        unlock: false,
+        unlock: false, recover: None, evidence_origin: "device".into(),
     };
     let mut i = 0;
     let need = |args: &[String], i: usize, name: &str| -> Result<String, String> {
@@ -112,12 +114,18 @@ fn parse_args(args: &[String]) -> Result<BenchArgs, String> {
             "--out" => { a.out = Some(need(args, i, "--out")?); i += 1; }
             "--keep" => a.keep = true,
             "--unlock" => a.unlock = true,
+            "--recover" => { a.recover = Some(need(args, i, "--recover")?); i += 1; }
+            "--evidence-origin" => { a.evidence_origin = need(args, i, "--evidence-origin")?; i += 1; }
             "--json" => a.json = true,
             other => return Err(format!("无法识别的参数 '{other}'\n{USAGE}")),
         }
         i += 1;
     }
-    if a.model.is_empty() && !a.unlock { return Err(format!("缺 --model\n{USAGE}")); }
+    if a.model.is_empty() && !a.unlock && a.recover.is_none() { return Err(format!("缺 --model\n{USAGE}")); }
+    if !matches!(a.evidence_origin.as_str(), "device" | "synthetic") { return Err("--evidence-origin 只认 device|synthetic".into()); }
+    if a.recover.is_some() && (a.unlock || !a.model.is_empty() || a.out.is_some()) {
+        return Err("--recover 使用已有session，不与 --unlock/--model/--out 混用".into());
+    }
     if a.runs == 0 || a.num_runs == 0 { return Err("--runs / --num-runs 必须 >= 1".into()); }
     // 缺省多给 3 轮余量: 受干扰的轮不计入连续窗口, 但总轮数有界
     if a.max_rounds == 0 { a.max_rounds = a.runs + 3; }
@@ -326,21 +334,6 @@ fn locate_bin(a: &BenchArgs) -> Result<String, String> {
     Err(format!("找不到 benchmark_model 二进制 (试过 {:?}); 下载: curl -L -o {DEFAULT_BIN} {BIN_URL}", cands))
 }
 
-/// 差量部署: 远端同大小即跳过 push
-fn deploy_bin(phone: &crate::device::Device, local: &str) -> Result<(), String> {
-    let size = std::fs::metadata(local).map(|m| m.len()).map_err(|e| format!("{local}: {e}"))?;
-    let remote = format!("{REMOTE_DIR}/benchmark_model");
-    phone.shell(&format!("mkdir -p {REMOTE_DIR}"), 5000);
-    let cur = phone.shell(&format!("stat -c %s {remote} 2>/dev/null"), 5000).trim().parse::<u64>().unwrap_or(0);
-    if cur != size {
-        if !phone.push_file(local, &remote) {
-            return Err(format!("推送 {local} 到 {remote} 失败"));
-        }
-    }
-    phone.shell(&format!("chmod 755 {remote}"), 5000);
-    Ok(())
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -348,7 +341,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn device_info(phone: &crate::device::Device) -> Value {
+fn device_info(phone: &crate::bench_session::Session) -> Value {
     let get = |k: &str| phone.shell(&format!("getprop {k}"), 5000).trim().to_string();
     // 前台窗口: 标尺的前提是没有游戏在前台渲染, 记进报告作证据
     let focus = phone.shell("dumpsys window | grep -m1 mCurrentFocus", 6000);
@@ -363,86 +356,83 @@ fn device_info(phone: &crate::device::Device) -> Value {
     })
 }
 
-/// 跑一轮 benchmark_model, 同时起一路 root 采样器记录 gpuclk 与各簇当前频率 (锁频是否真生效的地面真值)
-fn run_round(phone: &crate::device::Device, a: &BenchArgs, remote_model: &str, snap: &Snapshot) -> (String, Vec<(u64, u64, u64)>) {
-    let mut sampler = None;
-    if !snap.cpu.is_empty() {
+/// Worker owns both processes; bounded scripts run only after its durable PID permit.
+fn worker_scripts(a: &BenchArgs, remote: &str, snap: &Snapshot) -> (String, String) {
+    let workload = format!("#!/system/bin/sh\nset -eu\ncd '{}'\nexec timeout 180 ./benchmark_model --graph=model.tflite --use_gpu=true --gpu_precision_loss_allowed={} --gpu_backend=cl --num_threads={} --warmup_runs={} --warmup_min_secs=0 --num_runs={} --min_secs=0 --enable_op_profiling=true --max_profiling_buffer_entries=4096 2>&1\n",
+        remote, a.fp16, a.threads, a.warmup, a.num_runs);
+    let sampler = if snap.cpu.is_empty() { "#!/system/bin/sh\nexit 0\n".into() } else {
         let reads: Vec<String> = std::iter::once(format!("$(cat {KGSL}/gpuclk)"))
             .chain(snap.cpu.iter().map(|p| format!("$(cat {}/scaling_cur_freq)", p.path)))
-            .chain(snap.bus.iter().map(|b| format!("$(cat {BUS_DCVS}/{}/cur_freq)", b.name)))
-            .collect();
-        // 采样上限 240 x 0.25s = 60s, adb 通道断开后远端循环也会自行到头, 不留常驻进程
-        let cmd = format!("su -c 'i=0; while [ $i -lt 240 ]; do echo {}; sleep 0.25; i=$((i+1)); done'", reads.join(" "));
-        sampler = phone.stream_shell(&cmd).ok();
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    let cmd = format!(
-        "cd {REMOTE_DIR} && ./benchmark_model --graph={remote_model} --use_gpu=true --gpu_precision_loss_allowed={} \
---gpu_backend=cl --num_threads={} --warmup_runs={} --warmup_min_secs=0 --num_runs={} --min_secs=0 --enable_op_profiling=true \
---max_profiling_buffer_entries=4096 2>&1",
-        a.fp16, a.threads, a.warmup, a.num_runs, );
-    let log = phone.shell(&cmd, 180_000);
-    let mut samples = Vec::new();
-    if let Some(mut child) = sampler {
-        let _ = child.kill();
-        if let Ok(out) = child.wait_with_output() {
-            samples = parse_samples(&String::from_utf8_lossy(&out.stdout));
-        }
-    }
-    (log, samples)
+            .chain(snap.bus.iter().map(|b| format!("$(cat {BUS_DCVS}/{}/cur_freq)", b.name))).collect();
+        format!("#!/system/bin/sh\nset -eu\ni=0; while [ $i -lt 240 ]; do echo {}; sleep 0.25; i=$((i+1)); done\n", reads.join(" "))
+    };
+    (workload, sampler)
 }
 
 // ══════════════ 主流程 ══════════════
 
 pub fn run_bench(args: &[String]) -> i32 {
-    let mut a = match parse_args(args) {
+    let mut args = args.to_vec();
+    if let Err(e) = crate::devlock::strip_lock_args(&mut args) { eprintln!("{e}"); return 2; }
+    let mut a = match parse_args(&args) {
         Ok(a) => a,
         Err(e) => { eprintln!("{e}"); return 2; }
     };
-    let _lease = match crate::devlease::Lease::target(a.serial.as_deref(), "bench") {
-        Ok(v) => v, Err(e) => { eprintln!("{e}"); return 2; }
+    let session = if let Some(dir) = &a.recover {
+        let Some(serial) = a.serial.as_deref() else { eprintln!("--recover 需要明确 --serial"); return 2; };
+        crate::bench_session::Session::resume(std::path::Path::new(dir), serial)
+    } else {
+        crate::devlease::Lease::target(a.serial.as_deref(), "bench").and_then(|lease| {
+            a.serial = Some(lease.serial.clone());
+            crate::bench_session::Session::new(lease, a.out.as_deref(), a.keep, &a.evidence_origin)
+        })
     };
-    a.serial = Some(_lease.serial.clone());
-
-    match bench(&a) {
-        Ok((report, code)) => {
-            if let Err(e)=_lease.check() {eprintln!("{e}"); return 2;}
-            if a.json {
-                emit(&format!("{}\n", serde_json::to_string_pretty(&report).unwrap_or_default()));
-            } else {
-                emit(&render_text(&report));
-            }
-            code
-        }
-        Err(e) => {
-            if a.json {
-                emit(&format!("{}\n", json!({"v": 1, "ok": false, "verdict": "ERROR", "error": e})));
-            } else {
-                eprintln!("bench 失败: {e}");
-            }
-            2
-        }
+    let session = match session { Ok(s) => s, Err(e) => { eprintln!("{e}"); return 2; } };
+    let result = if a.recover.is_some() {
+        Ok((json!({"v":1,"ok":true,"verdict":"RECOVER","serial":a.serial}), 0))
+    } else { bench(&a, &session) };
+    let error = result.as_ref().err().map(String::as_str);
+    let restoration = session.finish(error);
+    let (mut report, mut code) = match result {
+        Ok(v) => v,
+        Err(e) => (json!({"v":1,"ok":false,"verdict":"ERROR","error":e}),2),
+    };
+    report["session"] = json!(session.dir);
+    report["workload_uid"] = json!(session.workload_uid());
+    report["recovery"] = match restoration {
+        Ok(v) => v,
+        Err(e) => { code=2; report["ok"]=json!(false); json!({"status":"required","error":e,"session":session.dir}) }
+    };
+    if let Err(e) = crate::devlease::durable_replace(&session.dir.join(format!("report-{}.json",std::process::id())),
+        serde_json::to_string_pretty(&report).unwrap().as_bytes()) { eprintln!("保存bench报告失败: {e}"); code=2; }
+    if a.json { emit(&format!("{}\n",serde_json::to_string_pretty(&report).unwrap())); }
+    else {
+        if report["verdict"]=="ERROR" { eprintln!("bench失败: {}",report["error"]); }
+        else if report["verdict"]=="RECOVER" { emit("bench session恢复流程已执行\n"); }
+        else { emit(&render_text(&report)); }
+        emit(&format!("恢复: {}；session {}\n",report["recovery"],session.dir.display()));
     }
+    code
 }
 
-fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
+fn bench(a: &BenchArgs, phone: &crate::bench_session::Session) -> Result<(Value, i32), String> {
     let t_all = Instant::now();
     let serial = a.serial.clone();
     if serial.as_deref().map(|s| s.starts_with("hdc:")).unwrap_or(false) {
         return Err("bench 只支持 Android/adb 设备 (kgsl + TFLite GPU Delegate)".into());
     }
-    let out_dir = match &a.out {
-        Some(d) => std::path::PathBuf::from(d),
-        None => std::env::temp_dir().join(format!("phonefarm-bench-{}", std::process::id())),
+    let state_path = phone.state_path()?;
+    let out_dir = &phone.dir;
+    if phone.checked("health", "echo ok", 8000)?.trim() != "ok" { return Err("设备无心跳".into()); }
+    let root = phone.hw(Ok(root_ok(phone)))?;
+    phone.identity(root)?;
+    let has_state = match std::fs::symlink_metadata(&state_path) {
+        Ok(_) => true,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound => false,
+        Err(e) => { phone.hold()?; return Err(format!("恢复记录不可读: {e}")); }
     };
-    std::fs::create_dir_all(&out_dir).map_err(|e| format!("建不了输出目录 {}: {e}", out_dir.display()))?;
-    let phone = crate::device::Device::new(serial.clone(), out_dir.to_string_lossy().to_string());
-    if !phone.health_check(8000) {
-        return Err("设备无心跳 (adb devices 里不是 device 态, 或未指定 --serial)".into());
-    }
-    let state_path = lock_state_path("bench", &serial);
-    let root = root_ok(&phone);
-    let recovered = if root { recover_stale_lock("bench", &phone, &state_path) } else { None };
+    if has_state { phone.hold()?; }
+    let recovered = if root { phone.hw(recover_stale_lock("bench", phone, &state_path))? } else { None };
     if a.unlock {
         let msg = match recovered {
             Some(true) => "已回滚遗留锁频态",
@@ -452,23 +442,28 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
         let code = if matches!(recovered, Some(false)) || !root { 1 } else { 0 };
         return Ok((json!({"v": 1, "ok": code == 0, "verdict": "UNLOCK", "serial": serial, "recovered": recovered, "message": msg}), code));
     }
+    if recovered == Some(false) {
+        return Err("上次遗留的锁频态回滚失败, 拒绝继续部署或测量".into());
+    }
+    if !root {
+        match std::fs::symlink_metadata(&state_path) {
+            Ok(_) => return Err("存在遗留锁频状态但无 root, 无法确认恢复, 拒绝继续测量".into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("检查锁频状态 {}: {e}", state_path.display())),
+        }
+    }
     if a.lock && !root {
         return Err("锁频需要 root (su -c); 无 root 设备请加 --no-lock (标尺不受控, 结果只作参考)".into());
     }
     let model_bytes = std::fs::read(&a.model).map_err(|e| format!("读不到模型 {}: {e}", a.model))?;
     let sha = sha256_hex(&model_bytes);
     let bin = locate_bin(a)?;
-    let info = device_info(&phone);
+    let info = device_info(phone);
     progress(&format!("设备 {} ({}), root={root}, 模型 {} ({} B)", info["model"].as_str().unwrap_or("?"),
         info["soc"].as_str().unwrap_or("?"), a.model, model_bytes.len()));
-    deploy_bin(&phone, &bin)?;
-    let remote_model = format!("{REMOTE_DIR}/model_{}.tflite", &sha[..12]);
-    if !phone.push_file(&a.model, &remote_model) {
-        return Err(format!("推送模型到 {remote_model} 失败"));
-    }
-
-    // 档位选择只看一次基线快照; 每轮锁前再取当轮基线 (恢复以当轮为准)
-    let base = if root { read_snapshot(&phone) } else { Snapshot::default() };
+    phone.hw(Ok(()))?;
+    // Determine the measurement baseline before deploying the isolated workload.
+    let base = if root { phone.hw(Ok(read_snapshot(phone)))? } else { Snapshot::default() };
     let mut target: Option<(u32, u64)> = None;
     if a.lock {
         let level = match (a.gpu_level, a.gpu_mhz) {
@@ -485,6 +480,9 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
             base.cpu.len(), hz / 1_000_000, base.gpu_freqs.len(), base.gpu_max_level, base.gpu_min_level));
     }
 
+    let (workload, sampler) = worker_scripts(a, &phone.remote(), &base);
+    phone.deploy(&bin, &a.model, &workload, &sampler)?;
+
     let mut rounds = Vec::new();
     let mut all_restored = true;
     let mut first_err: Option<String> = None;
@@ -496,31 +494,37 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     while i < a.max_rounds {
         i += 1;
         // 1. 未锁频等冷: 结温门禁在待机态判定, 锁频只覆盖跑测那几秒
-        let (zone, c, waited) = match wait_cool("bench", &phone, a.cool_c, a.cool_timeout_s) {
+        let (zone, c, waited) = match phone.hw(wait_cool("bench", phone, a.cool_c, a.cool_timeout_s)) {
             Ok(v) => v,
             Err(e) => { first_err = Some(format!("第{i}轮: {e}")); break; }
         };
         // 2. 锁 (CPU performance + kgsl 档位 + DDR/LLCC 钉顶)
-        let before = if root { read_snapshot(&phone) } else { Snapshot::default() };
+        let before = if root { phone.hw(Ok(read_snapshot(phone)))? } else { Snapshot::default() };
         let lock = match target {
-            Some((level, _)) => match Lock::apply(&phone, &state_path, before.clone(), level) {
+            Some((level, _)) => match phone.hw(Lock::apply(phone, &state_path, before.clone(), level)) {
                 Ok(l) => Some(l),
                 Err(e) => { first_err = Some(format!("第{i}轮: {e}")); break; }
             },
             None => None,
         };
-        let locked = if root { read_snapshot(&phone) } else { Snapshot::default() };
+        let locked = if root { phone.hw(Ok(read_snapshot(phone)))? } else { Snapshot::default() };
         // 3. 测
         let t0 = Instant::now();
-        let (log, samples) = run_round(&phone, a, &remote_model, &before);
+        let (log, sample_text, workload_exit) = match phone.round(i) {
+            Ok(v) => v,
+            Err(e) => { first_err = Some(e); all_restored = false; break; }
+        };
+        let samples = parse_samples(&sample_text);
         let wall_ms = t0.elapsed().as_millis() as u64;
-        // 4. 立刻解锁, 无论日志好坏
-        let restored = lock.as_ref().map(|l| l.restore(&phone)).unwrap_or(true);
+        // Only a verified quiescent round may restore controls; unknown runs are
+        // closed and reconciled by Session::finish before any restore attempt.
+        let restored = phone.hw(Ok(lock.as_ref().map(|l| l.restore(phone)).unwrap_or(true)))?;
         all_restored &= restored;
         let log_path = out_dir.join(format!("round{i}.log"));
         let _ = std::fs::write(&log_path, &log);
-        let st = parse_round_log(&log);
-        let (zone_end, c_end) = soc_max_c(&read_thermal(&phone)).unwrap_or((String::new(), 0.0));
+        let mut st = parse_round_log(&log);
+        if workload_exit != 0 { st.error = Some(format!("benchmark_model exit {workload_exit}")); }
+        let (zone_end, c_end) = soc_max_c(&phone.hw(Ok(read_thermal(phone)))?).unwrap_or((String::new(), 0.0));
         let gpu_sample = samples.first().copied();
         let ncpu = before.cpu.len();
         let bus_samples: Vec<(u64, u64, u64)> = samples.iter().skip(1 + ncpu).copied().collect();
@@ -584,6 +588,10 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
         }));
         clean_flags.push(clean);
         metric_vals.push(metric_val);
+        if !restored {
+            progress("锁频恢复回读失败, 保留状态文件并停止后续轮次");
+            break;
+        }
         // 委托失败 / 出错的模型没有继续测的意义 (零样本秒筛要快), 首轮即定案
         if !st.full_gpu() || st.error.is_some() { break; }
         // 连续 N 轮全干净且离散度达标 → 判定窗口成立, 停
@@ -597,9 +605,6 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
             }
         }
     }
-    if !a.keep {
-        phone.shell(&format!("rm -f {remote_model}"), 5000);
-    }
     if let Some(e) = first_err {
         return Err(format!("{e} (已完成 {} 轮, 锁频全部恢复={all_restored})", rounds.len()));
     }
@@ -609,7 +614,10 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     let n = rounds.len();
     let (ws, we) = window.unwrap_or((n.saturating_sub(need), n));
     let vals: Vec<f64> = metric_vals[ws..we].iter().filter_map(|v| *v).collect();
-    let errors: Vec<String> = rounds.iter().filter_map(|r| r["error"].as_str().map(String::from)).collect();
+    let mut errors: Vec<String> = rounds.iter().filter_map(|r| r["error"].as_str().map(String::from)).collect();
+    if !all_restored {
+        errors.push("锁频恢复回读失败, 后续轮次未执行, 状态文件保留".into());
+    }
     let full_gpu = !rounds.is_empty() && rounds.iter().all(|r| r["full_gpu"].as_bool() == Some(true));
     let (median_us, min_us, max_us, disp) = dispersion_pct(&vals);
     let have_all = vals.len() == need && n >= need;
@@ -620,8 +628,8 @@ fn bench(a: &BenchArgs) -> Result<(Value, i32), String> {
     let ran = rounds.iter().all(|r| r["invoke_avg_us"].as_f64().is_some());
     let attempted = rounds.iter().all(|r| r["delegate_attempted"].as_bool() == Some(true));
     let fallback_reason: Option<String> = rounds.iter().find_map(|r| r["fallback_reason"].as_str().map(String::from));
-    // 回退否决优先于 ERROR: delegate 已创建但整图没落在 OpenCL 上 (含申请失败、benchmark 中止) 都是模型的问题, 不是环境的
-    let verdict = if rounds.is_empty() || !attempted { "ERROR" }
+    // 恢复失败先报 ERROR; 否则 delegate 已创建但整图没落在 OpenCL 上按模型回退判定。
+    let verdict = if !all_restored || rounds.is_empty() || !attempted { "ERROR" }
         else if !full_gpu { "FAIL_FALLBACK" }
         else if !ran { "ERROR" }
         else if !dispersion_ok { "FAIL_UNSTABLE" }
@@ -852,5 +860,8 @@ INFO: Inference timings in us: Init: 188735, First inference: 26307, Warmup (avg
     fn args_unlock_needs_no_model() {
         let a = parse_args(&["--serial".into(), "X".into(), "--unlock".into()]).unwrap();
         assert!(a.unlock && a.model.is_empty());
+        let a = parse_args(&["--serial".into(), "X".into(), "--recover".into(), "session".into()]).unwrap();
+        assert_eq!(a.recover.as_deref(), Some("session"));
+        assert!(parse_args(&["--recover".into(), "session".into(), "--model".into(), "m".into()]).is_err());
     }
 }

@@ -16,6 +16,31 @@
 //!   - 解析全是纯函数, 同一份输入每次重算逐字节一致。
 
 use std::time::{Duration, Instant};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+
+/// Minimal transport boundary for hardware conditioning under a caller-owned lease.
+pub(crate) trait Shell {
+    fn shell(&self, cmd: &str, ms: u64) -> String;
+    fn shell_write(&self, cmd: &str, ms: u64) -> String { self.shell(cmd, ms) }
+    fn check(&self) -> Result<(), String> { Ok(()) }
+    fn charge_node(&self, path: &str) -> Result<Option<String>, String> {
+        let value=self.shell(&format!("su -c 'cat {path} 2>/dev/null'"),8_000);
+        self.check()?;
+        Ok((!value.trim().is_empty()).then(||value.trim().to_owned()))
+    }
+    fn charge_battery(&self) -> Result<BatteryState, String> {
+        let state=read_battery_state(self);self.check()?;Ok(state)
+    }
+}
+
+impl Shell for crate::device::Device {
+    fn shell(&self, cmd: &str, ms: u64) -> String {
+        crate::device::Device::shell(self, cmd, ms)
+    }
+}
 
 pub const KGSL: &str = "/sys/class/kgsl/kgsl-3d0";
 pub const CPUFREQ: &str = "/sys/devices/system/cpu/cpufreq";
@@ -33,32 +58,115 @@ pub fn progress(tag: &str, msg: &str) {
     eprintln!("[{tag}] {msg}");
 }
 
-/// 本机状态文件目录: `PHONEFARM_STATE_DIR` > `~/.local/state/phonefarm` > 系统临时目录。
-///
-/// 不默认放临时目录: 2026-10-11 宿主机崩溃重启, 临时目录被清空, 锁频/停充的
-/// 「改之前是什么」随之丢失, 设备被留在改过的状态里, 下次启动也无从回滚。
-pub fn state_dir() -> std::path::PathBuf {
-    let dir = std::env::var_os("PHONEFARM_STATE_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state/phonefarm")))
-        .unwrap_or_else(std::env::temp_dir);
-    if std::fs::create_dir_all(&dir).is_ok() {
-        dir
-    } else {
-        std::env::temp_dir()
-    }
+/// 与 lease 共用持久根；解析不创建目录，错误不回退临时目录。
+pub fn state_dir() -> Result<PathBuf, String> {
+    crate::lease_storage::state_root()
 }
 
 /// 锁频前的设备快照落到本机状态文件 (按通路与 serial 区分);
 /// 进程被杀 (含宿主机崩溃重启) 留下的锁态由下次启动或 `--unlock` 回滚。
-pub fn lock_state_path(tag: &str, serial: &Option<String>) -> std::path::PathBuf {
-    let s: String = serial
-        .as_deref()
-        .unwrap_or("default")
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    state_dir().join(format!("phonefarm-{tag}-lock-{s}.txt"))
+pub fn lock_state_path(tag: &str, serial: &Option<String>) -> Result<PathBuf, String> {
+    recovery_path(&state_dir()?, tag, serial.as_deref(),
+        &[std::env::temp_dir(), PathBuf::from("/tmp")])
+}
+
+fn recovery_path(root: &Path, tag: &str, serial: Option<&str>, old_roots: &[PathBuf]) -> Result<PathBuf, String> {
+    let serial = serial.filter(|s| !s.is_empty()).ok_or("recovery state requires a bound serial")?;
+    if tag.is_empty() || !tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err("invalid recovery state tag".into());
+    }
+    let mut encoded = String::new();
+    for b in serial.bytes() {
+        if b.is_ascii_alphanumeric() { encoded.push(b as char); }
+        else { encoded.push_str(&format!("%{b:02X}")); }
+    }
+    let path = root.join(format!("phonefarm-{tag}-lock-{encoded}.txt"));
+    let old: String = serial.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let old_name = format!("phonefarm-{tag}-lock-{old}.txt");
+    for dir in std::iter::once(root).chain(old_roots.iter().map(PathBuf::as_path)) {
+        let dir = match dir.canonicalize() {
+            Ok(p) => p,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => dir.to_path_buf(),
+            Err(e) => return Err(format!("legacy recovery directory {}: {e}", dir.display())),
+        };
+        for name in [&old_name, &format!("phonefarm-{tag}-lock-default.txt")] {
+            let legacy = dir.join(name);
+            if legacy == path { continue; }
+            match fs::symlink_metadata(&legacy) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                Err(e) => return Err(format!("legacy recovery record {}: {e}", legacy.display())),
+                Ok(_) => return Err(format!("legacy recovery record {}; reconcile its device and saved state before using {} (record preserved)", legacy.display(), path.display())),
+            }
+        }
+    }
+    Ok(path)
+}
+
+fn read_state(path: &Path) -> Result<Option<String>, String> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read recovery record {}: {e}", path.display())),
+        Ok(m) if !m.is_file() || m.len() > 65536 =>
+            return Err(format!("recovery record is not a bounded regular file: {}", path.display())),
+        Ok(_) => {},
+    }
+    crate::shared_access::check_existing(path, false)
+        .map_err(|e| format!("read recovery record {}: {e}", path.display()))?;
+    let text = fs::read_to_string(path).map_err(|e| format!("read recovery record {}: {e}", path.display()))?;
+    if let Some(record) = text.strip_prefix("phonefarm-recovery@1 ") {
+        let (length, body) = record.split_once('\n')
+            .ok_or_else(|| format!("incomplete recovery record {}; preserved", path.display()))?;
+        if length.parse::<usize>().ok() != Some(body.len()) {
+            return Err(format!("truncated recovery record {}; preserved", path.display()));
+        }
+        Ok(Some(body.into()))
+    } else {
+        // Existing plaintext records remain recoverable under strict parsing.
+        Ok(Some(text))
+    }
+}
+
+// Persist newly created directories as well as the record. A partial create is
+// deliberately retained on error: no device mutation has been allowed yet.
+fn ensure_state_parent(dir: &Path) -> std::io::Result<()> {
+    if crate::shared_access::for_path(dir)?.is_some() {
+        return crate::shared_access::create_dir_all(dir);
+    }
+    if dir.is_dir() { return Ok(()); }
+    let parent = dir.parent().ok_or_else(|| std::io::Error::other("state directory has no parent"))?;
+    ensure_state_parent(parent)?;
+    match fs::create_dir(dir) {
+        Ok(()) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {},
+        Err(e) => return Err(e),
+    }
+    File::open(parent)?.sync_all()
+}
+
+fn save_state(path: &Path, text: &str) -> Result<(), String> {
+    let save = || -> std::io::Result<()> {
+        let parent = path.parent().ok_or_else(|| std::io::Error::other("state record has no parent"))?;
+        ensure_state_parent(parent)?;
+        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        crate::shared_access::created_file(path, &file, false)?;
+        write!(file, "phonefarm-recovery@1 {}\n{text}", text.len())?;
+        file.sync_all()?;
+        File::open(parent)?.sync_all()
+    };
+    save().map_err(|e| format!("cannot persist new recovery record {}: {e}; existing/partial record preserved, device not changed", path.display()))
+}
+
+fn clear_state(path: &Path) -> Result<(), String> {
+    fs::remove_file(path).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) })
+        .and_then(|_| File::open(path.parent().unwrap()).and_then(|p| p.sync_all()))
+        .map_err(|e| format!("cannot durably clear recovery record {}: {e}", path.display()))
+}
+
+fn clear_restored_state(path: &Path) -> bool {
+    match clear_state(path) {
+        Ok(()) => true,
+        Err(e) => { progress("restore", &e); false },
+    }
 }
 
 // ══════════════ 设备快照 ══════════════
@@ -739,7 +847,7 @@ pub fn parse_battery_state(text: &str) -> Option<BatteryState> {
     })
 }
 
-pub fn read_battery_state(phone: &crate::device::Device) -> BatteryState {
+pub fn read_battery_state(phone: &(impl Shell + ?Sized)) -> BatteryState {
     parse_battery_state(&phone.shell(&battery_state_cmd(), 8_000)).unwrap_or_default()
 }
 
@@ -798,7 +906,7 @@ pub const CHARGE_CTL_CANDIDATES: &[ChargeCtlNode] = &[
 ///   1. 先把「改了哪个节点、原值是什么」落到本机状态文件, **再**动设备 ——
 ///      进程中途被杀也能由下次启动回滚 (`recover_stale_charge_ctl`);
 ///   2. 写完必须**回读确认停充真的生效** (电流转负), 没生效就地还原并换下一个候选;
-///   3. `Drop` 里无条件还原 —— 不指望调用方记得调 `restore`。
+///   3. 调用方必须 restore；Drop 只警告并保留恢复记录。
 pub struct ChargeSuspend {
     path: String,
     saved: String,
@@ -860,7 +968,8 @@ pub fn parse_charge_ctl_state(text: &str) -> Option<(String, String)> {
     let mut it = text.lines();
     let path = it.next()?.trim();
     let saved = it.next()?.trim();
-    if path.is_empty() || saved.is_empty() || !path.starts_with("/sys/") {
+    if !CHARGE_CTL_CANDIDATES.iter().any(|n| n.path == path)
+        || saved.parse::<i64>().is_err() || it.next().is_some() {
         return None;
     }
     Some((path.to_string(), saved.to_string()))
@@ -884,15 +993,27 @@ pub fn suspend_value(how: SuspendHow, capacity_pct: Option<i64>) -> Option<Strin
 }
 
 impl ChargeSuspend {
-    /// 停充。返回守卫; 失败时设备状态与调用前一致。
+    /// 停充。失败时尝试恢复；恢复未确认则保留记录并停止。
     ///
     /// `state_path` 用 `lock_state_path("charge", serial)`, 与锁频的状态文件分开放 ——
     /// 两者互不相干, 混在一份文件里会互相覆盖。
     pub fn apply(
-        phone: &crate::device::Device,
+        phone: &impl Shell,
         state_path: &std::path::Path,
     ) -> Result<ChargeSuspend, String> {
-        let bat = read_battery_state(phone);
+        Self::apply_with_hooks(phone,state_path,|_,_,_|Ok(()),||Ok(()),||Ok(()))
+    }
+
+    /// The owner binds the durable record before the first write. Rollback hooks
+    /// distinguish a still-owned record from an explicitly verified candidate.
+    pub(crate) fn apply_with_hooks(
+        phone:&impl Shell, state_path:&Path,
+        mut before_write:impl FnMut(&str,&str,&str)->Result<(),String>,
+        mut before_rollback:impl FnMut()->Result<(),String>,
+        mut after_rollback:impl FnMut()->Result<(),String>,
+    )->Result<Self,String> {
+        phone.check()?;
+        let bat = phone.charge_battery()?;
         if let Some(cap) = bat.capacity_pct {
             if cap < MIN_CAPACITY_FOR_SUSPEND_PCT {
                 return Err(format!(
@@ -909,25 +1030,27 @@ impl ChargeSuspend {
 
         let mut tried: Vec<String> = Vec::new();
         for node in CHARGE_CTL_CANDIDATES {
-            let saved = phone.shell(&format!("su -c 'cat {} 2>/dev/null'", node.path), 8_000);
-            let saved = saved.trim().to_string();
-            if saved.is_empty() {
-                continue; // 这台机器没有这个节点
-            }
+            let Some(saved)=phone.charge_node(node.path)? else {continue;};
             let Some(want) = suspend_value(node.how, bat.capacity_pct) else { continue };
 
             // 先落状态文件再动设备: 中途被杀也能回滚
-            std::fs::write(state_path, charge_ctl_state_text(node.path, &saved))
-                .map_err(|e| format!("写不了停充状态文件 {}: {e}", state_path.display()))?;
+            let text = charge_ctl_state_text(node.path, &saved);
+            if parse_charge_ctl_state(&text).is_none() {
+                return Err(format!("停充节点 {} 原值无法安全保存: {saved:?}", node.path));
+            }
+            save_state(state_path, &text)?;
+            before_write(node.path,&saved,&want)?;
+            phone.check()?;
+            phone.shell_write(&format!("su -c 'echo {want} > {}'", node.path), 8_000);
 
-            phone.shell(&format!("su -c 'echo {want} > {}'", node.path), 8_000);
-
+            phone.check()?;
             // 回读确认**停充真的生效** —— 写进去不代表内核认。
             // 本机 charge_control_end_threshold 出厂就是 80 而电量 91% 照充不误, 就是活例。
-            let ok = (0..(SUSPEND_SETTLE_MS / 500).max(1)).any(|_| {
+            let mut ok=false;
+            for _ in 0..(SUSPEND_SETTLE_MS/500).max(1) {
                 std::thread::sleep(Duration::from_millis(500));
-                read_battery_state(phone).on_battery()
-            });
+                if phone.charge_battery()?.on_battery() {ok=true;break;}
+            }
             if ok {
                 progress("charge", &format!("已停充: {} {saved} → {want}", node.path));
                 return Ok(ChargeSuspend {
@@ -986,8 +1109,16 @@ impl ChargeSuspend {
                 });
             }
             // 没生效: 就地还原, 试下一个
-            phone.shell(&format!("su -c 'echo {saved} > {}'", node.path), 8_000);
-            let _ = std::fs::remove_file(state_path);
+            let mut candidate = ChargeSuspend {
+                path: node.path.into(), saved, state_path: state_path.into(), restored: false,
+                // 只用于就地回滚, 供电方式无意义
+                mode: SupplyMode::Battery,
+            };
+            before_rollback()?;
+            if !candidate.restore_checked(phone)? {
+                return Err(format!("停充候选 {} 无效且未确认恢复；停止尝试，核查 {}", node.path, state_path.display()));
+            }
+            after_rollback()?;
             tried.push(format!("{} (写 {want} 无效)", node.path));
         }
         Err(if tried.is_empty() {
@@ -1008,29 +1139,38 @@ impl ChargeSuspend {
     }
 
     /// 恢复充电并清掉状态文件; 返回是否确认恢复。
-    pub fn restore(&mut self, phone: &crate::device::Device) -> bool {
-        if self.restored {
-            return true;
-        }
-        self.restored = true;
-        phone.shell(&format!("su -c 'echo {} > {}'", self.saved, self.path), 8_000);
-        let back = phone.shell(&format!("su -c 'cat {} 2>/dev/null'", self.path), 8_000);
-        let ok = back.trim() == self.saved;
-        if ok {
-            let _ = std::fs::remove_file(&self.state_path);
-        } else {
-            progress(
-                "charge",
-                &format!(
-                    "恢复充电后回读不符: {} 期望 {} 实得 {}; 状态文件留着, 下次启动会再回滚一次",
-                    self.path,
-                    self.saved,
-                    back.trim()
-                ),
-            );
-        }
-        ok
+    pub fn restore(&mut self, phone: &impl Shell) -> bool {
+        self.restore_checked(phone).unwrap_or(false)
     }
+    pub(crate) fn restore_checked(&mut self, phone: &impl Shell) -> Result<bool,String> {
+        phone.check()?;
+        if self.restored {return Ok(true);}
+        phone.shell_write(&format!("su -c 'echo {} > {}'", self.saved, self.path),8_000);
+        phone.check()?;
+        let back=phone.charge_node(&self.path)?;
+        if back.as_deref()==Some(&self.saved) {
+            clear_state(&self.state_path)?;
+            self.restored=true;
+        } else {
+            progress("charge",&format!("恢复充电读回不符: {} 期望 {} 实得 {:?}; 保留 {}",self.path,self.saved,back,self.state_path.display()));
+        }
+        Ok(self.restored)
+    }
+    /// Reconstruct only a caller-bound obligation. A missing record is accepted
+    /// solely after that owner durably entered restoration; the write/readback
+    /// still runs and record disappearance alone never proves recovery.
+    pub(crate) fn from_bound_record(state_path:&Path,path:&str,saved:&str,restoration_started:bool)->Result<Self,String> {
+        if parse_charge_ctl_state(&charge_ctl_state_text(path,saved)).is_none() {return Err("invalid bound charging values".into());}
+        match charge_record(state_path)? {
+            Some(actual) if actual==(path.to_owned(),saved.to_owned())=>{},
+            None if restoration_started=>{},
+            _=>return Err("charging record differs from the current parent binding".into()),
+        }
+        // Recovery reconstructs only the restore obligation; the supply mode observed
+        // when charging was suspended is not part of the bound record.
+        Ok(Self{path:path.into(),saved:saved.into(),state_path:state_path.into(),restored:false,mode:SupplyMode::Battery})
+    }
+
 }
 
 impl Drop for ChargeSuspend {
@@ -1050,44 +1190,46 @@ impl Drop for ChargeSuspend {
     }
 }
 
+pub(crate) fn charge_record(path:&Path)->Result<Option<(String,String)>,String> {
+    read_state(path)?.map(|text|parse_charge_ctl_state(&text).ok_or_else(||format!("invalid charge recovery record {}; preserved",path.display()))).transpose()
+}
+
 /// 回滚上次遗留的停充状态 (进程被杀没来得及还原)。返回 `None` 表示没有遗留。
 pub fn recover_stale_charge_ctl(
-    phone: &crate::device::Device,
+    phone: &impl Shell,
     state_path: &std::path::Path,
-) -> Option<bool> {
-    let text = std::fs::read_to_string(state_path).ok()?;
-    let Some((path, saved)) = parse_charge_ctl_state(&text) else {
-        let _ = std::fs::remove_file(state_path);
-        return None;
-    };
+) -> Result<Option<bool>, String> {
+    let Some(text) = read_state(state_path)? else { return Ok(None) };
+    let (path, saved) = parse_charge_ctl_state(&text)
+        .ok_or_else(|| format!("invalid charge recovery record {}; preserved", state_path.display()))?;
     progress("charge", &format!("发现上次遗留的停充状态 {path}, 先恢复充电"));
-    phone.shell(&format!("su -c 'echo {saved} > {path}'", ), 8_000);
+    phone.shell_write(&format!("su -c 'echo {saved} > {path}'", ), 8_000);
     let back = phone.shell(&format!("su -c 'cat {path} 2>/dev/null'"), 8_000);
     let ok = back.trim() == saved;
     if ok {
-        let _ = std::fs::remove_file(state_path);
+        clear_state(state_path)?;
     }
-    Some(ok)
+    Ok(Some(ok))
 }
 
 // ══════════════ 设备操作 ══════════════
 
-pub fn root_ok(phone: &crate::device::Device) -> bool {
+pub fn root_ok(phone: &impl Shell) -> bool {
     phone.shell("su -c id", 8000).contains("uid=0(")
 }
 
-pub fn read_snapshot(phone: &crate::device::Device) -> Snapshot {
+pub fn read_snapshot(phone: &impl Shell) -> Snapshot {
     parse_snapshot(&phone.shell(&snapshot_cmd(), 15000))
 }
 
-pub fn read_thermal(phone: &crate::device::Device) -> Vec<(String, i64)> {
+pub fn read_thermal(phone: &impl Shell) -> Vec<(String, i64)> {
     parse_thermal(&phone.shell(
         "for z in /sys/class/thermal/thermal_zone*; do echo \"$(cat $z/type) $(cat $z/temp)\"; done 2>/dev/null",
         15000,
     ))
 }
 
-pub fn read_power(phone: &crate::device::Device, rail: PowerRail) -> Option<PowerSample> {
+pub fn read_power(phone: &impl Shell, rail: PowerRail) -> Option<PowerSample> {
     parse_power_samples(&phone.shell(&power_sample_cmd(rail), 8000))
         .into_iter()
         .next()
@@ -1096,7 +1238,7 @@ pub fn read_power(phone: &crate::device::Device, rail: PowerRail) -> Option<Powe
 /// 冷机门禁: SoC 结温最高热区 < cool_c 才放行; 超时即报错(安全阀, 不是时间预设)
 pub fn wait_cool(
     tag: &str,
-    phone: &crate::device::Device,
+    phone: &impl Shell,
     cool_c: f64,
     timeout_s: u64,
 ) -> Result<(String, f64, u64), String> {
@@ -1165,8 +1307,52 @@ pub fn snapshot_text(s: &Snapshot) -> String {
     t
 }
 
+// Telemetry tolerates absent/malformed fields; recovery must not invent a value
+// or restore only the parseable prefix of a damaged record.
+fn recovery_snapshot(text: &str) -> Result<Snapshot, String> {
+    let s = parse_snapshot(text);
+    if snapshot_text(&s) != text || s.cpu.is_empty()
+        || s.gpu_max_level.is_none() || s.gpu_min_level.is_none() {
+        return Err("incomplete or malformed lock snapshot".into());
+    }
+    let mut paths = std::collections::HashSet::new();
+    for p in &s.cpu {
+        let suffix = p.path.strip_prefix(&format!("{CPUFREQ}/policy"));
+        if !suffix.is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            || !paths.insert(&p.path) || p.governor.is_empty()
+            || !p.governor.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+            return Err("invalid CPU recovery node/governor".into());
+        }
+    }
+    let mut buses = std::collections::HashSet::new();
+    if s.bus.iter().any(|b| !BUS_NODES.contains(&b.name.as_str()) || !buses.insert(&b.name)) {
+        return Err("invalid/duplicate bus recovery node".into());
+    }
+    Ok(s)
+}
+
+fn restored_snapshot_matches(before: &Snapshot, after: &Snapshot) -> bool {
+    before.cpu.len() == after.cpu.len()
+        && before.cpu.iter().all(|b| after.cpu.iter().any(|a| a.path == b.path && a.governor == b.governor))
+        && before.bus.len() == after.bus.len()
+        && before.bus.iter().all(|b| after.bus.iter().any(|a| a.name == b.name && a.floor_khz == b.floor_khz))
+        && after.gpu_max_level == before.gpu_max_level
+        && after.gpu_min_level == before.gpu_min_level
+}
+
+fn restored_text_matches(before: &Snapshot, text: &str) -> bool {
+    // The telemetry parser defaults malformed bus integers to zero. A zero
+    // readback can only certify restore if the device actually returned it.
+    let buses_valid = text.lines().all(|line| {
+        let c: Vec<_> = line.split_whitespace().collect();
+        c.first().copied() != Some("BUS")
+            || (c.len() == 5 && c[2..].iter().all(|v| v.parse::<u64>().is_ok()))
+    });
+    buses_valid && restored_snapshot_matches(before, &parse_snapshot(text))
+}
+
 /// 把快照里的调速器与 kgsl 档位写回设备; 返回回读是否一致
-pub fn restore_snapshot(phone: &crate::device::Device, before: &Snapshot) -> bool {
+pub fn restore_snapshot(phone: &impl Shell, before: &Snapshot) -> bool {
     let mut cmd = String::from("su -c '");
     for p in &before.cpu {
         cmd.push_str(&format!("echo {} > {}/scaling_governor; ", p.governor, p.path));
@@ -1184,62 +1370,44 @@ pub fn restore_snapshot(phone: &crate::device::Device, before: &Snapshot) -> boo
         ));
     }
     cmd.push_str("echo RESTORED'");
-    let out = phone.shell(&cmd, 15000);
+    let out = phone.shell_write(&cmd, 15000);
     if !out.contains("RESTORED") {
         return false;
     }
-    let after = read_snapshot(phone);
-    let cpu_ok = after.cpu.len() == before.cpu.len()
-        && after
-            .cpu
-            .iter()
-            .zip(&before.cpu)
-            .all(|(a, b)| a.governor == b.governor);
-    let bus_ok = after.bus.len() == before.bus.len()
-        && after
-            .bus
-            .iter()
-            .zip(&before.bus)
-            .all(|(a, b)| a.floor_khz == b.floor_khz);
-    cpu_ok
-        && bus_ok
-        && after.gpu_max_level == before.gpu_max_level
-        && after.gpu_min_level == before.gpu_min_level
+    restored_text_matches(before, &phone.shell(&snapshot_cmd(), 15000))
 }
 
 /// 上次异常退出遗留的锁态: 状态文件在就按它回滚。返回 Some(是否回滚成功); 无遗留 None
 pub fn recover_stale_lock(
     tag: &str,
-    phone: &crate::device::Device,
+    phone: &impl Shell,
     state_path: &std::path::Path,
-) -> Option<bool> {
-    let text = std::fs::read_to_string(state_path).ok()?;
-    let before = parse_snapshot(&text);
-    if before.cpu.is_empty() && before.gpu_max_level.is_none() {
-        let _ = std::fs::remove_file(state_path);
-        return None;
-    }
+) -> Result<Option<bool>, String> {
+    let Some(text) = read_state(state_path)? else { return Ok(None) };
+    let before = recovery_snapshot(&text)
+        .map_err(|e| format!("invalid lock recovery record {}: {e}; preserved", state_path.display()))?;
     progress(
         tag,
         &format!("发现上次遗留的锁频状态 {}, 先回滚", state_path.display()),
     );
     let ok = restore_snapshot(phone, &before);
     if ok {
-        let _ = std::fs::remove_file(state_path);
+        clear_state(state_path)?;
     }
-    Some(ok)
+    Ok(Some(ok))
 }
 
 impl Lock {
     pub fn apply(
-        phone: &crate::device::Device,
+        phone: &impl Shell,
         state_path: &std::path::Path,
         before: Snapshot,
         level: u32,
     ) -> Result<Lock, String> {
         // 先落状态文件再动设备: 中途被杀也能回滚
-        std::fs::write(state_path, snapshot_text(&before))
-            .map_err(|e| format!("写不了锁频状态文件 {}: {e}", state_path.display()))?;
+        let text = snapshot_text(&before);
+        recovery_snapshot(&text).map_err(|e| format!("不能保存完整锁频恢复快照: {e}; 未改设备"))?;
+        save_state(state_path, &text)?;
         let mut cmd = String::from("su -c '");
         for p in &before.cpu {
             cmd.push_str(&format!("echo performance > {}/scaling_governor; ", p.path));
@@ -1256,15 +1424,15 @@ impl Lock {
             ));
         }
         cmd.push_str("echo LOCKED'");
-        let out = phone.shell(&cmd, 15000);
+        let out = phone.shell_write(&cmd, 15000);
         let lock = Lock {
             before,
             state_path: state_path.to_path_buf(),
             applied: true,
         };
         if !out.contains("LOCKED") {
-            lock.restore(phone);
-            return Err(format!("锁频命令未执行完: {}; 已回滚", out.trim()));
+            let restored = lock.restore(phone);
+            return Err(format!("锁频命令未执行完: {}; 恢复确认={restored}; 状态路径 {}", out.trim(), state_path.display()));
         }
         let after = read_snapshot(phone);
         let cpu_ok = !after.cpu.is_empty() && after.cpu.iter().all(|p| p.governor == "performance");
@@ -1272,28 +1440,25 @@ impl Lock {
         let bus_ok = after.bus.len() == lock.before.bus.len()
             && after.bus.iter().all(|b| b.floor_khz == b.max_khz);
         if !cpu_ok || !gpu_ok || !bus_ok {
-            lock.restore(phone);
+            let restored = lock.restore(phone);
             return Err(format!(
-                "锁频回读不符: cpu_governor={:?} gpu(max,min)=({:?},{:?}) 目标档 {level} bus={:?}; 已回滚",
+                "锁频回读不符: cpu_governor={:?} gpu(max,min)=({:?},{:?}) 目标档 {level} bus={:?}; 恢复确认={restored}; 状态路径 {}",
                 after.cpu.iter().map(|p| p.governor.as_str()).collect::<Vec<_>>(),
                 after.gpu_max_level,
                 after.gpu_min_level,
-                after.bus.iter().map(|b| format!("{}:{}/{}", b.name, b.floor_khz, b.max_khz)).collect::<Vec<_>>()
+                after.bus.iter().map(|b| format!("{}:{}/{}", b.name, b.floor_khz, b.max_khz)).collect::<Vec<_>>(),
+                state_path.display()
             ));
         }
         Ok(lock)
     }
 
     /// 恢复原值并清掉状态文件; 返回回读是否与锁前一致
-    pub fn restore(&self, phone: &crate::device::Device) -> bool {
+    pub fn restore(&self, phone: &impl Shell) -> bool {
         if !self.applied {
             return true;
         }
-        let ok = restore_snapshot(phone, &self.before);
-        if ok {
-            let _ = std::fs::remove_file(&self.state_path);
-        }
-        ok
+        restore_snapshot(phone, &self.before) && clear_restored_state(&self.state_path)
     }
 }
 
@@ -1535,14 +1700,167 @@ mod tests {
 
     #[test]
     fn lock_state_path_separates_paths_and_serials() {
-        let a = lock_state_path("bench", &Some("R5CT30ABCDE".into()));
-        let b = lock_state_path("gpuop", &Some("R5CT30ABCDE".into()));
-        let c = lock_state_path("bench", &Some("other".into()));
+        let f = RecoveryFixture::new();
+        let root = f.0.join("not-created");
+        let path = |tag, serial| recovery_path(&root, tag, Some(serial), &[]).unwrap();
+        let a = path("bench", "R5CT30ABCDE");
+        let b = path("gpuop", "R5CT30ABCDE");
+        let c = path("bench", "other");
         assert_ne!(a, b, "不同通路的锁态文件不能互相覆盖");
         assert_ne!(a, c, "不同设备的锁态文件不能互相覆盖");
-        // 序列号里的非字母数字必须被规整掉, 免得拼出非法路径
-        let d = lock_state_path("bench", &Some("127.0.0.1:5555".into()));
-        assert!(d.to_string_lossy().contains("127_0_0_1_5555"));
+        assert_ne!(path("bench", "a-b"), path("bench", "a_b"));
+        assert!(path("bench", "127.0.0.1:5555").ends_with("phonefarm-bench-lock-127%2E0%2E0%2E1%3A5555.txt"));
+        assert!(recovery_path(&root, "bench", None, &[]).is_err());
+        assert!(!root.exists(), "查询不创建目录");
+        fs::create_dir(&root).unwrap();
+        let legacy = root.join("phonefarm-bench-lock-a_b.txt");
+        fs::write(&legacy, "old original").unwrap();
+        assert!(recovery_path(&root, "bench", Some("a-b"), &[]).unwrap_err().contains("legacy recovery record"));
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "old original");
+        assert!(recovery_path(&f.0.join("new"), "bench", Some("a-b"), &[root]).is_err());
+        let unbound = f.0.join("phonefarm-bench-lock-default.txt");
+        fs::write(&unbound, "unknown device").unwrap();
+        assert!(recovery_path(&f.0, "bench", Some("serial"), &[]).is_err());
+        assert!(unbound.is_file());
+    }
+
+    struct RecoveryFixture(PathBuf);
+    impl RecoveryFixture {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!("hwcond-{}-{}", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            fs::create_dir(&p).unwrap();
+            Self(p.canonicalize().unwrap())
+        }
+    }
+    impl Drop for RecoveryFixture {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn owned_charge_binds_before_write_and_does_not_treat_errors_as_absence() {
+        use std::cell::{Cell,RefCell};
+        struct Phone<'a> {path:&'a Path,bound:Cell<bool>,value:Cell<i32>,writes:RefCell<Vec<String>>,permission:bool,uncertain:Cell<bool>,fail_write:bool}
+        impl Shell for Phone<'_> {
+            fn shell(&self,_:&str,_:u64)->String {panic!("owned charge must use typed optional/battery reads")}
+            fn shell_write(&self,cmd:&str,_:u64)->String {
+                assert!(self.bound.get());assert!(charge_record(self.path).unwrap().is_some());
+                self.writes.borrow_mut().push(cmd.into());self.value.set(if cmd.contains("echo 1 "){1}else{0});
+                if self.fail_write{self.uncertain.set(true);}String::new()
+            }
+            fn check(&self)->Result<(),String> {if self.uncertain.get(){Err("transport completion unknown".into())}else{Ok(())}}
+            fn charge_node(&self,path:&str)->Result<Option<String>,String> {
+                self.check()?;
+                if self.permission{return Err("permission denied".into());}
+                if path==CHARGE_CTL_CANDIDATES[0].path{return Ok(None);}
+                Ok(Some(self.value.get().to_string()))
+            }
+            fn charge_battery(&self)->Result<BatteryState,String> {
+                self.check()?;Ok(BatteryState{status:if self.value.get()==1{"Discharging"}else{"Charging"}.into(),current_ua:Some(if self.value.get()==1{-100000}else{100000}),capacity_pct:Some(80)})
+            }
+        }
+        let f=RecoveryFixture::new();let path=f.0.join("charge");
+        let phone=Phone{path:&path,bound:Cell::new(false),value:Cell::new(0),writes:RefCell::new(Vec::new()),permission:false,uncertain:Cell::new(false),fail_write:false};
+        let mut guard=ChargeSuspend::apply_with_hooks(&phone,&path,|node,saved,_|{
+            assert_eq!(node,CHARGE_CTL_CANDIDATES[1].path);assert_eq!(charge_record(&path)?,Some((node.into(),saved.into())));phone.bound.set(true);Ok(())
+        },||Ok(()),||Ok(())).unwrap();
+        assert!(guard.restore_checked(&phone).unwrap());assert!(!path.exists());assert_eq!(phone.writes.borrow().len(),2);
+        let denied=Phone{permission:true,..phone};
+        assert!(ChargeSuspend::apply(&denied,&path).err().unwrap().contains("permission denied"));
+        assert_eq!(denied.writes.borrow().len(),2);assert!(!path.exists());
+        let uncertain=Phone{permission:false,fail_write:true,bound:Cell::new(false),..denied};
+        assert!(ChargeSuspend::apply_with_hooks(&uncertain,&path,|_,_,_|{uncertain.bound.set(true);Ok(())},||Ok(()),||Ok(())).is_err());
+        assert_eq!(uncertain.writes.borrow().len(),3);assert!(charge_record(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn recovery_records_never_overwrite_or_hide_io_errors() {
+        let f = RecoveryFixture::new();
+        let p = f.0.join("nested/state");
+        assert_eq!(read_state(&p).unwrap(), None);
+        save_state(&p, "original").unwrap();
+        assert!(save_state(&p, "replacement").is_err());
+        assert_eq!(read_state(&p).unwrap().as_deref(), Some("original"));
+        let bytes = fs::read(&p).unwrap();
+        fs::write(&p, &bytes[..bytes.len()-1]).unwrap();
+        assert!(read_state(&p).unwrap_err().contains("truncated"));
+        assert!(p.is_file());
+        clear_state(&p).unwrap();
+        fs::create_dir(&p).unwrap();
+        assert!(read_state(&p).is_err());
+        assert!(p.is_dir());
+        let blocked = f.0.join("file");
+        fs::write(&blocked, "not a directory").unwrap();
+        assert!(save_state(&blocked.join("state"), "value").is_err());
+        assert_eq!(fs::read_to_string(blocked).unwrap(), "not a directory");
+    }
+
+    #[test]
+    fn shared_recovery_records_keep_originals_and_reject_private_state() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        const CHILD_ROOT: &str = "PF_HWCOND_SHARED_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let gid = std::env::var("PHONEFARM_SHARED_GID").unwrap().parse::<u32>().unwrap();
+            let path = root.join("nested/charge");
+            let original = charge_ctl_state_text(CHARGE_CTL_CANDIDATES[0].path, "0");
+            save_state(&path, &original).unwrap();
+            let parent = fs::metadata(path.parent().unwrap()).unwrap();
+            let record = fs::metadata(&path).unwrap();
+            assert_eq!((parent.gid(), parent.mode() & 0o7777), (gid, 0o2770));
+            assert_eq!((record.gid(), record.mode() & 0o777), (gid, 0o640));
+            assert_eq!(read_state(&path).unwrap().as_deref(), Some(original.as_str()));
+            let bytes = fs::read(&path).unwrap();
+            assert!(save_state(&path, "replacement").is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(read_state(&path).unwrap_err().contains("offline migration"));
+            assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(save_state(&root.join("nested/other"), "value").is_err());
+            assert!(!root.join("nested/other").exists());
+            return;
+        }
+        // Only this isolated child receives sharing settings; parallel unit
+        // tests keep the process environment and default private behavior.
+        let fixture = RecoveryFixture::new();
+        let gid = unsafe { libc::getegid() };
+        assert!(gid > 0, "shared-profile fixture requires a nonroot primary group");
+        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o2770)).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "hwcond::tests::shared_recovery_records_keep_originals_and_reject_private_state", "--nocapture"])
+            .env(CHILD_ROOT, &fixture.0)
+            .env("PHONEFARM_STATE_DIR", &fixture.0)
+            .env("PHONEFARM_SHARED_GID", gid.to_string())
+            .env_remove("PF_JOB_OUT")
+            .env_remove("DEVLOCK_DIR")
+            .env_remove("PHONEFARM_LEASE_DIR")
+            .output().unwrap();
+        assert!(result.status.success(), "shared recovery fixture failed:\n{}\n{}",
+            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    }
+
+    #[test]
+    fn recovery_rejects_partial_snapshot_and_wrong_node_identity() {
+        let text = format!("CPU {CPUFREQ}/policy0 schedutil 300 1000 700 0,1\nGPU 0 4 0 500 Adreno\nBUS DDR 100 900 700\n");
+        let s = recovery_snapshot(&text).unwrap();
+        for damaged in [text.replace("GPU 0", "GPU broken"), text.replace("BUS DDR 100 900 700", "BUS DDR"),
+            text.replace("GPU 0 4 0 500 Adreno\n", ""), text.replace("schedutil", "a;reboot")] {
+            assert!(recovery_snapshot(&damaged).is_err());
+        }
+        let mut wrong = s.clone();
+        wrong.cpu[0].path = format!("{CPUFREQ}/policy4");
+        assert!(!restored_snapshot_matches(&s, &wrong));
+        wrong = s.clone();
+        wrong.bus[0].name = "LLCC".into();
+        assert!(!restored_snapshot_matches(&s, &wrong));
+        assert!(restored_snapshot_matches(&s, &s));
+        let zero = text.replace("BUS DDR 100", "BUS DDR 0");
+        let baseline = recovery_snapshot(&zero).unwrap();
+        assert!(restored_text_matches(&baseline, &zero));
+        assert!(!restored_text_matches(&baseline, &zero.replace("BUS DDR 0", "BUS DDR unreadable")));
+        assert!(parse_charge_ctl_state("/sys/class/power_supply/battery/input_suspend\n0;reboot\n").is_none());
     }
 
     // ---------- 功耗遥测 ----------

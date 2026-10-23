@@ -6,19 +6,19 @@
 //!
 //! 流程 (`devlock run` 的进程内版本):
 //!
-//! 1. 先 `devlock renew <label>`: 成功 = 这把锁已经在 `<label>` 手里 (外层的
+//! 1. 先 `devlock renew <label>`: 成功 = 继承的实例身份与活的外层进程树已核验 (外层的
 //!    game_opt_loop optimize、外层的 `devlock run <label>`, 或调起我们的父 phonefarm)。
 //!    这时**原地执行**, 心跳归外层管, 收尾也不释放 —— 否则就是自己等自己。
-//! 2. 否则 `devlock acquire <label>`, 没轮到就每 45 秒重试 (重试不丢队位), 等到
+//! 2. 无继承实例时 `devlock acquire <label>`, 没轮到就每 45 秒重试 (重试不丢队位), 等到
 //!    `--lock-wait` 用完还没拿到就退出 2, **一个字节都不碰设备**。
-//! 3. 拿到之后把同一条命令作为子进程再跑一遍 (环境里带 `DEVLOCK_LABEL=<label>`, 子进程
+//! 3. 拿到之后把同一条命令作为子进程再跑一遍 (环境里带 `DEVLOCK_LABEL` 与 `DEVLOCK_INSTANCE_ID`, 子进程
 //!    走第 1 步原地执行), 父进程每 60 秒续一次心跳, 子进程退出就释放, 退出码原样透传。
 //!    子进程里任何一处 `process::exit` 或 panic 都不会漏掉释放 —— 释放在父进程里。
 //!
 //! label 的来源: `--lock-label` > 环境 `DEVLOCK_LABEL` > `phonefarm`。lead 预排了队列时
 //! 必须用队列里那个名字, 自己起一个新名字会排到队尾。
 //!
-//! 不拿锁的子命令: `fleet` (只读快照, 本身就按锁自动降级)、`devices` (只问 adb)、
+//! 不拿锁的子命令: `fleet` (只读快照, 非空闲租约域拒绝探测)、`devices` (只问 adb)、
 //! `keepalive` (常驻保活, 拿锁就把别人全挡住)、`serve`, 以及所有纯离线的解析/报告类。
 
 use std::path::PathBuf;
@@ -80,6 +80,18 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
         return false;
     }
     if rest.iter().any(|a| a == "-h" || a == "--help") {
+        return false;
+    }
+    // Recovery enters the matching retained strong lease directly; ordinary
+    // acquisition would wait behind the very barrier it needs to reconcile.
+    if matches!(sub, "bench" | "capture") && rest.iter().any(|a| a == "--recover") {
+        return false;
+    }
+    if sub == "gray-ab" && rest.first().is_some_and(|a| a == "recover") {
+        return false;
+    }
+    if sub == "gray-layer" && matches!(rest.first().map(String::as_str),
+        Some("session-status" | "session-action" | "session-recover" | "refbench-recover")) {
         return false;
     }
     // preflight: 只读核查不拿锁; --fix 要写风扇/音量，跟测量一样排队
@@ -145,10 +157,23 @@ pub fn strip_lock_args(args: &mut Vec<String>) -> Result<LockOpts, String> {
     };
     let mut kept = Vec::with_capacity(args.len());
     let mut it = std::mem::take(args).into_iter();
-    if let Some(sub) = it.next() {
-        kept.push(sub);
-    }
+    let sub = it.next().unwrap_or_default();
+    if !sub.is_empty() { kept.push(sub.clone()); }
     while let Some(a) = it.next() {
+        // Gray admission and execution must see the same option values. A
+        // serial/path named --no-devlock must not disable the queue gate.
+        let gray_value = match sub.as_str() {
+            "gray-layer" => matches!(a.as_str(), "--serial" | "--so" | "--mode" | "--package" |
+                "--out" | "--max-seconds" | "--actor-id" | "--evidence-origin" | "--power-policy" |
+                "--request-id" | "--request" | "--session" | "--frames" | "--intensity" | "--timeout-seconds"),
+            "gray-ab" => matches!(a.as_str(), "--serial" | "--out" | "--pairs" | "--mode" | "--evidence-origin"),
+            _ => false,
+        };
+        if gray_value {
+            let value = it.next().ok_or_else(|| format!("{a} requires a value"))?;
+            kept.extend([a, value]);
+            continue;
+        }
         match a.as_str() {
             "--lock-label" => {
                 o.label = Some(it.next().ok_or("--lock-label 要一个名字")?);
@@ -175,25 +200,32 @@ pub fn script_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-fn call(script: &PathBuf, args: &[&str]) -> (bool, String) {
-    match Command::new(script).args(args).output() {
+fn call(script: &PathBuf, args: &[&str], instance: Option<&str>) -> (Option<i32>, String) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return (None, format!("cannot select phonefarm storage resolver: {e}")),
+    };
+    let mut command = Command::new(script);
+    command.args(args).env("PHONEFARM_BIN", exe).env_remove("DEVLOCK_INSTANCE_ID");
+    if let Some(instance) = instance { command.env("DEVLOCK_INSTANCE_ID", instance); }
+    match command.output() {
         Ok(o) => (
-            o.status.success(),
-            format!(
+            o.status.code(),
+            if o.status.success() { String::from_utf8_lossy(&o.stdout).trim().to_string() } else { format!(
                 "{}{}",
                 String::from_utf8_lossy(&o.stdout),
                 String::from_utf8_lossy(&o.stderr)
             )
             .trim()
-            .to_string(),
+            .to_string() },
         ),
-        Err(e) => (false, format!("调不起 {}: {e}", script.display())),
+        Err(e) => (None, format!("调不起 {}: {e}", script.display())),
     }
 }
 
 /// 拿锁的结果。
 pub enum Gate {
-    /// 原地执行 (锁已在本 label 手里, 或显式 `--no-devlock`)。
+    /// 原地执行 (继承的外层实例已核验, 或显式 `--no-devlock`)。
     Proceed,
     /// 已经在子进程里跑完了, 带着它的退出码退出。
     Exit(i32),
@@ -208,6 +240,10 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
             return Gate::Exit(2);
         }
     };
+    if let Err(e) = crate::lease_storage::resolve().require_ready() {
+        eprintln!("device lock storage unavailable: {e}");
+        return Gate::Exit(2);
+    }
     if opts.disabled {
         eprintln!("⚠ --no-devlock: 不拿设备锁直接碰设备。共享手机上两边的数都可能作废。");
         return Gate::Proceed;
@@ -225,49 +261,107 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
         );
         return Gate::Exit(2);
     };
-    // 1. 已经在自己这一侧手里: 原地跑, 心跳与释放归外层
-    if call(&script, &["renew", &label]).0 {
+    // An inherited instance must verify; a stale identity is not a new queue request.
+    if let Ok(instance) = std::env::var("DEVLOCK_INSTANCE_ID") {
+        let (code, out) = call(&script, &["renew", &label], Some(&instance));
+        if code != Some(0) {
+            eprintln!("inherited device lock identity rejected: {out}");
+            return Gate::Exit(2);
+        }
         std::env::set_var("DEVLOCK_LABEL", &label);
         return Gate::Proceed;
     }
-    // 2. 排队拿锁
-    if let Err(e) = acquire(&script, &label, opts.wait) {
-        eprintln!("{e}");
-        return Gate::Exit(2);
-    }
+    let instance = match acquire(&script, &label, opts.wait) {
+        Ok(instance) => instance,
+        Err(e) => { eprintln!("{e}"); return Gate::Exit(2); }
+    };
     // 3. 子进程里跑, 父进程心跳 + 释放
     let stop = Arc::new(AtomicBool::new(false));
-    let hb = heartbeat(script.clone(), label.clone(), stop.clone());
+    let hb = heartbeat(script.clone(), label.clone(), instance.clone(), stop.clone());
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm"));
-    let code = match Command::new(&exe)
-        .args(args.iter())
-        .env("DEVLOCK_LABEL", &label)
-        .status()
-    {
-        Ok(s) => s.code().unwrap_or(2),
-        Err(e) => {
-            eprintln!("起不了 {}: {e}", exe.display());
-            2
+    let mut command = Command::new(&exe);
+    command.args(args.iter()).env("DEVLOCK_LABEL", &label).env("DEVLOCK_INSTANCE_ID", &instance);
+    let code = if args.first().is_some_and(|a| a == "gray-layer")
+        && args.get(1).is_some_and(|a| a == "session") {
+        // The node cancels the entire command group. Keep this queue owner
+        // alive while the control child finishes its bounded action and
+        // restores the device; otherwise the node sees a premature exit and
+        // the ordinary outer lock is left behind.
+        wait_control_child(&mut command)
+    } else {
+        match command.status() {
+            Ok(s) => s.code().unwrap_or(2),
+            Err(e) => { eprintln!("起不了 {}: {e}", exe.display()); 2 }
         }
     };
     stop.store(true, Ordering::SeqCst);
     let _ = hb.join();
-    let (ok, out) = call(&script, &["release", &label]);
-    if !ok {
+    let (release_code, out) = call(&script, &["release", &label], Some(&instance));
+    if release_code != Some(0) {
         eprintln!("设备锁释放失败 ({label}): {out}");
     }
-    Gate::Exit(code)
+    Gate::Exit(if code == 0 && release_code != Some(0) { 2 } else { code })
+}
+
+static CONTROL_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+extern "C" fn control_interrupted(_: libc::c_int) {
+    CONTROL_INTERRUPTED.store(true, Ordering::SeqCst);
+}
+struct ControlInterrupt(libc::sigaction);
+impl Drop for ControlInterrupt {
+    fn drop(&mut self) {
+        unsafe { libc::sigaction(libc::SIGINT, &self.0, std::ptr::null_mut()); }
+    }
+}
+
+fn wait_control_child(command: &mut Command) -> i32 {
+    CONTROL_INTERRUPTED.store(false, Ordering::SeqCst);
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = control_interrupted as *const () as usize;
+    unsafe { libc::sigemptyset(&mut action.sa_mask); }
+    if unsafe { libc::sigaction(libc::SIGINT, &action, &mut previous) } != 0 {
+        eprintln!("cannot supervise gray control cancellation: {}", std::io::Error::last_os_error());
+        return 2;
+    }
+    let _interrupt = ControlInterrupt(previous);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => { eprintln!("cannot start gray control owner: {error}"); return 2; }
+    };
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.code().unwrap_or(2),
+            Err(error) => { eprintln!("cannot wait for gray control owner: {error}"); return 2; }
+            Ok(None) => {},
+        }
+        if CONTROL_INTERRUPTED.swap(false, Ordering::SeqCst) {
+            // Group cancellation already reaches the child. Forwarding also
+            // supports a caller that signals only this wrapper's PID. Repeated
+            // SIGINT is an idempotent stop request, never forced escalation.
+            unsafe { libc::kill(child.id() as i32, libc::SIGINT); }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// 排队直到拿到, 或等满 `wait`。
-fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<(), String> {
+fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<String, String> {
     let t0 = Instant::now();
     loop {
-        let (ok, out) = call(script, &["acquire", label]);
-        if ok {
+        crate::lease_storage::resolve().require_ready()?;
+        let (code, out) = call(script, &["acquire", label], None);
+        if code == Some(0) {
+            let owner: crate::queue_owner::QueueOwner = serde_json::from_str(&out)
+                .map_err(|_| "devlock returned no typed instance; upgrade the selected phonefarm/devlock together")?;
+            if owner.schema != "phonefarm/devlock-owner@1" || owner.label != label
+                || owner.holder_pid != std::process::id() || !crate::queue_owner::valid_instance(&owner.instance_id) {
+                return Err("devlock acquisition identity does not match this holder".into());
+            }
             eprintln!("设备锁: 已拿到 ({label})");
-            return Ok(());
+            return Ok(owner.instance_id);
         }
+        if code != Some(1) { return Err(format!("device queue unavailable ({code:?}): {out}")); }
         if t0.elapsed() + POLL > wait {
             return Err(format!(
                 "设备锁: 等了 {} 秒还没轮到 {label}, 没碰设备就退出 ({out})。\
@@ -286,7 +380,7 @@ fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<(), String> 
 
 /// 后台心跳。续期失败 (锁被当成废弃接管了) 只喊一次 —— 子进程已经在跑, 杀它会把
 /// 设备留在半施加态, 比让它收尾更糟。
-fn heartbeat(script: PathBuf, label: String, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+fn heartbeat(script: PathBuf, label: String, instance: String, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut warned = false;
         loop {
@@ -297,8 +391,8 @@ fn heartbeat(script: PathBuf, label: String, stop: Arc<AtomicBool>) -> std::thre
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
-            let (ok, out) = call(&script, &["renew", &label]);
-            if !ok && !warned {
+            let (code, out) = call(&script, &["renew", &label], Some(&instance));
+            if code != Some(0) && !warned {
                 eprintln!("⚠ 设备锁续期失败 ({label}): {out} —— 锁可能已被接管, 这一轮数据要存疑");
                 warned = true;
             }
@@ -316,6 +410,9 @@ mod tests {
         assert!(needs_lock("frame-audit", &v(&["capture", "--out", "x"])));
         assert!(needs_lock("frame-audit", &v(&["storeop-check", "--rule", "a:1"])));
         assert!(!needs_lock("frame-audit", &v(&["analyze", "f.json"])));
+        assert!(!needs_lock("frame-audit", &v(&["recover", "--session", "session", "--serial", "S"])));
+        assert!(!needs_lock("gray-ab", &v(&["recover", "--session", "session", "--serial", "S"])));
+        assert!(needs_lock("gray-ab", &v(&["--mode", "loadop", "--out", "x"])));
         assert!(!needs_lock("frame-audit", &v(&[])));
     }
 
@@ -333,6 +430,16 @@ mod tests {
         assert_eq!(o.label.as_deref(), Some("core"));
         assert_eq!(o.wait, Duration::from_secs(600));
         assert!(!o.disabled);
+        for sub in ["gray-layer", "gray-ab"] {
+            let mut gray = v(&[sub, "--serial", "--no-devlock", "--lock-label", "--help"]);
+            let options = strip_lock_args(&mut gray).unwrap();
+            assert_eq!(gray, v(&[sub, "--serial", "--no-devlock"]));
+            assert!(!options.disabled);
+            assert_eq!(options.label.as_deref(), Some("--help"));
+        }
+        let mut gray = v(&["gray-ab", "--out", "--lock-wait", "--mode", "loadop", "--no-devlock"]);
+        assert!(strip_lock_args(&mut gray).unwrap().disabled);
+        assert_eq!(gray, v(&["gray-ab", "--out", "--lock-wait", "--mode", "loadop"]));
     }
 
     #[test]
@@ -351,6 +458,10 @@ mod tests {
 
     #[test]
     fn only_device_touching_subcommands_take_the_lock() {
+        assert!(!needs_lock("bench", &v(&["--serial", "S", "--recover", "session"])));
+        assert!(!needs_lock("capture", &v(&["--serial", "S", "--recover", "session"])));
+        assert!(needs_lock("capture", &v(&["--serial", "S", "--frames", "1"])));
+        assert!(needs_lock("bench", &v(&["--serial", "S", "--model", "m"])));
         assert!(needs_lock("gray-layer", &v(&["off"])));
         assert!(needs_lock("perf", &v(&["--serial", "S"])));
         assert!(needs_lock("selftest", &v(&["run", "--out", "d"])));

@@ -412,11 +412,12 @@ pub(super) fn run(dir: &Path, execute: bool, retire: bool) -> Result<Value, Stri
     })();
     lease.check()?;
     let complete = retire && result.is_ok();
-    if complete {
-        lease.complete_recovery()?;
-    }
     let value = json!({"schema":"phonefarm/native_helper_retirement@1","status":if complete {if req.transport.kind=="fake"{"SIMULATED_HELPER_CLOSED"}else{"HELPER_CLOSED_REQUIRES_NEW_SESSION"}}else{"UNKNOWN"},"retirement_completed":complete,"diagnostic_complete":result.is_ok(),"error":result.err(),"stages":observed,"operation_dir":out,"session":dir,"evidence_origin":if req.transport.kind=="fake"{"synthetic"}else{"receiver_dead_only_retirement"},"old_tools_changed":false,"live_process_stopped":false,"control_restore_claimed":false,"eligible":false,"real_game_optimization_proven":false,"promotion_allowed":false,"old_samples_revalidated":false,"barrier_retained":!complete,"recovery":"UNKNOWN must not be automatically retried or adopted. A closed helper requires a new session; this operation grants no game/display/GPU qualification."});
     save_json(&out, "result.json", &value)?;
+    if complete {
+        lease.complete_recovery("helper_retirement_only", value["evidence_origin"].as_str().unwrap(),
+            &[&out.join("result.json"), &out.join("remove.verified.json")])?;
+    }
     journal(
         &dir,
         json!({"event":"native_helper_recorded","run_id":run,"retirement_completed":complete,"at":now()}),

@@ -1062,20 +1062,62 @@ pub(crate) fn sample_window(text:&str)->SampleWindow {
     SampleWindow{complete,duration_s,interval_s,first_uptime,last_uptime,power_interval_s}
 }
 
-/// ftrace capture metadata uses /proc/uptime too, so compare clocks without assuming event trace_clock.
-///
+/// Capture metadata shares /proc/uptime with ENV; event trace_clock is not assumed.
+fn capture_window(trace: &str, expected_capture_s: u64) -> Option<(f64, f64)> {
+    let line = trace.lines().find(|l| l.starts_with("#loop_v1_meta capture_start_uptime="))?;
+    let field = |key: &str| line.split_whitespace().find_map(|t| t.strip_prefix(key))
+        .and_then(|x| x.parse::<f64>().ok()).filter(|x| x.is_finite());
+    let (start,end,dur) = (field("capture_start_uptime=")?,field("capture_end_uptime=")?,field("duration_req=")?);
+    (dur == expected_capture_s as f64 && end-start >= dur-0.1 && end-start <= dur+5.0).then_some((start,end))
+}
 /// v2 采样器见到停止标志 (采集结束后才写出的 trace 文件) 就停, 最后一条功耗行与采集结束之间
 /// 最多差一个快循环周期加读节点的耗时, 所以末端放宽 2 × power_interval + 0.1 s。
 pub(crate) fn trace_window_covered(window:&SampleWindow,trace:&str,expected_capture_s:u64)->bool {
-    let field=|key:&str|trace.lines().find(|l|l.starts_with("#loop_v1_meta capture_start_uptime="))
-        .and_then(|l|l.split_whitespace().find_map(|t|t.strip_prefix(key)))
-        .and_then(|x|x.parse::<f64>().ok()).filter(|x|x.is_finite());
     let tail_slack=window.power_interval_s.map_or(0.0,|p|2.0*p+0.1);
-    match (window.first_uptime,window.last_uptime,field("capture_start_uptime="),field("capture_end_uptime="),field("duration_req=")) {
-        (Some(a),Some(b),Some(start),Some(end),Some(dur))=>window.complete && dur==expected_capture_s as f64
-            && end-start>=dur-0.1 && end-start<=dur+5.0 && a<=start && b+tail_slack>=end,
+    match (window.first_uptime,window.last_uptime,capture_window(trace,expected_capture_s)) {
+        (Some(a),Some(b),Some((start,end))) => window.complete && a<=start && b+tail_slack>=end,
         _=>false,
     }
+}
+
+/// Integrate one battery V*I series over the capture window, never extrapolate
+/// endpoints or combine whole-sampler power with a different frame denominator.
+pub(crate) fn battery_energy_in_capture(env: &str, trace: &str, seconds: u64) -> Result<serde_json::Value, String> {
+    let stats = env_stats(env);
+    if stats.get("power_window_verified") != Some(&PyVal::Bool(true))
+        || stats.get("on_battery") != Some(&PyVal::Bool(true))
+        || stats.get("power_source") != Some(&PyVal::Str("battery".into())) {
+        return Err("whole sampling window lacks verified battery discharge".into());
+    }
+    let window = sample_window(env);
+    if !trace_window_covered(&window,trace,seconds) {
+        return Err("valid battery samples do not bracket the verified capture window".into());
+    }
+    let (start,end) = capture_window(trace,seconds).ok_or("capture uptime metadata is unavailable")?;
+    if start < 0.0 || end <= start { return Err("capture window has no positive duration".into()); }
+    let samples = env.lines().filter(|l| l.starts_with("ENV ")).map(|line| {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len()!=9 {return Err("invalid ENV sample".to_owned());}
+        let number = |index: usize| fields[index].parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(||"invalid battery sample value".to_owned());
+        let (time,voltage,current)=(number(1)?,number(2)?,number(3)?);
+        let power=(voltage / 1e6 * current / 1e6).abs();
+        if voltage<=0.0 || current>=0.0 || !(crate::hwcond::POWER_MIN_W..=crate::hwcond::POWER_MAX_W).contains(&power) {
+            return Err("battery sample is outside the discharge power range".into());
+        }
+        Ok((time,power))
+    }).collect::<Result<Vec<_>,String>>()?;
+    let mut energy=0.0;
+    for pair in samples.windows(2) {
+        let ((t0,p0),(t1,p1))=(pair[0],pair[1]);
+        let (left,right)=(start.max(t0),end.min(t1));
+        if right<=left {continue;}
+        let power=|time| p0+(p1-p0)*(time-t0)/(t1-t0);
+        energy+=(power(left)+power(right))*0.5*(right-left);
+    }
+    Ok(serde_json::json!({"available":true,"estimated":true,"reason":null,
+        "energy_j":energy,"power_w_mean":energy/(end-start),"rail":"battery",
+        "method":"battery V*I; linear boundary interpolation and trapezoidal integration",
+        "window":{"clock":"uptime","start":start,"end":end},"samples":samples.len()}))
 }
 
 pub fn env_stats(text: &str) -> PyVal {
@@ -2227,6 +2269,19 @@ ENV 1.0 4412000 -2000 NA 4920000 806000 cpu-0-4-1 44900\n",
         }
     }
 
+    #[test]
+    fn capture_energy_clips_to_same_window_and_requires_discharge() {
+        let env="#sample_env v1 dur=6 interval=2\n#battery_status=Discharging\nENV 100 4000000 -500000 NA 0 0 cpu-0 40000\nENV 102 4000000 -1000000 NA 0 0 cpu-0 40000\nENV 104 4000000 -1500000 NA 0 0 cpu-0 40000\n#battery_status_after=Discharging\n#sample_env done\n";
+        let trace="#loop_v1_meta capture_start_uptime=100.5 capture_end_uptime=103.5 duration_req=3\n";
+        let energy=battery_energy_in_capture(env,trace,3).unwrap();
+        // Linear P(t) rises 2->6W. Clipping half a second from each end gives
+        // 12J over exactly 3s; using the full sample window would give 16J.
+        assert!((energy["energy_j"].as_f64().unwrap()-12.0).abs()<1e-9);
+        assert!((energy["power_w_mean"].as_f64().unwrap()-4.0).abs()<1e-9);
+        assert_eq!(energy["window"]["start"],100.5);
+        assert!(battery_energy_in_capture(env,&trace.replace("100.5","99.5").replace("103.5","102.5"),3).is_err());
+        assert!(battery_energy_in_capture(&env.replace("-1000000","1000000"),trace,3).is_err());
+    }
     #[test]
     fn window_requires_done_count_span_and_bound_capture() {
         let good="#sample_env v1 dur=6 interval=2\n#battery_status=Discharging\nENV 100 4000000 -1000000 NA 0 0 cpu-1-0 41000\nENV 102 4000000 -1000000 NA 0 0 cpu-1-0 41000\nENV 104 4000000 -1000000 NA 0 0 cpu-1-0 41000\n#battery_status_after=Discharging\n#sample_env done";

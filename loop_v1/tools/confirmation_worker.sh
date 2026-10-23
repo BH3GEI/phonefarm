@@ -6,13 +6,31 @@ case "$D" in /data/local/tmp/phonefarm-confirmation-*) ;; *) exit 70 ;; esac
 case "$TOKEN:$RUN" in *[!a-zA-Z0-9_:-]*) exit 70 ;; esac
 [ "$(cat "$D/owner")" = "$TOKEN $BOOT" ] || exit 71
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT" ] || exit 72
-[ ! -e "$D/session.closed" ] || exit 86
+case "$MODE" in verify_bench|verify_gray_groups) ;; *) [ ! -e "$D/session.closed" ] || exit 86 ;; esac
 # A capability diagnostic session cannot enter any performance sampling mode.
 if [ -e "$D/thermal-purpose.txt" ]; then
   [ -f "$D/thermal-purpose.txt" ] && [ "$(cat "$D/thermal-purpose.txt")" = capability_absolute_v1 ] || exit 87
   case "$MODE" in control_probe|reconcile_controls) ;; *) exit 87 ;; esac
 fi
 R="$D/$RUN"
+# Gray sampling owns one trace instance; it never falls back to global tracing.
+if [ "$MODE" = gray_sample ] || [ "$MODE" = gray_script_sample ] || [ "$MODE" = gray_control_sample ]; then
+  if [ "$MODE" = gray_script_sample ] || [ "$MODE" = gray_control_sample ]; then
+    [ "$#" = 8 ] || exit 70
+    gray_qualify=$8
+    case "$gray_qualify" in 0|1) ;; *) exit 70 ;; esac
+  else [ "$#" = 7 ] || exit 70; fi
+  gray_seconds=$6; gray_instance=$7
+  case "$gray_seconds" in ''|*[!0-9]*) exit 70 ;; esac
+  [ "$gray_seconds" -ge 1 ] && [ "$gray_seconds" -le 86400 ] || exit 70
+  [ "$MODE" != gray_script_sample ] || [ "$gray_seconds" -le 594 ] || exit 70
+  if [ "$MODE" = gray_control_sample ]; then
+    [ "$gray_seconds" -le 120 ] && [ "$gray_qualify" = 0 ] || exit 70
+    [ -f "$D/workload-$RUN.sh" ] && [ ! -L "$D/workload-$RUN.sh" ] || exit 70
+  fi
+  [ "$gray_instance" = "/sys/kernel/tracing/instances/phonefarm_gray_$TOKEN" ] || exit 70
+  [ -d "$gray_instance" ] && [ ! -L "$gray_instance" ] || exit 70
+fi
 #phonefarm_thermal_clock_begin
 thermal_uptime() {
   v=$(cut -d' ' -f1 /proc/uptime) || return 1
@@ -174,16 +192,30 @@ ledger_complete() {
 }
 children_valid() {
   CHILD_ROWS=0
+  GRAY_SCRIPT_ROUND=0
+  GRAY_WORKLOAD="$D/workload.sh"
+  if [ -e "$R/round-kind.txt" ] || [ -L "$R/round-kind.txt" ]; then
+    ledger_complete "$R/round-kind.txt" || return 1
+    case "$(cat "$R/round-kind.txt")" in
+      gray_script_v1) ;;
+      gray_control_v1) GRAY_WORKLOAD="$D/workload-${R##*/}.sh" ;;
+      *) return 1 ;;
+    esac
+    GRAY_SCRIPT_ROUND=1
+  fi
   [ -e "$R/children.tsv" ] || [ -L "$R/children.tsv" ] || return 0
   ledger_complete "$R/children.tsv" || return 1
-  CHILD_ROWS=$(awk -F '\t' -v w="$D/workload.sh" -v s="$D/sample_env.sh" -v th="$D/thermal_sampler.sh" -v rr="$D/render_ownership.sh" -v mode="$MODE" '
+  CHILD_ROWS=$(awk -F '\t' -v w="$GRAY_WORKLOAD" -v s="$D/sample_env.sh" -v tr="$D/trace.sh" -v scripted="$GRAY_SCRIPT_ROUND" -v th="$D/thermal_sampler.sh" -v rr="$D/render_ownership.sh" -v mode="$MODE" '
+    BEGIN {bench=(mode=="bench" || mode=="gray_sample" || mode=="gray_script_sample" || mode=="gray_control_sample" || mode=="verify_gray_idle" || mode=="verify_gray_groups" || mode=="reconcile_bench" || mode=="verify_bench")}
+    scripted && (!bench || mode=="bench" || mode=="gray_sample") {bad=1}
+    bench && $1!="workload" && $1!="sampler" && !(scripted && $1=="trace") {bad=1}
     ((mode=="render_readonly" || mode=="reconcile_render") && $1!="render_reader") ||
     ((mode!="render_readonly" && mode!="reconcile_render") && $1=="render_reader") ||
-    NF!=4 || ($1!="workload" && $1!="sampler" && $1!="thermal_sampler" && $1!="render_reader") || $2!~/^[0-9]+$/ ||
+    NF!=4 || ($1!="workload" && $1!="sampler" && $1!="thermal_sampler" && $1!="render_reader" && !(scripted && $1=="trace")) || $2!~/^[0-9]+$/ ||
     $2+0<=0 || $2+0>2147483647 || $3!~/^[0-9]+$/ || $3+0<=0 ||
-    ($1=="workload" && $4!=w) || ($1=="sampler" && $4!=s) || ($1=="thermal_sampler" && $4!=th) || ($1=="render_reader" && $4!=rr) {bad=1}
+    ($1=="workload" && $4!=w) || ($1=="sampler" && $4!=s) || ($1=="trace" && $4!=tr) || ($1=="thermal_sampler" && $4!=th) || ($1=="render_reader" && $4!=rr) {bad=1}
     ++tags[$1]>1 || ++pids[$2]>1 {bad=1}
-    END {if (bad || NR<1 || NR>((mode=="render_readonly" || mode=="reconcile_render")?1:3)) exit 1; print NR}' "$R/children.tsv") || return 1
+    END {if (bad || NR<1 || NR>((mode=="render_readonly" || mode=="reconcile_render")?1:(bench&&!scripted?2:3))) exit 1; print NR}' "$R/children.tsv") || return 1
 }
 pending_known() {
   children_valid || return 1
@@ -192,7 +224,7 @@ pending_known() {
     ledger_complete "$pending" || return 1
     [ -f "$R/children.tsv" ] || return 1
     expected=${pending##*/}; expected=${expected#launch-}; expected=${expected%.pending}
-    case "$expected" in workload) script_expected="$D/workload.sh" ;; sampler) script_expected="$D/sample_env.sh" ;; thermal_sampler) script_expected="$D/thermal_sampler.sh" ;; render_reader) script_expected="$D/render_ownership.sh" ;; *) return 1 ;; esac
+    case "$expected" in workload) script_expected="$GRAY_WORKLOAD" ;; sampler) script_expected="$D/sample_env.sh" ;; trace) [ "$GRAY_SCRIPT_ROUND" = 1 ] || return 1; script_expected="$D/trace.sh" ;; thermal_sampler) script_expected="$D/thermal_sampler.sh" ;; render_reader) script_expected="$D/render_ownership.sh" ;; *) return 1 ;; esac
     awk -F '\t' -v t="$expected" -v s="$script_expected" '
       NF!=2 || $1!=t || $2!=s {bad=1} END {exit (bad || NR!=1)}' "$pending" || return 1
     consumed_pending=0
@@ -206,13 +238,21 @@ pending_known() {
 }
 group_absent_remote() {
   expected=$1
-  for proc in /proc/[0-9]*; do
-    [ -d "$proc" ] || continue
-    pg=$(group_id "${proc##*/}")
-    if [ -z "$pg" ]; then [ ! -d "$proc" ] || return 1; continue; fi
-    [ "$pg" != "$expected" ] || return 1
-  done
-  if error=$(/system/bin/kill -0 -- "-$expected" 2>&1); then return 1; fi
+  case "$MODE" in
+    bench|gray_sample|gray_script_sample|gray_control_sample|verify_gray_idle|verify_gray_groups|reconcile_bench|verify_bench)
+      # Rootless bench cannot inspect unrelated root processes. ESRCH for the
+      # exact negative PGID proves absence; EPERM and unknown errors do not.
+      ;;
+    *)
+      for proc in /proc/[0-9]*; do
+        [ -d "$proc" ] || continue
+        pg=$(group_id "${proc##*/}")
+        if [ -z "$pg" ]; then [ ! -d "$proc" ] || return 1; continue; fi
+        [ "$pg" != "$expected" ] || return 1
+      done
+      ;;
+  esac
+  if error=$(LC_ALL=C /system/bin/kill -0 -- "-$expected" 2>&1); then return 1; fi
   case "$error" in *"No such process"*) ;; *) return 1 ;; esac
 }
 quiescent() {
@@ -304,14 +344,14 @@ cleanup_failure() {
   trap - EXIT INT TERM
   # The absence of an attributable child/group is required before any restore write.
   if stop_owned; then
-    case "$MODE" in render_readonly|reconcile_render) : ;; control_probe|reconcile_controls) restore_controls || true ;; *) restore_trace && restore_controls || true ;; esac
+    case "$MODE" in bench|gray_sample|gray_script_sample|gray_control_sample|reconcile_bench|render_readonly|reconcile_render) : ;; control_probe|reconcile_controls) restore_controls || true ;; *) restore_trace && restore_controls || true ;; esac
   fi
 }
 acquire_master() {
   [ ! -e "$D/session.closed" ] || return 1
   L="$D/worker.lock"
   if [ -d "$L" ]; then
-    case "$MODE" in reconcile|reconcile_controls|reconcile_render) ;; *) return 1 ;; esac
+    case "$MODE" in reconcile|reconcile_controls|reconcile_render|reconcile_bench) ;; *) return 1 ;; esac
     ledger_complete "$L/owner" || return 1
     awk -v t="$TOKEN" -v b="$BOOT" 'NF!=5 || $1!=t || $2!=b {bad=1} END {exit (bad || NR!=1)}' "$L/owner" || return 1
     IFS=' ' read -r oldtoken oldboot oldpid oldticks oldrun < "$L/owner" || return 1
@@ -337,7 +377,7 @@ release_master() {
   [ "$(cat "$D/worker.lock/owner")" = "$MASTER" ] || return 1
   if [ -e "$D/session.closed" ]; then
     # Closure forbids all normal intents. Only this matching terminal reconcile may unlock.
-    case "$MODE" in reconcile|reconcile_controls|reconcile_render) ;; *) return 1 ;; esac
+    case "$MODE" in reconcile|reconcile_controls|reconcile_render|reconcile_bench) ;; *) return 1 ;; esac
     [ "$(cat "$D/session.closed/owner")" = "$TOKEN $BOOT $RUN" ] || return 1
     [ "$(cat "$D/owner")" = "$TOKEN $BOOT" ] && [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT" ] || return 1
     printf '%s\tterminal_release_master\t%s\t%s\n' "$TOKEN" "$D/worker.lock" "$$" >> "$D/journal.tsv"
@@ -358,9 +398,132 @@ close_session() {
   printf 'SESSION_REVOKED %s %s %s\n' "$TOKEN" "$BOOT" "$RUN" > "$R/session_closed.txt" || return 1
   sync || return 1
 }
+verify_owned_children() {
+  [ ! -e "$D/worker.lock" ] && [ ! -L "$D/worker.lock" ] || return 85
+  for prior in "$D"/*; do
+    [ -d "$prior" ] || continue
+    [ "$prior" != "$D/session.closed" ] || continue
+    R=$prior; quiescent || return 77
+    [ "$MODE" = verify_gray_groups ] || input_natural_complete || return 77
+  done
+}
+input_natural_complete() {
+  [ "$GRAY_SCRIPT_ROUND" = 1 ] || return 0
+  # A durable permit may have admitted input even if the start receipt is absent.
+  [ -e "$R/permit-workload" ] || [ -L "$R/permit-workload" ] || return 0
+  ledger_complete "$R/input-complete.json" || return 1
+  # Generated receipt is a single canonical line. No JSON tool is required on Android.
+  awk -v t="$TOKEN" -v b="$BOOT" -v r="${R##*/}" '
+    BEGIN {prefix="{\"schema\":\"phonefarm/gray-input-complete@1\",\"token\":\"" t "\",\"boot_id\":\"" b "\",\"run\":\"" r "\","}
+    NR!=1 || index($0,prefix)!=1 {bad=1}
+    {rest=substr($0,length(prefix)+1); if(rest !~ /^"steps":[0-9]+,"declared_ms":[0-9]+,"start":[0-9]+([.][0-9]+)?,"end":[0-9]+([.][0-9]+)?\}$/) bad=1}
+    END {exit (bad || NR!=1)}' "$R/input-complete.json"
+}
+valid_closed_owner() {
+  [ -d "$D/session.closed" ] && [ ! -L "$D/session.closed" ] || return 1
+  ledger_complete "$D/session.closed/owner" || return 1
+  awk -v t="$TOKEN" -v b="$BOOT" 'NF!=3 || $1!=t || $2!=b || $3!~/^[a-zA-Z0-9_:-]+$/ {bad=1} END {exit (bad || NR!=1)}' "$D/session.closed/owner"
+}
+# Closed bench verification is read-only and cannot reacquire or clear a lock.
+if [ "$MODE" = verify_bench ]; then
+  valid_closed_owner || exit 86
+  verify_owned_children || exit $?
+  echo BENCH_CLOSED_QUIESCENT
+  exit 0
+fi
+if [ "$MODE" = verify_gray_groups ]; then
+  # Group absence permits independent charge restoration, never input completion.
+  if [ -e "$D/session.closed" ] || [ -L "$D/session.closed" ]; then valid_closed_owner || exit 86; fi
+  verify_owned_children || exit $?
+  echo GRAY_GROUPS_QUIESCENT
+  exit 0
+fi
+if [ "$MODE" = verify_gray_idle ]; then
+  # Current group absence, not an earlier quiescence.txt, admits the next round.
+  verify_owned_children || exit $?
+  echo GRAY_IDLE_QUIESCENT
+  exit 0
+fi
 # The host invokes this worker through setsid, so master and its synchronous children own one group.
 acquire_master || exit 85
 case "$MODE" in
+  gray_script_sample|gray_control_sample)
+    intent mkdir "$R" ''; mkdir "$R"
+    printf '%s\n' "$MASTER" > "$R/master.tsv"
+    gray_workload="$D/workload.sh"; gray_kind=gray_script_v1
+    if [ "$MODE" = gray_control_sample ]; then gray_workload="$D/workload-$RUN.sh"; gray_kind=gray_control_v1; fi
+    printf '%s\n' "$gray_kind" > "$R/round-kind.txt"; sync
+    trap 'cleanup_failure' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    start_child trace "$D/trace.sh" "$gray_instance" "$gray_seconds" "$R" 6 "$gray_qualify"; trace_pid=$CHILD_PID
+    n=0
+    while [ ! -f "$R/trace-ready.txt" ]; do
+      [ -d "/proc/$trace_pid" ] && [ "$n" -lt 200 ] || exit 76
+      n=$((n+1)); sleep .1
+    done
+    [ "$(cat "$R/trace-ready.txt")" = TRACE_READY ] || exit 76
+    start_child sampler "$D/sample_env.sh" "$((gray_seconds+10))" 2 "$R" "$TOKEN" "$BOOT"; sampler_pid=$CHILD_PID
+    start_child workload "$gray_workload" "$R" "$TOKEN" "$BOOT"; workload_pid=$CHILD_PID
+    if wait "$workload_pid"; then echo 0 > "$R/workload_exit.txt"; else code=$?; echo "$code" > "$R/workload_exit.txt"; fi
+    if wait "$trace_pid"; then echo 0 > "$R/trace_exit.txt"; else code=$?; echo "$code" > "$R/trace_exit.txt"; fi
+    if wait "$sampler_pid"; then echo 0 > "$R/sampler_exit.txt"; else code=$?; echo "$code" > "$R/sampler_exit.txt"; fi
+    n=0; until quiescent; do [ "$n" -lt 50 ] || exit 76; n=$((n+1)); sleep .1; done
+    [ "$CHILD_ROWS" = 3 ] || exit 76
+    echo OWNED_GROUPS_ABSENT > "$R/quiescence.txt"; sync
+    trap - EXIT INT TERM
+    release_master
+    # Missing natural input completion is data here, but blocks idle/recovery below.
+    echo GRAY_SCRIPT_SAMPLE_COMPLETE
+    ;;
+  gray_sample)
+    intent mkdir "$R" ''; mkdir "$R"
+    printf '%s\n' "$MASTER" > "$R/master.tsv"; sync
+    trap 'cleanup_failure' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    start_child sampler "$D/sample_env.sh" "$((gray_seconds+4))" 2; sampler_pid=$CHILD_PID
+    start_child workload "$D/workload.sh" "$gray_instance" "$gray_seconds" "$R"; workload_pid=$CHILD_PID
+    if wait "$workload_pid"; then echo 0 > "$R/workload_exit.txt"; else code=$?; echo "$code" > "$R/workload_exit.txt"; fi
+    if wait "$sampler_pid"; then echo 0 > "$R/sampler_exit.txt"; else code=$?; echo "$code" > "$R/sampler_exit.txt"; fi
+    quiescent || exit 76
+    [ "$CHILD_ROWS" = 2 ] || exit 76
+    echo OWNED_GROUPS_ABSENT > "$R/quiescence.txt"; sync
+    trap - EXIT INT TERM
+    release_master
+    # Collection exit codes are data; only known child quiescence completes this mode.
+    echo GRAY_SAMPLE_COMPLETE
+    ;;
+  bench)
+    intent mkdir "$R" ''; mkdir "$R"
+    printf '%s\n' "$MASTER" > "$R/master.tsv"; sync
+    trap 'cleanup_failure' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    start_child sampler "$D/sample_env.sh"
+    start_child workload "$D/workload.sh"; workload_pid=$CHILD_PID
+    if wait "$workload_pid"; then echo 0 > "$R/workload_exit.txt"; else code=$?; echo "$code" > "$R/workload_exit.txt"; fi
+    stop_owned || exit 76
+    quiescent || exit 76
+    echo OWNED_GROUPS_ABSENT > "$R/quiescence.txt"; sync
+    trap - EXIT INT TERM
+    release_master
+    # Lifecycle completion is independent of the workload's recorded exit code.
+    echo BENCH_COMPLETE
+    ;;
+  reconcile_bench)
+    for prior in "$D"/*; do
+      [ -d "$prior" ] || continue
+      [ "$prior" != "$D/worker.lock" ] || continue
+      R=$prior; stop_owned && input_natural_complete || exit 77
+    done
+    R="$D/$RUN"; intent mkdir "$R" ''; mkdir "$R"
+    printf '%s\n' "$MASTER" > "$R/master.tsv"; sync
+    echo OWNED_GROUPS_ABSENT > "$R/quiescence.txt"
+    close_session
+    release_master
+    echo BENCH_RECONCILE_COMPLETE
+    ;;
   render_readonly)
     intent mkdir "$R" ''; mkdir "$R"
     printf '%s\n' "$MASTER" > "$R/master.tsv"; sync

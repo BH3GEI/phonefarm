@@ -51,10 +51,12 @@ const DEFAULT_DENY_KEYWORDS: [&str; 7] = [
 /// 现在校验直接走 `parse_gray_rewrites`, 这张表只用于报错文字, 两者由单测锁在一起。
 pub(crate) const GRAY_SUPPORTED_KNOBS: [&str; 3] = ["loadop_dont_care", "storeop_dont_care", "npuop"];
 
-const USAGE: &str = "用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--lock-gpu-level N] [--json] [--validate-only]
+const USAGE: &str = "恢复: phonefarm eval recover --session DIR --serial S [--json]
+用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--lock-gpu-level N] [--evidence-origin device|synthetic] [--json] [--validate-only]
   --validate-only: 只做收端校验 (validate_v2 + gray 改写解析 + 负载脚本/层 .so 是否找得到), 不碰设备; 退出码 0 = 收, 2 = 拒
   --lock-gpu-level N  评测期间把 kgsl min/max_pwrlevel 都钉在 N 档 (审计 #9: 档位不受控时同一配置帧率跳台阶),
-                      结束时还原, 回包 conditions_observed.gpu_level_lock; 候选本身改 GPU 档位的 sysparam 不能同时用";
+                      结束时还原, 回包 conditions_observed.gpu_level_lock; 候选本身改 GPU 档位的 sysparam 不能同时用;
+                      kind=gray 走受控会话 (session owner), 不支持此旗子";
 
 /// PyVal → serde_json 值 (同一个桥的反向)。经 dumps 走文本, 非有限值
 /// (Infinity/NaN) 会被 serde_json 拒掉, 这里如实落 null。
@@ -100,6 +102,7 @@ struct EvalArgs {
     lock_gpu_level: Option<u32>,
     /// 只校验不上机 (离线 dry-run)
     validate_only: bool,
+    evidence_origin: String,
 }
 
 fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
@@ -109,6 +112,7 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
     let mut qualify_from = None;
     let mut lock_gpu_level = None;
     let mut validate_only = false;
+    let mut evidence_origin = "device".to_string();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--request" => request = it.next().cloned(),
@@ -122,10 +126,12 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
                 lock_gpu_level = Some(v.ok_or(format!("--lock-gpu-level 要一个非负整数档位号\n{USAGE}"))?);
             }
             "--validate-only" => validate_only = true,
+            "--evidence-origin" => evidence_origin = it.next().ok_or("missing evidence origin")?.clone(),
             "--json" => {} // eval 的回包恒为 JSON, 收下这个旗子仅为兼容接口形状
             other => return Err(format!("不认识的参数 {other}\n{USAGE}")),
         }
     }
+    if !matches!(evidence_origin.as_str(),"device"|"synthetic") {return Err("invalid evidence origin".into());}
     Ok(EvalArgs {
         request: request.ok_or(format!("缺少 --request\n\n{USAGE}"))?,
         serial,
@@ -135,10 +141,12 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
         qualify_from,
         lock_gpu_level,
         validate_only,
+        evidence_origin,
     })
 }
 
 pub fn run_eval(args: &[String]) -> i32 {
+    if args.first().is_some_and(|a|a=="recover") {return recover_gray_eval(&args[1..]);}
     let a = match parse_args(args) {
         Ok(v) => v,
         Err(e) => {
@@ -229,6 +237,10 @@ pub fn run_eval(args: &[String]) -> i32 {
         eprintln!("不认识的 kind {kind}");
         return 2;
     }
+    if kind == "gray" && a.lock_gpu_level.is_some() {
+        eprintln!("--lock-gpu-level 不支持 kind=gray: 灰档评测由受控会话 (gray_eval_session) 持有并恢复设备状态, 会话外的档位写入无法随会话恢复");
+        return 2;
+    }
     // 审查 R2 #11: 同一目录再跑会覆盖上一次的证据 (hw.txt、readback、快照、截图都是同名写入), 非空就拒跑
     if let Err(e) = refuse_nonempty_out(Path::new(&evidence)) {
         eprintln!("{e}");
@@ -247,6 +259,13 @@ pub fn run_eval(args: &[String]) -> i32 {
         }
     };
     let serial = Some(_lease.serial.clone());
+    if kind=="gray" {
+        return match gray_eval_owned(&req, _lease, Path::new(&evidence), &a.evidence_origin) {
+            Ok(r)=>{ let code=if r["recovery"]["status"]!="reported_complete" || !r["report_error"].is_null() || !r["qualification_error"].is_null() {2} else if r["status"]=="ABORT" {1} else {0}; println!("{}",serde_json::to_string_pretty(&r).unwrap()); code },
+            Err(e)=>{eprintln!("{e}");2}
+        };
+    }
+    if a.evidence_origin!="device" {eprintln!("--evidence-origin is supported for owned gray eval only");return 2;}
     // 审计 #9: 可选的 GPU 档位锁, 包住整次评测; 候选本身改档位的不能锁
     let gpu_lock = match a.lock_gpu_level {
         Some(level) => {
@@ -271,7 +290,6 @@ pub fn run_eval(args: &[String]) -> i32 {
     };
     let report = match kind {
         "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail && !is_screen(&req)),
-        "gray" => gray_eval(&req, serial.as_deref(), Path::new(&evidence)),
         _ => crate::whitebox::whitebox_eval(&req, serial.as_deref(), Path::new(&evidence)),
     };
     // 锁档无条件还原 (评测 Err 也还原), 结果写进回包
@@ -683,6 +701,10 @@ fn offline_qualification(req: &Value, path: &Path) -> Result<Value, String> {
 
 fn record_qualification(report: &mut Value, evidence: &Path, facts: &Evidence) -> Result<qualification::Report,String> {
     let q = qualification::evaluate(facts)?;
+    write_qualification(report, evidence, facts, q)
+}
+
+fn write_qualification(report: &mut Value, evidence: &Path, facts: &Evidence, q: qualification::Report) -> Result<qualification::Report,String> {
     std::fs::create_dir_all(evidence).map_err(|e|e.to_string())?;
     qualification::write(&evidence.join("qualification.json"), &q)?;
     std::fs::write(evidence.join("qualification_evidence.json"),serde_json::to_string_pretty(facts).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
@@ -3754,9 +3776,6 @@ pub(crate) fn judge_image(gate: &ImageGate, best_knob_vs_ctrl_db: Option<f64>) -
         )),
     }
 }
-/// 画质判据最多留几张原始截图 (每张 2400×1080 RGBA 约 10 MB)。
-const IQ_MAX_CTRL_SHOTS: usize = 6;
-const IQ_MAX_KNOB_SHOTS: usize = 3;
 /// 挂层重启、进到场景之后先等画面稳下来再截图 (流式加载、过场淡入)。
 const GRAY_SHOT_SETTLE_S: u64 = 8;
 /// 两张图逐像素相同时 PSNR 是无穷大; JSON 放不下, 按这个值记。
@@ -3783,19 +3802,32 @@ pub(crate) fn psnr_rgba(a: &[u8], b: &[u8]) -> Option<f64> {
     Some(((10.0 * (255.0f64 * 255.0 / mse).log10()) * 100.0).round() / 100.0)
 }
 
-/// 截一张原始 RGBA 帧 (adb exec-out screencap, 不经 PNG)。回 (宽, 高, 像素)。
-fn grab_rgba(serial: &str) -> Result<(u32, u32, Vec<u8>), String> {
-    let out = Command::new(adb_path())
-        .args(["-s", serial, "exec-out", "screencap"])
-        .output()
-        .map_err(|e| format!("截图起不来: {e}"))?;
-    let (w, h, px) = crate::framecheck::parse_screencap(&out.stdout)?;
-    Ok((w, h, px.to_vec()))
+fn recover_gray_eval(args:&[String])->i32 {
+    let result=(||->Result<Value,String>{
+        let (mut dir,mut serial)=(None,None);let mut it=args.iter();
+        while let Some(a)=it.next(){match a.as_str(){"--session"=>dir=it.next(),"--serial"=>serial=it.next(),"--json"=>{},_=>return Err(format!("unknown eval recover argument: {a}"))}}
+        let parent=crate::gray_eval_session::Parent::resume(Path::new(dir.ok_or("missing --session")?),serial.ok_or("missing --serial")?)?;
+        parent.finish(Some("explicit same-context recovery; original experiment report is unchanged"))
+    })();
+    match result {Ok(r)=>{println!("{}",serde_json::to_string_pretty(&r).unwrap());if r["status"]=="reported_complete"{0}else{2}},Err(e)=>{eprintln!("{e}");2}}
 }
 
 pub(crate) fn save_png(path: &Path, shot: &(u32, u32, Vec<u8>)) {
     if let Some(img) = image::RgbaImage::from_raw(shot.0, shot.1, shot.2.clone()) {
         let _ = img.save(path);
+    }
+}
+
+fn wait_owned_launch(parent:&crate::gray_eval_session::Parent, launch:&LaunchSpec, layered:bool)->Result<(),String> {
+    let start=std::time::Instant::now();
+    loop {
+        if !parent.base.target_alive()? {return Err("target exited before the launch window".into());}
+        let ready=if launch.marker.is_some() {parent.base.eval_launch_marker()?.is_some_and(|v|!v.trim().is_empty())}
+            else {start.elapsed().as_secs()>=LAUNCH_SETTLE_S};
+        let loaded=!layered || parent.base.marker()?.is_some_and(|v|v["frames"].as_u64().is_some());
+        if ready&&loaded {if layered{parent.base.narrow()?;}return Ok(());}
+        if start.elapsed().as_secs()>=LAUNCH_MARKER_TIMEOUT_S {return Err("launch marker or current layer evidence timed out".into());}
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 
@@ -3811,65 +3843,6 @@ pub(crate) fn genshin_gate_entry(req: &Value) -> bool {
 }
 
 /// 灰档评测外壳: 设备端脚本先推最新版 (采样器版本要和主机端解析一致), 按请求停充,
-/// 跑完 (含任何中途退出) 一定恢复充电, 并把停充经过记进回包。测量本身在 [`gray_eval_arms`]。
-fn gray_eval(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
-    let Some(serial) = serial else {
-        return Err("kind=gray 需要真机: 请加 --serial".into());
-    };
-    let _ = std::fs::create_dir_all(evidence);
-    // 以前灰档不推脚本, 用的是设备上残留的旧版 sample_env.sh (可能还是 1 Hz、旧供电口径)
-    push_tools(serial)?;
-    let want_suspend = req["conditions"]["charging_suspend"]["enabled"].as_bool().unwrap_or(false);
-    let mut suspended_via: Option<String> = None;
-    let mut usb_supply_note: Option<String> = None;
-    let mut charge_settle: Option<Value> = None;
-    if want_suspend {
-        let out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
-        std::fs::write(evidence.join("charge_suspend.log"), &out).map_err(|e| e.to_string())?;
-        usb_supply_note = sysparam::usb_supply_note(&out);
-        if adb_ok(&out) && out.contains("CHARGE_SUSPENDED") {
-            suspended_via = out
-                .lines()
-                .find(|l| l.contains("node="))
-                .map(|l| l.trim().to_string())
-                .or_else(|| Some("/sys/class/qcom-battery/charging_enabled".into()));
-            charge_settle = Some(wait_charge_settled(serial));
-        }
-    }
-    let res = gray_eval_arms(req, Some(serial), evidence);
-    let mut charge_restored: Option<bool> = None;
-    if suspended_via.is_some() {
-        let cr = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
-        std::fs::write(evidence.join("charge_restore.log"), &cr).ok();
-        charge_restored = Some(adb_ok(&cr));
-    }
-    let text = res?;
-    let Ok(mut report) = serde_json::from_str::<Value>(&text) else {
-        return Ok(text);
-    };
-    if !report["conditions_observed"].is_object() {
-        report["conditions_observed"] = json!({});
-    }
-    report["conditions_observed"]["charging_suspend_requested"] = json!(want_suspend);
-    report["conditions_observed"]["charging_suspended_via"] = json!(suspended_via);
-    report["conditions_observed"]["charge_settle"] = json!(charge_settle);
-    report["conditions_observed"]["usb_supply_note"] = json!(usb_supply_note);
-    report["conditions_observed"]["charge_restored"] = json!(charge_restored);
-    report["conditions_observed"]["world_entry"] = json!(if genshin_gate_entry(req) {
-        "genshin_gate"
-    } else {
-        req["workload"]["enter"].as_str().unwrap_or("none")
-    });
-    if charge_restored == Some(false) {
-        report["conditions_observed"]["restored"] = json!(false);
-        report["status"] = json!("ABORT");
-        report["verdict"]["reason"] = json!(format!(
-            "恢复充电失败 (见 charge_restore.log), 设备没还原; 原判定: {}",
-            report["verdict"]["reason"].as_str().unwrap_or("")
-        ));
-    }
-    Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
-}
 
 /// 离线校验 (`eval --validate-only`): validate_v2 之外, 把上机时才会查的东西先查一遍 ——
 /// gray 改写解析成的层属性串、负载脚本、层 .so 是否带 storeop 开关、轮数够不够判显著。不碰设备。
@@ -3911,6 +3884,8 @@ pub(crate) fn offline_check(req: &Value) -> Result<Value, String> {
     if let Some(n) = &knobs.npuop {
         let f = crate::npuop_device::NpuopFiles::locate(&n.files).map_err(|e| format!("npuop 本机文件: {e}"))?;
         out["npuop_files"] = f.to_json();
+        out["owned_eval_supported"] = json!(false);
+        out["owned_eval_note"] = json!("npuop 只过离线校验: 受控灰档会话尚未接管 NPU 运行库/模型挂载, 上机 eval 会在碰设备前拒绝");
         out["layer_so"] = json!(f.layer_so.display().to_string());
         return Ok(out);
     }
@@ -3924,619 +3899,6 @@ pub(crate) fn offline_check(req: &Value) -> Result<Value, String> {
     Ok(out)
 }
 
-fn gray_eval_arms(req: &Value, serial: Option<&str>, evidence: &Path) -> Result<String, String> {
-    let kind = "gray";
-    let mut report = base_report(req, kind);
-    let Some(serial) = serial else {
-        return Err("kind=gray 需要真机: 请加 --serial".into());
-    };
-    let policy=policy_for_request(req)?;
-    let mut facts=Evidence::new(Stage::Probe,policy,qualification::inspect_device(serial));
-    let q=record_qualification(&mut report,evidence,&facts)?;
-    if !q.probe_allowed {report["verdict"]["reason"]=json!("root/trace 未验证，禁止灰档写入");return Ok(serde_json::to_string_pretty(&report).unwrap());}
-    let require_hit = req["payload"]["require_hit"].as_bool().unwrap_or(true);
-    let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen").to_string();
-    let min_psnr = req["payload"]["image_check"]["min_psnr_db"]
-        .as_f64()
-        .unwrap_or(GRAY_MIN_PSNR_DB);
-    let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
-    let temp_cap = req["conditions"]["temp_cap_c"].as_f64();
-    // 候选臂旋钮自报按设计处理的帧低于这个比例 → 这一臂未按设计施加, 连同对照臂剔除
-    let min_frac = crate::scorecard::min_applied_frac(req);
-
-    // 改写在碰设备之前解析: 不认识的开关直接 ABORT, 设备一下都不碰
-    let knobs = match parse_gray_rewrites(&req["payload"]) {
-        Ok(k) => k,
-        Err(e) => {
-            report["verdict"]["reason"] = json!(e);
-            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-        }
-    };
-    // 画质策略 (judge/v1-scorecard): report 下画面判据只记差距, 不否决性能判定。
-    // npuop 是基于模型的候选, 请求没写时缺省就是 report (gate 会把每个超分候选都判成画面出错)。
-    let policy = gray_image_policy(req, &knobs).unwrap_or(crate::scorecard::ImagePolicy::Gate);
-    // npuop: 本机文件 (层 / 模型 / 运行库) 在碰设备之前定位并核验
-    let npu_files = match &knobs.npuop {
-        Some(n) => match crate::npuop_device::NpuopFiles::locate(&n.files) {
-            Ok(f) => Some(f),
-            Err(e) => {
-                report["verdict"]["reason"] = json!(format!("npuop 本机文件没备齐, 不碰设备: {e}"));
-                return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-            }
-        },
-        None => None,
-    };
-
-    // knobs/gray 的调用层: src/graylayer.rs (enable_layer.sh 的 Rust 移植)。
-    // **两臂都挂层**, 唯一差别是改写属性 —— ctrl = 层+改写全关, knob = 层+这一组改写。
-    // 要判的是"这条改写"值不值, 不是"挂层这件事"值不值; 两臂都挂层才能把层本身的
-    // 开销消掉, 差值才干净地对应改写这一个改动。
-    let launch = launch_spec(req);
-    if launch.is_some() && knobs.loadop {
-        report["verdict"]["reason"] = json!("自驱动负载只支持 storeop_dont_care (画面比对走孪生 pass 现场切换, loadop 没有孪生)");
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    if launch.is_some() && knobs.npuop.is_some() {
-        report["verdict"]["reason"] = json!("npuop 只对原神类目标有效 (层靠 upop 定位原神自己的放大 pass), 自驱动负载 (白盒载体) 不支持");
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    let extras = launch.as_ref().map(|l| l.extras.clone());
-    // npuop 时两臂用同一个 (带 npuop 的) 层 .so, 只切属性 —— 层本身的开销两臂一样
-    let so = npu_files.as_ref().map(|f| f.layer_so.to_string_lossy().into_owned());
-    let gl = crate::graylayer::GrayLayer::new(serial).with_so(so.clone()).with_launch_extras(extras.clone());
-    let gl_knob = crate::graylayer::GrayLayer::new(serial)
-        .with_so(so)
-        .with_launch_extras(extras)
-        .with_storeop((knobs.storeop != "0").then(|| knobs.storeop.clone()), false)
-        .with_npuop(knobs.npuop.as_ref().map(|n| n.props.clone()));
-    let mount = |arm: &str| -> Result<(), String> {
-        if arm == "knob" {
-            let mode = if knobs.npuop.is_some() { "npuop" } else if knobs.loadop { "loadop" } else { "probe" };
-            gl_knob.mount_mode(mode, &pkg, false)?;
-            gl_knob.require_storeop()?;
-            gl_knob.require_npuop()
-        } else {
-            gl.mount_mode("probe", &pkg, false)
-        }
-    };
-
-    // 改写先落盘再动设备 (证据纪律)
-    let _ = std::fs::create_dir_all(evidence);
-    std::fs::write(
-        evidence.join("rewrites.json"),
-        serde_json::to_string_pretty(&json!({
-            "rewrites": req["payload"]["rewrites"],
-            "debug.knobs.loadop": if knobs.loadop { "1" } else { "0" },
-            "debug.knobs.storeop": knobs.storeop,
-            "npuop": knobs.npuop.as_ref().map(|n| json!({"setprop": n.props.setprop_cmd(true), "files": npu_files.as_ref().map(|f| f.to_json())})),
-            "image_policy": policy.as_str(),
-            "image_check_min_psnr_db": min_psnr,
-        }))
-        .unwrap_or_default(),
-    )
-    .map_err(|e| e.to_string())?;
-
-    // 测量与 sysparam 同一套 ABBA (负载必须触控版)
-    let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(1).max(1) as u32;
-    let seconds = req["workload"]["seconds"].as_i64().unwrap_or(30).max(1) as u64;
-    let spf = declared_spf(req);
-    let fps_cap_declared = declared_fps_cap(req);
-    let wl_file = req["workload"]["script"]
-        .as_str()
-        .unwrap_or("loop_v1/scripts/workload_spin_touch_v1.json");
-    let workload_path = match (resolve_path(wl_file), &launch) {
-        (Some(p), _) => p,
-        (None, Some(_)) => PathBuf::new(),
-        (None, None) => {
-            report["verdict"]["reason"] =
-                json!(format!("负载脚本不在: {wl_file} (按 cwd 与仓库根都找不到)"));
-            return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-        }
-    };
-    // 自驱动负载 (相机一直在飞) 没法在两臂之间截到同一画面: 画面比对改成上机前跑一次
-    // frame-audit storeop-check —— 同一局里用孪生 pass 现场开/关, 静态场景逐像素比。
-    // 开关之间的差异 (off_vs_on) 不能明显大于同状态之间的噪声 (same_state), 否则判画面出错。
-    let mut live_check: Option<Value> = None;
-    let mut live_gap: Option<String> = None;
-    if let Some(l) = &launch {
-        let static_extras = l.static_extras.clone().unwrap_or_else(|| l.extras.clone());
-        let chk = crate::frameaudit::storeop_check(
-            serial,
-            &evidence.join("image_check"),
-            None,
-            &knobs.storeop,
-            2,
-            &pkg,
-            &[],
-            STATIC_SETTLE_S,
-            Some(static_extras),
-        );
-        let v = match chk {
-            Ok(v) => v,
-            Err(e) => {
-                report["verdict"]["reason"] = json!(format!("画面比对 (storeop-check) 没做成, 不上 A/B: {e}"));
-                report["evidence_dir"] = json!(evidence.display().to_string());
-                return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-            }
-        };
-        let verdict = live_check_verdict(&v);
-        if let Err(why) = &verdict {
-            if !policy.is_report() {
-                report["conditions_observed"] = json!({"image_check": {"method": "storeop_check_live", "result": v}});
-                report["verdict"]["reason"] = json!(format!("{} (storeop-check 现场开关, image_policy=gate 不量性能): {why}", crate::scorecard::IMAGE_GATE_PREFIX));
-                report["evidence_dir"] = json!(evidence.display().to_string());
-                return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-            }
-            // report: 画面差距记下, 性能照量
-            live_gap = Some(why.clone());
-        }
-        live_check = Some(v);
-    }
-    // 实验资格: 不挂层的冷机 + 负载自检 + 3 轮基线, 资格不过不上挂层候选实验
-    push_tools(serial)?;
-    let baseline_before=snapshot(serial);
-    let _ = gl.off();
-    let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false,"reason"=>"conditions.cool_c 未知"}};
-    facts.cold_ok=cold.get("ok").and_then(|v|v.as_bool());
-    if facts.cold_ok==Some(true) {
-        let workload_check=verify_workload_for(serial,&workload_path,launch.as_ref(),&pkg,&evidence.join("workload_check"));
-        facts.workload_verified=workload_check["verified"].as_bool();
-        if facts.workload_verified==Some(true) {for i in 1..=3 {
-            match run_one_for(serial,&format!("baseline{i}"),&evidence.join(format!("baseline{i}")),seconds,&workload_path,&pkg,req["workload"]["render_comm"].as_str(),launch.as_ref(),spf) {
-                Ok(m)=>facts.baseline.push(m),Err(_)=>break,
-            }
-        }}
-    }
-    facts.device.control_verified=None; // layer effectiveness remains unverified before mount; no assumed capability
-    facts.restored=Some(snapshots_identical(&baseline_before,&snapshot(serial)));
-    facts.stage=Stage::Experiment;
-    let experiment=record_qualification(&mut report,evidence,&facts)?;
-    if !experiment.experiment_allowed {
-        report["verdict"]["reason"]=json!("灰档基线/冷机/负载/供电资格未通过，禁止挂层候选实验");
-        return Ok(serde_json::to_string_pretty(&report).unwrap());
-    }
-    let mut knob_runs: Vec<Value> = Vec::new();
-    let mut ctrl_runs: Vec<Value> = Vec::new();
-    let mut abort_reason: Option<String> = None;
-    // 画面比对: 每一轮两臂各在负载开始前、同一位置截一张, 改写臂对对照臂算 PSNR。
-    // 对照臂相邻两轮之间也算一个, 当作"什么都没改时画面自己会差多少"的参照, 一起落进报告。
-    let mut psnr_knob_vs_ctrl: Vec<f64> = Vec::new();
-    let mut psnr_ctrl_vs_ctrl: Vec<f64> = Vec::new();
-    // 同设置重拍 (对照臂隔一段再拍一张): 单轮评测唯一的噪声底来源
-    let mut noise_within_round: Vec<f64> = Vec::new();
-    let mut prev_ctrl: Option<(u32, u32, Vec<u8>)> = None;
-    // 改写臂同样重拍一张 (审计 #14: 以前只有对照臂多等 8 秒、多拍一张, 晚约 10 秒开测,
-    // ABBA 抵消不了)。两臂等待与截图次数对齐; 这一组只记录, 不进噪声底 (画面门槛口径不变)
-    let mut knob_within_round: Vec<f64> = Vec::new();
-    // 画质判据 (iqjudge) 的原始截图: 对照臂每轮 2 张 (含重拍), 改写臂每轮 1 张。限量, 免得多轮时占内存太多。
-    let (mut iq_ctrl_raw, mut iq_knob_raw): (Vec<(u32, u32, Vec<u8>)>, Vec<(u32, u32, Vec<u8>)>) = (Vec::new(), Vec::new());
-    let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
-    let mut cool_log: Vec<Value> = Vec::new();
-    // 臂序随机 (审计 #13), 种子进报告; 环境不一致的对单独剔除 (审计 #9 #11)
-    let order_seed = curtail::order_seed(req["protocol"]["order_seed"].as_u64());
-    let knob_first = curtail::knob_first_order(rounds as usize, order_seed);
-    let mut dropped: Vec<Value> = Vec::new();
-    // 候选臂未按设计施加 (旋钮自报回退 / 部分施加) 被剔除的对
-    let mut unapplied: Vec<Value> = Vec::new();
-    // 审查 R1 #1: 以前只推 sample_hw.sh, 设备上留着旧的 ftrace_capture.sh / sample_env.sh 时
-    // 灰档两臂按线程名认帧、不认停止标志, 而且不报错。全套都推 (push_tools 含 sample_hw.sh)。
-    push_tools(serial)?;
-    // npuop: 研究机布置 (lib 目录副本 + 运行库 + 模型, bind mount; SELinux 放行) 整次评测只做一次,
-    // 两臂都在这个目录上跑 (对照臂 npuop=0, 运行库闲置); 结尾 umount 还原。
-    let npu_mount = match (&npu_files, &knobs.npuop) {
-        (Some(f), Some(_)) => match crate::npuop_device::NpuopMount::setup(serial, &pkg, f, evidence) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                report["verdict"]["reason"] = json!(format!("npuop 研究机布置失败, 没上 A/B: {e}"));
-                report["evidence_dir"] = json!(evidence.display().to_string());
-                return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-            }
-        },
-        _ => None,
-    };
-    'rounds: for i in 1..=rounds {
-        let mut shots: std::collections::BTreeMap<&str, (u32, u32, Vec<u8>)> = Default::default();
-        for arm in if knob_first[i as usize - 1] { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
-            // 层是 CreateInstance 时读的, 切属性必须重启目标 —— force-stop 是两臂切换的一部分
-            let _ = gl.off();
-            let fan = arm_fan_off(serial);
-            // 游戏关着的时候等冷最快; 等到请求的 cool_c 或超时
-            let mut c = arm_wait_cool(serial, cool_c, &format!("{arm}{i}"), arm_cool_timeout(&cool_log));
-            c["arm"] = json!(format!("{arm}{i}"));
-            c["fan"] = fan.clone();
-            cool_log.push(c);
-            if let Some(e) = fan_still_on(&fan) {
-                abort_reason = Some(format!("{arm}{i}: {e}"));
-                break 'rounds;
-            }
-            if let Err(e) = mount(arm) {
-                abort_reason = Some(format!("{arm} 臂挂层失败: {e}"));
-                break 'rounds;
-            }
-            // 挂层 = 重启了游戏。有游戏档案的目标 (enter == "onboard") 自己走回游戏场景;
-            // 进不去这一臂就没法量, 整次评测作废, 不拿登录页 / 加载画面的帧凑数
-            if req["workload"]["enter"].as_str() == Some("onboard") {
-                if let Err(e) = crate::onboard::enter_scene(serial, &pkg, &evidence.join(format!("{arm}{i}_enter"))) {
-                    abort_reason = Some(format!("{arm}{i} 重启后没回到游戏场景: {e}"));
-                    break 'rounds;
-                }
-            } else if genshin_gate_entry(req) {
-                // 原神重启后停在登录页的门上: 不点门, 两臂量的都是登录页, 改写的 pass 根本不出现
-                // (require_hit 会把整次判作废)。走 gray-ab 验过的流程: 等门出现 → 点门 → 按每帧 pass 数判大世界
-                if let Err(e) = crate::grayab::launch_to_world_layered(serial) {
-                    abort_reason = Some(format!("{arm}{i} 重启后没进大世界: {e}"));
-                    break 'rounds;
-                }
-            }
-            // 挂层重启了游戏, 厂商游戏模式可能又把风扇打开 (审计 #11): 开测前再按死一次
-            let fan_after_mount = arm_fan_off(serial);
-            if let Some(c) = cool_log.last_mut() {
-                c["fan_after_mount"] = fan_after_mount.clone();
-            }
-            if let Some(e) = fan_still_on(&fan_after_mount) {
-                abort_reason = Some(format!("{arm}{i} 挂层后: {e}"));
-                break 'rounds;
-            }
-            if let Some(l) = &launch {
-                let res = run_one_launch(
-                    serial,
-                    &format!("gray_{arm}{i}"),
-                    &evidence.join(format!("{arm}{i}")),
-                    seconds,
-                    &pkg,
-                    req["workload"]["render_comm"].as_str(),
-                    l,
-                    false,
-                    None,
-                    spf,
-                );
-                match res {
-                    Ok(mut m) => {
-                        if let (Some(t), Some(cap)) = (run_soc_temp_max(&m), temp_cap) {
-                            if t > cap {
-                                abort_reason = Some(format!("{arm} 臂第 {i} 轮 SoC 结温 {t}C 超过上限 {cap}C"));
-                                break 'rounds;
-                            }
-                        }
-                        m["round"] = json!(i);
-                        if arm == "knob" {
-                            let (hits, marker) = layer_out(serial, &pkg, evidence);
-                            m["layer_hits"] = json!(hits);
-                            if let Some(mk) = &marker {
-                                m["knob_application"] = crate::scorecard::knob_application(mk, min_frac);
-                                m["npuop_frames"] = json!(npuop_frames(mk));
-                            }
-                            knob_runs.push(m);
-                        } else {
-                            ctrl_runs.push(m);
-                        }
-                        if !settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true) {
-                            crate::scorecard::settle_application(i, &mut knob_runs, &mut ctrl_runs, &mut unapplied);
-                        }
-                    }
-                    Err(e) => {
-                        abort_reason = Some(e);
-                        break 'rounds;
-                    }
-                }
-                continue;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
-            match grab_rgba(serial) {
-                Ok(shot) => {
-                    save_png(&evidence.join(format!("shot_{arm}{i}.png")), &shot);
-                    if arm == "ctrl" && iq_ctrl_raw.len() < IQ_MAX_CTRL_SHOTS {
-                        iq_ctrl_raw.push(shot.clone());
-                    } else if arm == "knob" && iq_knob_raw.len() < IQ_MAX_KNOB_SHOTS {
-                        iq_knob_raw.push(shot.clone());
-                    }
-                    shots.insert(arm, shot);
-                }
-                Err(e) => {
-                    abort_reason = Some(format!("{arm}{i} 截图失败, 画面比对做不了: {e}"));
-                    break 'rounds;
-                }
-            }
-            // 每臂都多拍一张 (同样的等待再拍)。对照臂这一对就是本轮场景的噪声底:
-            // 只有轮数 ≥ 2 才拿得到跨轮对照对对照, 单轮评测以前没有任何噪声底可依 ——
-            // 固定 30 dB 阈值在会动的场景里比噪声底还高, 候选会被误判成「画面出错」。
-            // 改写臂也拍, 是为了两臂开测前的等待与截图次数一样 (审计 #14); 它只记录, 不进噪声底。
-            std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
-            if let Ok(again) = grab_rgba(serial) {
-                save_png(&evidence.join(format!("shot_{arm}{i}_repeat.png")), &again);
-                if let Some(q) = psnr_rgba(&shots[arm].2, &again.2) {
-                    if arm == "ctrl" {
-                        noise_within_round.push(q);
-                        // 只有对照臂的重拍进画质判据的对照组 (原生自噪声); 改写臂的重拍不能混进对照组
-                        if iq_ctrl_raw.len() < IQ_MAX_CTRL_SHOTS {
-                            iq_ctrl_raw.push(again);
-                        }
-                    } else {
-                        knob_within_round.push(q);
-                    }
-                }
-            }
-            let res = run_one_with(
-                serial,
-                &format!("gray_{arm}{i}"),
-                &evidence.join(format!("{arm}{i}")),
-                seconds,
-                &workload_path,
-                &pkg,
-                req["workload"]["render_comm"].as_str(),
-                spf,
-            );
-            match res {
-                Ok(mut m) => {
-                    if let (Some(t), Some(cap)) = (run_soc_temp_max(&m), temp_cap) {
-                        if t > cap {
-                            abort_reason = Some(format!("{arm} 臂第 {i} 轮 SoC 结温 {t}C 超过上限 {cap}C"));
-                            break 'rounds;
-                        }
-                    }
-                    m["round"] = json!(i);
-                    if arm == "knob" {
-                        // 命中 marker 要在**这一臂跑完后立刻**采: 下一次 mount_layer
-                        // 会把三个落点全删了重写, 拖到循环外读到的就是初始化的空表
-                        let (hits_now, marker) = layer_out(serial, &pkg, evidence);
-                        m["layer_hits"] = json!(hits_now);
-                        // 旋钮自报的施加程度 (npuop 回退双线性等): 同一份 marker, 同一时刻读
-                        if let Some(mk) = &marker {
-                            m["knob_application"] = crate::scorecard::knob_application(mk, min_frac);
-                            m["npuop_frames"] = json!(npuop_frames(mk));
-                        }
-                        knob_runs.push(m);
-                    } else {
-                        ctrl_runs.push(m);
-                    }
-                    if !settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, true) {
-                        crate::scorecard::settle_application(i, &mut knob_runs, &mut ctrl_runs, &mut unapplied);
-                    }
-                }
-                Err(e) => {
-                    abort_reason = Some(e);
-                    break 'rounds;
-                }
-            }
-        }
-        if launch.is_some() {
-            continue; // 画面比对已在上机前用 storeop-check 做过
-        }
-        let (k, c) = (&shots["knob"], &shots["ctrl"]);
-        let Some(p) = psnr_rgba(&k.2, &c.2) else {
-            abort_reason = Some(format!("第 {i} 轮两臂截图尺寸不一样 ({}x{} vs {}x{}), 画面比对做不了", k.0, k.1, c.0, c.1));
-            break;
-        };
-        psnr_knob_vs_ctrl.push(p);
-        if let Some(prev) = &prev_ctrl {
-            if let Some(q) = psnr_rgba(&prev.2, &c.2) {
-                psnr_ctrl_vs_ctrl.push(q);
-            }
-        }
-        // 画面判定不在这里做: 噪声底要等所有轮拍完才知道 (单轮时靠对照臂的重复拍)。
-        // 先看就是拿一个还不知道噪声底多少的固定阈值去判, 会把候选误判成画面出错。
-        prev_ctrl = shots.remove("ctrl");
-    }
-    // 还原 (npuop 的 umount 在摘层之后: 摘层要先 force-stop, umount 要等进程退干净)
-    let mut restore_log = gl.off();
-    if let Some(m) = &npu_mount {
-        restore_log.push('\n');
-        restore_log.push_str(&m.restore());
-    }
-    std::fs::write(evidence.join("restore.log"), &restore_log).ok();
-
-    // 画面判定: 拿同设置重拍的噪声底比, 而不是拿一个固定阈值硬卡。
-    let noise_floor = noise_floor_db(
-        noise_within_round
-            .iter()
-            .chain(psnr_ctrl_vs_ctrl.iter())
-            .map(|v| Some(*v)),
-    );
-    let image_gate = ImageGate::new(min_psnr, noise_floor);
-    let best_knob = noise_floor_db(psnr_knob_vs_ctrl.iter().map(|v| Some(*v)));
-    let image_ruling = if launch.is_some() {
-        None // 自驱动负载已用 storeop-check 判过画面
-    } else {
-        Some(judge_image(&image_gate, best_knob))
-    };
-    // 画质判据: 全帧 PSNR 门槛之外再看稳定块 PSNR/SSIM + 细节能量 (都对原生自噪声)
-    let iq = if launch.is_some() {
-        None
-    } else {
-        let cfg = crate::iqjudge::IqConfig::from_request(&req["payload"]["image_check"]);
-        let conv = |v: &[(u32, u32, Vec<u8>)]| -> Vec<crate::iqjudge::Shot> {
-            v.iter().filter_map(|s| crate::iqjudge::Shot::from_rgba(s.0 as usize, s.1 as usize, &s.2, cfg.tile)).collect()
-        };
-        Some(crate::iqjudge::judge(&conv(&iq_ctrl_raw), &conv(&iq_knob_raw), &cfg))
-    };
-    drop((iq_ctrl_raw, iq_knob_raw));
-
-    // 各 knob 臂采到的命中取最大 (require_hit 判的是"改写到底有没有真生效过一次")
-    // 环境不一致被剔除的那几对, 改写臂的命中照样算 (剔除只影响统计, 不影响「改写生效过没有」)
-    let hits = knob_runs
-        .iter()
-        .chain(dropped.iter().map(|d| &d["knob"]))
-        .chain(unapplied.iter().map(|d| &d["knob"]))
-        .filter_map(|r| r["layer_hits"].as_u64())
-        .max()
-        .unwrap_or(0);
-    let restore_clean = gl_off_clean(&restore_log);
-    // npuop: 用上 NPU 结果的帧 (marker npuop.counts.unpack), 各 knob 臂取最大
-    let npu_hits = knob_runs
-        .iter()
-        .chain(dropped.iter().map(|d| &d["knob"]))
-        .chain(unapplied.iter().map(|d| &d["knob"]))
-        .filter_map(|r| r["npuop_frames"].as_u64())
-        .max();
-    let min_of = |v: &[f64]| v.iter().cloned().reduce(f64::min);
-    let (cool_reached, cool_timeout) = cool_summary(&cool_log);
-    report["conditions_observed"] = json!({
-        "cool_c_target": cool_c,
-        "cool_reached_c": cool_reached,
-        "cool_timeout": cool_timeout,
-        "cool_per_arm": cool_log,
-        "arm_order": curtail::order_note(order_seed, rounds as usize),
-        "env_consistency": consistency_note(&dropped, true),
-        "marker_to_capture": marker_delay_note(&knob_runs, &ctrl_runs),
-        "spf_declared": spf,
-        "fps_cap_declared": fps_cap_declared,
-        "knob_application": crate::scorecard::application_note(&unapplied, &knob_runs, min_frac),
-        "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
-        "hits": hits,
-        "apply_ok": hits > 0,
-        "npuop": knobs.npuop.as_ref().map(|n| json!({
-            "props": n.props.prop_pairs(true).into_iter().map(|(k, v)| (k, Value::String(v))).collect::<serde_json::Map<String, Value>>(),
-            "npu_frames_max": npu_hits,
-            "mount": npu_mount.as_ref().map(|m| json!({"run_dir": m.run_dir, "libdir": m.libdir})),
-        })),
-        "restored": restore_clean,
-        "image_check": match &live_check {
-            Some(v) => json!({"method": "storeop_check_live", "result": v}),
-            None => json!({
-                "method": "same_spot_screenshot",
-                "min_psnr_db": min_psnr,
-                "psnr_knob_vs_ctrl_db": psnr_knob_vs_ctrl,
-                "psnr_ctrl_vs_ctrl_db": psnr_ctrl_vs_ctrl,
-                "noise_within_round_db": noise_within_round,
-                "knob_within_round_db": knob_within_round,
-                "noise_floor_db": noise_floor,
-                "psnr_db_used": best_knob,
-                "gate": image_ruling.as_ref().map(|r| match r {
-                    ImageRuling::Pass(by) => image_gate.gate(by),
-                    ImageRuling::Fail(_) => image_gate.gate("failed"),
-                }),
-                "iq": iq.as_ref().map(|(_, rep)| rep.clone()),
-            }),
-        },
-    });
-    report["evidence_dir"] = json!(evidence.display().to_string());
-
-    // 画面差距。gate: 画面没通过就作废这一轮 (先于其它检查报出来, 原行为);
-    // report: 差距只记进 verdict.quality_gap, 性能照判。
-    let mut gap_open: Vec<String> = Vec::new();
-    if let Some(why) = &live_gap {
-        gap_open.push(format!("storeop-check: {why}"));
-    }
-    if let Some(ImageRuling::Fail(reason)) = &image_ruling {
-        if policy.is_report() {
-            gap_open.push(format!("全帧 PSNR: {reason}"));
-        } else if abort_reason.is_none() {
-            abort_reason = Some(format!("{} (全帧 PSNR, image_policy=gate 不量性能): {reason} (截图见 evidence_dir)", crate::scorecard::IMAGE_GATE_PREFIX));
-        }
-    }
-    let mut image_unverified: Option<String> = None;
-    match iq.as_ref().map(|(v, _)| v) {
-        Some(crate::iqjudge::IqVerdict::BeyondRef(reason)) if policy.is_report() => gap_open.push(format!("画质指标: {reason}")),
-        Some(crate::iqjudge::IqVerdict::BeyondRef(reason)) if abort_reason.is_none() => {
-            abort_reason = Some(format!("{} (画质指标, image_policy=gate 不量性能): {reason} (截图见 evidence_dir)", crate::scorecard::IMAGE_GATE_PREFIX));
-        }
-        Some(crate::iqjudge::IqVerdict::NotComputed(r)) => image_unverified = Some(r.clone()),
-        _ => {}
-    }
-    let gap_state = if !gap_open.is_empty() {
-        crate::scorecard::GapState::Open(gap_open.join("; "))
-    } else if let Some(r) = &image_unverified {
-        crate::scorecard::GapState::Unverified(r.clone())
-    } else {
-        crate::scorecard::GapState::Closed
-    };
-    let gap_json = crate::scorecard::quality_gap_json(
-        policy,
-        &gap_state,
-        if live_check.is_some() { "storeop_check_live" } else { "iq_judge+psnr" },
-        if live_check.is_some() {
-            Vec::new()
-        } else {
-            crate::scorecard::image_rows(iq.as_ref().map(|(_, r)| r).unwrap_or(&Value::Null), best_knob, noise_floor, image_gate.margin_db)
-        },
-        match (&live_check, &iq) {
-            (Some(v), _) => json!({"storeop_check": v}),
-            (None, Some((_, rep))) => json!({"iq": rep, "psnr_db_used": best_knob, "noise_floor_db": noise_floor}),
-            _ => Value::Null,
-        },
-    );
-
-    if let Some(reason) = abort_reason {
-        report["verdict"]["reason"] = json!(reason);
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    if !restore_clean {
-        report["verdict"]["reason"] = json!("摘层没摘干净 (见 restore.log), 后续数据不可信");
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    facts.stage=Stage::Conclusion;facts.control=ctrl_runs.clone();facts.candidate=knob_runs.clone();
-    facts.device.control_verified=Some(hits>0);facts.restored=Some(restore_clean);
-    // Missing baseline/cold/workload/quality evidence remains unknown, never a complete optimizer.
-    let _=record_qualification(&mut report,evidence,&facts)?;
-    // require_hit 缺省为真: 改写一次都没命中 = 拿 A 去和 A 比, 整轮作废
-    if require_hit && hits == 0 {
-        report["verdict"]["reason"] =
-            json!("require_hit=true 但改写一次都没命中 (层自报绑定计数为 0) —— 拿 A 去和 A 比, 整轮作废");
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    // npuop 的「命中」= 真用上了 NPU 结果的帧; 层挂上了但一帧都没走到 NPU (初始化失败、永久回退)
-    // 同样是拿 A 去和 A 比 (回退路径 = upop 双线性, 不是候选)
-    if require_hit && knobs.npuop.is_some() && npu_hits.unwrap_or(0) == 0 {
-        report["verdict"]["reason"] = json!(format!(
-            "require_hit=true 但 npuop 一帧都没用上 NPU 结果 (marker npuop.counts.unpack = {}) —— 候选臂跑的是回退路径, 整轮作废 (回退原因见 conditions_observed.knob_application)",
-            npu_hits.map(|x| x.to_string()).unwrap_or_else(|| "无 npuop 段".into())
-        ));
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-
-    if knob_runs.is_empty() && !unapplied.is_empty() {
-        report["verdict"]["reason"] = json!(format!(
-            "没测成: {} 对的候选臂都未按设计施加 (旋钮自报回退或部分施加), 全部剔除 (见 conditions_observed.knob_application)",
-            unapplied.len()
-        ));
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    if knob_runs.is_empty() && !dropped.is_empty() {
-        report["verdict"]["reason"] = json!(format!(
-            "{} 对两臂测量环境都不一致 (风扇或 GPU 档位), 全部剔除, 没有可比的数据 (见 conditions_observed.env_consistency)",
-            dropped.len()
-        ));
-        return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
-    }
-    // 画面过了门槛 (或 report 下差距已记下): 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
-    let (verdict, keep, on_battery_all) = judge_runs(&ctrl_runs, &knob_runs, alpha, rounds, fps_cap_declared);
-    report["verdict"] = verdict;
-    append_dropped_reason(&mut report, &dropped);
-    let md = report["conditions_observed"]["marker_to_capture"].clone();
-    append_marker_delay_reason(&mut report, &md);
-    let mut m = report["metrics"].take();
-    let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
-    m["psnr_db"] = json!(min_of(&psnr_knob_vs_ctrl));
-    if power.is_none() {
-        unavailable(&mut m, "power_watt", "非放电态 (或功耗采样缺失): 整机功耗量不准, 如实 null");
-    }
-    if m["fps_p95_ms"].is_null() {
-        unavailable(&mut m, "fps_p95_ms", "本轮没拿到可用的帧时序");
-    }
-    report["metrics"] = m;
-    if !unapplied.is_empty() {
-        let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
-        let rounds: Vec<String> = unapplied.iter().map(|d| d["round"].to_string()).collect();
-        report["verdict"]["reason"] = json!(format!(
-            "{r} (第 {} 对候选臂未按设计施加, 已剔除, 见 conditions_observed.knob_application)",
-            rounds.join("、")
-        ));
-    }
-    // 状态: 画面差距关闭才可能 PASS; report 下性能过了而差距没关闭 → KEEP_WITH_QUALITY_GAP;
-    // gate 下画面没确认不变 → REJECT (原行为)
-    crate::scorecard::finalize_status(&mut report, keep, policy, &gap_state, gap_json);
-    Ok(serde_json::to_string_pretty(&report).unwrap_or_default())
-}
-
-/// 摘层回包是否干净: 只认 `GrayLayer::off` 写出的明确失败标记。
-///
-/// 以前还看 `#adb_exit=1`: off() 先删 STATE 再 `cat` 它, cat 必然退出码 1, 于是每次
-/// 灰档评测都判「摘层没摘干净」ABORT (审计 #2)。现在 off() 自己判断每一步回读,
-/// 失败 (含回读命令本身失败) 一律写 OFF_FAIL_MARK, 这里不再猜退出码。
-fn gl_off_clean(restore_log: &str) -> bool {
-    !restore_log.contains(crate::graylayer::OFF_FAIL_MARK)
-}
-
 /// gray 请求的画质策略: 显式写了就按写的; 没写时 npuop (基于模型的候选) 缺省 report, 其余缺省 gate。
 pub(crate) fn gray_image_policy(req: &Value, knobs: &GrayKnobs) -> Result<crate::scorecard::ImagePolicy, String> {
     let explicit = req["protocol"].get("image_policy").filter(|v| !v.is_null()).is_some();
@@ -4547,60 +3909,394 @@ pub(crate) fn gray_image_policy(req: &Value, knobs: &GrayKnobs) -> Result<crate:
 }
 
 /// marker 的 npuop 段里「用上 NPU 结果」的帧数 (`counts.unpack`); 没有 npuop 段回 None。
+/// (旧 gray_eval 用它核对 NPU 臂; 受控会话接入 npuop 之前只有单测在用)
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn npuop_frames(marker: &Value) -> Option<u64> {
     marker.get("npuop").filter(|v| v.is_object()).map(|np| np["counts"]["unpack"].as_u64().unwrap_or(0))
 }
 
-/// 层自报的改写命中数 (契约 verdict 口径: "改写被绑定的次数")。
-///
-/// markers 在 knobs/gray/layer 的三个候选落点; su() 输出尾部带 #adb_exit=N 要剥掉。
-/// 命中的口径: **sum(effective[].begins)** —— 改写了但一次都没被绑定的 pass 不算命中
-/// (层自报 unavailable_reason = "rewritten pass never bound")。readonly 探针变体
-/// 没有改写, 退回 render_pass_begins (层确实看到了帧)。多个落点取最大。
-fn layer_out(serial: &str, pkg: &str, evidence: &Path) -> (Option<u64>, Option<Value>) {
-    if pkg.is_empty() {
-        return (None, None);
+enum OwnedGrayWorkload { Launch(LaunchSpec), Script(crate::gray_script::Plan) }
+impl OwnedGrayWorkload {
+    fn plan(&self)->Option<&crate::gray_script::Plan> {match self {Self::Script(p)=>Some(p),_=>None}}
+    fn restart(&self,parent:&crate::gray_eval_session::Parent,label:&str,layered:bool,knobs:&GrayKnobs,candidate:bool)->Result<(),String> {
+        match self {
+            Self::Launch(l)=>{parent.base.restart_eval(label,layered.then_some(if candidate{knobs.storeop.as_str()}else{"0"}),&l.extras)?;wait_owned_launch(parent,l,layered)},
+            Self::Script(_)=>{
+                parent.base.restart_script(label,layered,candidate&&knobs.loadop,if candidate{&knobs.storeop}else{"0"})?;
+                std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
+                if !parent.base.target_alive()? {return Err("target exited before finite input".into());}
+                if layered {
+                    let start=std::time::Instant::now();
+                    loop {
+                        if parent.base.marker()?.is_some_and(|v|v["frames"].as_u64().is_some()) {parent.base.narrow()?;break;}
+                        if !parent.base.target_alive()? || start.elapsed().as_secs()>=LAUNCH_MARKER_TIMEOUT_S {return Err("current layer evidence unavailable before finite input".into());}
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+                Ok(())
+            }
+        }
     }
-    let candidates = [
-        format!("/storage/emulated/0/Android/data/{pkg}/files/knobs_layer_out.json"),
-        format!("/data/data/{pkg}/knobs_layer_out.json"),
-        format!("{DEV_TMP}/knobs_layer_out.{pkg}.json"),
+}
+fn owned_shot(parent:&crate::gray_eval_session::Parent,path:&Path,plan:Option<&crate::gray_script::Plan>)->Result<(u32,u32,Vec<u8>),String> {
+    parent.base.screenshot(path)?;
+    let raw=crate::frameaudit::png_raw(path)?;
+    let (w,h,pixels)=crate::framecheck::parse_screencap(&raw)?;
+    if let Some(plan)=plan {plan.validate_screen(w,h)?;}
+    Ok((w,h,pixels.to_vec()))
+}
+fn shot_psnr(a:&(u32,u32,Vec<u8>),b:&(u32,u32,Vec<u8>))->Result<f64,String> {
+    if (a.0,a.1)!=(b.0,b.1) {return Err("original screen dimensions changed across comparison images".into());}
+    psnr_rgba(&a.2,&b.2).ok_or_else(||"image comparison bytes differ".into())
+}
+fn run_owned_gray(parent:&crate::gray_eval_session::Parent,workload:&OwnedGrayWorkload,label:&str,out:&Path,seconds:u64,comm:Option<&str>)->Result<Value,String> {
+    let (workload_ok,sampler_ok,input)=match workload {
+        OwnedGrayWorkload::Launch(_)=>{let(w,s)=parent.sample(label,seconds,out)?;(w,s,Value::Null)},
+        OwnedGrayWorkload::Script(_)=>parent.sample_script(label,seconds,out,false)?,
+    };
+    let alive=parent.base.target_alive()?;
+    parent.base.eval_stop_target()?;
+    if !workload_ok {return Err(format!("{label}: trace workload failed; raw exit and log retained"));}
+    let trace=std::fs::read_to_string(out.join("trace.txt")).map_err(|e|e.to_string())?;
+    let parsed=crate::looptrace::parse(&trace,comm.filter(|c|!c.is_empty()).unwrap_or(crate::looptrace::DEFAULT_RENDER_COMM));
+    let summary=py_dumps(&parsed.summarize());
+    crate::confirmation_transport::new_file(&out.join("summary.json"),summary.as_bytes())?;
+    let env_path=out.join("env.txt");
+    let env=std::fs::read_to_string(&env_path).map_err(|e|e.to_string())?;
+    let mut result=json!({"label":label,"run_once_rc":0,"launch":workload.plan().is_none(),"input_window":input,
+        "summary":serde_json::from_str::<Value>(&summary).map_err(|e|e.to_string())?,"env":to_serde(&sysparam::env_stats(&env))});
+    bind_run_evidence(&mut result,label,out,&env_path,sampler_ok,seconds+if workload.plan().is_some(){10}else{4},seconds,Some(if alive {0}else{1}))?;
+    crate::confirmation_transport::new_file(&out.join("run.json"),&serde_json::to_vec_pretty(&result).unwrap())?;
+    Ok(result)
+}
+
+pub(crate) fn run_owned_gray_script(parent:&crate::gray_eval_session::Parent,plan:&crate::gray_script::Plan,label:&str,out:&Path)->Result<Value,String> {
+    run_owned_gray(parent,&OwnedGrayWorkload::Script(plan.clone()),label,out,plan.seconds,None)
+}
+
+/// Archive a current-scene sample without restarting/stopping the target or
+/// applying the eval qualification/decision policy. Collection errors are data;
+/// only an inability to persist the result returns Err to the owner.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn summarize_control_sample(
+    out: &Path,
+    label: &str,
+    seconds: u64,
+    trace_ok: bool,
+    sampler_ok: bool,
+    input: Value,
+    target_alive: bool,
+    evidence_origin: &str,
+    render_comm: Option<&str>,
+) -> Result<Value, String> {
+    let mut errors = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(out.join("collection-error.json")) {
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            if let Some(error) = value["error"].as_str() { errors.push(error.to_owned()); }
+        }
+    }
+    let sample_request = std::fs::read_to_string(out.join("sample-request.json")).ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok()).unwrap_or(Value::Null);
+    let requested_power = sample_request["power_policy"].as_str().unwrap_or("observe");
+    let power_path = out.join("power.json");
+    // The returned snapshot also carries a final evidence-save failure; an
+    // earlier on-disk snapshot must not hide that failure from qualification.
+    let power = input.get("power").filter(|v|v.is_object()).cloned().or_else(||
+        std::fs::read_to_string(&power_path).ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok()).filter(Value::is_object))
+        .unwrap_or_else(||json!({"policy":requested_power,"before":null,"after":null,
+            "error":if power_path.exists(){json!("power evidence could not be read")}else{Value::Null}}));
+    let power_condition_ok = power["error"].is_null() && power["policy"] == requested_power
+        && (requested_power == "observe" || (requested_power == "battery"
+            && power["before"]["on_battery"] == true && power["after"]["on_battery"] == true));
+    if !power_condition_ok {
+        errors.push(power["error"].as_str().unwrap_or("requested battery policy lacks verified before/after discharge observations").to_owned());
+    }
+    let trace = std::fs::read_to_string(out.join("trace.txt"));
+    let env_text = std::fs::read_to_string(out.join("env.txt"));
+    if !trace_ok { errors.push("trace child failed; inspect its exit code and log".to_owned()); }
+    if !sampler_ok { errors.push("environment sampler failed; inspect its exit code and log".to_owned()); }
+    if let Err(error) = &trace { errors.push(format!("trace evidence unavailable: {error}")); }
+    if let Err(error) = &env_text { errors.push(format!("environment evidence unavailable: {error}")); }
+    let summary = if trace_ok {
+        render_comm.zip(trace.as_ref().ok()).map(|(comm, text)| {
+            to_serde(&crate::looptrace::parse(text, comm).summarize())
+        })
+    } else { None };
+    if let Some(summary) = &summary {
+        crate::confirmation_transport::new_file(&out.join("summary.json"), &serde_json::to_vec_pretty(summary).unwrap())?;
+    }
+    let mut run = json!({"schema":"phonefarm/gray-control-sample@1", "label":label,
+        "requested_seconds":seconds,"evidence_origin":evidence_origin,"target_alive_after":target_alive,
+        "input_kind":sample_request["input_kind"],"planned_input_ms":sample_request["planned_input_ms"],"initial_frame":sample_request["initial_frame"],"power":power,
+        "input_window":input,"summary":summary.clone().unwrap_or_else(||json!({})),
+        "env":env_text.as_ref().map(|text|to_serde(&sysparam::env_stats(text))).unwrap_or_else(|_|json!({}))});
+    if trace_ok && trace.is_ok() && env_text.is_ok() {
+        if let Err(error) = bind_run_evidence(&mut run,label,out,&out.join("env.txt"),sampler_ok,seconds+10,seconds,Some(if target_alive{0}else{1})) {
+            errors.push(error);
+        }
+    } else {
+        run["env"]["trace_window_verified"] = json!(false);
+        run["env"]["sampler_exit_success"] = json!(sampler_ok);
+        if !target_alive { errors.push("target was not alive after collection".into()); }
+    }
+    // No implicit Unity filter and no claim that a comm filter proves process
+    // ownership. Keep the original parser semantics available for later audit.
+    if summary.is_none() { run["summary"] = Value::Null; }
+    let mut limitations = vec![
+        "GPU submit proxy; target process/context ownership and display FPS are not verified".to_owned(),
+        "power covers the whole sampler window including lead/tail, not only the trace window".to_owned(),
+        "energy per frame requires the complete GPU-submit group window and verified frame semantics".to_owned(),
     ];
-    let mut best: Option<u64> = None;
-    let mut marker: Option<Value> = None;
-    for (i, path) in candidates.iter().enumerate() {
-        let out = su(serial, &format!("cat {path} 2>/dev/null"), 30);
-        if !out.contains("\"effective\"") {
-            continue;
-        }
-        std::fs::write(evidence.join(format!("knobs_layer_out.{i}.json")), &out).ok();
-        // su() 恒在尾部追 #adb_exit=N, 不剥掉 JSON 永远解析不出来
-        let body = match out.rfind("#adb_exit=") {
-            Some(i) => &out[..i],
-            None => &out[..],
-        };
-        let Ok(v) = serde_json::from_str::<Value>(body.trim()) else {
-            continue;
-        };
-        let begins: u64 = v["effective"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|e| e.get("begins").and_then(|b| b.as_u64()))
-                    .sum()
-            })
-            .unwrap_or(0);
-        let fallback = v["readonly_stats"]["render_pass_begins"]
-            .as_u64()
-            .unwrap_or(0);
-        let hits = if begins > 0 { begins } else { fallback };
-        // 命中最多的那个落点的 marker 一起回去 (旋钮自报的回退 / 施加程度在里面)
-        if best.is_none_or(|b| hits >= b) {
-            marker = Some(v);
-        }
-        best = Some(best.unwrap_or(0).max(hits));
+    if sample_request["input_kind"] == "finite" {
+        limitations.push("input geometry is verified at launch only; natural completion does not restore game state".into());
     }
-    (best, marker)
+    if render_comm.is_none() {
+        limitations.push("no render thread filter selected; raw trace is retained and frame metrics are unknown".into());
+    } else if summary.as_ref().is_some_and(|s|s["n_frames"].as_u64().unwrap_or(0)==0) {
+        limitations.push("no frame intervals matched the requested render thread filter".into());
+    }
+    if evidence_origin != "device" {
+        limitations.push("synthetic evidence is not a real device performance measurement".into());
+    }
+    // An old charge-suspend/bypass file is not an ownership or power-window
+    // proof for this session. Battery discharge must be observed throughout a
+    // verified sampler/trace window, including any requested power conditions.
+    let power_ok = power_condition_ok && sampler_ok && run["env"]["trace_window_verified"] == true
+        && run["env"]["power_window_verified"] == true && run["env"]["on_battery"] == true
+        && run["env"]["power_source"] == "battery";
+    if !power_ok {
+        let reason = if !power_condition_ok {
+            power["error"].as_str().unwrap_or("requested battery policy was not verified before and after this sample").to_owned()
+        } else if run["env"]["trace_window_verified"] != true {
+            "sampler/trace window coverage was not verified".to_owned()
+        } else if run["env"]["power_source"] == "usb_bypass" {
+            "legacy bypass marker does not establish battery discharge for this control sample".to_owned()
+        } else {
+            run["env"]["power_usable_reason"].as_str().unwrap_or("battery discharge throughout the sampling window was not verified").to_owned()
+        };
+        run["env"]["power_w_mean"] = Value::Null;
+        run["env"]["power_w_median"] = Value::Null;
+        run["env"]["power_valid"] = json!(false);
+        run["env"]["power_cross_run_comparable"] = json!(false);
+        run["env"]["power_usable_reason"] = json!(reason);
+        limitations.push(format!("power unavailable: {reason}"));
+    }
+    let energy = if power_ok {
+        crate::sysparam::battery_energy_in_capture(env_text.as_ref().unwrap(),trace.as_ref().unwrap(),seconds)
+    } else {
+        Err(run["env"]["power_usable_reason"].as_str().unwrap_or("battery power window is not qualified").to_owned())
+    };
+    let energy = energy.unwrap_or_else(|reason|json!({"available":false,"estimated":true,"reason":reason,
+        "energy_j":null,"power_w_mean":null,"rail":"battery","window":null}));
+    run["metrics"] = json!({"gpu_submit_fps":run["summary"]["fps_mean"],
+        "frame_p95_ms":run["summary"]["frame_p95"],"gpu_active_mean_ms":run["summary"]["gpu_active_mean"],
+        "queue_p95_ms":run["summary"]["queue_p95"],"power_w_mean":run["env"]["power_w_mean"],
+        "trace_energy_j":energy["energy_j"],"trace_power_w_mean":energy["power_w_mean"],"energy_per_frame_mj":null});
+    run["metric_provenance"] = json!({"frame":{"semantics":"gpu_submit_proxy","render_comm":render_comm,
+        "grouping":"existing auto submits-per-frame parser","target_ownership_verified":false,"display_verified":false},
+        "power":{"rail":run["env"]["power_rail"],"window_verified":power_ok,
+            "scope":"whole sampler window including lead/tail"},"trace_energy":energy,
+        "energy_per_frame":{"available":false,"reason":"complete GPU-submit group window and frame ownership are not verified"}});
+    run["collection"] = json!({"status":if errors.is_empty(){"complete"}else{"failed"},
+        "error":if errors.is_empty(){Value::Null}else{json!(errors.join("; "))}});
+    run["limitations"] = json!(limitations);
+    let names = ["trace.txt","summary.json","env.txt","capture.log","collection-error.json","input-plan.json","workload_exit.txt","trace_exit.txt","sampler_exit.txt",
+        "quiescence.txt","workload.log","trace.log","workload-time.json","trace-time.json","sampler-time.json",
+        "input-complete.json","input-window.json","sample-request.json","input-frame.json","input-check.png","power.json","power-before.json","power-after.json"];
+    run["artifact_path_base"] = json!("run_directory");
+    run["artifacts"] = json!(names.into_iter().filter(|name|out.join(name).is_file())
+        .map(|name|json!({"name":name,"path":name})).collect::<Vec<_>>());
+    let workload = format!("workload-{label}.sh");
+    if out.join(&workload).is_file() {
+        run["artifacts"].as_array_mut().unwrap().push(json!({"name":workload,"path":workload}));
+    }
+    crate::confirmation_transport::new_file(&out.join("run.json"),&serde_json::to_vec_pretty(&run).unwrap())?;
+    Ok(run)
+}
+
+fn effective_gray_hits(marker:&Value)->u64 {
+    marker["effective"].as_array().map(|xs|xs.iter().filter_map(|e|e["begins"].as_u64()).sum()).unwrap_or(0)
+}
+
+fn gray_eval_owned(req:&Value, lease:crate::devlease::Lease, evidence:&Path, origin:&str)->Result<Value,String> {
+    let knobs=parse_gray_rewrites(&req["payload"])?;
+    // npuop (NPU 超分) 的设备端布置 (运行库/模型 bind mount, npuop_device) 还没接进受控会话的
+    // 恢复记录; 在会话里静默忽略它会把候选臂变成对照臂 (A/A), 所以碰设备前明确拒绝。
+    if knobs.npuop.is_some() {return Err("owned gray eval does not support npuop yet: NPU runtime/model mounts are not owned or recoverable by the gray session".into());}
+    if req["workload"]["enter"].as_str()==Some("onboard") {return Err("owned gray eval does not support onboard/HID input".into());}
+    let seconds=match req["workload"].get("seconds") {None=>30,Some(v)=>v.as_u64().ok_or("workload.seconds must be an integer")?};
+    let workload=if let Some(launch)=launch_spec(req) {
+        if knobs.loadop {return Err("gray workload.launch supports storeop only".into());}
+        if !(1..=86400).contains(&seconds) {return Err("workload.seconds must be 1..86400".into());}
+        OwnedGrayWorkload::Launch(launch)
+    } else {
+        let file=match req["workload"].get("script") {None|Some(Value::Null)=>"loop_v1/scripts/workload_spin_touch_v1.json",Some(v)=>v.as_str().ok_or("workload.script must be a local path")?};
+        let path=resolve_path(file).ok_or_else(||format!("finite input script not found: {file}"))?;
+        let input:Value=serde_json::from_slice(&crate::confirmation_transport::bounded(&path,4*1024*1024)?).map_err(|e|e.to_string())?;
+        OwnedGrayWorkload::Script(crate::gray_script::parse(&input,seconds)?)
+    };
+    let policy=policy_for_request(req)?;
+    let rounds=policy.required_pairs;let alpha=policy.alpha;let cap=policy.temp_cap_c;let cool=policy.cool_c;
+    let min_psnr=req["payload"]["image_check"]["min_psnr_db"].as_f64().unwrap_or(GRAY_MIN_PSNR_DB);
+    let pkg=req["package"].as_str().ok_or("missing package")?;
+    let parent=match &workload {
+        OwnedGrayWorkload::Launch(l)=>crate::gray_eval_session::Parent::new(crate::gray_session::Session::new_eval(lease,evidence,pkg,origin,l.marker.as_deref())?,req)?,
+        OwnedGrayWorkload::Script(p)=>crate::gray_eval_session::Parent::new_script(crate::gray_session::Session::new_script(lease,evidence,pkg,origin)?,req,p)?,
+    };
+    let dir=parent.base.dir.clone();
+    let mut report=base_report(req,"gray");
+    report["session"]=json!(dir);report["evidence_dir"]=json!(dir);report["evidence_origin"]=json!(origin);
+    let mut facts=Evidence::new(Stage::Probe,policy,qualification::Capabilities::default());
+    if origin=="synthetic" {facts.evidence_origin="synthetic".into();}
+    let mut ctrl=Vec::new();let mut candidate=Vec::new();let mut cool_log=Vec::new();let mut frames=Vec::new();let mut image_check=Value::Null;
+    let mut psnr_pairs=Vec::new();let mut psnr_controls=Vec::new();let mut noise_within=Vec::new();let mut previous_control=None;
+    let result=(||->Result<(),String>{
+        parent.stage("capability")?;
+        facts.device=parent.capabilities()?;
+        if !record_qualification(&mut report,&dir,&facts)?.probe_allowed {return Err("root/trace prerequisites not verified".into());}
+        parent.base.prepare()?;
+        parent.stage("image_check")?;
+        match &workload {
+            OwnedGrayWorkload::Launch(launch)=>{
+                let static_extras=launch.static_extras.as_deref().unwrap_or(&launch.extras);
+                parent.base.install_storeop(req["payload"]["layer_so"].as_str(),&knobs.storeop,Some(static_extras))?;
+                let image_dir=dir.join("image_check");std::fs::create_dir(&image_dir).map_err(|e|e.to_string())?;
+                let live=crate::frameaudit::collect_storeop(&parent.base,&image_dir,&knobs.storeop,2,pkg,&[],STATIC_SETTLE_S,&mut frames)?;
+                crate::confirmation_transport::new_file(&image_dir.join("result.json"),&serde_json::to_vec_pretty(&live).unwrap())?;
+                image_check=json!({"method":"storeop_check_live","result":live});
+                live_check_verdict(&live)?;facts.quality_verified=Some(true);
+            },
+            OwnedGrayWorkload::Script(_)=>parent.base.install_script(req["payload"]["layer_so"].as_str())?,
+        }
+        parent.base.eval_stop_target()?;
+        parent.stage("qualification")?;parent.deploy()?;
+        let fan=parent.fan_off()?;
+        let cold=parent.wait_cool(cool,420)?;facts.cold_ok=cold["ok"].as_bool();
+        report["baseline_conditions"]=json!({"fan":fan,"cold":cold});
+        if facts.cold_ok!=Some(true) {return Err("baseline cold condition not verified".into());}
+        workload.restart(&parent,"workload_check",false,&knobs,false)?;
+        let motion_dir=dir.join("workload_check");std::fs::create_dir(&motion_dir).map_err(|e|e.to_string())?;
+        let a=motion_dir.join("frame_a.png");let b=motion_dir.join("frame_b.png");
+        let input=match &workload {
+            OwnedGrayWorkload::Launch(_)=>{
+                parent.base.screenshot(&a)?;std::thread::sleep(std::time::Duration::from_secs(5));parent.base.screenshot(&b)?;Value::Null
+            },
+            OwnedGrayWorkload::Script(plan)=>{
+                owned_shot(&parent,&motion_dir.join("input_screen.png"),Some(plan))?;
+                let (trace_ok,sampler_ok,input)=parent.sample_script("workload_check",seconds,&motion_dir,true)?;
+                if !trace_ok||!sampler_ok {return Err("finite workload qualification child failed".into());}input
+            }
+        };
+        let motion=to_serde(&crate::framecheck::verdict(&crate::frameaudit::png_raw(&a)?,&crate::frameaudit::png_raw(&b)?));
+        let alive=parent.base.target_alive()?;parent.base.eval_stop_target()?;
+        facts.workload_verified=Some(alive&&motion["spinning"]==true);
+        let check=json!({"verified":facts.workload_verified,"app_alive":alive,"motion":motion,"frames":[a,b],"launch":workload.plan().is_none(),"input_window":input});
+        crate::confirmation_transport::new_file(&motion_dir.join("workload_check.json"),&serde_json::to_vec_pretty(&check).unwrap())?;
+        if facts.workload_verified!=Some(true) {return Err("workload motion not verified".into());}
+        for i in 1..=3 {
+            let label=format!("baseline{i}");parent.stage(&label)?;
+            workload.restart(&parent,&label,false,&knobs,false)?;
+            let out=dir.join(&label);std::fs::create_dir(&out).map_err(|e|e.to_string())?;
+            if let Some(plan)=workload.plan(){owned_shot(&parent,&out.join("input_screen.png"),Some(plan))?;}
+            facts.baseline.push(run_owned_gray(&parent,&workload,&label,&out,seconds,req["workload"]["render_comm"].as_str())?);
+        }
+        parent.admission_ready()?;facts.restored=None;facts.stage=Stage::Experiment;
+        let q=qualification::evaluate_gray_session_collection(&facts)?;
+        if !write_qualification(&mut report,&dir,&facts,q)?.experiment_allowed {return Err("gray baseline/workload/power qualification did not admit candidate collection".into());}
+        for i in 1..=rounds {
+            let mut shots=std::collections::BTreeMap::new();
+            for arm in if i%2==1 {["knob","ctrl"]}else{["ctrl","knob"]} {
+                let label=format!("{arm}{i}");parent.stage(&label)?;
+                let fan=parent.fan_off()?;let mut cold=parent.wait_cool(cool,arm_cool_timeout(&cool_log))?;
+                cold["arm"]=json!(label);cold["fan"]=fan;cool_log.push(cold);
+                workload.restart(&parent,&label,true,&knobs,arm=="knob")?;
+                let out=dir.join(&label);std::fs::create_dir(&out).map_err(|e|e.to_string())?;
+                if let Some(plan)=workload.plan() {
+                    let path=out.join("image.png");let shot=owned_shot(&parent,&path,Some(plan))?;frames.push(json!(path));
+                    if arm=="ctrl" {
+                        std::thread::sleep(std::time::Duration::from_secs(GRAY_SHOT_SETTLE_S));
+                        let path=out.join("image-repeat.png");let repeat=owned_shot(&parent,&path,Some(plan))?;frames.push(json!(path));
+                        noise_within.push(shot_psnr(&shot,&repeat)?);
+                    }
+                    shots.insert(arm,shot);
+                }
+                let mut run=run_owned_gray(&parent,&workload,&label,&out,seconds,req["workload"]["render_comm"].as_str())?;
+                if let (Some(t),Some(limit))=(run_soc_temp_max(&run),cap) {if t>limit{return Err(format!("{label}: SoC temperature {t} exceeds {limit}"));}}
+                if arm=="knob" {
+                    let marker=parent.base.marker()?.ok_or("candidate marker missing")?;
+                    crate::confirmation_transport::new_file(&out.join("layer_marker.json"),&serde_json::to_vec_pretty(&marker).unwrap())?;
+                    run["layer_hits"]=json!(effective_gray_hits(&marker));candidate.push(run);
+                } else {ctrl.push(run);}
+            }
+            if workload.plan().is_some() {
+                let c=shots.remove("ctrl").ok_or("missing control quality image")?;
+                let k=shots.remove("knob").ok_or("missing candidate quality image")?;
+                psnr_pairs.push(shot_psnr(&k,&c)?);
+                if let Some(previous)=&previous_control {psnr_controls.push(shot_psnr(previous,&c)?);}
+                previous_control=Some(c);
+            }
+        }
+        if workload.plan().is_some() {
+            let noise=noise_floor_db(noise_within.iter().chain(psnr_controls.iter()).copied().map(Some));
+            let gate=ImageGate::new(min_psnr,noise);
+            let used=noise_floor_db(psnr_pairs.iter().copied().map(Some));
+            let ruling=judge_image(&gate,used);
+            image_check=json!({"method":"same_spot_screenshot","min_psnr_db":min_psnr,"psnr_knob_vs_ctrl_db":psnr_pairs,
+                "psnr_ctrl_vs_ctrl_db":psnr_controls,"noise_within_round_db":noise_within,"noise_floor_db":noise,"psnr_db_used":used,
+                "gate":match &ruling {ImageRuling::Pass(by)=>gate.gate(by),ImageRuling::Fail(_)=>gate.gate("failed")}});
+            facts.quality_verified=Some(matches!(ruling,ImageRuling::Pass(_)));
+            if let ImageRuling::Fail(reason)=ruling {return Err(format!("画面出错: {reason}"));}
+        }
+        Ok(())
+    })();
+    let mut error=result.err();
+    let collection=json!({"schema":if workload.plan().is_some(){"phonefarm/gray-eval-script-collection@1"}else{"phonefarm/gray-eval-launch-collection@1"},"session":dir,"evidence_origin":origin,
+        "input_plan":workload.plan().map(|p|p.to_value()),"baseline":facts.baseline,"control":ctrl,"candidate":candidate,"image_check":if workload.plan().is_some(){&image_check}else{&image_check["result"]},"frames":frames,"cool_per_arm":cool_log,"error":error});
+    if let Err(e)=crate::confirmation_transport::new_file(&dir.join("eval-collection.json"),&serde_json::to_vec_pretty(&collection).unwrap()) {
+        error=Some(format!("{}; collection report: {e}",error.as_deref().unwrap_or("collection completed")));
+    }
+    let recovery=parent.finish(error.as_deref()).unwrap_or_else(|e|json!({"status":"required","error":e,"session":dir}));
+    let complete=recovery["status"]=="reported_complete";
+    let hits=candidate.iter().filter_map(|v|v["layer_hits"].as_u64()).max().unwrap_or(0);
+    facts.stage=Stage::Conclusion;facts.control=ctrl.clone();facts.candidate=candidate.clone();facts.restored=Some(complete);facts.device.control_verified=Some(hits>0);
+    report["recovery"]=recovery;
+    let (reached,timed_out)=cool_summary(&cool_log);
+    report["conditions_observed"]=json!({"cool_c_target":cool,"cool_reached_c":reached,"cool_timeout":timed_out,"cool_per_arm":cool_log,
+        "hits":hits,"apply_ok":hits>0,"restored":complete,"game_state_restored":false,"image_check":image_check});
+    let qualified=record_qualification(&mut report,&dir,&facts);
+    if let Some(e)=error {report["verdict"]["reason"]=json!(e);}
+    else if !complete {report["verdict"]["reason"]=json!("owned gray eval recovery not complete; evidence retained");}
+    else if !qualified.as_ref().is_ok_and(|q|q.conclusion_allowed) {report["verdict"]["reason"]=json!("conclusion qualification not satisfied");}
+    else if req["payload"]["require_hit"].as_bool().unwrap_or(true)&&hits==0 {report["verdict"]["reason"]=json!("candidate rewrite never hit");}
+    else {finish_gray_statistics(&mut report,&candidate,&ctrl,alpha,rounds,psnr_pairs.iter().copied().reduce(f64::min),&facts.policy.required_metrics,declared_fps_cap(req))?;}
+    if let Err(e)=qualified {report["qualification_error"]=json!(e);}
+    let path=dir.join("eval-report.json");report["report_path"]=json!(path);
+    if let Err(e)=crate::confirmation_transport::new_file(&path,&serde_json::to_vec_pretty(&report).unwrap()) {report["report_error"]=json!(e);}
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_gray_statistics(report:&mut Value, knob_runs:&[Value], ctrl_runs:&[Value], alpha:f64, rounds:u32, psnr:Option<f64>, required:&[String], fps_cap_declared:Option<f64>)->Result<(),String> {
+    if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
+        report["verdict"]["reason"] = json!(e);
+        return Ok(());
+    }
+    // 画面过了门槛: 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
+    let (verdict, keep, on_battery_all) = judge_runs_with(ctrl_runs, knob_runs, alpha, rounds, fps_cap_declared, Some(required));
+    report["verdict"] = verdict;
+    let mut m = report["metrics"].take();
+    let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
+    m["psnr_db"] = json!(psnr);
+    if power.is_none() {
+        unavailable(&mut m, "power_watt", "非放电态 (或功耗采样缺失): 整机功耗量不准, 如实 null");
+    }
+    if m["fps_p95_ms"].is_null() {
+        unavailable(&mut m, "fps_p95_ms", "本轮没拿到可用的帧时序");
+    }
+    report["metrics"] = m;
+    report["status"] = json!(if keep { "PASS" } else { "REJECT" });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4905,6 +4601,7 @@ mod tests {
 
     #[test]
     fn gray_rejects_unimplemented_knobs() {
+        assert!(validate_ok(&v2_req("gray",json!({"rewrites":[{"knob":"storeop_dont_care","scope":"15a51a87:0"}]}))));
         let mut r = v2_req("gray", json!({"rewrites": [{"knob": "render_scale", "args": {"scale": 0.75}}]}));
         assert!(validate_err(&r).contains("render_scale"));
         assert!(validate_err(&r).contains("收端已实现"));
@@ -5077,18 +4774,6 @@ mod tests {
             );
         }
         assert!(parse_gray_rewrites(&json!({"rewrites": [{"knob": "render_scale"}]})).is_err());
-    }
-
-    /// 审计 #2: 正常摘层的回包 (STATE 已删) 必须判干净; 明确失败必须判不干净。
-    #[test]
-    fn gl_off_clean_uses_explicit_marks_only() {
-        use crate::graylayer::off_readback;
-        assert!(gl_off_clean(&off_readback("\n#adb_exit=0", "ABSENT\n#adb_exit=0")));
-        assert!(!gl_off_clean(&off_readback("\n#adb_exit=0", "PRESENT\npkg|/dir\n#adb_exit=0")));
-        assert!(!gl_off_clean(&off_readback("\n#adb_exit=0", "#adb_exit=1")));
-        assert!(!gl_off_clean(&off_readback("VK_LAYER_refknobs_readonly\n#adb_exit=0", "ABSENT\n#adb_exit=0")));
-        // .so 没删掉时 off() 打的也是这个标记
-        assert!(!gl_off_clean("警告: /data/app/x/libVkLayer_refknobs.so 没删掉"));
     }
 
     /// 跨仓库契约: game_opt_loop `src/optimize/gray.rs` 的 CATALOG 里每个 Landed 开关, 都必须能过
@@ -5611,6 +5296,49 @@ junk\n\
 mod path_tests {
     use super::*;
 
+    #[test]
+    fn control_sample_keeps_unknown_filter_and_power_separate_from_raw_collection() {
+        let root = std::env::temp_dir().join(format!("control-sample-{}-{}",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        for (name,status,current,trace_present) in [("legacy_bypass","Charging",0,true),("battery","Discharging",-1_000_000,true),("failed","Discharging",-1_000_000,false),("battery_policy_failed","Discharging",-1_000_000,true)] {
+            let out = root.join(name);std::fs::create_dir(&out).unwrap();
+            // 放电用例是纯电池: 停充模式 battery、USB 输入电流 0。写成 bypass 或带 5 V × 1 A 输入,
+            // 混合供电规则会 (正确地) 把它判成 usb_plus_battery, 电池能量积分就不成立了
+            let (mode,usb_ua) = if status=="Charging" {("bypass",1_000_000)} else {("battery",0)};
+            let mut env = format!("#sample_env v1 dur=13 interval=2\n#battery_status={status}\n#charge_suspended=yes\n#charge_mode={mode}\n");
+            for t in (100..=112).step_by(2) {env.push_str(&format!("ENV {t} 3800000 {current} NA 5000000 {usb_ua} gpuss 40000\n"));}
+            env.push_str(&format!("#battery_status_after={status}\n#sample_env done\n"));
+            std::fs::write(out.join("env.txt"),env).unwrap();
+            if trace_present {std::fs::write(out.join("trace.txt"),"#loop_v1_meta capture_start_uptime=106 capture_end_uptime=109 duration_req=3\n").unwrap();}
+            if name=="battery_policy_failed" {
+                std::fs::write(out.join("sample-request.json"),r#"{"power_policy":"battery"}"#).unwrap();
+                std::fs::write(out.join("power.json"),r#"{"policy":"battery","before":{"on_battery":true},"after":{"on_battery":false},"error":"supply changed after collection"}"#).unwrap();
+            }
+            let input = if name=="battery_policy_failed" {
+                // Final save failed: the latest returned failure takes priority
+                // over the earlier durable before/after snapshot.
+                json!({"power":{"policy":"battery","before":{"on_battery":true},"after":{"on_battery":false},"error":"supply changed after collection; power evidence save failed"}})
+            } else {Value::Null};
+            let result = summarize_control_sample(&out,name,3,trace_present,true,input,true,"synthetic",None).unwrap();
+            assert!(result["summary"].is_null());
+            assert!(result["metrics"]["gpu_submit_fps"].is_null());
+            assert!(result["metrics"]["energy_per_frame_mj"].is_null());
+            assert_eq!(result["metric_provenance"]["frame"]["target_ownership_verified"],false);
+            if name=="battery" {
+                assert_eq!(result["metrics"]["power_w_mean"],3.8);
+                assert!((result["metrics"]["trace_energy_j"].as_f64().unwrap()-11.4).abs()<1e-9);
+                assert_eq!(result["metric_provenance"]["trace_energy"]["available"],true);
+            } else {
+                assert!(result["metrics"]["power_w_mean"].is_null());
+                assert!(result["metrics"]["trace_energy_j"].is_null());
+            }
+            assert_eq!(result["collection"]["status"],if trace_present && name!="battery_policy_failed"{"complete"}else{"failed"});
+            if name=="battery_policy_failed" {assert!(out.join("trace.txt").is_file());assert!(result["collection"]["error"].as_str().unwrap().contains("power evidence save failed"));}
+            assert!(out.join("run.json").is_file());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// game_opt_loop 的 workload.script 是**调用方视角**的相对路径
     /// ("../phonefarm/knobs/gray/workload_spin_touch_v1.json"): 在 game_opt_loop
     /// 的 cwd 下按原样就要找得到。
@@ -5642,6 +5370,8 @@ mod path_tests {
 
     #[test]
     fn gray_rewrites_map_to_layer_properties() {
+        assert_eq!(effective_gray_hits(&json!({"effective":[{"begins":0}],"readonly_stats":{"render_pass_begins":100}})),0);
+        assert_eq!(effective_gray_hits(&json!({"effective":[{"begins":2},{"begins":3}]})),5);
         let k = parse_gray_rewrites(&json!({"rewrites": [
             {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"},
             {"knob": "storeop_dont_care", "scope": "9d0b4db80bf552b8:0"},
@@ -5655,6 +5385,20 @@ mod path_tests {
         assert!(k.npuop.is_none());
         let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop", "args": {"lag": 1}}]})).unwrap();
         assert_eq!(k.npuop.unwrap().props.setprop_cmd(true), "setprop debug.knobs.npuop 1; setprop debug.knobs.npuop_lag 1; setprop debug.knobs.npuop_wait_ms 2; setprop debug.knobs.npuop_budget_ms 12; setprop debug.knobs.npuop_budget_frames 30; setprop debug.knobs.npuop_init_frame 300; setprop debug.knobs.npuop_zc 1; setprop debug.knobs.npuop_ts 1");
+    }
+
+    #[test]
+    fn gray_cadence_does_not_win_from_power_outside_its_frozen_goal() {
+        let arm=|power:f64| (0..6).map(|i|json!({"label":format!("r{i}"),"summary":{"frame_p95":16.0,"fps_mean":60.0},
+            "env":{"power_w_mean":power+i as f64*0.01,"on_battery":true}})).collect::<Vec<_>>();
+        let (ctrl,knob)=(arm(6.0),arm(3.0));
+        assert!(judge_runs(&ctrl,&knob,0.05,6,None).1); // old adaptive metric list would accept this
+        let required=Goal::RenderCadence.metrics();
+        let mut report=base_report(&json!({}),"gray");
+        finish_gray_statistics(&mut report,&knob,&ctrl,0.05,6,None,&required,None).unwrap();
+        assert_eq!(report["status"],"REJECT");
+        assert_eq!(report["verdict"]["alpha_win"],0.025);
+        assert!(report["verdict"]["per_metric"].get("power_w_mean").is_none());
     }
 
     /// 不认识的开关、缺范围、范围写错, 都在碰设备之前拒收。

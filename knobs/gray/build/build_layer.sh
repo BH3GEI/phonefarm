@@ -71,11 +71,16 @@ for n in sys.argv[2:]:
 PYEOF
 echo "interp shaders: $(for s in $INTERP_SHADERS; do printf '%s=%sB ' $s $(wc -c < "$OUT/$s.spv" | tr -d ' '); done)-> interp_spv.h"
 
-"$CXX" -O2 -Wall -fPIC -std=c++17 -fno-exceptions -fno-rtti \
-    -static-libstdc++ -Wl,--exclude-libs,ALL \
-    -I"$OUT" -I"$ROOT/layer" \
-    -shared -o "$OUT/libVkLayer_refknobs.so" "$ROOT/layer/vk_layer_refknobs.cpp" "$ROOT/layer/npuprobe.cpp" "$ROOT/layer/framedump.cpp" "$ROOT/layer/interp.cpp" \
-    -llog -ldl
+# gray-artifact uses this same native source/flag list for its candidate build.
+python3 - "$CXX" "$ROOT" "$OUT" <<'PYEOF'
+import json, pathlib, subprocess, sys
+cxx, root, out = sys.argv[1], pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+config = json.loads((root / "build/layer_build.json").read_text())
+subprocess.run([cxx, *config["compile_flags"], "-I", str(out),
+                "-o", str(out / "libVkLayer_refknobs.so"),
+                *(str(root / "layer" / name) for name in config["sources"]),
+                *config["link_flags"]], check=True)
+PYEOF
 cp "$ROOT/layer/VkLayer_refknobs.json" "$OUT/"
 echo "layer: $OUT/libVkLayer_refknobs.so ($(wc -c < "$OUT/libVkLayer_refknobs.so" | tr -d ' ') B)"
 NM="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/llvm-nm"

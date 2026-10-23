@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::process::Command;
 use std::time::Duration;
+use crate::fleet::parse_hdc_power_on;
 
 const TIMEOUT_NEVER: &str = "2147483647"; // int32 上限; 两族都没有真正的"永不"值
 const TIMEOUT_NEVER_MS: i64 = 2147483647;
@@ -87,18 +88,6 @@ fn parse_wakefulness(text: &str) -> Option<bool> {
     let val: String = text[i + "mWakefulness=".len()..].chars()
         .take_while(|c| c.is_ascii_alphabetic()).collect();
     if val.is_empty() { None } else { Some(val == "Awake") }
-}
-
-/// RenderService dump 的 powerStatus: POWER_STATUS_ON→true, OFF→false
-fn parse_hdc_power_on(text: &str) -> Option<bool> {
-    let i = text.find("powerStatus=POWER_STATUS_")?;
-    let val: String = text[i + "powerStatus=POWER_STATUS_".len()..].chars()
-        .take_while(|c| c.is_ascii_alphabetic()).collect();
-    match val.as_str() {
-        "ON" => Some(true),
-        "OFF" => Some(false),
-        _ => None,
-    }
 }
 
 /// PowerManagerService dump 的 OverrideTimeout(毫秒)

@@ -43,6 +43,7 @@ pub(crate) fn new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .write(true)
         .open(path)
         .map_err(|e| e.to_string())?;
+    crate::shared_access::created_file(path, &f, false).map_err(|e| e.to_string())?;
     f.write_all(bytes)
         .and_then(|_| f.sync_all())
         .map_err(|e| e.to_string())?;
@@ -62,10 +63,7 @@ fn publish_permit(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 pub(crate) fn journal(dir: &Path, event: Value) -> Result<(), String> {
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("journal.jsonl"))
+    let mut f = crate::shared_access::append_file(&dir.join("journal.jsonl"))
         .map_err(|e| e.to_string())?;
     writeln!(f, "{}", event)
         .and_then(|_| f.sync_all())

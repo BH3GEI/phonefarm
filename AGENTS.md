@@ -11,8 +11,12 @@ iOS `wda`），
 
 ## 在整体里的位置（改这个仓库之前先看这一段）
 
-整套东西是一个 harness。用户只提一种任务——「把某个游戏在某台手机上优化一下」，
-内部自动决定用哪几层。本仓库是底座那一层，四件事：
+整套东西服务于外部 Agent：使用远程真机系统性优化指定游戏/系统，探索多种方向，
+完成可复现实验并留下可审核结果。Agent 的优先级判断可在任意工具里完成；GOL 是可选客户端。
+网页与 CLI/API 同等优先。目标、方向、实验、证据、人工指导/协助/评价独立于聊天工具持久化；
+人异步参与，只阻断依赖其反馈的方向，其他可行方向继续。
+当前产品准则与开发计划见 https://github.com/HGamey/docs/tree/main/plans/2026-10-22-agent-platform 。
+本仓库提供设备与测量底座，当前能力主要分为四类：
 
 - 设备：adb / hdc / iOS(WebDriverAgent) 三族的连接、保活、确定性脚本回放。新增一种设备/平台 = 实现 `platform::Backend`
   并登记 serial 前缀，各平台能开哪几层及原因见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DEVICES.md`。
@@ -21,15 +25,14 @@ iOS `wda`），
   测功耗期间停充。
 - 统计判定与还原：规则先于数据冻结，不显著就回退，退出前恢复现场。
 
-提改动的是上层（`game_opt_loop` 的决策层，或者人），判定这一侧留在本仓库。
-这条边界是硬的：**判定口径与阈值只能在本仓库里定，且在看到候选数据之前冻结**。
-上层可以随请求带参数（比如 `incumbent_latency_ms` 说明现任冠军的耗时），
-但那是被判定的输入，不是判定规则本身——出主意的一方不能改判定，否则整套证据失去意义。
+外部 Agent、GOL 或人提出候选；本仓库按冻结合同采集和判定。
+用户可在实验前选择性能/画质预算、原游戏基线和模块 ms 目标；探索与确认分层。
+不能在看到候选结果后改写旧实验的判据，也不能把未知功耗或没有胜过双线性直接等同于无优化价值。
 
 优化分三个层级：① 游戏代码（需要白盒）② 图形接口 Vulkan 层 ③ 系统参数。
-闭源商用游戏只剩 ②③。鸿蒙商用机在没有 root 的情况下只能测不能改：HiSmartPerf 采得到
-帧率、帧时、温度、功耗，但 ② 和 ③ 都动不了。可能的出路有工程机、官方性能接口、
-开发者模式下自签名应用三条，都还没核实过，不要当成现成能力写进文档或代码注释。
+闭源商用游戏的可用路线还取决于游戏内设置和公开接口；不能仅按是否 root 做统一结论。
+鸿蒙商用机的 root 注入/系统改动不能照搬 Android；HiSmartPerf 等来源须按具体设备、
+版本和实际字段验证。工程机、官方接口或自签名应用也是待核路线，不是现成能力。
 
 测试载体在 `loop_v1/carriers/`（Megacity / Vulkan-Samples / AnKi），
 白盒靶子在同级的 `refbench` 仓库。`sr_loop` 是已结项的前序实验，不在当前主线上。
@@ -54,9 +57,9 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 ./phonefarm devices                        # adb / hdc / iOS 三族设备一并列出（iOS 只列 USB 上看得见的，不代表 WDA 已就绪）
 ./phonefarm keepalive [--status|--watch]   # 农场级保活：唤醒 + 解锁 + 不息屏
 ./phonefarm fleet [--json]                 # 农场只读快照：每台手机的在线/型号/电量/温度/风扇/
-                                           # 前台应用/保活策略 + 设备锁。别人持锁时自动降成
-                                           # 只读 sysfs 的轻量档，不跑 dumpsys（锁在 $DEVLOCK_LABEL
-                                           # 或 --lock-label 名下时算自己的，走完整档）
+                                           # 前台应用/保活策略 + 设备锁。租约域必须明确 clear；
+                                           # 持锁、恢复待处理、未知或未初始化时返回暂不可用。
+                                           # 标签与 --probe-while-locked 不能绕过租约检查。
 tools/devlock status                       # 设备锁：谁持有、谁在排队（碰设备的子命令自己拿锁）
 ./phonefarm probe --serial S "只读命令"     # 只读调试通道
 ./phonefarm exec --serial S "命令" --yes    # 写操作通道，高危，必须显式 --yes
@@ -140,9 +143,48 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ```
 
 一个 std-only 的本地 HTTP 服务 + 一份自包含 HTML（无外链、无构建）。
-它**不拿设备锁** —— 拿锁就没法在别人跑局时观战，而观战正是它的用途；
-代价写在 `--help` 与页面上：**每秒一次 screencap 会影响帧时与功耗，做判定性测量时别开着它**。
-契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_SCREEN_WIDGET.md`。
+有效观看订阅触发短时采样；每帧在同一设备域强租约内完成，测量占用、排队或恢复待核时暂缓并保留旧图年龄。
+服务本身与缓存读取不持锁。子进程超时/退出不确定时保留屏障，不能自动推断设备端空闲。
+当前合同见 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/OBSERVATION-OWNERSHIP.md`。
+
+**持续灰层控制会话**（源码与宿主替身已验，尚未部署/真机验收）
+
+`gray-layer session --mode MODE --package PKG --serial S --out DIR` 在同一个 owner 内挂层、抓图、有限输入和恢复。
+网页、`pf-node session-status/session-action` 与本机 `gray-layer session-status/session-action` 共用有序请求及回执；
+连接已有会话不另拿设备锁。请求超时保留原 request_id 并查询，不换 ID 重放输入。
+人工接管只改变控制 epoch，lease 仍归原 owner；stop/SIGINT 在有界动作结束后恢复。
+失败使用 `gray-layer session-recover --session DIR --serial S --json` 接续原上下文。
+局部恢复收据不自动解除整个 job，沿用 fresh lease clear + 核查说明释放流程。
+`sample` 动作可在当前场景采1至120秒，保持同一 owner；不自动重启，供电遵循创建时固定政策，风扇/频率不变。
+可选 input + frame_id 在同一采样中执行有限计划；无 input 保持 idle。计划必须覆盖 seconds+10、最多600秒，
+依最新真实截图核坐标，并在部署后放行前再核图龄/方向；不自动补输入。旧owner缺 sample v2 能力时明确拒绝。
+每轮plan和自然完成原件保留，新资源父@3仍可恢复旧C1/C2A/B1会话。
+可选 render_comm 必须显式给出；留空仍保留 raw/env，帧指标为未知，不套 Unity 默认。
+GPU submit proxy 不等于显示 FPS，首批不按不同窗口推算每帧能耗。采样资源先恢复，之后才完成灰层范围。
+会话可在创建时显式选择 --power-policy observe|battery，默认只观察；battery首次采样准备一次并跨轮保持，
+原记录绑定当前context。独立恢复供电不代表自然输入/整个会话已恢复；未知时保留屏障及原件。
+同期trace电池能量/平均功率是V×I采样积分估计，缺覆盖或放电资格时null；每帧能耗仍待完整分组窗口。
+画质检查点使用同一owner的quality begin/checkpoint/finish动作，逐阶段保存当前控制epoch，
+完整原图与明确派生的半尺寸预览分开；缺marker保原图且阶段不前进，显式新请求可重采失败阶段。
+Web/CLI共读持久manifest；采集完成不代表同场景或画质通过。
+旧genshin_quality客户端只连接显式既有session/job，要求尺寸/方向/坐标profile，每个输入前重新截图；
+它不启动或重启游戏。重复完整调用返回旧原件，partial/未知不自动重走导航；远程状态缺失与断网分别处理。
+合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-QUALITY.md。
+REF_ARM=1参考客户端也只连接显式既有passdump会话，按profile和供电期望执行capture/sample/marker。
+默认保留40秒有限输入与30秒采样，WL/CAPDUR可给默认值，LEAD仅支持现有owner固定的6秒；
+不安装/重启/停止会话、不推断世界场景或极高精度。完整重复返回旧结果，partial不自动重采。
+网页已补整组profile/epoch/label校验及同组回执查询，隐藏或离开页面停止后续提交；合同见
+https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-REFERENCE-CLIENT.md。
+四臂refbench已完成源码与宿主替身验收，`gray-layer refbench-loadop --serial S --out DIR` 使用一个Session，
+A/B确实未安装层，C/D才安装改写；所有extras为字符串，八份原件与started事实保留。
+自然退出、应用自报、改写预期及资源恢复分开；D的创建期effective可以非空，实际begins必须为0。
+不测FPS/功耗；恢复入口`gray-layer refbench-recover --session DIR --serial S --json`仅接续原上下文。
+实现合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-REFBENCH-SESSION.md。
+旧gray-layer挂层后退出入口已退役（源码与零设备拦截验证），旧keep-prop仅安装不启动语义不能直接alias为session。
+typed off/status和历史/离线分析保留；shell off改为同一typed入口，去掉全盘删SO/settings私链。
+合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-LEGACY-MOUNT-RETIREMENT.md。
+持续会话合同见
+`https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
 
 **Compute Shader 算子标尺**（零 Token，需 root）
 
@@ -164,6 +206,11 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ./phonefarm gpu-op --request <eval_request.json> --serial S --json   # shader 通路的实现本体 (等冷+锁频+A/B/A/B+Welch t 检验)
 ./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
 ```
+
+当前 gray eval 的 launch 与有限触控 script 走同一父会话；恢复用 `eval recover --session DIR --serial S`。
+有限脚本支持 sleep/tap/swipe 及精确旧 `input swipe` 数值格式；不支持 onboard、HID 或任意 shell。
+输入中断而缺自然完成收据时，进程消失也不能解除恢复屏障。当前验收层级为宿主替身，不能外推真机恢复。
+规格与限制见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-EVAL-SCRIPT-SESSION.md 。
 
 `game_opt_loop` 决策层的物理采样与统计裁决端，契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_GPU_OP.md`。
 设备条件化与功耗遥测在 `src/hwcond.rs`（与 `bench` 共享），统计在 `src/gpustat.rs`。
@@ -233,7 +280,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
      锁脚本在 `tools/devlock`（安装：`ln -sf "$PWD/tools/devlock" ~/.local/bin/devlock`）。
      碰设备的子命令自己拿锁（`src/devlock.rs`，通用参数 `--lock-label` / `--lock-wait` / `--no-devlock`，
      label 缺省取 `$DEVLOCK_LABEL` 再缺省 `phonefarm`），不必在外面包 `devlock run`；
-     锁已在同一 label 手里时原地执行，所以外面包了 `devlock run <label>` 也不会自己等自己。
+     只有继承实例与实际holder进程树核验通过才借用；label仅显示和排队。`devlock run`会传同一实例。
      lead 预排了队列时 label 用队列里的名字。
    - 影响稳态的环境条件（风扇开关、冷机阈值、供电状态）逐轮记进证据。这些不是无关细节，
      条件不同的两批数据不能混在一起比。
@@ -244,15 +291,17 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 5. **数据持久化规范**：程序唯一合法写入路径为 `tasks/<任务名>/`。`log.jsonl` 只追加；
    `lessons.jsonl` 必须原子写；禁止自行清理 `runs/` 历史目录；媒体与树结构大文件已由 `.gitignore`
    排除，严禁提交大体积非文本文件。`test-batch`/`cts-fetch`/`bench`/`capture` 的产物写入各自 `--out` 目录。
-6. **代码稳定性**：任何逻辑或代码变更后，必须在本地运行 `cd src && cargo test`，确保单测 100% 通过。
+6. **代码稳定性**：运行与改动相关的关键行为和既有回归测试；共享合同变化再按影响扩大。
+   完整集成包含真实等待与严格心跳，须与快速单元测试分开；失败留日志并定位，不反复盲跑。
+   不为覆盖数堆镜像实现的测试，不计算无用哈希，优先用明确状态、所有权和数据流降低复杂度。
 7. **构建后必须重新签名（Apple Silicon 硬性要求）**：`[profile.release] strip = true` 会在链接后剥离符号，
    使 ad-hoc 代码签名失效；失效的二进制在 macOS 上不报错，而是**静默卡死在 `_dyld_start`**
    （进程存活、CPU 为零、无输出），极易被误判为死循环或设备失联。跑任何实机测试前，
    先确认用的是当前源码构建并已签名的二进制。
-8. **缺陷修复规范**：新缺陷修复遵循项目编号管理（从 #20 起递增）。修复必须保证通用性，
-   严禁针对特定任务或界面编写硬编码拦截逻辑。完成后用今日头条断言局做标准回归。
-9. **版本控制与提交**：`push` 权限属于用户。完成本地提交后，把提交哈希与变更概要呈报用户，
-   由用户决定推送。部署时用 `mv` 做原子产物替换，防止进程踩踏。
+8. **缺陷修复规范**：记录触发条件、行为变化和验证范围；保证通用性，
+   不针对特定任务或界面硬编码拦截，也不以无关真机流程代替受影响行为的回归。
+9. **版本控制与提交**：用户授权小批直接 commit/push，不新开 PR、不 force push。
+   有远端并发变更先 pull --rebase 并重验。部署与提交分开；部署时原子替换产物，防止进程踩踏。
 10. **汇报规范**：呈报进度或结果时给最直接的技术事实、运行指标与对局结论（成功率、耗时分位数、
     Token 支出），禁止含糊夸张的非技术词汇，严禁在文档中堆砌虚假的性能或战绩宣称。
     计划中的能力写成「计划」，不写成「已完成」；撤回过的结论不要再引用。
@@ -293,7 +342,7 @@ src/                   Rust 内核源码
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
   ios.rs               iOS 设备后端（经 WebDriverAgent）+ ios-probe 真机体检
   collect.rs           有界滚动采集（组合动作原语，零 Token）：有界滚动 / 重叠去重 / 覆盖边界
-  screen.rs            设备屏幕观战窗口（零 Token，只读；不拿设备锁）+ screen_widget.html
+  screen.rs            设备屏幕窗口（零 Token，每帧短时租约；忙时保留旧图）+ screen_widget.html
   decision.rs          决策原语通路（零 Token 降级档 + 侧车协议 + 资产校验）；仓库不含训练权重
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
   hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测
@@ -323,12 +372,21 @@ tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campa
 
 - 不要在本仓库新增或修改说明文档、图片、PPT、PDF、实验报告。
 - 这次改了什么、为什么改：写在 commit message 正文。
-- 一个功能或修复的完整说明、验证方法、实验数字、截图：写在 PR 描述。
+- 一个功能或修复的说明、验证与限制：写在 commit 正文；完整报告和截图归 HGamey/docs 或本机证据目录。
 - 长期文档（设计、规格、架构图、进展汇报）：提交到 https://github.com/HGamey/docs ，本仓库的旧文档在那里的 `repos/<仓库名>/` 下。
 - 允许的例外：根目录 README.md（40 行以内）、AGENTS.md、skills/、许可证、程序或测试要读的数据。CI 检查 `code-only` 会拦下其他文档类文件。
 
-## 分支与 PR
+## 直接提交与团队开发
 
-- 每次都从最新的 `main` 开分支，PR 的目标只能是 `main`。不要叠 PR，不要开“集成基线”之类的中间分支。
-- 一个 PR 只做一件事，做完尽快合并；合并后分支会自动删除。
-- 动手前和开 PR 前各同步一次 `main`。CI 检查 `code-only` 会拦下目标不是 `main`、或落后 `main` 超过 50 个提交的 PR。
+- 基于当前 main 分批开发，保留同事修改；先将同一提交推到 `verify/<批次>`，通过必需的 `code-only` 检查后直接推 main。
+- 不关闭必需检查、禁止强推或删除规则；rebase 改变提交后重新检查。
+- 主 Agent 聚焦系统结构、协议与整合；前端等独立模块可交具体 subagent，划分文件所有权。
+- 每批记录已做、未做、测试层级和恢复义务；模拟通过不等于真机或全流程已可用。
+
+## 外层队列实例（源码与隔离宿主已验，未部署）
+
+`tools/devlock` 与 PF/GOL 必须一起升级。队列owner用phonefarm/devlock-owner@1持久化实例与宿主进程/启动身份；继承ID校验失败不创建新实例。nested强lease显式关联outer_instance_id，父holder退出不阻断已有强owner有界恢复。`devlock reconcile INSTANCE --participants-stopped --confirm-device-idle`仅退休已退出且无nested的外层元数据，不能代替设备恢复。旧/坏/缺失记录不按TTL自动删除。实现与验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/LEASE-IDENTITY.md 。
+
+强lease另存宿主boot与owner/child启动身份；旧宿主boot仅证明旧本地进程结束，同boot PID复用仍须检查原进程组。pending与设备恢复屏障不因宿主身份变化释放；旧记录全缺身份时保守兼容，部分缺失拒绝。CLI/API和网页呈现host_process事实，不能据此宣称设备恢复。实现与隔离宿主验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/STRONG-LEASE-IDENTITY.md 。
+
+跨UID会话仅在管理员显式配置PHONEFARM_SHARED_GID及输出/持久state/lease根时使用共享权限；参与进程须已在该组。新目录2770、协调锁/追加日志660、原子记录/原件640，发布前设置；既有私有状态拒绝，禁止在线递归chmod代替迁移。默认CLI权限保持原样；有限正常停止链不证明任意producer、全局供电恢复或worker失联恢复，完整范围见JOB-CONTAINMENT合同。
