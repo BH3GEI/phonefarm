@@ -388,3 +388,5 @@ tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campa
 `tools/devlock` 与 PF/GOL 必须一起升级。队列owner用phonefarm/devlock-owner@1持久化实例与宿主进程/启动身份；继承ID校验失败不创建新实例。nested强lease显式关联outer_instance_id，父holder退出不阻断已有强owner有界恢复。`devlock reconcile INSTANCE --participants-stopped --confirm-device-idle`仅退休已退出且无nested的外层元数据，不能代替设备恢复。旧/坏/缺失记录不按TTL自动删除。实现与验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/LEASE-IDENTITY.md 。
 
 强lease另存宿主boot与owner/child启动身份；旧宿主boot仅证明旧本地进程结束，同boot PID复用仍须检查原进程组。pending与设备恢复屏障不因宿主身份变化释放；旧记录全缺身份时保守兼容，部分缺失拒绝。CLI/API和网页呈现host_process事实，不能据此宣称设备恢复。实现与隔离宿主验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/STRONG-LEASE-IDENTITY.md 。
+
+跨UID会话仅在管理员显式配置PHONEFARM_SHARED_GID及输出/持久state/lease根时使用共享权限；参与进程须已在该组。新目录2770、协调锁/追加日志660、原子记录/原件640，发布前设置；既有私有状态拒绝，禁止在线递归chmod代替迁移。默认CLI权限保持原样；有限正常停止链不证明任意producer、全局供电恢复或worker失联恢复，完整范围见JOB-CONTAINMENT合同。

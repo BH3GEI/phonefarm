@@ -25,12 +25,7 @@ pub struct Lease {
 }
 
 fn lock_file(path: &Path, deadline: Instant) -> Result<File, String> {
-    let f = File::options()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path)
+    let f = crate::shared_access::lock_file(path, 0o666)
         .map_err(|e| format!("lease open {}: {e}", path.display()))?;
     loop {
         match f.try_lock() {
@@ -47,6 +42,7 @@ fn lock_file(path: &Path, deadline: Instant) -> Result<File, String> {
 pub(crate) fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let parent = path.parent().ok_or("marker parent missing")?;
+    crate::shared_access::check_existing(path, false).map_err(|e| e.to_string())?;
     let tmp = parent.join(format!(
         ".lease-write-{}-{}",
         std::process::id(),
@@ -60,6 +56,7 @@ pub(crate) fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .write(true)
         .open(&tmp)
         .map_err(|e| e.to_string())?;
+    crate::shared_access::created_file(&tmp, &f, false).map_err(|e| e.to_string())?;
     f.write_all(bytes)
         .and_then(|_| f.sync_all())
         .map_err(|e| e.to_string())?;
@@ -362,8 +359,8 @@ impl Lease {
         }
         let receipt = crate::lease_receipt::JobReceipt::from_env(serial, label, Value::Null)?;
         let process_identity = host_process::capture(std::process::id())?;
-        fs::create_dir_all(root).map_err(|e| format!("lease directory: {e}"))?;
-        fs::create_dir_all(legacy_root).map_err(|e| format!("devlock directory: {e}"))?;
+        crate::shared_access::create_dir_all(root).map_err(|e| format!("lease directory: {e}"))?;
+        crate::shared_access::create_dir_all(legacy_root).map_err(|e| format!("devlock directory: {e}"))?;
         let deadline = Instant::now() + timeout;
         let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
         let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
@@ -397,7 +394,7 @@ impl Lease {
             }
         }
         loop {
-            match fs::create_dir(&legacy) {
+            match crate::shared_access::create_dir(&legacy) {
                 Ok(()) => break,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if let Some(m) = marker(&legacy) {
@@ -860,7 +857,7 @@ impl Lease {
         timeout: Duration,
     ) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
-        fs::create_dir_all(root).map_err(|e| e.to_string())?;
+        crate::shared_access::create_dir_all(root).map_err(|e| e.to_string())?;
         let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
         let _device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
         let _bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
@@ -887,10 +884,7 @@ impl Lease {
         }
         prior_processes_gone(&m)?;
         // Human confirmation is explicit and auditable; it is not a device observation.
-        let mut log = File::options()
-            .create(true)
-            .append(true)
-            .open(legacy_root.join("phonefarm-recovery.jsonl"))
+        let mut log = crate::shared_access::append_file(&legacy_root.join("phonefarm-recovery.jsonl"))
             .map_err(|e| e.to_string())?;
         use std::io::Write;
         writeln!(log,"{}",json!({"serial":serial,"previous_owner":m,"acknowledged_by_pid":std::process::id(),
@@ -982,6 +976,7 @@ fn host_process_fact(m: &Value, observed: &Result<Option<InstanceState>, String>
 /// Observe existing host state only. This is neither a recovery receipt nor write authorization.
 fn lease_status(legacy_root: &Path) -> Value {
     let probe_bridge = || -> Result<bool, String> {
+        crate::shared_access::check_directory(legacy_root).map_err(|e| e.to_string())?;
         let path = legacy_root.join("phonefarm-bridge.lock");
         match fs::symlink_metadata(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -989,6 +984,7 @@ fn lease_status(legacy_root: &Path) -> Value {
             Ok(m) if !m.is_file() => return Err("bridge is not a regular file".into()),
             Ok(_) => {}
         }
+        crate::shared_access::check_existing(&path, true).map_err(|e| e.to_string())?;
         let file = File::open(path).map_err(|e| format!("bridge read: {e}"))?;
         match file.try_lock() {
             Ok(()) => Ok(false), // Closing this descriptor releases only our brief probe lock.

@@ -85,7 +85,7 @@ impl Session {
             return Err("invalid gray capture package or evidence origin".into());
         }
         if marker.is_some_and(|name| !valid_marker(name)) { return Err("launch marker must be a safe, distinct filename in the target files directory".into()); }
-        fs::create_dir_all(out).map_err(|e| e.to_string())?;
+        crate::shared_access::create_dir_all(out).map_err(|e| e.to_string())?;
         let token = lease.token().to_owned();
         // The control descriptor publishes this relative directory. Its name
         // must not disclose the internal Lease token used by other producers.
@@ -93,7 +93,7 @@ impl Session {
             format!("gray-session-{}-{}", std::process::id(), stamp()?)
         } else { format!("gray-{token}") };
         let dir = out.canonicalize().map_err(|e| e.to_string())?.join(name);
-        fs::create_dir(&dir).map_err(|e| e.to_string())?;
+        crate::shared_access::create_dir(&dir).map_err(|e| e.to_string())?;
         for parent in dir.ancestors() {
             fs::File::open(parent).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
         }

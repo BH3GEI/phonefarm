@@ -1,7 +1,7 @@
 //! Owned resources for gray eval; one base session owns the actual lease.
 use crate::{confirmation_transport::{new_file, quote as q}, gray_session::Session};
 use serde_json::{json, Value};
-use std::{cell::RefCell, fs, path::Path, time::{Duration, Instant}};
+use std::{cell::RefCell, path::Path, time::{Duration, Instant}};
 
 const SCHEMA: &str = "phonefarm/gray-eval-launch-session@1";
 const SCRIPT_SCHEMA: &str = "phonefarm/gray-eval-script-session@1";
@@ -182,7 +182,7 @@ impl Parent {
     }
     pub fn sample(&self,label:&str,seconds:u64,out:&Path)->Result<(bool,bool),String> {
         if !(1..=86400).contains(&seconds) || label.is_empty() || !label.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_') {return Err("invalid finite gray sample".into());}
-        fs::create_dir_all(out).map_err(|e|e.to_string())?;
+        crate::shared_access::create_dir_all(out).map_err(|e|e.to_string())?;
         self.update(|s|s["rounds"].as_array_mut().unwrap().push(json!({"label":label,"seconds":seconds,"out":out})))?;
         let result=self.worker("gray_sample",label,Some(seconds),true)?;
         new_file(&out.join("capture.log"),result.as_bytes())?;
@@ -215,7 +215,7 @@ impl Parent {
     pub fn sample_script(&self,label:&str,seconds:u64,out:&Path,qualify:bool)->Result<(bool,bool,Value),String> {
         let plan=script_plan(&self.state.borrow())?;
         if seconds!=plan.seconds || label.is_empty() || !label.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_') {return Err("invalid finite gray sample".into());}
-        fs::create_dir_all(out).map_err(|e|e.to_string())?;
+        crate::shared_access::create_dir_all(out).map_err(|e|e.to_string())?;
         self.update(|s|s["rounds"].as_array_mut().unwrap().push(json!({"label":label,"seconds":seconds,"out":out,"qualify":qualify})))?;
         self.collect_script(label,seconds,out,qualify,&plan,"gray_script_sample")
     }
@@ -238,7 +238,7 @@ impl Parent {
             _=>return Err("unknown control input kind".into()),
         };
         if normalized!=*plan {return Err("control input plan is not normalized for its declared kind".into());}
-        fs::create_dir_all(out).map_err(|e|e.to_string())?;
+        crate::shared_access::create_dir_all(out).map_err(|e|e.to_string())?;
         let policy=control_power_policy(&self.state.borrow())?;
         let mut power=json!({"policy":policy,"before":null,"after":null,"error":null});
         let power_path=out.join("power.json");

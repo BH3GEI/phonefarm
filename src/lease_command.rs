@@ -1,7 +1,7 @@
 //! Bounded, sequential transport commands under an existing experiment lease.
 //! Local process completion never certifies that activity on the device stopped.
 use crate::devlease::Lease;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::{
     fs::OpenOptionsExt,
@@ -62,13 +62,15 @@ fn stop_and_reap(child: &mut Child) -> bool {
 }
 
 fn output_file(path: &Path) -> Result<File, String> {
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(path)
-        .map_err(|e| format!("command output {}: {e}", path.display()))
+        .map_err(|e| format!("command output {}: {e}", path.display()))?;
+    crate::shared_access::created_file(path, &file, false).map_err(|e| e.to_string())?;
+    Ok(file)
 }
 
 fn within_limit(file: &File) -> Result<(), String> {
@@ -131,7 +133,7 @@ fn supervise(
     worker: bool,
 ) -> Result<Output, String> {
     lease.check()?;
-    fs::create_dir_all(dir).map_err(|e| format!("command output directory: {e}"))?;
+    crate::shared_access::create_dir_all(dir).map_err(|e| format!("command output directory: {e}"))?;
     let stem = format!(
         "{}-{:06}",
         std::process::id(),
@@ -266,6 +268,7 @@ pub(crate) fn worker_guard() -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::fs;
 
     struct Scratch(std::path::PathBuf);
     impl Scratch {

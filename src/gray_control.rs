@@ -94,6 +94,7 @@ fn number(v: &Value, key: &str) -> Result<u64> {
 struct Store {
     root: File,
     path: PathBuf,
+    shared: Option<crate::shared_access::Policy>,
 }
 impl Store {
     fn open(path: &Path) -> Result<Self> {
@@ -105,7 +106,11 @@ impl Store {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)?;
-        Ok(Self { root, path })
+        let shared = crate::shared_access::Policy::from_env()?;
+        if let Some(policy) = shared {
+            policy.check(&root, 0o2770)?;
+        }
+        Ok(Self { root, path, shared })
     }
     fn parent(&self, rel: &str) -> Result<(File, CString)> {
         let mut parts = Vec::new();
@@ -139,6 +144,9 @@ impl Store {
                 return Err(std::io::Error::last_os_error().into());
             }
             dir = unsafe { File::from_raw_fd(fd) };
+            if let Some(policy) = self.shared {
+                policy.check(&dir, 0o2770)?;
+            }
         }
         Ok((dir, name))
     }
@@ -161,6 +169,18 @@ impl Store {
                 "invalid_request",
                 "control record is not a regular file",
             ));
+        }
+        if let Some(policy) = self.shared {
+            let mode = if flags & libc::O_RDWR != 0 {
+                0o660
+            } else {
+                0o640
+            };
+            if flags & libc::O_EXCL != 0 {
+                policy.apply_new(&file, mode)?;
+            } else {
+                policy.check(&file, mode)?;
+            }
         }
         Ok(file)
     }
@@ -195,6 +215,13 @@ impl Store {
         self.write_bytes(rel, &bytes, replace)
     }
     fn write_bytes(&self, rel: &str, bytes: &[u8], replace: bool) -> Result<()> {
+        if self.shared.is_some() {
+            match self.open_file(rel, libc::O_RDONLY) {
+                Ok(_) => {}
+                Err(e) if e.code == "not_found" => {}
+                Err(e) => return Err(e),
+            }
+        }
         let (dir, name) = self.parent(rel)?;
         let tmp = CString::new(format!(
             ".control-{}-{}",
@@ -215,6 +242,9 @@ impl Store {
         }
         let mut file = unsafe { File::from_raw_fd(fd) };
         let saved = (|| -> Result<()> {
+            if let Some(policy) = self.shared {
+                policy.apply_new(&file, 0o640)?;
+            }
             file.write_all(bytes)?;
             file.sync_all()?;
             let code = unsafe {
@@ -250,6 +280,21 @@ impl Store {
         let (dir, name) = self.parent(rel)?;
         if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
             return Err(std::io::Error::last_os_error().into());
+        }
+        if let Some(policy) = self.shared {
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let child = unsafe { File::from_raw_fd(fd) };
+            policy.apply_new(&child, 0o2770)?;
+            child.sync_all()?;
         }
         dir.sync_all()?;
         Ok(())
@@ -959,11 +1004,7 @@ fn create_control(store: &Store) -> Result<()> {
         "gray-control/artifacts",
         "gray-control/quality",
     ] {
-        let (dir, name) = store.parent(rel)?;
-        if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        dir.sync_all()?;
+        store.mkdir(rel)?;
     }
     for name in ["owner", "publisher"] {
         let file = store.open_file(
@@ -1024,7 +1065,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
     crate::gray_eval_session::admit_control_power(a.serial.as_ref().unwrap(), &a.power_policy)
         .map_err(device)?;
     let out = a.out.as_ref().unwrap();
-    fs::create_dir_all(out)?;
+    crate::shared_access::create_dir_all(out)?;
     let store = Store::open(out)?;
     let job = job_identity(&store)?;
     if store.optional(DESCRIPTOR)?.is_some() {
@@ -1332,7 +1373,7 @@ fn execute(
             let label = format!("sample_{sequence}");
             let relative = format!("{CONTROL}/artifacts/{label}");
             let out = store.path.join(&relative);
-            fs::create_dir(&out)?;
+            store.mkdir(&relative)?;
             d["phase"] = json!("measuring");
             d["active_sample"] = json!({"request_id":id,"seconds":seconds,"input_kind":input_kind,"planned_input_ms":plan.duration_ms(),"started_at":now(),"path":relative});
             save_descriptor(store, d)?;

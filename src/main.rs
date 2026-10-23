@@ -45,6 +45,7 @@ mod host_process;
 mod observation;
 mod lease_receipt;
 mod lease_storage;
+mod shared_access;
 mod eval;
 mod onboard;
 mod qualification;

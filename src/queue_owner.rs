@@ -47,9 +47,16 @@ fn root_path(root: &Path) -> Result<(), String> {
     if !root.is_absolute() {
         return Err("queue root must be absolute".into());
     }
-    checked_dir(root).map(|_| ())
+    if checked_dir(root)? {
+        crate::shared_access::check_directory(root).map_err(|e| e.to_string())?;
+        for name in ["devlock.queue", "devlock.queue.tmp", "devlock.seen", "devlock.seen.tmp", "devlock.log"] {
+            crate::shared_access::check_existing(&root.join(name), true).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 fn bounded(path: &Path) -> Result<Vec<u8>, String> {
+    crate::shared_access::check_existing(path, false).map_err(|e| e.to_string())?;
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -160,14 +167,7 @@ pub(crate) fn inherited(root: &Path) -> Result<Option<QueueOwner>, String> {
 
 pub(crate) fn lock(root: &Path) -> Result<File, String> {
     root_path(root)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(root.join("queue-owner.lock"))
+    let file = crate::shared_access::lock_file(&root.join("queue-owner.lock"), 0o600)
         .map_err(|e| e.to_string())?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
         return Err("queue metadata mutex is not a file".into());
@@ -211,14 +211,7 @@ fn same(root: &Path, expected: &QueueOwner) -> Result<(), String> {
     }
 }
 fn bridge(root: &Path) -> Result<File, String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(root.join("phonefarm-bridge.lock"))
+    let file = crate::shared_access::lock_file(&root.join("phonefarm-bridge.lock"), 0o600)
         .map_err(|e| e.to_string())?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
         return Err("bridge is not a regular file".into());
@@ -335,7 +328,7 @@ fn reconcile(root: &Path, instance: &str) -> Result<Value, String> {
     }
     let archive = root.join("devlock-reconciliations");
     if !checked_dir(&archive)? {
-        fs::create_dir(&archive).map_err(|e| e.to_string())?;
+        crate::shared_access::create_dir(&archive).map_err(|e| e.to_string())?;
     }
     let report = json!({"schema":"phonefarm/devlock-reconciliation@1","instance_id":instance,"owner":owner,
         "scope":"outer_queue_metadata_retired_after_explicit_idle_assertion","participants_stopped_asserted":true,
@@ -350,6 +343,7 @@ fn reconcile(root: &Path, instance: &str) -> Result<Value, String> {
         .open(&path)
     {
         Ok(mut file) => {
+            crate::shared_access::created_file(&path, &file, false).map_err(|e| e.to_string())?;
             file.write_all(&serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?)
                 .and_then(|_| file.sync_all())
                 .map_err(|e| e.to_string())?;

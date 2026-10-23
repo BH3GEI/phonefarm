@@ -38,6 +38,12 @@ except (ValueError, TypeError, AttributeError) as error:
     print(error, file=sys.stderr)
     sys.exit(2)
 ' || exit 2
+# The typed check above validates the declared shared root and existing queue
+# files. Setgid directories supply the group; only these queue writes use 0007.
+original_umask=$(umask)
+if (( ${+PHONEFARM_SHARED_GID} )); then
+  umask 0007
+fi
 # Observation does not initialize a lock domain.
 [[ "$1" == status ]] || mkdir -p -- "$B" || exit 2
 D=$B/devlock.d; LOG=$B/devlock.log; Q=$B/devlock.queue; SEEN=$B/devlock.seen; M=$B/devlock.qmutex
@@ -177,7 +183,11 @@ print(v["instance_id"])
     ( trap 'exit 0' INT TERM HUP
       while renew "$L" >/dev/null; do zselect -t 6000; done
     ) & HB=$!
-    "$@"; rc=$?
+    if (( ${+PHONEFARM_SHARED_GID} )); then
+      ( umask "$original_umask"; "$@" ); rc=$?
+    else
+      "$@"; rc=$?
+    fi
     stop_heartbeat
     release "$L" >/dev/null || { (( rc != 0 )) || rc=2; }
     exit $rc ;;
