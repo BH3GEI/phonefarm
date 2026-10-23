@@ -220,8 +220,12 @@ def main():
             time.sleep(a.settle)
             fg = dev.shell("dumpsys window | grep mCurrentFocus")
             props = {p: dev.prop(f"vendor.gpp.{p}") for p in ("gfrc.interp.rate", "gfrc.upscale.ratio", "frc.enable")}
-            want_on = state == "on"
-            applied = (props["gfrc.interp.rate"] not in ("", "0")) == want_on
+            # 三位: 画质档 (→ 超分 upscale.ratio) / 帧率档 (→ 插帧 interp.rate) / 总开关; 两个属性分别核对
+            bits = a.on if state == "on" else "000"
+            want_up = bits[2] == "1" and bits[0] != "0"
+            want_interp = bits[2] == "1" and bits[1] != "0"
+            applied = ((props["gfrc.upscale.ratio"] not in ("", "0")) == want_up
+                       and (props["gfrc.interp.rate"] not in ("", "0")) == want_interp)
             dev_trace = f"/data/local/tmp/gfrc_trace_{name}.txt"
             ts_cmd = ("dumpsys SurfaceFlinger --timestats -disable -clear >/dev/null; "
                       "dumpsys SurfaceFlinger --timestats -enable >/dev/null; "
