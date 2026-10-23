@@ -177,6 +177,10 @@ pub struct Evidence {
     pub control: Vec<Value>,
     #[serde(default)]
     pub candidate: Vec<Value>,
+    /// 初筛 (protocol.stage=screen): 每候选只跑两三对, 只用来挑候选。豁免样本量可达性,
+    /// 但永远拿不到结论资格 —— 能出结论的只有完整确认阶段。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub screen: bool,
 }
 
 fn unknown_origin() -> String {
@@ -199,6 +203,7 @@ impl Evidence {
             baseline: vec![],
             control: vec![],
             candidate: vec![],
+            screen: false,
         }
     }
 }
@@ -407,12 +412,21 @@ pub fn evaluate(e: &Evidence) -> Result<Report, String> {
             )),
             "合成/估计/未知来源不能取得真实实验结论资格",
         );
-        check(
-            &mut checks,
-            "statistical_reachability",
-            Some(statistically_reachable(&e.policy)),
-            "至少五对且精确置换最小p必须小于冻结alpha/K",
-        );
+        if e.screen {
+            check(
+                &mut checks,
+                "statistical_reachability.screen_exempt",
+                Some(true),
+                "初筛只挑候选、不出结论, 豁免样本量; 结论资格另行禁止",
+            );
+        } else {
+            check(
+                &mut checks,
+                "statistical_reachability",
+                Some(statistically_reachable(&e.policy)),
+                "至少五对且精确置换最小p必须小于冻结alpha/K",
+            );
+        }
         check(
             &mut checks,
             "control",
@@ -523,8 +537,8 @@ pub fn evaluate(e: &Evidence) -> Result<Report, String> {
         status: status.into(),
         probe_allowed,
         experiment_allowed: all_pass && e.stage != Stage::Probe,
-        conclusion_allowed: all_pass && e.stage == Stage::Conclusion,
-        eligible: all_pass && e.stage == Stage::Conclusion,
+        conclusion_allowed: all_pass && e.stage == Stage::Conclusion && !e.screen,
+        eligible: all_pass && e.stage == Stage::Conclusion && !e.screen,
         policy: e.policy.clone(),
         checks,
         frame_evidence: frames,
@@ -853,6 +867,18 @@ mod tests {
         e.policy.temp_cap_c = Some(70.0);
         e.policy.cool_c = None;
         assert!(!evaluate(&e).unwrap().eligible);
+    }
+    #[test]
+    fn screen_runs_experiments_without_reachable_pairs_but_never_concludes() {
+        let mut e = ready();
+        e.policy.required_pairs = 2;
+        e.stage = Stage::Experiment;
+        assert!(!evaluate(&e).unwrap().experiment_allowed);
+        e.screen = true;
+        assert!(evaluate(&e).unwrap().experiment_allowed);
+        e.stage = Stage::Conclusion;
+        let r = evaluate(&e).unwrap();
+        assert!(!r.conclusion_allowed && !r.eligible);
     }
     #[test]
     fn strict_alpha_requires_reachable_sample_size() {

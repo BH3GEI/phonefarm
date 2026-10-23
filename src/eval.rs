@@ -2060,6 +2060,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let policy = policy_for_request(req)?;
     std::fs::write(evidence.join("qualification_policy.json"),serde_json::to_string_pretty(&policy).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
     let mut facts=Evidence::new(Stage::Probe,policy,qualification::inspect_device(serial));
+    facts.screen=is_screen(req);
     let preflight=record_qualification(&mut report,evidence,&facts)?;
     if !preflight.probe_allowed {
         report["verdict"]["reason"]=json!("root/目标 trace 能力未确认，禁止差异写探测");
@@ -2532,7 +2533,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     facts.restored=Some(snapshot_restored && restore_fail.is_none());
     let qualified=record_qualification(&mut report,evidence,&facts)?;
     if !qualified.conclusion_allowed {
-        report["verdict"]["reason"]=json!("实验结论资格未通过；数字保留，禁止 PASS/KEEP");
+        report["verdict"]["reason"]=json!(if facts.screen {"初筛只报方向与幅度 (数字保留), 不判 PASS/KEEP; 有苗头的候选进确认阶段"}
+            else {"实验结论资格未通过；数字保留，禁止 PASS/KEEP"});
         return Ok(serde_json::to_string_pretty(&report).unwrap());
     }
     // ── 判定 ──
