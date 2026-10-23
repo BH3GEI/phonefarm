@@ -35,7 +35,7 @@ const POLL: Duration = Duration::from_secs(45);
 const HEARTBEAT: Duration = Duration::from_secs(60);
 
 /// 会碰设备、要拿锁的子命令。
-const LOCKED: [&str; 23] = [
+const LOCKED: [&str; 24] = [
     "run",
     "onboard",
     "benchmark",
@@ -59,6 +59,7 @@ const LOCKED: [&str; 23] = [
     "selftest",
     "frame-audit",
     "preflight",
+    "frame-sources",
 ];
 
 /// 从参数里剥下来的锁选项。
@@ -105,6 +106,10 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
     if sub == "frame-audit" && !matches!(rest.first().map(|s| s.as_str()), Some("capture") | Some("storeop-check")) {
         return false;
     }
+    // perf --from-csv: 离线解析已拉回的 SP_daemon CSV, 不碰设备
+    if sub == "perf" && rest.iter().any(|a| a == "--from-csv") {
+        return false;
+    }
     if matches!(sub, "eval" | "gpu-op") {
         // 这两个入口只有两种情况会碰设备: `--unlock` 回滚遗留锁频态, 或 `--request`
         // 指着一个真实存在的文件。其余 (裸调用、缺参数、请求路径不存在) 都在解析
@@ -112,6 +117,10 @@ pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
         // 别人持锁就排两小时队。
         if rest.iter().any(|a| a == "--unlock") {
             return true;
+        }
+        // eval --validate-only: 只做离线校验, 不碰设备
+        if sub == "eval" && rest.iter().any(|a| a == "--validate-only") {
+            return false;
         }
         return match rest.iter().position(|a| a == "--request") {
             Some(i) => rest
@@ -486,5 +495,21 @@ mod tests {
         std::fs::remove_file(&f).ok();
         // --unlock 回滚锁频态是写设备
         assert!(needs_lock("gpu-op", &v(&["--serial", "S", "--unlock"])));
+    }
+
+    /// perf --from-csv 只读盘上的 CSV, 不拿锁; frame-sources 是只读探测但碰设备, 要拿锁
+    #[test]
+    fn perf_from_csv_is_offline_and_frame_sources_locks() {
+        assert!(!needs_lock("perf", &v(&["--from-csv", "x.csv", "--json"])));
+        assert!(needs_lock("perf", &v(&["--serial", "S", "--source", "sflatency"])));
+        assert!(needs_lock("frame-sources", &v(&["--serial", "S"])));
+    }
+
+    /// eval --validate-only 是离线 dry-run: 请求文件在也不排队拿锁
+    #[test]
+    fn eval_validate_only_does_not_queue() {
+        let existing = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        assert!(!needs_lock("eval", &v(&["--request", existing, "--validate-only"])));
+        assert!(needs_lock("eval", &v(&["--request", existing])));
     }
 }

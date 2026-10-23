@@ -6,6 +6,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # gray/
 SDK="${ANDROID_SDK_ROOT:-/opt/homebrew/share/android-commandlinetools}"
 NDK="${REFBENCH_NDK:-$SDK/ndk/28.2.13676358}"
+# 默认位置没有时依次找: ANDROID_NDK_HOME, Android Studio 的 SDK, 仓库外的 tools/ndk (都要求 r28c = 28.2.13676358)
+if [ ! -d "$NDK" ]; then
+    for c in "${ANDROID_NDK_HOME:-}" "$HOME/Library/Android/sdk/ndk/28.2.13676358" \
+             "$ROOT/../../../../tools/ndk/android-ndk-r28c" "$ROOT/../../../../../tools/ndk/android-ndk-r28c"; do
+        [ -n "$c" ] && [ -d "$c" ] && { NDK="$(cd "$c" && pwd)"; break; }
+    done
+fi
 HOST_TAG=darwin-x86_64
 [ -d "$NDK/toolchains/llvm/prebuilt/$HOST_TAG" ] || HOST_TAG=linux-x86_64
 CXX="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android30-clang++"
@@ -24,7 +31,10 @@ GLSLC="$NDK/shader-tools/$HOST_TAG/glslc"
 [ -x "$GLSLC" ] || { echo "缺 glslc: $GLSLC" >&2; exit 1; }
 "$GLSLC" -O "$ROOT/layer/copyprobe_copy.comp" -o "$OUT/copyprobe_copy.spv"
 "$GLSLC" -O "$ROOT/layer/upop.comp" -o "$OUT/upop.spv"
-python3 - "$OUT/copyprobe_copy.spv" "$OUT/upop.spv" > "$OUT/copy_spv.h" <<'PYEOF'
+# npuop: 画面 -> NPU 输入张量 / NPU 输出张量 -> 送显分辨率 dst
+"$GLSLC" -O "$ROOT/layer/npu_pack.comp" -o "$OUT/npu_pack.spv"
+"$GLSLC" -O "$ROOT/layer/npu_unpack.comp" -o "$OUT/npu_unpack.spv"
+python3 - "$OUT/copyprobe_copy.spv" "$OUT/upop.spv" "$OUT/npu_pack.spv" "$OUT/npu_unpack.spv" > "$OUT/copy_spv.h" <<'PYEOF'
 import sys
 def emit(name, path):
     d = open(path, "rb").read()
@@ -35,8 +45,31 @@ def emit(name, path):
     print(f"static const unsigned int {name}Len = {len(d)};")
 emit("kCopySpv", sys.argv[1])
 emit("kUpopSpv", sys.argv[2])
+emit("kNpuPackSpv", sys.argv[3])
+emit("kNpuUnpackSpv", sys.argv[4])
 PYEOF
-echo "shader: copy=$(wc -c < "$OUT/copyprobe_copy.spv" | tr -d ' ')B upop=$(wc -c < "$OUT/upop.spv" | tr -d ' ')B -> copy_spv.h"
+echo "shader: copy=$(wc -c < "$OUT/copyprobe_copy.spv" | tr -d ' ')B upop=$(wc -c < "$OUT/upop.spv" | tr -d ' ')B" \
+     "npu_pack=$(wc -c < "$OUT/npu_pack.spv" | tr -d ' ')B npu_unpack=$(wc -c < "$OUT/npu_unpack.spv" | tr -d ' ')B -> copy_spv.h"
+
+# 插帧 GPU 侧 (路线 A: 缩小+光流放大采样混合; 路线 B: 块匹配+平滑+预对齐+残差合成)。先编译并内嵌成
+# interp_spv.h 备用; 层代码还没调用它们 (接线是后续工作), 这里至少保证每次构建都能编过。
+INTERP_SHADERS="interp_a_down interp_a_blend interp_b_luma interp_b_bm interp_b_smooth interp_b_prealign interp_b_compose"
+for s in $INTERP_SHADERS; do
+    "$GLSLC" --target-env=vulkan1.1 -O -I"$ROOT/layer" "$ROOT/layer/$s.comp" -o "$OUT/$s.spv"
+done
+python3 - "$OUT" $INTERP_SHADERS > "$OUT/interp_spv.h" <<'PYEOF'
+import sys
+out = sys.argv[1]
+for n in sys.argv[2:]:
+    d = open(f"{out}/{n}.spv", "rb").read()
+    cname = "k" + "".join(p.capitalize() for p in n.split("_")) + "Spv"
+    print(f"static const unsigned char {cname}[] = {{")
+    for i in range(0, len(d), 16):
+        print("  " + ",".join(str(b) for b in d[i:i+16]) + ",")
+    print("};")
+    print(f"static const unsigned int {cname}Len = {len(d)};")
+PYEOF
+echo "interp shaders: $(for s in $INTERP_SHADERS; do printf '%s=%sB ' $s $(wc -c < "$OUT/$s.spv" | tr -d ' '); done)-> interp_spv.h"
 
 # gray-artifact uses this same native source/flag list for its candidate build.
 python3 - "$CXX" "$ROOT" "$OUT" <<'PYEOF'

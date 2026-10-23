@@ -45,7 +45,7 @@ fn host_native_counters_and_actual_layer_hooks() {
             std::os::unix::fs::symlink(headers.join("vk_video"), temp.join("vk_video")).unwrap();
         }
     }
-    fs::write(temp.join("copy_spv.h"),"alignas(4) static const unsigned char kCopySpv[]={3,2,35,7};static const unsigned int kCopySpvLen=4;alignas(4) static const unsigned char kUpopSpv[]={3,2,35,7};static const unsigned int kUpopSpvLen=4;").unwrap();
+    fs::write(temp.join("copy_spv.h"),"alignas(4) static const unsigned char kCopySpv[]={3,2,35,7};static const unsigned int kCopySpvLen=4;alignas(4) static const unsigned char kUpopSpv[]={3,2,35,7};static const unsigned int kUpopSpvLen=4;alignas(4) static const unsigned char kNpuPackSpv[]={3,2,35,7};static const unsigned int kNpuPackSpvLen=4;alignas(4) static const unsigned char kNpuUnpackSpv[]={3,2,35,7};static const unsigned int kNpuUnpackSpvLen=4;").unwrap();
     for (dynamic, fixture) in [(false, true), (true, true), (false, false), (true, false)] {
         if dynamic {
             fs::write(temp.join("artifact_metadata.h"),"#define RK_DYNAMIC_ARTIFACT_METADATA 1\nstatic const char kArtifactId[]=\"upop-host-fixture\";static const char kCandidateSourceSha256[]=\"source-fixture\";static const char kCandidateSpirvSha256[]=\"spv-fixture\";\n").unwrap();
@@ -66,6 +66,10 @@ fn host_native_counters_and_actual_layer_hooks() {
             .arg(root.join("tests/layer_artifact_test.cpp"))
             // main 的层把 present 钩子接到 npuprobe (build_layer.sh 一起编), 宿主测试同样链进来
             .arg(root.join("layer/npuprobe.cpp"))
+            // ruler 侧 framedump 档 (build_layer.sh 一起编), 宿主测试同样链进来
+            .arg(root.join("layer/framedump.cpp"))
+            // interp (I6 层内多 present), build_layer.sh 一起编
+            .arg(root.join("layer/interp.cpp"))
             .arg("-o")
             .arg(&exe)
             .output()

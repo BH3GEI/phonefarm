@@ -1,6 +1,6 @@
 {
-  "sources": ["vk_layer_refknobs.cpp", "npuprobe.cpp"],
-  "inputs": ["artifact_stats.h", "dispatch_ownership.h", "copyprobe_copy.comp", "VkLayer_refknobs.json"],
+  "sources": ["vk_layer_refknobs.cpp", "npuprobe.cpp", "framedump.cpp", "interp.cpp"],
+  "inputs": ["artifact_stats.h", "dispatch_ownership.h", "npu_rt.h", "framedump.h", "interp.h", "copyprobe_copy.comp", "VkLayer_refknobs.json"],
   "compile_flags": ["-O2", "-Wall", "-fPIC", "-std=c++17", "-fno-exceptions", "-fno-rtti", "-static-libstdc++", "-Wl,--exclude-libs,ALL"],
   "link_flags": ["-shared", "-Wl,-z,defs", "-llog", "-ldl"]
 }

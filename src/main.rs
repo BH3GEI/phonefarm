@@ -69,13 +69,21 @@ mod gray_eval_session;
 mod grayartifact;
 mod upopabi;
 mod storageadapter;
+mod npuop_device;
 mod shotdiff;
 mod sequence_quality;
+mod iqjudge;
+mod iqsheet;
+mod interpjudge;
+mod scorecard;
+mod iqdiagnose;
 mod hypo;
 mod mtools;
 mod caps;
 mod gpdaemon;
 mod perfsrc;
+mod framesrc;
+mod sflatency;
 pub mod pyjson;
 mod pyrandom;
 mod refbenchreport;
@@ -281,13 +289,19 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (配对连续帧 RGB PSNR/色偏/残差变化, 零 Token 离线; PASS 只覆盖冻结指标, 不证明无鬼影)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
        (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
-性能:  perf [--serial S] [--app 包名] [--rounds 10] [--source sysfs|smartperf] [--power-rail usb|battery] [--xpower-out 目录] [--json]
-       perf --from-csv <本地 data.csv> [--json]   (离线解析已拉回的 SP_daemon 产物,不碰设备)
+性能:  perf [--serial S] [--app 包名] [--rounds 10] [--source sysfs|smartperf|sflatency] [--layer 图层] [--power-rail usb|battery] [--xpower-out 目录] [--json]
+       perf --from-csv <本地 data.csv> [--app 包名] [--json]   (离线解析已拉回的 SP_daemon 产物,不碰设备; --app 声明它是 -PKG 采的)
+       frame-sources [--serial S] [--app 包名] [--json]
+       (这台设备有哪些帧率/帧时来源: kgsl_ftrace / sf_latency / gfxinfo_hwui / sp_daemon_pkg / rs_fpscount ...,
+        各自口径 app / app_ui / global、能否进判定表; 只读探测, 退出码 0=有能进判定表的来源)
        (归一化性能快照: 三条通路同一份字段, 采不到的字段是 null 并附原因, 不填 0。
         安卓 --source sysfs(默认): 直读 /sys/class/power_supply 电源轨, 只出功耗;
         安卓 --source smartperf: HiSmartPerf 通路, 往设备推 GamePerfToolCollector 常驻 +
           adb forward socket 实时流, 出帧率/功耗/温度(要 --app 包名; 有副作用, 故不默认);
-        鸿蒙(--serial hdc:<key>): HiSmartPerf 的 SP_daemon 落盘 CSV。尚未上真机验证。
+        安卓 --source sflatency: 无 root 的显示帧, 轮询 dumpsys SurfaceFlinger --latency <目标图层>,
+          只出帧 (frame_judge 标 sf_latency); 要 --app 包名, 图层不给就按包名挑;
+        鸿蒙(--serial hdc:<key>): HiSmartPerf 的 SP_daemon 落盘 CSV; 带 --app 走 -PKG 应用口径
+          (frame_judge 标 sp_daemon_pkg), 不带是整机口径, fps 记缺失, meta.fps_scope 标口径。
         退出码 0=采到/1=没采到/2=通路不可用。--xpower-out 才刷 Xpower 落盘拉回 dubai.db)
 采集:  capture --serial <S> [--out 目录] [--frames 200] [--max-steps N] [--settle-ms 800] [--mode auto] [--no-shutdown] [--json]
        (原神无 UI 自动巡航原始帧采集: 只留大世界探索态帧 + manifest 路线分段, SPEC_SR_LOOP Gate 2)
@@ -300,7 +314,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)
 设备锁: 碰设备的子命令 (run/onboard/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
-       capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
+       capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest/frame-sources) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
        通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h] [--no-devlock]
        锁已在同一 label 手里 (外层 devlock run / optimize) 时原地执行; 没拿到锁不碰设备, 退出 2";
 
@@ -826,6 +840,18 @@ fn main() {
             // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
             std::process::exit(bench::run_bench(&args[1..]));
         }
+        Some("interp-judge") => {
+            // 插帧验收: 插出的中间帧对原生 2 倍帧率真值, 静止块/运动块/最差块/包络/细节 + 序列闪烁
+            std::process::exit(interpjudge::run_interp_judge(&args[1..]));
+        }
+        Some("iq-diagnose") => {
+            // 画质降质诊断: 哪种降质 (模糊/振铃/锯齿/色偏/块效应/重影/光晕/闪烁)、在哪 (逐块热图 + 区域 + 最差块截图)
+            std::process::exit(iqdiagnose::run_iq_diagnose(&args[1..]));
+        }
+        Some("iq-judge") => {
+            // 画质验收: 候选与「原生自己跟自己比」同一水平才算画面不变 (稳定块 PSNR/SSIM + 细节能量)
+            std::process::exit(iqjudge::run_iq_judge(&args[1..]));
+        }
         Some("shot-diff") => {
             // copyprobe 验收 ②: 截帧逐像素比对 (控制对基线)
             std::process::exit(shotdiff::run_shot_diff(&args[1..]));
@@ -932,6 +958,10 @@ fn main() {
             // 归一化性能快照: 安卓走 sysfs 电源轨, 鸿蒙走 HiSmartPerf(SP_daemon + Xpower),
             // 上层拿到的 JSON 字段完全一致。零 Token, 只读设备。纯增量子命令。
             std::process::exit(perfsrc::run_perf(&args[1..]));
+        }
+        Some("frame-sources") => {
+            // 这台设备上有哪些帧率/帧时来源、各自什么口径 (app / app_ui / global)、能否进判定表。只读探测。
+            std::process::exit(framesrc::run(&args[1..]));
         }
         Some("capture") => {
             // 原神无 UI 自动巡航截图(SPEC_SR_LOOP Gate 2): 复用 genshin 插件生命周期与单步, 只抓原始帧, 纯增量子命令

@@ -8,7 +8,7 @@ usage() {
 Usage: enable_layer.sh {status|off [PACKAGE]} --serial SERIAL [--json]
 PHONEFARM_BIN selects the executable (default: phonefarm).
 An explicitly set REFBENCH_SERIAL supplies the default serial; --serial overrides it.
-Legacy probe/loadop/passdump/frameaudit/frameaudit-ts/target are retired.
+Legacy probe/loadop/passdump/frameaudit/frameaudit-ts/target/framedump/interp are retired.
 Use: phonefarm gray-layer session --mode MODE --package PKG --serial S --out DIR --max-seconds N
 The old --keep-prop installed without launching; the new session always launches.
 copyprobe/upop remain unsupported, including custom artifacts.
@@ -38,7 +38,7 @@ done
 [ "${#positional[@]}" -le 2 ] || fail 'expected one mode and at most one package'
 mode="${positional[0]:-}"
 case "$mode" in
-  probe|loadop|passdump|frameaudit|frameaudit-ts|target|copyprobe|upop|status|off|'') ;;
+  probe|loadop|passdump|frameaudit|frameaudit-ts|target|framedump|interp|copyprobe|upop|status|off|'') ;;
   *) fail "unknown mode: $mode" ;;
 esac
 if [ "$help" = true ]; then usage; exit 0; fi
@@ -46,7 +46,9 @@ if [ "$help" = true ]; then usage; exit 0; fi
 [ "$mode" != target ] || [ "${#positional[@]}" -eq 2 ] || fail 'target requires a package'
 [ "$mode" != status ] || [ "${#positional[@]}" -eq 1 ] || fail 'status does not accept a package'
 case "$mode" in
-  probe|loadop|passdump|frameaudit|frameaudit-ts|target)
+  # framedump/interp (layer/framedump.cpp, layer/interp.cpp) were install-and-exit modes too;
+  # they stay in the layer but need a persistent Session owner before they can be mounted again.
+  probe|loadop|passdump|frameaudit|frameaudit-ts|target|framedump|interp)
     printf '{"schema":"phonefarm/gray-legacy-mount-retirement@1","requested_mode":"%s","status":"retired","reason":"persistent_owner_required","execution_started":false,"device_commands_started":false,"replacement":"phonefarm gray-layer session --mode MODE --package PKG --serial S --out DIR --max-seconds N","keep_prop_compatibility":"legacy_install_without_launch_is_not_supported"}\n' "$mode"
     exit 2 ;;
   copyprobe|upop)

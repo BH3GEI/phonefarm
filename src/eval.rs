@@ -43,11 +43,20 @@ const DEFAULT_DENY_KEYWORDS: [&str; 7] = [
     "throttl",
 ];
 
-/// gray 收端目前实现的受控开关。层的开关集合是有限且已实现的, 上层发明新开关
-/// 或请求收端没实现的开关, 整份拒绝。
-const GRAY_SUPPORTED_KNOBS: [&str; 2] = ["loadop_dont_care", "storeop_dont_care"];
+/// gray 收端目前实现的受控开关 (= `parse_gray_rewrites` 能认的那几个)。层的开关集合是有限且
+/// 已实现的, 上层发明新开关或请求收端没实现的开关, 整份拒绝。
+///
+/// 以前这里只写了 loadop, 而上层 (game_opt_loop optimize/gray.rs) 唯一 Landed 的是 storeop ——
+/// 收端明明实现了 storeop 却在校验这一步拦掉, 每个灰档候选都退出码 2 (审计 #1)。
+/// 现在校验直接走 `parse_gray_rewrites`, 这张表只用于报错文字, 两者由单测锁在一起。
+pub(crate) const GRAY_SUPPORTED_KNOBS: [&str; 3] = ["loadop_dont_care", "storeop_dont_care", "npuop"];
 
-const USAGE: &str = "恢复: phonefarm eval recover --session DIR --serial S [--json]\n用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--evidence-origin device|synthetic] [--json]";
+const USAGE: &str = "恢复: phonefarm eval recover --session DIR --serial S [--json]
+用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--lock-gpu-level N] [--evidence-origin device|synthetic] [--json] [--validate-only]
+  --validate-only: 只做收端校验 (validate_v2 + gray 改写解析 + 负载脚本/层 .so 是否找得到), 不碰设备; 退出码 0 = 收, 2 = 拒
+  --lock-gpu-level N  评测期间把 kgsl min/max_pwrlevel 都钉在 N 档 (审计 #9: 档位不受控时同一配置帧率跳台阶),
+                      结束时还原, 回包 conditions_observed.gpu_level_lock; 候选本身改 GPU 档位的 sysparam 不能同时用;
+                      kind=gray 走受控会话 (session owner), 不支持此旗子";
 
 /// PyVal → serde_json 值 (同一个桥的反向)。经 dumps 走文本, 非有限值
 /// (Infinity/NaN) 会被 serde_json 拒掉, 这里如实落 null。
@@ -89,6 +98,10 @@ struct EvalArgs {
     /// 确定性截断 (src/curtail.rs): 缺省开。`--no-curtail` 跑满全部轮次。
     curtail: bool,
     qualify_from: Option<String>,
+    /// 审计 #9: 评测期间把 GPU 档位钉在这一档 (kgsl min/max_pwrlevel), 见 [`GpuLevelLock`]。
+    lock_gpu_level: Option<u32>,
+    /// 只校验不上机 (离线 dry-run)
+    validate_only: bool,
     evidence_origin: String,
 }
 
@@ -97,6 +110,8 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
     let (mut request, mut serial, mut power_rail, mut out) = (None, None, None, None);
     let mut curtail = true;
     let mut qualify_from = None;
+    let mut lock_gpu_level = None;
+    let mut validate_only = false;
     let mut evidence_origin = "device".to_string();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -106,6 +121,11 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
             "--out" => out = it.next().cloned(),
             "--no-curtail" => curtail = false,
             "--qualify-from" => qualify_from = it.next().cloned(),
+            "--lock-gpu-level" => {
+                let v = it.next().and_then(|v| v.parse::<u32>().ok());
+                lock_gpu_level = Some(v.ok_or(format!("--lock-gpu-level 要一个非负整数档位号\n{USAGE}"))?);
+            }
+            "--validate-only" => validate_only = true,
             "--evidence-origin" => evidence_origin = it.next().ok_or("missing evidence origin")?.clone(),
             "--json" => {} // eval 的回包恒为 JSON, 收下这个旗子仅为兼容接口形状
             other => return Err(format!("不认识的参数 {other}\n{USAGE}")),
@@ -119,6 +139,8 @@ fn parse_args(args: &[String]) -> Result<EvalArgs, String> {
         out,
         curtail,
         qualify_from,
+        lock_gpu_level,
+        validate_only,
         evidence_origin,
     })
 }
@@ -182,6 +204,18 @@ pub fn run_eval(args: &[String]) -> i32 {
             Err(e) => { eprintln!("{e}"); 2 }
         };
     }
+    if a.validate_only {
+        return match offline_check(&req) {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                0
+            }
+            Err(e) => {
+                eprintln!("离线校验不通过: {e}");
+                2
+            }
+        };
+    }
     let evidence = a
         .out
         .clone()
@@ -193,8 +227,26 @@ pub fn run_eval(args: &[String]) -> i32 {
         .clone()
         .or_else(|| req["serial"].as_str().map(String::from));
     if kind == "shader" {
+        if a.lock_gpu_level.is_some() {
+            eprintln!("--lock-gpu-level 只对 kind=sysparam/gray/whitebox 生效 (shader 走 gpu-op, 它自己锁频)");
+            return 2;
+        }
         return eval_shader_v2(&req, &a);
     }
+    if !matches!(kind, "sysparam" | "gray" | "whitebox") {
+        eprintln!("不认识的 kind {kind}");
+        return 2;
+    }
+    if kind == "gray" && a.lock_gpu_level.is_some() {
+        eprintln!("--lock-gpu-level 不支持 kind=gray: 灰档评测由受控会话 (gray_eval_session) 持有并恢复设备状态, 会话外的档位写入无法随会话恢复");
+        return 2;
+    }
+    // 审查 R2 #11: 同一目录再跑会覆盖上一次的证据 (hw.txt、readback、快照、截图都是同名写入), 非空就拒跑
+    if let Err(e) = refuse_nonempty_out(Path::new(&evidence)) {
+        eprintln!("{e}");
+        return 2;
+    }
+    // 设备租约 (main): 先拿租约再碰设备 (下面的 GPU 档位锁也要写设备)
     let _lease = match crate::devlease::Lease::target(serial.as_deref(), "eval") {
         Ok(v) => v,
         Err(e) => {
@@ -214,14 +266,38 @@ pub fn run_eval(args: &[String]) -> i32 {
         };
     }
     if a.evidence_origin!="device" {eprintln!("--evidence-origin is supported for owned gray eval only");return 2;}
-    let report = match kind {
-        "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail),
-        "whitebox" => crate::whitebox::whitebox_eval(&req, serial.as_deref(), Path::new(&evidence)),
-        other => {
-            eprintln!("不认识的 kind {other}");
-            return 2;
+    // 审计 #9: 可选的 GPU 档位锁, 包住整次评测; 候选本身改档位的不能锁
+    let gpu_lock = match a.lock_gpu_level {
+        Some(level) => {
+            let Some(s) = serial.as_deref() else {
+                eprintln!("--lock-gpu-level 需要 --serial");
+                return 2;
+            };
+            if let Err(e) = gpu_lock_conflict(&req) {
+                eprintln!("{e}");
+                return 2;
+            }
+            let _ = std::fs::create_dir_all(&evidence);
+            match GpuLevelLock::apply(s, level, Path::new(&evidence)) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    eprintln!("GPU 档位锁失败: {e}");
+                    return 2;
+                }
+            }
         }
+        None => None,
     };
+    let report = match kind {
+        "sysparam" => sysparam_eval(&req, serial.as_deref(), Path::new(&evidence), a.curtail && !is_screen(&req)),
+        _ => crate::whitebox::whitebox_eval(&req, serial.as_deref(), Path::new(&evidence)),
+    };
+    // 锁档无条件还原 (评测 Err 也还原), 结果写进回包
+    let lock_note = gpu_lock.map(|l| l.restore());
+    let report = report.map(|r| attach_gpu_lock_note(&r, lock_note.as_ref()));
+    // 每份回包都带记分卡 (verdict.scorecard): 逐维度一行, 只有安全和「没测成」让结果无效
+    let policy = crate::scorecard::ImagePolicy::from_request(&req).unwrap_or(crate::scorecard::ImagePolicy::Gate);
+    let report = report.map(|r| crate::scorecard::attach(&r, policy));
     match report {
         Ok(r) => {
             if let Err(e) = _lease.check() {
@@ -324,7 +400,215 @@ fn gpuop_passthrough(args: &[String]) -> i32 {
     crate::gpuop::run_gpu_op(args)
 }
 
+/// 审查 R2 #11: 评测目录已经有东西 (同一个 candidate_id 再跑, game_opt_loop 的缺省路径就会这样) 时拒跑。
+/// 各臂的 hw.txt / readback / 快照 / 截图都是同名写入, 再跑一次上一次的证据就没了 (铁律: 不覆盖)。
+/// 目录不存在或是空目录都放行。
+pub(crate) fn refuse_nonempty_out(dir: &Path) -> Result<(), String> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Ok(()) };
+    let names: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "评测目录 {} 非空 (已有 {} 项, 如 {}): 同一目录再跑会覆盖上一次的证据, 换一个 --out (例如带时间戳的子目录)",
+        dir.display(),
+        names.len(),
+        names.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+// ══════════════ GPU 档位锁 (审计 #9) ══════════════
+//
+// 2026-10-21 selftest run1/run2 实测: 同一配置的帧率在 231 / 258 / 287 / 305 / 347 fps 之间跳,
+// 因为 kgsl 的 max_pwrlevel 只在开头归 0 一次, 之后厂商性能服务随意改。两种处置:
+//   · 锁: `--lock-gpu-level N` 把 min/max_pwrlevel 都钉在 N 档, 结束还原 (这里);
+//   · 记 + 协变量: 不锁时每臂逐秒记档位 (sample_hw.sh → hw.gpu_pwrlevel_runs), 两臂分布不同的那一对
+//     判不可比 (pair_env_check), 且 gpu_clk_mhz_mean 作为辅助证据进 verdict.aux (aux_compare)。
+// 锁住也只是钉了边界: 厂商服务仍可能中途改写, 逐秒记录照样做, 回包里看得到。
+
+pub(crate) const KGSL_DIR: &str = "/sys/class/kgsl/kgsl-3d0";
+
+/// 读 kgsl 档位的一条命令, 输出 `max_pwrlevel=…` / `min_pwrlevel=…` / `num_pwrlevels=…`。
+pub(crate) fn pwrlevel_read_cmd() -> String {
+    format!("for f in max_pwrlevel min_pwrlevel num_pwrlevels; do echo \"$f=$(cat {KGSL_DIR}/$f 2>/dev/null)\"; done")
+}
+
+/// 回读 → (max_pwrlevel, min_pwrlevel, num_pwrlevels)。max/min 任一读不到就 None。
+pub(crate) fn parse_pwrlevels(out: &str) -> Option<(u32, u32, Option<u32>)> {
+    let (mut mx, mut mn, mut n) = (None, None, None);
+    for l in out.lines() {
+        if let Some((k, v)) = l.trim().split_once('=') {
+            let v = v.trim().parse::<u32>().ok();
+            match k.trim() {
+                "max_pwrlevel" => mx = v,
+                "min_pwrlevel" => mn = v,
+                "num_pwrlevels" => n = v,
+                _ => {}
+            }
+        }
+    }
+    Some((mx?, mn?, n))
+}
+
+/// 锁到 `level`: 先 max 再 min 再 max。kgsl 的 store 互相钳位 (max 不能大于 min 的数值, 反之亦然),
+/// 这个顺序对任意目标档都成立 (与 hwcond::Lock 同一做法)。
+pub(crate) fn pwrlevel_lock_cmd(level: u32) -> String {
+    format!(
+        "echo {level} > {KGSL_DIR}/max_pwrlevel; echo {level} > {KGSL_DIR}/min_pwrlevel; echo {level} > {KGSL_DIR}/max_pwrlevel"
+    )
+}
+
+/// 还原: 先 min (数值大) 再 max。
+pub(crate) fn pwrlevel_restore_cmd(max: u32, min: u32) -> String {
+    format!("echo {min} > {KGSL_DIR}/min_pwrlevel; echo {max} > {KGSL_DIR}/max_pwrlevel")
+}
+
+/// 候选本身改 GPU 档位 (sysparam 的 params / plan 里有 pwrlevel) 时不能再锁: 锁会把候选钉死, 量的就不是候选了。
+pub(crate) fn gpu_lock_conflict(req: &Value) -> Result<(), String> {
+    let mut hits: Vec<String> = Vec::new();
+    if let Some(o) = req["payload"]["params"].as_object() {
+        hits.extend(o.keys().filter(|k| k.contains("pwrlevel")).cloned());
+    }
+    if let Some(a) = req["payload"]["plan"].as_array() {
+        hits.extend(a.iter().filter_map(|e| e["path"].as_str()).filter(|p| p.contains("pwrlevel")).map(String::from));
+    }
+    if hits.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("候选本身改 GPU 档位 ({}), 不能同时 --lock-gpu-level", hits.join(", ")))
+    }
+}
+
+/// 评测期间的 GPU 档位锁。先把「锁前的值 + 还原命令」落到 evidence 下的状态文件、登记进
+/// [`cleanup`] (Ctrl-C 也还原), 再写设备; 回读不符立即还原并报错。
+pub(crate) struct GpuLevelLock {
+    serial: String,
+    level: u32,
+    /// (max_pwrlevel, min_pwrlevel) 锁前的值
+    before: (u32, u32),
+    state_path: PathBuf,
+}
+
+impl GpuLevelLock {
+    pub(crate) fn apply(serial: &str, level: u32, evidence: &Path) -> Result<Self, String> {
+        let _ = std::fs::create_dir_all(evidence);
+        let rd = su(serial, &pwrlevel_read_cmd(), 15);
+        let (mx, mn, n) = parse_pwrlevels(&rd).ok_or(format!("读不到 kgsl 档位 (需要 root): {}", rd.trim()))?;
+        if let Some(n) = n {
+            if level >= n {
+                return Err(format!("档位 {level} 超出范围 (num_pwrlevels={n}, 合法 0..={})", n.saturating_sub(1)));
+            }
+        }
+        // 先落状态文件再动设备: 中途被杀也有据可还原 (文件只新建, 不删)
+        let state_path = evidence.join("gpu_level_lock.txt");
+        std::fs::write(
+            &state_path,
+            format!(
+                "# gpu_level_lock v1\nbefore_max={mx}\nbefore_min={mn}\nlevel={level}\nrestore_cmd={}\n",
+                pwrlevel_restore_cmd(mx, mn)
+            ),
+        )
+        .map_err(|e| format!("写不了锁档状态文件 {}: {e}", state_path.display()))?;
+        cleanup::install();
+        cleanup::register(serial, &format!("su -c '{}'", pwrlevel_restore_cmd(mx, mn)));
+        let lock = Self { serial: serial.to_string(), level, before: (mx, mn), state_path };
+        let _ = su(serial, &pwrlevel_lock_cmd(level), 15);
+        let rb = su(serial, &pwrlevel_read_cmd(), 15);
+        match parse_pwrlevels(&rb) {
+            Some((a, b, _)) if a == level && b == level => {
+                eprintln!("[eval] GPU 档位已锁在 {level} 档 (锁前 max={mx} min={mn})");
+                Ok(lock)
+            }
+            other => {
+                let r = lock.restore();
+                Err(format!(
+                    "锁档回读不符: 目标 {level}, 读到 (max,min)={:?}; 已还原 (restored={})",
+                    other.map(|(a, b, _)| (a, b)),
+                    r["restored"]
+                ))
+            }
+        }
+    }
+
+    /// 写回锁前的值并回读核对。回包记进 conditions_observed.gpu_level_lock。
+    pub(crate) fn restore(&self) -> Value {
+        let _ = su(&self.serial, &pwrlevel_restore_cmd(self.before.0, self.before.1), 15);
+        let rb = su(&self.serial, &pwrlevel_read_cmd(), 15);
+        let after = parse_pwrlevels(&rb).map(|(a, b, _)| (a, b));
+        let restored = after == Some(self.before);
+        if !restored {
+            eprintln!("[eval] GPU 档位锁还原失败: 锁前 {:?}, 现在 {:?} (状态文件 {})", self.before, after, self.state_path.display());
+        }
+        json!({
+            "level": self.level,
+            "before": {"max": self.before.0, "min": self.before.1},
+            "after": after.map(|(a, b)| json!({"max": a, "min": b})),
+            "restored": restored,
+            "state_file": self.state_path.display().to_string(),
+            "note": "锁档只钉 kgsl min/max_pwrlevel 的边界; 厂商性能服务仍可能中途改写, 逐秒记录见各臂 hw.gpu_pwrlevel_runs",
+        })
+    }
+}
+
+/// 把锁档记录并进回包的 conditions_observed.gpu_level_lock; 没锁时记 null。还原失败写进判定理由 (不改状态:
+/// 测量本身是有效的, 但设备留在锁态要让人看见)。
+pub(crate) fn attach_gpu_lock_note(report_json: &str, note: Option<&Value>) -> String {
+    let Ok(mut r) = serde_json::from_str::<Value>(report_json) else { return report_json.to_string() };
+    if !r["conditions_observed"].is_object() {
+        r["conditions_observed"] = json!({});
+    }
+    r["conditions_observed"]["gpu_level_lock"] = note.cloned().unwrap_or(Value::Null);
+    if let Some(n) = note {
+        if n["restored"].as_bool() == Some(false) {
+            let reason = r["verdict"]["reason"].as_str().unwrap_or("").to_string();
+            r["verdict"]["reason"] = json!(format!("{reason} (GPU 档位锁还原失败, 设备仍锁在 {} 档, 见 conditions_observed.gpu_level_lock)", n["level"]));
+        }
+    }
+    serde_json::to_string_pretty(&r).unwrap_or_else(|_| report_json.to_string())
+}
+
 // ══════════════ 请求校验 ══════════════
+
+/// 两级测量的第一级 (game_opt_loop 的初筛): 只看方向与幅度, 不判显著。
+/// 收端对它不做分辨率防护, 也不做确定性截断 —— 截断针对的是 KEEP 可不可达,
+/// 而初筛的轮数本来就判不出 KEEP, 开着截断会在第一臂之后就停, 初筛拿不到任何对照数据。
+pub(crate) fn is_screen(req: &Value) -> bool {
+    req["protocol"]["stage"].as_str() == Some("screen")
+}
+
+/// 回放脚本的标称时长 (秒): sleep 的 ms、swipe 的 duration_ms、exec 里 `input swipe x1 y1 x2 y2 D` 的 D 相加。
+/// 读不了或不是动作数组时 None。不含 adb 往返开销, 所以是下限。
+pub(crate) fn workload_script_seconds(path: &Path) -> Option<f64> {
+    let steps: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let ms: u64 = steps.iter().map(|st| match st["action"].as_str().unwrap_or("") {
+        "sleep" => st["ms"].as_u64().unwrap_or(0),
+        "swipe" => st["duration_ms"].as_u64().unwrap_or(0),
+        "exec" => st["cmd"].as_str().and_then(|c| {
+            let t: Vec<&str> = c.split_whitespace().collect();
+            (t.len() == 7 && t[0] == "input" && t[1] == "swipe").then(|| t[6].parse::<u64>().ok()).flatten()
+        }).unwrap_or(0),
+        _ => 0,
+    }).sum();
+    Some(ms as f64 / 1000.0)
+}
+
+/// run_once.sh 在负载起跑 LEAD=6 s 后开采 seconds 秒; 负载必须撑满整个采集窗。
+/// 2026-10-23 红魔: 确认阶段 60 s 窗配 42 s 的转镜头脚本, 后 24 s 画面静止, frame_p95 在 20/30 ms 两档间跳
+/// (基线离散 44%), 资格当场被拒 —— 宁可开跑前拒绝, 也不让静止段混进采集窗。
+pub(crate) fn workload_covers_capture(req: &Value) -> Result<(), String> {
+    // 只管走 run_once.sh 的 sysparam: gray 等走自己的会话采样, 时序不同
+    if req["kind"].as_str() != Some("sysparam") || req["workload"]["carrier"].as_str() != Some("game_replay") || launch_spec(req).is_some() {
+        return Ok(());
+    }
+    let Some(file) = req["workload"]["script"].as_str() else { return Ok(()) };
+    let Some(path) = resolve_path(file) else { return Ok(()) };   // 找不到脚本由 eval 本身报
+    let seconds = req["workload"]["seconds"].as_f64().unwrap_or(30.0);
+    match workload_script_seconds(&path) {
+        Some(d) if d + 0.5 < 6.0 + seconds => Err(format!(
+            "负载脚本 {file} 标称 {d:.0} s, 撑不满「起跑后 6 s + 采集 {seconds:.0} s」; 换更长的脚本或缩短 workload.seconds")),
+        _ => Ok(()),
+    }
+}
 
 fn validate_v2(req: &Value) -> Result<(), String> {
     for k in ["kind", "candidate_id", "package", "workload", "conditions", "protocol", "payload"] {
@@ -337,6 +621,7 @@ fn validate_v2(req: &Value) -> Result<(), String> {
     if !matches!(carrier, "headless" | "refbench" | "game_replay") {
         return Err(format!("workload.carrier 不合法: {carrier:?}"));
     }
+    workload_covers_capture(req)?;
     let p = &req["protocol"];
     if p.get("rounds").and_then(|v| v.as_i64()).unwrap_or(0) < 1 {
         return Err("protocol.rounds 必须 >= 1".into());
@@ -345,9 +630,38 @@ fn validate_v2(req: &Value) -> Result<(), String> {
         return Err("protocol.alternating 缺失或不是布尔".into());
     }
     let pt = p.get("p_threshold").and_then(|v| v.as_f64());
-    match pt {
-        Some(x) if x > 0.0 && x <= 0.05 => {}
+    let alpha = match pt {
+        Some(x) if x > 0.0 && x <= 0.05 => x,
         _ => return Err("protocol.p_threshold 必须 (0, .05]（收端不接受更宽门槛）".into()),
+    };
+    match p.get("stage").map(|v| v.as_str()) {
+        None | Some(Some("full")) | Some(Some("screen")) => {}
+        _ => return Err("protocol.stage 只认 \"full\" / \"screen\" (省略 = full)".into()),
+    }
+    baseline_plan(req)?;
+    // 画质策略: gate (缺省, 画面不过门槛就停) / report (基于模型的候选: 只记差距, 性能照判)
+    crate::scorecard::ImagePolicy::from_request(req)?;
+    // 审计 #10: 每帧提交数由请求声明 (workload.spf), 不让各臂自己猜; 审查 R2 #9: 锁帧由请求声明 (workload.fps_cap)
+    if let Some(s) = req["workload"].get("spf").filter(|v| !v.is_null()) {
+        if !s.as_u64().is_some_and(|n| n >= 1) {
+            return Err("workload.spf 必须是 >= 1 的整数 (每帧提交数)".into());
+        }
+    }
+    if let Some(c) = req["workload"].get("fps_cap").filter(|v| !v.is_null()) {
+        if !c.as_f64().is_some_and(|x| x > 0.0) {
+            return Err("workload.fps_cap 必须是 > 0 的数 (负载的帧率上限)".into());
+        }
+    }
+    // 结构性防护: sysparam / gray / whitebox 走精确置换检验 (judge_runs), 改善一侧用 alpha/K。
+    // rounds 太少时最小可达 p 就够不着 alpha/K, 这个请求在数学上判不出任何改善 —— 收端
+    // 拒收, 不碰设备。功耗进不进表要等数据, 按最严的 K=3 算。
+    // 初筛 (stage=screen) 只看方向与幅度、不判显著, 不受这条限制。
+    // shader 走 gpu-op 的 Welch t 检验, 没有这种离散的分辨率下限, 不在此列。
+    if matches!(kind, "sysparam" | "gray" | "whitebox") && !is_screen(req) {
+        let rounds = p.get("rounds").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+        loopstat::ensure_resolvable(rounds, alpha / loopstat::MAX_WIN_METRICS as f64, "protocol.rounds").map_err(|e| {
+            format!("{e}。(初筛快测请在 protocol.stage 写 \"screen\": 那一级只看方向和幅度, 不判显著)")
+        })?;
     }
     match kind {
         "shader" => {
@@ -376,6 +690,8 @@ fn validate_v2(req: &Value) -> Result<(), String> {
                     ));
                 }
             }
+            // 收端真正施加时用的就是这个解析; 校验阶段跑同一份, 缺 scope / scope 写错在碰设备前拒收
+            parse_gray_rewrites(&req["payload"])?;
         }
         "whitebox" => {
             crate::whitebox::knob_extras(&req["payload"])?;
@@ -436,18 +752,57 @@ pub(crate) fn snapshots_identical(before: &str, after: &str) -> bool {
     adb_ok(before) && adb_ok(after) && before.lines().any(|l|l.contains('=')) && before == after
 }
 
-fn probe_report(report: &mut Value, before: &str, after: &str, wl: &sysparam::Whitelist) {
+/// 轮末资格里的「已还原」: 两次快照都读成功且非空, 除厂商性能服务自管的频率边界外逐项相等
+/// (我们写过的节点另由 knob_sysparam.sh restore 逐项回读核对)。探测前后仍用严格的 [`snapshots_identical`]。
+pub(crate) fn snapshots_restored(before: &str, after: &str) -> bool {
+    snapshots_identical(before, after)
+        || (adb_ok(before) && adb_ok(after) && before.lines().any(|l| l.contains('='))
+            && split_snapshot_diff(before, after).1.is_empty())
+}
+
+/// 探测脚本的每一次差异写都当场回读核对过已还原: 至少一条 `.effect_restored=yes`, 没有一条 `=NO`。
+pub(crate) fn probe_writes_verified(probe_txt: &str) -> bool {
+    let mut ok = 0;
+    for l in probe_txt.lines() {
+        if l.contains(".effect_restored=NO") {
+            return false;
+        }
+        if l.trim_end().ends_with(".effect_restored=yes") {
+            ok += 1;
+        }
+    }
+    ok > 0
+}
+
+/// 探测前后的「已还原」。快照逐项相等; 或者只有厂商自管的频率边界变了, 且探测的每一次写入
+/// 都当场核对过还原 (探测把自己的写入留在节点上时, 当场回读会报 effect_restored=NO, 照样拦下)。
+/// 2026-10-22 红魔实测: 厂商性能服务在探测的几十秒里就把 kgsl.max_pwrlevel 17→0、
+/// policy6.scaling_max 1632000→4608000 改了, 9 次差异写全部当场还原, 严格比对却让后续实验一律禁跑。
+pub(crate) fn probe_snapshots_restored(before: &str, after: &str, probe_txt: &str) -> bool {
+    snapshots_identical(before, after)
+        || (adb_ok(before) && adb_ok(after) && before.lines().any(|l| l.contains('='))
+            && split_snapshot_diff(before, after).1.is_empty()
+            && probe_writes_verified(probe_txt))
+}
+
+fn probe_report(report: &mut Value, before: &str, after: &str, probe_txt: &str, wl: &sysparam::Whitelist) {
     let identical = snapshots_identical(before,after);
-    report["status"] = json!(if identical {"REVERTED"} else {"ABORT"});
-    report["verdict"]["reason"] = json!(if identical {"probe_only: 探测写入已验证还原"} else {"probe_only: 快照缺失/读取失败或不一致，不能声称已还原"});
-    report["conditions_observed"] = json!({"snapshot_identical":identical,"restored":identical,"whitelist":wl_pyval(wl)});
+    // 厂商自管的频率边界变化, 只有在探测的每次写入都当场核对过还原时才放行 (见 probe_snapshots_restored)
+    let restored = probe_snapshots_restored(before, after, probe_txt);
+    let (vendor_drift, other_drift) = split_snapshot_diff(before, after);
+    report["status"] = json!(if restored {"REVERTED"} else {"ABORT"});
+    report["verdict"]["reason"] = json!(if restored {"probe_only: 探测写入已验证还原 (厂商自管的频率边界变化只记不判)"} else {"probe_only: 快照缺失/读取失败或不一致，不能声称已还原"});
+    report["conditions_observed"] = json!({"snapshot_identical":identical,"restored":restored,
+        "snapshot_vendor_drift":vendor_drift,"snapshot_other_drift":other_drift,"whitelist":wl_pyval(wl)});
 }
 
 /// Verify the supplied workload, rather than injecting a separate hard-coded gesture.
 pub(crate) fn verify_workload(serial: &str, workload: &Path, pkg: &str, outdir: &Path) -> Value {
     let _ = std::fs::create_dir_all(outdir);
     let mut child = match Command::new(std::env::current_exe().unwrap_or_default())
-        .args(["script", "--serial", serial, "--task", "qualification_workload", "--app", pkg])
+        // 不传 --app: 那只开 script 的逐步遥测 (dumpsys 等), 会把第一次转镜头推迟到 ~8 s 之后,
+        // 恰好错过下面第 3 / 8 秒的两次截屏 (2026-10-22 verify1 两帧一样, 判负载没转)
+        .args(["script", "--serial", serial, "--task", "qualification_workload", "--no-screen"])
         .arg(workload).current_dir(repo_root()).stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null()).spawn() {
         Ok(c)=>c,Err(e)=>return json!({"verified":false,"reason":e.to_string()})
@@ -456,7 +811,9 @@ pub(crate) fn verify_workload(serial: &str, workload: &Path, pkg: &str, outdir: 
         .filter(|o|o.status.success()).map(|o|o.stdout).unwrap_or_default();
     std::thread::sleep(std::time::Duration::from_secs(3)); let a=capture();
     std::thread::sleep(std::time::Duration::from_secs(5)); let b=capture();
-    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(65);
+    // 等脚本跑完: 标称时长 + 30 s 余量 (长脚本以前会在 65 s 被杀、判成脚本失败)
+    let budget=workload_script_seconds(workload).map_or(65.0,|d|d+30.0).max(65.0);
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs_f64(budget);
     let success=loop {match child.try_wait() {
         Ok(Some(s))=>break s.success(),
         Ok(None) if std::time::Instant::now()<deadline=>std::thread::sleep(std::time::Duration::from_millis(100)),
@@ -464,7 +821,9 @@ pub(crate) fn verify_workload(serial: &str, workload: &Path, pkg: &str, outdir: 
     }};
     let _=std::fs::write(outdir.join("frame_a.raw"),&a); let _=std::fs::write(outdir.join("frame_b.raw"),&b);
     let motion=to_serde(&crate::framecheck::verdict(&a,&b));
-    let result=json!({"verified":success && motion["spinning"]==true,"script_exit_success":success,"motion":motion});
+    let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
+    let alive = adb_ok(&alive) && !crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty();
+    let result=json!({"verified":success && alive && motion["spinning"]==true,"script_exit_success":success,"app_alive":alive,"motion":motion});
     let _=std::fs::write(outdir.join("workload_check.json"),serde_json::to_string_pretty(&result).unwrap());
     result
 }
@@ -574,13 +933,15 @@ pub(crate) fn repo_root() -> PathBuf {
 }
 
 pub(crate) const DEV_TMP: &str = "/data/local/tmp";
-pub(crate) const DEV_SCRIPTS: [&str; 6] = [
+pub(crate) const DEV_SCRIPTS: [&str; 7] = [
     "device_snapshot.sh",
     "ftrace_capture.sh",
     "knob_sysparam.sh",
     "probe_sysparam.sh",
     "sample_env.sh",
     "charge_suspend.sh",
+    // 测量窗口内逐秒记 GPU 上限档与风扇设定档 (审计 #9、#11, 见 [`HwWatch`])
+    "sample_hw.sh",
 ];
 
 pub(crate) fn push_tools(serial: &str) -> Result<(), String> {
@@ -658,8 +1019,14 @@ pub(crate) fn cool_summary(arms: &[Value]) -> (Option<f64>, bool) {
     (worst, arms.iter().any(|a| a["timeout"].as_bool() == Some(true)))
 }
 
-/// 施加后隔多少秒回读 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md: 厂商性能服务约 10 秒内改回)。
-const READBACK_AFTER_S: u64 = 12;
+/// 测量窗口内多久回读一次 plan 里的节点 (两臂都读, 读的节奏一样)。
+/// 厂商性能服务约 10 秒内改回 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md),
+/// 也会在臂中途再改, 所以不是施加后读一次, 而是整段窗口按固定节拍读。
+const READBACK_EVERY_S: u64 = 3;
+/// 改写臂在测量窗口内守住的时间比例至少这么多才进统计 (请求 `protocol.sysparam_hold_min` 可改)。
+const HOLD_MIN_FRAC: f64 = 0.9;
+/// 窗口内有效回读 (adb 调用成功的) 少于这么多次, 守没守住说不清, 不进统计。
+const HOLD_MIN_SAMPLES: usize = 3;
 
 /// 读回 plan 里每一项当前值的一条 shell 命令。输出每行 `<路径>=<值>`。
 pub(crate) fn readback_cmd(plan: &str) -> String {
@@ -678,7 +1045,16 @@ pub(crate) fn readback_cmd(plan: &str) -> String {
             _ => {}
         }
     }
+    // 审查 R1 #5: 每次回读打上设备 uptime, 守住比例才能按 trace 采集窗截 (见 hold_stats_window)
+    parts.push("echo \"#uptime=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)\"".to_string());
     parts.join("; ")
+}
+
+/// 一次回读输出里的设备 uptime (`#uptime=…` 行, 由 [`readback_cmd`] 打上)。旧脚本没有这一行时 None。
+pub(crate) fn readback_uptime(out: &str) -> Option<f64> {
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("#uptime="))
+        .and_then(|v| v.trim().parse::<f64>().ok())
 }
 
 /// 回读对不上的项: (路径, 写的值, 读回的值)。读不到的也算对不上 (守没守住说不清就不算守住)。
@@ -734,6 +1110,216 @@ pub(crate) fn split_snapshot_diff(before: &str, after: &str) -> (Vec<String>, Ve
         }
     }
     (vendor, other)
+}
+
+/// 测量窗口内的定时回读。按 `t0 + k*every` 的固定节拍读, 每次读数代表一段等长时间,
+/// 所以「守住的读数比例」就是「守住的时间比例」。[`HoldPoller::finish`] 停止时再读最后一次 (窗口末尾)。
+pub(crate) struct HoldPoller {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<Vec<(f64, String)>>,
+}
+
+impl HoldPoller {
+    pub(crate) fn start(serial: &str, cmd: &str, every_s: u64) -> Self {
+        use std::sync::atomic::Ordering;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (serial, cmd, flag) = (serial.to_string(), cmd.to_string(), stop.clone());
+        let handle = std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            let mut out = Vec::new();
+            let mut k: u64 = 0;
+            loop {
+                // 等到下一个节拍; 等的过程中收到停止就跳出, 补读最后一次
+                let due = t0 + std::time::Duration::from_secs(k * every_s.max(1));
+                while std::time::Instant::now() < due && !flag.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                let stopping = flag.load(Ordering::SeqCst);
+                out.push((t0.elapsed().as_secs_f64(), su(&serial, &cmd, 30)));
+                if stopping {
+                    break;
+                }
+                k += 1;
+                // 一次 adb 调用超过一个节拍时跳过已经错过的节拍, 不连发补读
+                let behind = t0.elapsed().as_secs() / every_s.max(1);
+                if behind >= k {
+                    k = behind + 1;
+                }
+            }
+            out
+        });
+        HoldPoller { stop, handle }
+    }
+
+    /// 停止并拿回全部读数 `(距开始秒数, 回读输出)`; 最后一条是停止时的末尾回读。
+    pub(crate) fn finish(self) -> Vec<(f64, String)> {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.handle.join().unwrap_or_default()
+    }
+}
+
+/// 一臂测量窗口内 plan 节点的守住情况。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Hold {
+    /// adb 调用成功的回读次数 (分母)
+    pub samples: usize,
+    /// 其中所有节点都等于写的值的次数
+    pub held: usize,
+    /// adb 调用本身失败、不进分母的次数
+    pub failed_calls: usize,
+    /// 第一次对不上的时刻 (距窗口开始秒数)
+    pub first_lost_s: Option<f64>,
+    /// 对不上的项, 每个 (节点, 读到的值) 只记一次: `路径: 写 X 读到 Y`
+    pub mismatches: Vec<String>,
+    /// 每个节点在窗口里读到过的不同值 (按出现顺序)。对照臂靠它看厂商服务有没有动这个节点。
+    pub values_seen: Vec<(String, Vec<String>)>,
+    /// 审查 R1 #5: 落在 trace 采集窗之外的回读 (施加后的准备段、采完后的 pull/解析段), 不进分母
+    pub outside_window: usize,
+    /// 截窗用的采集窗 `[capture_start_uptime, capture_end_uptime]`; None = 没截 (trace 没给窗, 或旧脚本没打 uptime)
+    pub window: Option<(f64, f64)>,
+}
+
+impl Hold {
+    pub(crate) fn frac(&self) -> Option<f64> {
+        (self.samples > 0).then(|| self.held as f64 / self.samples as f64)
+    }
+
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "samples": self.samples,
+            "held": self.held,
+            "hold_frac": self.frac(),
+            "failed_calls": self.failed_calls,
+            "first_lost_s": self.first_lost_s,
+            "mismatches": self.mismatches,
+            "values_seen": self.values_seen.iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect::<serde_json::Map<String, Value>>(),
+            "outside_window": self.outside_window,
+            "window": self.window.map(|(a, b)| json!([a, b])),
+        })
+    }
+}
+
+/// 窗口内全部回读 → 守住统计。读不到的节点算对不上 (同 [`readback_mismatches`])。不截窗 (旧口径)。
+pub(crate) fn hold_stats(plan: &str, samples: &[(f64, String)]) -> Hold {
+    hold_stats_window(plan, samples, None)
+}
+
+/// 同 [`hold_stats`], 但只算落在 trace 采集窗里的回读 (审查 R1 #5: 回读线程施加后即起、负载回来才停,
+/// 30 s 采集约 1/4 的回读落在窗外, 守住比例量的不是测量窗)。每次回读的时刻取 `#uptime=` 行
+/// (设备 uptime, 与 ftrace_capture.sh 写进 trace 头的 capture_*_uptime 同一时钟); 没有这一行的回读
+/// (旧脚本) 照旧计入。
+pub(crate) fn hold_stats_window(plan: &str, samples: &[(f64, String)], window: Option<(f64, f64)>) -> Hold {
+    let mut h = Hold {
+        samples: 0,
+        held: 0,
+        failed_calls: 0,
+        first_lost_s: None,
+        mismatches: Vec::new(),
+        values_seen: Vec::new(),
+        outside_window: 0,
+        window,
+    };
+    for (t, out) in samples {
+        if !adb_ok(out) {
+            h.failed_calls += 1;
+            continue;
+        }
+        if let (Some((a, b)), Some(up)) = (window, readback_uptime(out)) {
+            if up < a || up > b {
+                h.outside_window += 1;
+                continue;
+            }
+        }
+        h.samples += 1;
+        for l in out.lines() {
+            let Some((k, v)) = l.trim().split_once('=') else { continue };
+            if k.starts_with('#') {
+                continue;
+            }
+            let v = v.trim().to_string();
+            match h.values_seen.iter_mut().find(|(p, _)| p == k) {
+                Some((_, vs)) => {
+                    if !vs.contains(&v) {
+                        vs.push(v)
+                    }
+                }
+                None => h.values_seen.push((k.to_string(), vec![v])),
+            }
+        }
+        let bad = readback_mismatches(plan, out);
+        if bad.is_empty() {
+            h.held += 1;
+        } else {
+            h.first_lost_s.get_or_insert(*t);
+            for (path, want, got) in bad {
+                let line = format!("{path}: 写 {want} 读到 {got}");
+                if !h.mismatches.contains(&line) {
+                    h.mismatches.push(line);
+                }
+            }
+        }
+    }
+    h
+}
+
+/// 改写臂进不进统计: 有效回读够数, 且守住比例不低于 `min_frac`。不进的回原因。
+pub(crate) fn hold_verdict(h: &Hold, min_frac: f64) -> Result<(), String> {
+    if h.samples < HOLD_MIN_SAMPLES {
+        return Err(format!(
+            "窗口内有效回读只有 {} 次 (少于 {HOLD_MIN_SAMPLES}), 守没守住说不清",
+            h.samples
+        ));
+    }
+    let f = h.frac().unwrap_or(0.0);
+    if f < min_frac {
+        return Err(format!(
+            "窗口内只守住 {:.0}% 的时间 ({}/{} 次回读), 低于 {:.0}%",
+            f * 100.0,
+            h.held,
+            h.samples,
+            min_frac * 100.0
+        ));
+    }
+    Ok(())
+}
+
+/// 请求里的守住比例门槛, 不合法就用缺省 [`HOLD_MIN_FRAC`]。
+pub(crate) fn hold_min_frac(req: &Value) -> f64 {
+    req["protocol"]["sysparam_hold_min"]
+        .as_f64()
+        .filter(|x| *x > 0.0 && *x <= 1.0)
+        .unwrap_or(HOLD_MIN_FRAC)
+}
+
+/// 厂商性能服务会动的 sysfs 路径 (与 [`vendor_managed`] 是同一组节点, 这里按设备端路径认)。
+pub(crate) fn vendor_managed_path(path: &str) -> bool {
+    let kgsl = path.contains("kgsl")
+        && ["/max_pwrlevel", "/min_pwrlevel", "/thermal_pwrlevel", "/max_gpuclk", "/min_freq", "/max_freq"]
+            .iter()
+            .any(|s| path.ends_with(s));
+    let cpu = path.contains("/cpufreq/policy")
+        && (path.ends_with("/scaling_max_freq") || path.ends_with("/scaling_min_freq"));
+    kgsl || cpu
+}
+
+/// 探测时游戏是否从头到尾都在跑且在前台 (probe_sysparam.sh 的 `probe.game_*` 行)。
+pub(crate) fn probe_game_up(probe: &sysparam::ProbeMap) -> bool {
+    ["running_start", "running_end", "foreground_start", "foreground_end"]
+        .iter()
+        .all(|k| probe.get(&format!("probe.game_{k}")) == Some("yes"))
+}
+
+/// 游戏没在跑时探出来的白名单, 去掉厂商服务会动的节点: 那时厂商游戏模式没介入,
+/// 这些节点「守得住」不代表游戏跑起来后守得住。回 (留下的, 去掉的 pid)。
+pub(crate) fn gate_whitelist_by_probe(wl: sysparam::Whitelist, game_up: bool) -> (sysparam::Whitelist, Vec<String>) {
+    if game_up {
+        return (wl, Vec::new());
+    }
+    let (keep, drop): (Vec<_>, Vec<_>) =
+        wl.into_iter().partition(|(_, s)| !(s.kind == "sysfs" && vendor_managed_path(&s.path)));
+    (keep, drop.into_iter().map(|(k, _)| k).collect())
 }
 
 // ══════════════ 报告装配 ══════════════
@@ -827,15 +1413,55 @@ fn revalidate(req: &Value, wl: &sysparam::Whitelist) -> Result<(), String> {
     Ok(())
 }
 
-fn probe_whitelist(serial: &str, evidence: &Path) -> Result<sysparam::Whitelist, String> {
+/// 探白名单前把被测游戏拉到前台跑着。厂商游戏模式只在游戏前台运行时改频率边界,
+/// 游戏没跑时探出来的「守得住」不算数 (审计 #7)。回「是不是本函数拉起来的」(是就由调用方探完停掉)。
+/// 拉不起来不报错: 探测脚本会如实记下游戏不在, [`gate_whitelist_by_probe`] 再按这个去掉相关节点。
+fn probe_bring_up_game(serial: &str, pkg: &str, launch: Option<&LaunchSpec>, dir: &Path) -> bool {
+    let _ = std::fs::create_dir_all(dir);
+    let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
+    let fg = adb(serial, &["shell", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"], 15);
+    if !crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty() && fg.contains(pkg) {
+        return false; // 已经在前台跑着 (触控脚本负载的常态), 不重启它
+    }
+    let r = match launch {
+        // 静态场景一直跑 (frames 很大), 探测要几分钟, 不能中途跑完退出
+        Some(LaunchSpec { static_extras: Some(st), .. }) => start_with_extras(serial, pkg, st, None, &[], dir).map(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(STATIC_SETTLE_S));
+        }),
+        Some(l) => start_with_extras(serial, pkg, &l.extras, l.marker.as_deref(), &[], dir)
+            .and_then(|_| wait_launch_window(serial, pkg, "probe", l.marker.as_deref()).map(|_| ())),
+        None => start_with_extras(serial, pkg, "", None, &[], dir).map(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(LAUNCH_SETTLE_S));
+        }),
+    };
+    if let Err(e) = r {
+        std::fs::write(dir.join("bring_up_error.txt"), &e).ok();
+    }
+    true
+}
+
+fn probe_whitelist(serial: &str, evidence: &Path, req: &Value) -> Result<sysparam::Whitelist, String> {
     push_tools(serial)?;
-    let out = su(serial, &format!("sh {DEV_TMP}/probe_sysparam.sh"), 600);
+    let _ = std::fs::create_dir_all(evidence);
+    let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen");
+    let launched = probe_bring_up_game(serial, pkg, launch_spec(req).as_ref(), &evidence.join("probe_game"));
+    let out = su(serial, &format!("PROBE_PKG={pkg} sh {DEV_TMP}/probe_sysparam.sh"), 900);
+    if launched {
+        let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+    }
     if out.contains("#adb_exit=") && !out.ends_with("#adb_exit=0") {
         return Err(format!("probe_sysparam 失败: {out}"));
     }
-    let _ = std::fs::create_dir_all(evidence);
     std::fs::write(evidence.join("probe.txt"), &out).map_err(|e| e.to_string())?;
-    Ok(sysparam::build_whitelist(&sysparam::parse_probe(&out)))
+    let probe = sysparam::parse_probe(&out);
+    let game_up = probe_game_up(&probe);
+    let (wl, dropped) = gate_whitelist_by_probe(sysparam::build_whitelist(&probe), game_up);
+    std::fs::write(
+        evidence.join("probe_gate.txt"),
+        format!("game_up={game_up}\nlaunched_by_probe={launched}\ndropped_vendor_managed={dropped:?}\n"),
+    )
+    .ok();
+    Ok(wl)
 }
 
 /// 自驱动负载 (`workload.launch`): 应用带 intent extras 启动后自己跑一段确定性路线
@@ -897,9 +1523,16 @@ pub(crate) fn start_with_extras(
     Ok(())
 }
 
+/// 设备 uptime (秒, `/proc/uptime` 第一列; 与 ftrace_capture.sh 写进 trace 头的 capture_*_uptime 同一时钟)。
+pub(crate) fn device_uptime(serial: &str) -> Option<f64> {
+    let out = adb(serial, &["shell", "cut -d' ' -f1 /proc/uptime"], 15);
+    crate::graylayer::GrayLayer::adb_stdout(&out).trim().parse::<f64>().ok()
+}
+
 /// 等应用进入被测窗口: 有标记文件就等它出现 (应用中途退了或超时报错), 没有就固定等
-/// [`LAUNCH_SETTLE_S`] 秒。
-pub(crate) fn wait_launch_window(serial: &str, pkg: &str, label: &str, marker: Option<&str>) -> Result<(), String> {
+/// [`LAUNCH_SETTLE_S`] 秒。回看到标记那一刻的设备 uptime (审查 R1 #9: 与 trace 的
+/// capture_start_uptime 相减就是「进入窗口 → 开采」的延时, 两臂要对得上); 没有标记时 None。
+pub(crate) fn wait_launch_window(serial: &str, pkg: &str, label: &str, marker: Option<&str>) -> Result<Option<f64>, String> {
     let files = format!("/storage/emulated/0/Android/data/{pkg}/files");
     match marker {
         Some(m) => {
@@ -907,7 +1540,7 @@ pub(crate) fn wait_launch_window(serial: &str, pkg: &str, label: &str, marker: O
             loop {
                 let got = adb(serial, &["shell", &format!("cat {files}/{m} 2>/dev/null")], 15);
                 if !crate::graylayer::GrayLayer::adb_stdout(&got).trim().is_empty() {
-                    return Ok(());
+                    return Ok(device_uptime(serial));
                 }
                 let alive = adb(serial, &["shell", &format!("pidof {pkg}")], 15);
                 if crate::graylayer::GrayLayer::adb_stdout(&alive).trim().is_empty() {
@@ -921,7 +1554,7 @@ pub(crate) fn wait_launch_window(serial: &str, pkg: &str, label: &str, marker: O
         }
         None => {
             std::thread::sleep(std::time::Duration::from_secs(LAUNCH_SETTLE_S));
-            Ok(())
+            Ok(None)
         }
     }
 }
@@ -929,6 +1562,8 @@ pub(crate) fn wait_launch_window(serial: &str, pkg: &str, label: &str, marker: O
 /// 自驱动负载跑一轮: (可选) 带 extras 重启应用 → 等它进入被测窗口 → 功耗采样 + ftrace 采集
 /// `seconds` 秒 → 解析。回的形状与 [`run_one_with`] 相同 ({label, run_once_rc, summary, env})。
 /// `relaunch = false` 时应用已经由别人 (挂层那一步) 带着 extras 拉起来了。
+/// `marker_up`: 调用方已经等到过标记时传看到标记那一刻的设备 uptime (sysparam 先等标记再施加),
+/// 这里就不再等; None = 这里等。`spf`: 请求声明的每帧提交数 (审计 #10), None = 自检。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_one_launch(
     serial: &str,
@@ -939,24 +1574,37 @@ pub(crate) fn run_one_launch(
     comm: Option<&str>,
     launch: &LaunchSpec,
     relaunch: bool,
+    marker_up: Option<f64>,
+    spf: Option<usize>,
 ) -> Result<Value, String> {
     std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
     if relaunch {
         start_with_extras(serial, pkg, &launch.extras, launch.marker.as_deref(), &[], outdir)?;
     }
-    // 等进入被测窗口
-    wait_launch_window(serial, pkg, label, launch.marker.as_deref())?;
+    // 等进入被测窗口 (调用方已经等到的就不重复等, 标记时刻用它给的)
+    let marker_up = match marker_up {
+        Some(u) => Some(u),
+        None => wait_launch_window(serial, pkg, label, launch.marker.as_deref())?,
+    };
+    // 游戏启动后厂商游戏模式会把风扇打开 (审计 #11: msaa1 开跑前 0, 测量中 10/10 臂是开的):
+    // 进入被测窗口后再按死一次, 再起逐秒的 GPU 档位/风扇记录
+    let fan_after_marker = arm_fan_off(serial);
+    let hw = HwWatch::start(serial, outdir, label);
     // 功耗采样与 ftrace 并行, 覆盖整个采集窗
     let env_path = outdir.join("env.txt");
-    let dur = seconds + 4;
+    // 上限放宽: 正常由停止标志结束, 上限只防标志一直不出现 (ftrace 起得慢时也不会先于采集结束)
+    let dur = seconds + 20;
+    let tr = format!("{DEV_TMP}/lw_{label}.txt");
+    // 第三个参数是停止标志: ftrace_capture.sh 采完才写 trace 输出文件, 一出现采样就停 (审计 #3)。
+    // dur 只是上限。
     let sampler = Command::new(adb_path())
         .args(["-s", serial, "shell"])
-        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2'"))
+        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2 {tr}'"))
         .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
         .stderr(std::process::Stdio::null())
         .spawn();
-    let tr = format!("{DEV_TMP}/lw_{label}.txt");
-    let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {seconds} {tr}"), seconds + 120);
+    let cap = su(serial, &format!("sh {DEV_TMP}/ftrace_capture.sh {seconds} {tr} {pkg}"), seconds + 120);
+    let hw = hw.finish();
     std::fs::write(outdir.join("capture.log"), &cap).ok();
     let _ = adb(serial, &["pull", &tr, &outdir.join("trace.txt").to_string_lossy()], 120);
     let _ = adb(serial, &["shell", &format!("rm -f {tr}")], 15);
@@ -977,16 +1625,56 @@ pub(crate) fn run_one_launch(
     }
     let trace = std::fs::read(outdir.join("trace.txt")).map_err(|e| format!("{label}: 没拉回 trace ({e})"))?;
     let c = comm.filter(|c| !c.is_empty()).unwrap_or(crate::looptrace::DEFAULT_RENDER_COMM);
-    let d = crate::looptrace::parse(&String::from_utf8_lossy(&trace), c);
+    // 审计 #10: 每帧提交数按请求声明 (parse_with_spf), 不让各臂自己猜
+    let d = crate::looptrace::parse_with_spf(&String::from_utf8_lossy(&trace), c, spf);
     let summary = crate::pyjson::dumps(&d.summarize());
     std::fs::write(outdir.join("summary.json"), &summary).map_err(|e| e.to_string())?;
-    let mut m = json!({ "label": label, "run_once_rc": 0, "launch": true });
+    // 采集窗: 功耗、GPU 档位逐秒记录都按它截 (审计 #3, 审查 R1 #12)
+    let w = sysparam::capture_window_from_trace(&String::from_utf8_lossy(&trace));
+    let mut m = json!({
+        "label": label, "run_once_rc": 0, "launch": true,
+        "hw": hw_stats_window(&hw, w),
+        "fan_after_marker": fan_after_marker,
+        "spf_declared": spf,
+    });
     m["summary"] = serde_json::from_str(&summary).map_err(|e| format!("{label}: summary 解析失败 {e}"))?;
+    // ftrace_capture.sh 带了包名: 回来的必须是按目标线程号归因的新版产出 (审查 R1 #1 #6)
+    check_frame_attribution(&m["summary"]).map_err(|e| format!("{label}: {e}"))?;
+    // 审查 R1 #9: 进入被测窗口 (标记出现) → 开采 的延时, 逐臂记; 两臂相差 > 1 s 在配对核对里标出
+    m["marker_uptime"] = json!(marker_up);
+    m["marker_to_capture_s"] = json!(marker_to_capture_s(marker_up, w));
     if let Ok(t) = std::fs::read_to_string(&env_path) {
-        m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats(&t))).unwrap_or(Value::Null);
+        // 功耗只取 trace 采集窗内的样本 (审计 #3)
+        m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats_window(&t, w))).unwrap_or(Value::Null);
     }
     bind_run_evidence(&mut m, label, outdir, &env_path, sampler_success, dur, seconds, workload_exit)?;
     Ok(m)
+}
+
+/// 标记出现 → 采集开始 的秒数 (两位小数); 任一缺失 None。
+pub(crate) fn marker_to_capture_s(marker_up: Option<f64>, window: Option<(f64, f64)>) -> Option<f64> {
+    let (mu, (a, _)) = (marker_up?, window?);
+    Some(((a - mu) * 100.0).round() / 100.0)
+}
+
+/// 审查 R1 #1 #6: ftrace_capture.sh 收到包名时, 回来的 summary 必须带 `frame_attribution`
+/// (按目标线程号认帧; 没有 = 设备上是旧脚本, 忽略第三参数、按线程名认帧, 别的进程的同名线程
+/// 会混进来), 且目标线程至少一个 (`n_target_tids == 0` = 采集时 `pidof` 为空, 目标进程不在,
+/// 零帧; 以前要 10 臂全 n_frames=0 才发现)。两种情况都不能当数据, 直接 Err。
+pub(crate) fn check_frame_attribution(summary: &Value) -> Result<(), String> {
+    if summary.get("frame_attribution").is_none() {
+        return Err("summary 没有 frame_attribution: 设备端 ftrace_capture.sh 是旧版 (不按目标线程号认帧), \
+                    先 push_tools 把新脚本推上去再跑"
+            .into());
+    }
+    let n = summary["n_target_tids"].as_u64().unwrap_or(0);
+    if n == 0 {
+        return Err(format!(
+            "目标进程没找到 (n_target_tids=0, target_pid={}): 采集时游戏不在跑, 零帧不算数据",
+            summary["target_pid"].as_str().unwrap_or("")
+        ));
+    }
+    Ok(())
 }
 
 /// storeop-check 用静态场景时, 启动后等城市装完的时间 (秒)。
@@ -1030,12 +1718,13 @@ pub(crate) fn run_one(
     workload: &Path,
     pkg: &str,
 ) -> Result<Value, String> {
-    run_one_with(serial, label, outdir, seconds, workload, pkg, None)
+    run_one_with(serial, label, outdir, seconds, workload, pkg, None, None)
 }
 
-/// 同 [`run_one`], 但可指定渲染线程名 (ftrace comm)。非 Unity 游戏 (虚幻的 RHIThread 等)
-/// 不指定就解析出零帧 —— 这个名字由 `phonefarm onboard` 从 ftrace 里数出来, 记在游戏档案
-/// 的 workload.render_comm, 经评测请求的同名字段传到这里。
+/// 同 [`run_one`], 但可指定渲染线程名 (ftrace comm) 与每帧提交数 (审计 #10, 请求 workload.spf)。
+/// 非 Unity 游戏 (虚幻的 RHIThread 等) 不指定 comm 就解析出零帧 —— 这个名字由 `phonefarm onboard`
+/// 从 ftrace 里数出来, 记在游戏档案的 workload.render_comm, 经评测请求的同名字段传到这里。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_one_with(
     serial: &str,
     label: &str,
@@ -1044,14 +1733,20 @@ pub(crate) fn run_one_with(
     workload: &Path,
     pkg: &str,
     comm: Option<&str>,
+    spf: Option<usize>,
 ) -> Result<Value, String> {
     std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
     let root = repo_root();
-    let dur = seconds + 6 + 4;
+    // 逐秒 GPU 档位/风扇记录, 覆盖 run_once 的整段 (含 LEAD)
+    let hw = HwWatch::start(serial, outdir, label);
+    // LEAD 6 秒 + 采集 seconds 秒; 余量 20 秒只是上限, 正常由停止标志结束
+    let dur = seconds + 6 + 20;
     let env_path = outdir.join("env.txt");
+    // 停止标志 = run_once.sh 让 ftrace_capture.sh 写的 trace 输出文件 (采完才写), 见 sample_env.sh。
+    // dur 只是上限。
     let sampler = Command::new(adb_path())
         .args(["-s", serial, "shell"])
-        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2'"))
+        .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2 {DEV_TMP}/loop_v1_{label}.txt'"))
         .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -1077,6 +1772,7 @@ pub(crate) fn run_one_with(
         )
         .env("PF_BIN", std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm")))
         .output();
+    let hw = hw.finish();
     let sampler_success=if let Ok(mut s)=sampler {
         let deadline=std::time::Instant::now()+std::time::Duration::from_secs(90);
         loop {match s.try_wait() {
@@ -1093,14 +1789,20 @@ pub(crate) fn run_one_with(
         }
         Err(e) => return Err(format!("run_once 起不了: {e}")),
     };
-    let mut m = json!({ "label": label, "run_once_rc": rc });
+    // 采集窗 (trace 头部): 功耗、GPU 档位逐秒记录都按它截 (审计 #3, 审查 R1 #12)
+    let w = std::fs::read(outdir.join("trace.txt"))
+        .ok()
+        .and_then(|b| sysparam::capture_window_from_trace(&String::from_utf8_lossy(&b[..b.len().min(64 * 1024)])));
+    let mut m = json!({ "label": label, "run_once_rc": rc, "hw": hw_stats_window(&hw, w), "spf_declared": spf });
     let sp = outdir.join("summary.json");
-    // 指定了渲染线程: 在本进程里按它重解析 trace.txt, 覆盖 run_once.sh 按 Unity 缺省解析出的
-    // summary.json。放在这里而不是给 run_once.sh 加参数, 是为了换个仓库根 (手机节点上的
-    // main 版脚本) 也照样生效。
-    if let Some(c) = comm.filter(|c| !c.is_empty()) {
+    // 指定了渲染线程或每帧提交数: 在本进程里按它重解析 trace.txt, 覆盖 run_once.sh 按 Unity 缺省
+    // (自检 spf) 解析出的 summary.json。放在这里而不是给 run_once.sh 加参数, 是为了换个仓库根
+    // (手机节点上的 main 版脚本) 也照样生效。
+    let comm = comm.filter(|c| !c.is_empty());
+    if comm.is_some() || spf.is_some() {
         if let Ok(b) = std::fs::read(outdir.join("trace.txt")) {
-            let d = crate::looptrace::parse(&String::from_utf8_lossy(&b), c);
+            let c = comm.unwrap_or(crate::looptrace::DEFAULT_RENDER_COMM);
+            let d = crate::looptrace::parse_with_spf(&String::from_utf8_lossy(&b), c, spf);
             std::fs::write(&sp, crate::pyjson::dumps(&d.summarize())).map_err(|e| e.to_string())?;
         }
     }
@@ -1110,9 +1812,11 @@ pub(crate) fn run_one_with(
         }
         None => return Err(format!("{label}: 没拿到可用 summary.json (负载或采集失败, rc={rc})")),
     }
+    // run_once.sh 把 PKG 传给了 ftrace_capture.sh: 回来的必须是按目标线程号归因的新版产出 (审查 R1 #1 #6)
+    check_frame_attribution(&m["summary"]).map_err(|e| format!("{label}: {e}"))?;
     if let Ok(t) = std::fs::read_to_string(&env_path) {
-        // 功耗温度解析在 src/sysparam.rs (与 autoloop 同一份口径)
-        m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats(&t)))
+        // 功耗温度解析在 src/sysparam.rs (与 autoloop 同一份口径); 功耗只取 trace 采集窗内 (审计 #3)
+        m["env"] = serde_json::from_str(&py_dumps(&sysparam::env_stats_window(&t, w)))
             .unwrap_or(Value::Null);
     }
     let workload_exit=std::fs::read_to_string(outdir.join("workload_exit.txt")).ok().and_then(|t|t.trim().parse::<i64>().ok());
@@ -1142,7 +1846,7 @@ fn bind_run_evidence(
         && sysparam::trace_window_covered(&window,&trace_text,seconds);
     m["env"]["sampler_exit_success"]=json!(sampler_success);
     m["env"]["trace_window_verified"]=json!(bound);
-    m["env"]["power_observation_scope"]=json!("whole sampler window including lead/tail; covers trace capture window");
+    m["env"]["power_observation_scope"]=json!("sampler window covers trace capture window; power samples clipped to the capture window, first sample dropped (sample_env v2)");
     if !bound {m["env"]["power_w_mean"]=Value::Null;m["env"]["power_window_verified"]=json!(false);m["env"]["thermal_window_verified"]=json!(false);}
     m["frame_evidence"] = qualification::frame_evidence(&m["summary"]);
     {use sha2::{Digest,Sha256};m["frame_evidence"]["trace_sha256"]=json!(format!("{:x}",Sha256::digest(trace_text.as_bytes())));}
@@ -1162,10 +1866,11 @@ pub(crate) fn run_one_for(
     pkg: &str,
     comm: Option<&str>,
     launch: Option<&LaunchSpec>,
+    spf: Option<usize>,
 ) -> Result<Value, String> {
     match launch {
-        Some(l) => run_one_launch(serial, label, outdir, seconds, pkg, comm, l, true),
-        None => run_one_with(serial, label, outdir, seconds, workload, pkg, comm),
+        Some(l) => run_one_launch(serial, label, outdir, seconds, pkg, comm, l, true, None, spf),
+        None => run_one_with(serial, label, outdir, seconds, workload, pkg, comm, spf),
     }
 }
 
@@ -1186,7 +1891,7 @@ pub(crate) fn verify_workload_for(
         .and_then(|_| wait_launch_window(serial, pkg, "qualification_workload", l.marker.as_deref()));
     let result = match started {
         Err(e) => json!({"verified": false, "reason": e, "launch": true}),
-        Ok(()) => {
+        Ok(_) => {
             let capture = || Command::new(adb_path()).args(["-s",serial,"exec-out","screencap"]).output().ok()
                 .filter(|o|o.status.success()).map(|o|o.stdout).unwrap_or_default();
             let a = capture();
@@ -1269,35 +1974,122 @@ pub(crate) fn run_soc_temp_max(m: &Value) -> Option<f64> {
 }
 
 /// 判定视图下的一臂 (标签 + [`run_view`])。
+#[allow(dead_code)]
 fn eval_runs(runs: &[Value]) -> Vec<Run> {
     runs.iter()
         .filter_map(|r| Some((r["label"].as_str()?.to_string(), run_view(r))))
         .collect()
 }
 
-/// 两臂已跑的每一轮都量到了可信功耗、且是同一种口径 (全电池放电或全 USB 旁路), 功耗才进
-/// 判定; 混了口径这组功耗无效。空集算真 —— 后面的轮次还可能全合格。
+/// 按对取舍后的功耗 (审计 #5): 一臂不合格只剔除那一对, 不再整组作废。
+///
+/// 每臂都带 `round` (sysparam / gray / whitebox 都写) 时按轮对齐, 不按下标:
+/// 改写臂被判 contested (fix-B 守不住) 时只拿掉候选臂, 对照臂还在; 臂序随机 (fix-F) 时
+/// 截断可能停在一轮中间。这两种情况下按下标配对会把不同轮的两臂当成一对, 一臂不合格就错剔
+/// 另一轮的臂。没有 `round` 的旧证据仍按下标配对。
+/// 回的 `ctrl` / `knob` 与传入的 runs 一一对应 (下标相同), `dropped` 里的轮次是真实轮号。
+pub(crate) fn power_pairs_of(knob_runs: &[Value], ctrl_runs: &[Value]) -> sysparam::PowerPairs {
+    let round_of = |r: &Value| r["round"].as_u64().map(|x| x as usize);
+    let all_have_round = knob_runs.iter().chain(ctrl_runs.iter()).all(|r| round_of(r).is_some());
+    if !all_have_round {
+        let c: Vec<&Value> = ctrl_runs.iter().map(|r| &r["env"]).collect();
+        let k: Vec<&Value> = knob_runs.iter().map(|r| &r["env"]).collect();
+        return sysparam::power_pairs(&c, &k);
+    }
+    let mut rounds: Vec<usize> = knob_runs.iter().chain(ctrl_runs.iter()).filter_map(round_of).collect();
+    rounds.sort_unstable();
+    rounds.dedup();
+    // 同一轮同一臂只该有一个; 万一有重复, 按下标配对的旧办法兜底, 不猜
+    let dup = |runs: &[Value]| {
+        let mut xs: Vec<usize> = runs.iter().filter_map(round_of).collect();
+        let n = xs.len();
+        xs.sort_unstable();
+        xs.dedup();
+        xs.len() != n
+    };
+    if dup(knob_runs) || dup(ctrl_runs) {
+        let c: Vec<&Value> = ctrl_runs.iter().map(|r| &r["env"]).collect();
+        let k: Vec<&Value> = knob_runs.iter().map(|r| &r["env"]).collect();
+        return sysparam::power_pairs(&c, &k);
+    }
+    let pos = |runs: &[Value], rd: usize| runs.iter().position(|r| round_of(r) == Some(rd));
+    let ci: Vec<Option<usize>> = rounds.iter().map(|&rd| pos(ctrl_runs, rd)).collect();
+    let ki: Vec<Option<usize>> = rounds.iter().map(|&rd| pos(knob_runs, rd)).collect();
+    let c: Vec<Option<&Value>> = ci.iter().map(|o| o.map(|i| &ctrl_runs[i]["env"])).collect();
+    let k: Vec<Option<&Value>> = ki.iter().map(|o| o.map(|i| &knob_runs[i]["env"])).collect();
+    let mut pp = sysparam::power_pairs_slots(&c, &k, &rounds);
+    // 槽 → 传入 runs 的下标
+    let (mut cv, mut kv) = (vec![None; ctrl_runs.len()], vec![None; knob_runs.len()]);
+    for (j, o) in ci.iter().enumerate() {
+        if let Some(i) = o {
+            cv[*i] = pp.ctrl[j];
+        }
+    }
+    for (j, o) in ki.iter().enumerate() {
+        if let Some(i) = o {
+            kv[*i] = pp.knob[j];
+        }
+    }
+    pp.ctrl = cv;
+    pp.knob = kv;
+    pp
+}
+
+/// 功耗能不能进判定: 按对剔除不合格的之后, 两臂各至少 2 个同口径的可信值。
+#[allow(dead_code)]
 pub(crate) fn all_on_battery(knob_runs: &[Value], ctrl_runs: &[Value]) -> bool {
-    sysparam::power_group_ok(knob_runs.iter().chain(ctrl_runs.iter()).map(|r| &r["env"]))
+    power_pairs_of(knob_runs, ctrl_runs).usable()
+}
+
+/// 判定视图, 但 `power_w_mean` 换成按对取舍后的值 (被剔除的臂不带这个键, 口径统一时换成
+/// 两轨相加的值)。帧时等其余指标与 [`eval_runs`] 相同。
+fn eval_runs_power(runs: &[Value], power: &[Option<f64>]) -> Vec<Run> {
+    runs.iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let label = r["label"].as_str()?.to_string();
+            let mut v = run_view(r);
+            if let PyVal::Obj(kvs) = &mut v {
+                kvs.retain(|(k, _)| k != "power_w_mean");
+                if let Some(w) = power.get(i).copied().flatten() {
+                    kvs.push(("power_w_mean".into(), PyVal::Float(w)));
+                }
+            }
+            Some((label, v))
+        })
+        .collect()
+}
+
+/// 冻结 policy 的判定指标对应的截断检验 (与 [`judge_runs_with`] 同一张表、同一个 alpha_win)。
+/// 锁帧可能时 (ruler fix-G / 审计 #8) fps_mean 只守退化、不占预算, 其余指标最宽到 alpha/(n-1)。
+fn policy_win_tests(required: &[String], alpha: f64, fps_lock_possible: bool) -> Vec<curtail::WinTest> {
+    let n = required.len().max(1);
+    let has_fps = required.iter().any(|m| m == "fps_mean");
+    let n_min = if fps_lock_possible && has_fps && n > 1 { n - 1 } else { n };
+    required
+        .iter()
+        .map(|m| {
+            let k = if m == "fps_mean" { n } else { n_min };
+            curtail::WinTest::new(m, m != "fps_mean", alpha / k as f64)
+        })
+        .collect()
 }
 
 /// 跑满时**可能**进入判定的「显著改善」检验, 各取最宽的 alpha_win:
 /// 帧时/帧率至少在 2 指标表里 (alpha/2); 功耗只有在已跑的轮全在放电态时才可能进表,
 /// 进表时是 3 指标 (alpha/3)。覆盖所有可能的指标表, 截断只会更保守。
-/// 冻结 policy 的判定指标对应的截断检验 (与 [`judge_runs_with`] 同一张表、同一个 alpha_win)。
-fn policy_win_tests(required: &[String], alpha: f64) -> Vec<curtail::WinTest> {
-    let n = required.len().max(1) as f64;
-    required.iter().map(|m| curtail::WinTest::new(m, m != "fps_mean", alpha / n)).collect()
-}
-
-#[allow(dead_code)]
-fn sysparam_win_tests(alpha: f64, power_possible: bool) -> Vec<curtail::WinTest> {
+///
+/// `fps_lock_possible` (已跑的轮全钉在同一个帧率上限, 见 [`fps_lock_cap`]): 跑满后 fps_mean
+/// 可能只守退化、不占预算, 帧时最宽到 alpha/1, 功耗最宽到 alpha/2。
+#[cfg_attr(not(test), allow(dead_code))]
+fn sysparam_win_tests(alpha: f64, power_possible: bool, fps_lock_possible: bool) -> Vec<curtail::WinTest> {
+    let k_min = if fps_lock_possible { 1.0 } else { 2.0 };
     let mut t = vec![
-        curtail::WinTest::new("frame_p95", true, alpha / 2.0),
+        curtail::WinTest::new("frame_p95", true, alpha / k_min),
         curtail::WinTest::new("fps_mean", false, alpha / 2.0),
     ];
     if power_possible {
-        t.push(curtail::WinTest::new("power_w_mean", true, alpha / 3.0));
+        t.push(curtail::WinTest::new("power_w_mean", true, alpha / (k_min + 1.0)));
     }
     t
 }
@@ -1319,6 +2111,23 @@ fn curtail_note(knob: usize, ctrl: usize, rounds: u32, tests: &[curtail::WinTest
     })
 }
 
+/// 基线轮数与预热轮数 (protocol.baseline_runs 缺省 5, 3..=10; protocol.baseline_warmup 缺省 1, 0..=3)。
+/// 收端合同只冻结「至少三轮」和单调比 < 0.9: 只跑三轮时两步同向在纯噪声下就有 1/3 的概率,
+/// 两个指标叠起来一半以上的好基线被拒 (2026-10-22 红魔 fps 离散 0.15% 也被判单调)。五轮时纯噪声
+/// 四步同向只有 2/120。预热轮照常落盘 (baseline_warmup*/) 但不进资格证据: 实测重开游戏后第一轮
+/// 功耗偏高 (4.88 → 4.69 → 4.65 W)。
+pub(crate) fn baseline_plan(req: &Value) -> Result<(usize, usize), String> {
+    let p = &req["protocol"];
+    let field = |k: &str, dflt: u64, lo: u64, hi: u64| -> Result<usize, String> {
+        match p.get(k).filter(|v| !v.is_null()) {
+            None => Ok(dflt as usize),
+            Some(v) => v.as_u64().filter(|n| (lo..=hi).contains(n)).map(|n| n as usize)
+                .ok_or_else(|| format!("protocol.{k} 必须是 {lo}..={hi} 的整数")),
+        }
+    };
+    Ok((field("baseline_runs", 5, 3, 10)?, field("baseline_warmup", 1, 0, 3)?))
+}
+
 fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bool) -> Result<String, String> {
     let Some(serial) = serial else {
         return Err("kind=sysparam 需要真机: 请加 --serial (或设备唯一在线时省略)".into());
@@ -1328,24 +2137,42 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let _ = std::fs::create_dir_all(evidence);
     let probe_only = req["payload"]["probe_only"].as_bool().unwrap_or(false);
 
+    // 资格 (main): 先冻结 policy、看 root/trace 能力, 再做差异写探测
     let policy = policy_for_request(req)?;
     std::fs::write(evidence.join("qualification_policy.json"),serde_json::to_string_pretty(&policy).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
     let mut facts=Evidence::new(Stage::Probe,policy,qualification::inspect_device(serial));
+    facts.screen=is_screen(req);
     let preflight=record_qualification(&mut report,evidence,&facts)?;
     if !preflight.probe_allowed {
         report["verdict"]["reason"]=json!("root/目标 trace 能力未确认，禁止差异写探测");
         return Ok(serde_json::to_string_pretty(&report).unwrap());
     }
     push_tools(serial)?;
+    // 审查 R1 #10 (ruler): 上一次崩溃 / Ctrl-C 留下的旋钮或停充状态先对账、还原, 记进回包;
+    // 再装信号处理, 这一次被打断时也把还原跑掉。放在探测前的快照之前, 残留状态不进基准快照。
+    let preexisting = reconcile_preexisting(serial, evidence);
+    cleanup::install();
+    cleanup::register(serial, &format!("su -c 'sh {DEV_TMP}/knob_sysparam.sh restore'"));
+    cleanup::register(serial, &format!("su -c 'sh {DEV_TMP}/charge_suspend.sh restore'"));
+    // 白名单只探一遍 (审查 R1 #4), 夹在两次快照之间; 探测时目标游戏在跑 (fix-B)。
+    // 调用方给的白名单只是提议, 不能当实际生效的证据 (main)。
     let before_probe=snapshot(serial);
     std::fs::write(evidence.join("snap_before_probe.txt"),&before_probe).map_err(|e|e.to_string())?;
-    let wl=probe_whitelist(serial,evidence)?; // Caller whitelist is a proposal, never evidence of actual effectiveness.
+    let wl=probe_whitelist(serial,evidence,req)?;
     let after_probe=snapshot(serial);
     std::fs::write(evidence.join("snap_after_probe.txt"),&after_probe).map_err(|e|e.to_string())?;
-    let probe_restored=snapshots_identical(&before_probe,&after_probe);
+    let probe_txt=std::fs::read_to_string(evidence.join("probe.txt")).unwrap_or_default();
+    let probe_restored=probe_snapshots_restored(&before_probe,&after_probe,&probe_txt);
     facts.device.control_verified=Some(!wl.is_empty()); facts.restored=Some(probe_restored);
     record_qualification(&mut report,evidence,&facts)?;
-    if probe_only {probe_report(&mut report,&before_probe,&after_probe,&wl);record_qualification(&mut report,evidence,&facts)?;return Ok(serde_json::to_string_pretty(&report).unwrap());}
+    if probe_only {
+        probe_report(&mut report,&before_probe,&after_probe,&probe_txt,&wl);
+        report["conditions_observed"]["preexisting_state"]=json!(preexisting);
+        report["evidence_dir"] = json!(evidence.display().to_string());
+        record_qualification(&mut report,evidence,&facts)?;
+        cleanup::clear();
+        return Ok(serde_json::to_string_pretty(&report).unwrap());
+    }
     if !probe_restored {
         report["verdict"]["reason"]=json!("差异写探测未验证恢复，禁止开始候选实验");
         return Ok(serde_json::to_string_pretty(&report).unwrap());
@@ -1384,6 +2211,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let push = adb(serial, &["push", &plan_local.to_string_lossy(), &format!("{DEV_TMP}/loop_v1_sysparam.plan")], 60);
     if !push.ends_with("#adb_exit=0") {
         report["verdict"]["reason"] = json!(format!("plan 下发失败: {push}"));
+        // 停充可能已经做了: 一样要还原 (无 STATE 时是空操作)
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
@@ -1393,6 +2222,9 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     // ── ABBA 交替跑测 ──
     let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(1).max(1) as u32;
     let seconds = req["workload"]["seconds"].as_i64().unwrap_or(30).max(1) as u64;
+    // 审计 #10 / 审查 R2 #9: 每帧提交数与帧率上限都由请求声明
+    let spf = declared_spf(req);
+    let fps_cap_declared = declared_fps_cap(req);
     // workload 脚本: 请求给的是调用方视角的路径 (game_opt_loop 用 "../phonefarm/..."),
     // 先按原样 (cwd 相对/绝对) 找, 找不到再按仓库根拼
     let wl_file = req["workload"]["script"]
@@ -1401,6 +2233,10 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         .unwrap_or_else(|| "loop_v1/scripts/workload_spin_touch_v1.json".into());
     let pkg = req["package"].as_str().unwrap_or("com.miHoYo.Yuanshen");
     let launch = launch_spec(req);
+    if launch.is_some() {
+        // 自驱动负载是我们拉起来的: 被打断时也停掉, 别让它留在前台接着烧
+        cleanup::register(serial, &format!("am force-stop {pkg}"));
+    }
     let workload_path = match (resolve_path(&wl_file), &launch) {
         (Some(p), _) => p,
         // 自驱动负载用不到脚本
@@ -1426,27 +2262,45 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     // 停充失败保留证据；能效目标缺整窗放电功耗时资格失败，不能缩窄目标。
     let want_suspend = req["conditions"]["charging_suspend"]["enabled"].as_bool().unwrap_or(false);
     let mut suspended_via: Option<String> = None;
+    let mut usb_supply_note: Option<String> = None;
+    let mut charge_settle: Option<Value> = None;
     if want_suspend {
-        let out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), 90);
+        let mut out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), CHARGE_SUSPEND_TIMEOUT_S);
         if let Err(e)=std::fs::write(evidence.join("charge_suspend.log"),&out) {
             let _=su(serial,&format!("sh {DEV_TMP}/charge_suspend.sh restore"),60);
             return Err(e.to_string());
         }
-        if adb_ok(&out) && out.contains("CHARGE_SUSPENDED") {
-            // 脚本自己回显用的哪个节点; 原样记进报告
-            suspended_via = out
-                .lines()
-                .find(|l| l.contains("node="))
-                .map(|l| l.trim().to_string())
-                .or_else(|| Some("/sys/class/qcom-battery/charging_enabled".into()));
+        if !adb_ok(&out) {
+            // 审查 R1 #2: 超时 / adb 断了不等于没停充 —— 设备端脚本可能已经写了 STATE。
+            // 用 status 对账, 停了就按停了算 (结束时一样要还原)。
+            let st = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh status"), 30);
+            std::fs::write(evidence.join("charge_suspend_status.log"), &st).ok();
+            eprintln!("[eval] 停充脚本没正常结束 ({}), 已用 status 对账", out.lines().last().unwrap_or(""));
+            out.push('\n');
+            out.push_str(&st);
         }
+        // 开跑前的 USB 输入上限检查 (charge_suspend.sh 旁路时输出): 供电不足要明确写进回包
+        usb_supply_note = sysparam::usb_supply_note(&out);
+        if let Some(n) = &usb_supply_note {
+            eprintln!("[eval] {n}");
+        }
+        suspended_via = charge_suspended_via(&out);
+        // 停充成功后等电池停止吸电再开第一臂 (审计 #13)
+        charge_settle = suspended_via.as_ref().map(|_| wait_charge_settled(serial));
     }
 
-    for i in 1..=3 {
+    let (baseline_runs, baseline_warmup) = baseline_plan(req)?;
+    for w in 1..=baseline_warmup {
+        let label=format!("baseline_warmup{w}");
+        if let Err(e)=run_one_for(serial,&label,&evidence.join(&label),seconds,&workload_path,pkg,req["workload"]["render_comm"].as_str(),launch.as_ref(),spf) {
+            report["verdict"]["reason"]=json!(format!("预热轮失败: {e}"));
+        }
+    }
+    for i in 1..=baseline_runs {
         let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false}};
         let _=std::fs::write(evidence.join(format!("cold_baseline{i}.json")),py_dumps(&cold));
         if cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {facts.cold_ok=Some(false);break;}
-        match run_one_for(serial,&format!("baseline{i}"),&evidence.join(format!("baseline{i}")),seconds,&workload_path,pkg,req["workload"]["render_comm"].as_str(),launch.as_ref()) {
+        match run_one_for(serial,&format!("baseline{i}"),&evidence.join(format!("baseline{i}")),seconds,&workload_path,pkg,req["workload"]["render_comm"].as_str(),launch.as_ref(),spf) {
             Ok(m)=>facts.baseline.push(m),Err(e)=>{report["verdict"]["reason"]=json!(e);break;}
         }
     }
@@ -1454,7 +2308,9 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     std::fs::write(evidence.join("baseline_charge_restore.log"),&baseline_restore).ok();
     let baseline_after=snapshot(serial);
     std::fs::write(evidence.join("snap_after_baseline.txt"),&baseline_after).ok();
-    facts.restored=Some(snapshots_identical(&snap_before,&baseline_after) && adb_ok(&baseline_restore)
+    // 基线阶段我们一个节点都不写 (停充另由 charge_suspend.sh restore 核对), 快照差异只可能来自厂商性能服务
+    // 自管的频率边界; 严格逐字节比会把它判成还原失败 (2026-10-23 红魔: kgsl.max_pwrlevel 17→0、policy6 max 4608000→1632000)
+    facts.restored=Some(snapshots_restored(&snap_before,&baseline_after) && adb_ok(&baseline_restore)
         && !baseline_restore.contains("CHARGE_RESTORE_FAIL"));
     facts.stage=Stage::Experiment;
     let before_candidates=record_qualification(&mut report,evidence,&facts)?;
@@ -1465,10 +2321,18 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         return Ok(serde_json::to_string_pretty(&report).unwrap());
     }
     if want_suspend {
-        let out=su(serial,&format!("sh {DEV_TMP}/charge_suspend.sh suspend"),90);
+        let out=su(serial,&format!("sh {DEV_TMP}/charge_suspend.sh suspend"),CHARGE_SUSPEND_TIMEOUT_S);
         std::fs::write(evidence.join("candidate_charge_suspend.log"),&out).ok();
+        if let Some(n) = sysparam::usb_supply_note(&out) {
+            usb_supply_note = Some(n);
+        }
+        let via = charge_suspended_via(&out);
+        // 候选臂前同样等电池停止吸电 (审计 #13)
+        if via.is_some() {
+            charge_settle = Some(wait_charge_settled(serial));
+        }
         // Always attempt restore after a requested suspend, even when its acknowledgement failed.
-        suspended_via=Some(suspended_via.unwrap_or_else(||"requested; acknowledgement unknown".into()));
+        suspended_via=Some(via.or(suspended_via).unwrap_or_else(||"requested; acknowledgement unknown".into()));
     }
     const BAD_APPLY_TOKENS: [&str; 4] = [
         "KNOB_FAIL",
@@ -1491,13 +2355,23 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     let mut contested: Vec<Value> = Vec::new();
     let cool_c = req["conditions"]["cool_c"].as_f64().filter(|x| *x > 0.0 && *x < 100.0);
     let mut cool_log: Vec<Value> = Vec::new();
+    let hold_min = hold_min_frac(req);
+    let mut hold_log: Vec<Value> = Vec::new();
+    // 臂序随机 (审计 #13), 种子进报告; 环境不一致的对单独剔除 (审计 #9 #11)
+    let order_seed = curtail::order_seed(req["protocol"]["order_seed"].as_u64());
+    let knob_first = curtail::knob_first_order(rounds as usize, order_seed);
+    let mut dropped: Vec<Value> = Vec::new();
+    // 这组参数改的就是 GPU 档位时, 改写臂档位不同是设计如此, 不拿它判不可比
+    let check_gpu = !plan.contains("pwrlevel");
     'pairs: for i in 1..=rounds {
+        // 资格 (main): 每对开跑前冷机达标, 否则不再继续
         let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false}};
         let _=std::fs::write(evidence.join(format!("cold_pair{i}.json")),py_dumps(&cold));
         if cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {
             facts.cold_ok=Some(false);abort_reason=Some("候选对冷机失败，禁止继续".into());break;
         }
-        for arm in if i % 2 == 1 { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
+        // 臂序随机 (ruler fix-F)
+        for arm in if knob_first[i as usize - 1] { ["knob", "ctrl"] } else { ["ctrl", "knob"] } {
             // 风扇按死在关 (owner 规矩), 再等冷 —— 风扇状态会改等冷的结果
             let fan = arm_fan_off(serial);
             // 每臂开跑前按请求的 cool_c 等冷 (施加之前等: 等的那几分钟里厂商服务有足够时间把刚写的值改回去)
@@ -1509,7 +2383,31 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                 abort_reason = Some(format!("{arm}{i}: {e}"));
                 break;
             }
-            if arm == "knob" {
+            let label = format!("sp_{arm}{i}");
+            let arm_dir = evidence.join(format!("{arm}{i}"));
+            let rb_cmd = readback_cmd(&plan);
+            // 自驱动负载: 先冷启动游戏、等它进入被测窗口 (marker), 再施加 (审计 #7)。
+            // 游戏切到前台时厂商游戏模式 (perf2-hal / zperfcubeservice) 会套自己的配置,
+            // 在游戏启动前施加的值会在测量开始前就被改回去。触控脚本负载的游戏本来就在前台跑着。
+            // 标记出现那一刻的设备 uptime 记下来 (审查 R1 #9: 改写臂多一步施加, 开采固定晚 1–3 s)。
+            let mut marker_up: Option<f64> = None;
+            if let Some(l) = &launch {
+                let up = std::fs::create_dir_all(&arm_dir)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| start_with_extras(serial, pkg, &l.extras, l.marker.as_deref(), &[], &arm_dir))
+                    .and_then(|_| wait_launch_window(serial, pkg, &label, l.marker.as_deref()));
+                match up {
+                    Ok(u) => marker_up = u,
+                    Err(e) => {
+                        let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+                        abort_reason = Some(e);
+                        break;
+                    }
+                }
+            }
+            // 改写臂施加; 对照臂在同一时刻读一次这些节点的当前值 (同样一次 su 调用, 两臂节奏一致,
+            // 也留下对照臂的起点值)。
+            let pre = if arm == "knob" {
                 let out = su(
                     serial,
                     &format!("sh {DEV_TMP}/knob_sysparam.sh apply {DEV_TMP}/loop_v1_sysparam.plan"),
@@ -1523,58 +2421,65 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                     if !adb_ok(&r) || r.contains("KNOB_RESTORE_FAIL") {
                         restore_fail = Some(r);
                     }
+                    if launch.is_some() {
+                        let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
+                    }
                     break;
                 }
-            }
-            let label = format!("sp_{arm}{i}");
-            // 施加后隔十几秒回读一次 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md: 写得进不等于守得住, 厂商性能服务
-            // perf2-hal / zperfcubeservice 会在约 10 秒内把 GPU/CPU 频率边界改回去)。
-            // 两臂都读 —— 只在改写臂读的话, 那一次 adb 调用本身就成了两臂之间的差别。
-            let rb_cmd = readback_cmd(&plan);
-            let rb_thread = {
-                let (serial, cmd) = (serial.to_string(), rb_cmd.clone());
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(READBACK_AFTER_S));
-                    su(&serial, &cmd, 30)
-                })
+                out
+            } else {
+                su(serial, &rb_cmd, 30)
             };
+            // 测量窗口内按固定节拍回读 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md:
+            // 写得进不等于守得住)。两臂都读 —— 只在改写臂读的话, 回读的 adb 调用本身就成了两臂之间的差别。
+            let poller = HoldPoller::start(serial, &rb_cmd, READBACK_EVERY_S);
             let res = match &launch {
+                // 游戏已经由上面拉起来并进入窗口, 这里不再重启
                 Some(l) => run_one_launch(
                     serial,
                     &label,
-                    &evidence.join(format!("{arm}{i}")),
+                    &arm_dir,
                     seconds,
                     pkg,
                     req["workload"]["render_comm"].as_str(),
                     l,
-                    true,
+                    false,
+                    marker_up,
+                    spf,
                 ),
                 None => run_one_with(
                     serial,
                     &label,
-                    &evidence.join(format!("{arm}{i}")),
+                    &arm_dir,
                     seconds,
                     &workload_path,
                     pkg,
                     req["workload"]["render_comm"].as_str(),
+                    spf,
                 ),
             };
-            let rb_mid = rb_thread.join().unwrap_or_default();
-            let mut arm_contested: Vec<String> = Vec::new();
-            if arm == "knob" {
-                // 负载跑完、还原之前再读一次: 守住了整段测量才算数
-                let rb_end = su(serial, &rb_cmd, 30);
-                for (when, out) in [("+12s", &rb_mid), ("末尾", &rb_end)] {
-                    for (path, want, got) in readback_mismatches(&plan, out) {
-                        arm_contested.push(format!("{path}: 写 {want} {when}回读 {got}"));
-                    }
-                }
-                std::fs::write(
-                    evidence.join(format!("knob{i}_readback.txt")),
-                    format!("# +{READBACK_AFTER_S}s\n{rb_mid}\n# 末尾\n{rb_end}\n"),
-                )
-                .ok();
+            let samples = poller.finish();
+            if launch.is_some() {
+                // 量完就停掉, 别让它在还原、等冷的时候接着烧
+                let _ = adb(serial, &["shell", &format!("am force-stop {pkg}")], 30);
             }
+            // 守住比例只算 trace 采集窗内的回读 (审查 R1 #5)
+            let hold_win = std::fs::read(arm_dir.join("trace.txt"))
+                .ok()
+                .and_then(|b| sysparam::capture_window_from_trace(&String::from_utf8_lossy(&b[..b.len().min(64 * 1024)])));
+            let hold = hold_stats_window(&plan, &samples, hold_win);
+            let mut hold_rec = hold.to_json();
+            hold_rec["arm"] = json!(format!("{arm}{i}"));
+            hold_log.push(hold_rec.clone());
+            {
+                let mut txt = format!("# 施加/起点回读\n{pre}\n");
+                for (t, out) in &samples {
+                    txt.push_str(&format!("# +{t:.1}s\n{out}\n"));
+                }
+                std::fs::write(evidence.join(format!("{arm}{i}_readback.txt")), txt).ok();
+            }
+            // 改写臂按窗口内守住的时间比例判进不进统计
+            let arm_contested = if arm == "knob" { hold_verdict(&hold, hold_min).err() } else { None };
             if arm == "knob" {
                 let r = restore(serial);
                 if (!adb_ok(&r) || r.contains("KNOB_RESTORE_FAIL")) && restore_fail.is_none() {
@@ -1582,7 +2487,9 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                 }
             }
             match res {
-                Ok(m) => {
+                Ok(mut m) => {
+                    m["sysparam_hold"] = hold_rec;
+                    m["round"] = json!(i);
                     // 温度上限: 超了这一组作废
                     let t = run_soc_temp_max(&m);
                     if let (Some(t), Some(cap)) = (t, req["conditions"]["temp_cap_c"].as_f64()) {
@@ -1592,15 +2499,20 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
                     }
                     if abort_reason.is_none() {
                         if arm == "knob" {
-                            if arm_contested.is_empty() {
-                                knob_runs.push(m);
-                            } else {
+                            match arm_contested {
+                                None => knob_runs.push(m),
                                 // 守不住的那一臂量的不是这组参数: 不进统计, 单列计数
-                                contested.push(json!({"round": i, "nodes": arm_contested}));
+                                Some(why) => contested.push(json!({
+                                    "round": i,
+                                    "why": why,
+                                    "hold_frac": hold.frac(),
+                                    "nodes": hold.mismatches,
+                                })),
                             }
                         } else {
                             ctrl_runs.push(m);
                         }
+                        settle_pair(i, &mut knob_runs, &mut ctrl_runs, &mut dropped, check_gpu);
                     }
                     if restore_fail.is_some() {
                         abort_reason = Some("旋钮还原失败, 后续数据不可信".into());
@@ -1616,13 +2528,19 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             // 确定性截断: 剩下的臂无论量出什么, 都不可能有指标显著改善 → 跑满也必然不是
             // KEEP, 现在停 (论证见 src/curtail.rs)。KEEP 一侧永远不提前锁定。
             if curtail {
-                let tests = policy_win_tests(&facts.policy.required_metrics, alpha);
-                let (left_a, left_b) = (
-                    (rounds as usize).saturating_sub(ctrl_runs.len()),
-                    (rounds as usize).saturating_sub(knob_runs.len()),
-                );
-                if !curtail::keep_possible(&eval_runs(&ctrl_runs), &eval_runs(&knob_runs), left_a, left_b, &tests) {
-                    curtailed = Some(curtail_note(knob_runs.len(), ctrl_runs.len(), rounds, &tests));
+                let lock_possible = fps_lock_confirmed(fps_cap_declared, &ctrl_runs, &knob_runs).0.is_some();
+                // 审查 R1 #3: contested 的改写臂与 settle_pair 剔掉的对都不会再跑, 不能当「还没跑」
+                let (left_a, left_b) = remaining_arms(rounds as usize, ctrl_runs.len(), knob_runs.len(), contested.len(), dropped.len());
+                let pp = power_pairs_of(&knob_runs, &ctrl_runs);
+                // 判定指标由冻结的 policy 决定 (main), 功耗按对取舍后的值进截断检验 (ruler)
+                let tests = policy_win_tests(&facts.policy.required_metrics, alpha, lock_possible);
+                if !keep_reachable(ctrl_runs.len() + left_a, knob_runs.len() + left_b, &tests)
+                    || !curtail::keep_possible(&eval_runs_power(&ctrl_runs, &pp.ctrl), &eval_runs_power(&knob_runs, &pp.knob), left_a, left_b, &tests)
+                {
+                    let mut note = curtail_note(knob_runs.len(), ctrl_runs.len(), rounds, &tests);
+                    note["contested_arms"] = json!(contested.len());
+                    note["dropped_pairs"] = json!(dropped.len());
+                    curtailed = Some(note);
                     break 'pairs;
                 }
             }
@@ -1633,7 +2551,9 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     }
 
     // ── 还原 + 快照核对 ──
-    if suspended_via.is_some() {
+    // 停充无条件还原 (审查 R1 #2 #10): 没有 STATE 时脚本是空操作 (CHARGE_NOT_SUSPENDED);
+    // 超时后设备端才写成的 STATE、CHARGE_ALREADY_SUSPENDED 认下来的 STATE 都在这里一并还原。
+    {
         let cr = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         std::fs::write(evidence.join("charge_restore.log"), &cr).map_err(|e| e.to_string())?;
         if !adb_ok(&cr) || cr.contains("CHARGE_RESTORE_FAIL") {
@@ -1644,6 +2564,8 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     if (!adb_ok(&restore_log) || restore_log.contains("KNOB_RESTORE_FAIL")) && restore_fail.is_none() {
         restore_fail = Some(restore_log);
     }
+    // 两样都还原过了, 中断时不必再跑 (还原失败的已经记在 restore_fail 里, 下次开跑前对账会再还原一次)
+    cleanup::clear();
     let final_cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false}};
     let _=std::fs::write(evidence.join("cold_final.json"),py_dumps(&final_cold));
     if final_cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {facts.cold_ok=Some(false);abort_reason=Some("收尾冷机失败，撤销可保留结论".into());}
@@ -1655,8 +2577,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     // 只有其余的键变了才判留痕作废。前者如实记进报告。
     let (vendor_drift, other_drift) = split_snapshot_diff(&snap_before, &snap_after);
     // 资格里的「已还原」: 两次快照都读成功, 且除厂商自管的频率边界外逐项相等
-    let snapshot_restored = snapshot_identical
-        || (adb_ok(&snap_before) && adb_ok(&snap_after) && snap_before.lines().any(|l| l.contains('=')) && other_drift.is_empty());
+    let snapshot_restored = snapshots_restored(&snap_before, &snap_after);
 
     let (cool_reached, cool_timeout) = cool_summary(&cool_log);
     report["conditions_observed"] = json!({
@@ -1665,12 +2586,27 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         "cool_timeout": cool_timeout,
         "cool_per_arm": cool_log,
         "temp_cap_c": req["conditions"]["temp_cap_c"],
+        "arm_order": curtail::order_note(order_seed, rounds as usize),
+        "charge_settle": charge_settle,
+        // 开跑前对账: 上一次留下的旋钮 / 停充状态 (审查 R1 #10), 已还原
+        "preexisting_state": preexisting,
+        "env_consistency": consistency_note(&dropped, check_gpu),
+        // 审查 R1 #9: 两臂 标记出现→开采 的延时 (只标不剔)
+        "marker_to_capture": marker_delay_note(&knob_runs, &ctrl_runs),
+        "spf_declared": spf,
+        "fps_cap_declared": fps_cap_declared,
+        // 只记不判: 各对之间风扇状态不同 (每对内部一致) 不再整组作废
+        "fan_across_pairs": fan_mismatch(&knob_runs, &ctrl_runs),
         "apply_ok": apply_ok,
         "snapshot_identical": snapshot_identical,
         "restored": restore_fail.is_none(),
-        // 改写臂里有几臂被厂商服务抢回 (施加后 +12s 或负载末尾回读对不上), 这几臂没进统计
+        // 改写臂里有几臂在测量窗口内守住的时间比例低于门槛 (厂商服务抢回), 这几臂没进统计
         "contested_arms": contested.len(),
         "contested": contested,
+        "hold_min_frac": hold_min,
+        "readback_every_s": READBACK_EVERY_S,
+        // 逐臂 (两臂都有) 窗口内回读: 守住比例、读到过的值。对照臂看厂商服务有没有动这些节点
+        "hold_per_arm": hold_log,
         "snapshot_vendor_drift": vendor_drift,
         "snapshot_diff": if snapshot_identical { Value::Null } else {
             json!([
@@ -1687,44 +2623,43 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     facts.restored=Some(snapshot_restored && restore_fail.is_none());
     let qualified=record_qualification(&mut report,evidence,&facts)?;
     if !qualified.conclusion_allowed {
-        report["verdict"]["reason"]=json!("实验结论资格未通过；数字保留，禁止 PASS/KEEP");
+        report["verdict"]["reason"]=json!(if facts.screen {"初筛只报方向与幅度 (数字保留), 不判 PASS/KEEP; 有苗头的候选进确认阶段"}
+            else {"实验结论资格未通过；数字保留，禁止 PASS/KEEP"});
         return Ok(serde_json::to_string_pretty(&report).unwrap());
     }
     // ── 判定 ──
     if let Some(reason) = abort_reason.clone().or_else(|| restore_fail.clone().map(|r| format!("旋钮还原失败: {r}"))) {
-        if suspended_via.is_some() {
-            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
-        }
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         report["verdict"]["reason"] = json!(reason);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
     if !other_drift.is_empty() {
         report["verdict"]["reason"] = json!(format!("轮末设备快照与轮前不一致, 留痕: {}", other_drift.join("; ")));
-        if suspended_via.is_some() {
-            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
-        }
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
 
     if knob_runs.is_empty() && !contested.is_empty() {
         report["verdict"]["reason"] = json!(format!(
-            "改写臂 {} 臂全部被厂商性能服务抢回 (施加后回读对不上, contested), 没有一臂量的是这组参数",
+            "改写臂 {} 臂在测量窗口内都没守住 (守住时间比例低于门槛, contested), 没有一臂量的是这组参数",
             contested.len()
         ));
-        if suspended_via.is_some() {
-            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
-        }
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
-    if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
-        report["verdict"]["reason"] = json!(e);
-        if suspended_via.is_some() {
-            let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
-        }
+    if knob_runs.is_empty() && !dropped.is_empty() {
+        report["verdict"]["reason"] = json!(format!(
+            "{} 对两臂测量环境都不一致 (风扇或 GPU 档位), 全部剔除, 没有可比的数据 (见 conditions_observed.env_consistency)",
+            dropped.len()
+        ));
+        let _ = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
         return Ok(serde_json::to_string_pretty(&report).unwrap_or_default());
     }
-    let (verdict, keep, on_battery_all) = judge_runs_with(&ctrl_runs, &knob_runs, alpha, rounds, Some(&facts.policy.required_metrics));
+    let (verdict, keep, on_battery_all) = judge_runs_with(&ctrl_runs, &knob_runs, alpha, rounds, fps_cap_declared, Some(&facts.policy.required_metrics));
     report["verdict"] = verdict;
+    append_dropped_reason(&mut report, &dropped);
+    let md = report["conditions_observed"]["marker_to_capture"].clone();
+    append_marker_delay_reason(&mut report, &md);
     if !contested.is_empty() {
         let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
         report["verdict"]["reason"] = json!(format!(
@@ -1756,7 +2691,10 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     m["psnr_db"] = Value::Null;
     unavailable(&mut m, "psnr_db", "sysparam 不动画面, 无画质可量");
     if power.is_none() {
-        unavailable(&mut m, "power_watt", "非放电态 (或功耗采样缺失): 整机功耗量不准, 如实 null");
+        let why = power_pairs_of(&knob_runs, &ctrl_runs)
+            .note()
+            .unwrap_or_else(|| "非放电态 (或功耗采样缺失): 整机功耗量不准, 如实 null".into());
+        unavailable(&mut m, "power_watt", &why);
     }
     if m["fps_p95_ms"].is_null() {
         unavailable(&mut m, "fps_p95_ms", "本轮没拿到可用的帧时序");
@@ -1786,9 +2724,11 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         "cross_run_comparable": sysparam::power_cross_run_comparable(
             knob_runs.iter().chain(ctrl_runs.iter()).filter_map(|r| r.get("env")),
         ),
-        "excluded_reason": sysparam::power_group_note(
-            knob_runs.iter().chain(ctrl_runs.iter()).filter_map(|r| r.get("env")),
-        ),
+        // 按对取舍的结果: 剔了哪几对、为什么, 口径, 是否供电不足 (审计 #5)
+        "excluded_reason": power_pairs_of(&knob_runs, &ctrl_runs).note(),
+        "pairs": power_pairs_of(&knob_runs, &ctrl_runs).to_json(),
+        "supply_mode": env["supply_mode"],
+        "usb_supply_check": usb_supply_note.clone(),
     });
 
     report["status"] = json!(if keep { "PASS" } else { "REJECT" });
@@ -1803,17 +2743,7 @@ fn wl_pyval(wl: &sysparam::Whitelist) -> Value {
 
 /// n v n 精确置换检验的最小双侧 p = 2/C(2n,n); 够不着 alpha_win 就是 false。
 fn reachable(n: u32, alpha_win: f64) -> bool {
-    if n < 2 {
-        return false;
-    }
-    let mut c = 1.0f64;
-    for i in 1..=n {
-        c *= (n + i) as f64 / i as f64;
-        if !c.is_finite() {
-            return false;
-        }
-    }
-    2.0 / c < alpha_win
+    n >= 2 && loopstat::ensure_resolvable(n as usize, alpha_win, "").is_ok()
 }
 
 /// 风扇开关节点 (红魔 NX809J)。owner 规矩: 风扇默认必须关 (噪音)。
@@ -1858,6 +2788,501 @@ pub(crate) fn fan_mismatch(knob_runs: &[Value], ctrl_runs: &[Value]) -> Option<S
     (seen.len() > 1).then(|| format!("测量期间各臂风扇状态不一致 {seen:?}: 风扇自己耗电、还改热态, 这组不可比"))
 }
 
+// ══════════════ 臂间环境一致性 (审计 #9 #11 #13) ══════════════
+
+/// sample_hw.sh 自己跑的上限 (秒)。正常由 [`HwWatch::finish`] 写停止标记结束, 这只是兜底。
+const HW_WATCH_MAX_S: u64 = 900;
+/// 同一对两臂的 GPU 上限档分布, 总变差距离 (½·Σ|p_knob − p_ctrl|) 超过它就判不可比。
+/// 例: 一臂全程 0 档、另一臂有 1/4 时间被压到 17 档 → 0.25 > 0.2, 剔除这一对。
+pub(crate) const GPU_LEVEL_TV_MAX: f64 = 0.2;
+
+/// 每臂一个新的停止标记文件名: 设备端 sample_hw.sh 不删任何文件 (铁律: 不删除),
+/// 开始时已存在的标记它不认, 所以同一 label 再跑一次 (下一次评测) 也必须换名字。
+/// `nonce` 取主机时间纳秒 + 进程号, 见 [`hw_stop_nonce`]。纯函数, 便于测试。
+pub(crate) fn hw_stop_path(label: &str, nonce: &str) -> String {
+    format!("{DEV_TMP}/sample_hw_{label}_{nonce}.stop")
+}
+
+fn hw_stop_nonce() -> String {
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{ns}_{}", std::process::id())
+}
+
+/// 测量窗口内逐秒记 GPU 上限档与风扇设定档 (设备端 sample_hw.sh, 只读)。
+/// 两臂用同一个 [`HwWatch`], 所以这一路 adb 调用本身不造成两臂差别。
+pub(crate) struct HwWatch {
+    child: Option<std::process::Child>,
+    path: PathBuf,
+    stop: String,
+    serial: String,
+}
+
+impl HwWatch {
+    pub(crate) fn start(serial: &str, outdir: &Path, label: &str) -> Self {
+        let path = outdir.join("hw.txt");
+        let stop = hw_stop_path(label, &hw_stop_nonce());
+        let child = std::fs::File::create(&path).ok().and_then(|f| {
+            Command::new(adb_path())
+                .args(["-s", serial, "shell"])
+                .arg(format!("su -c 'sh {DEV_TMP}/sample_hw.sh {HW_WATCH_MAX_S} {stop}'"))
+                .stdout(f)
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()
+        });
+        Self { child, path, stop, serial: serial.to_string() }
+    }
+
+    /// 停掉采样, 回 hw.txt 原文 (调用方拿到 trace 采集窗之后再用 [`hw_stats_window`] 截窗解析,
+    /// 审查 R1 #12: LEAD 段 / 采完之后的档位变化不该算进这一臂)。没采到 (脚本不在、没 root) 时空串, n=0,
+    /// 一致性核对跳过这一项。
+    pub(crate) fn finish(mut self) -> String {
+        if let Some(mut ch) = self.child.take() {
+            let _ = su(&self.serial, &format!("touch {}", self.stop), 15);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match ch.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) if std::time::Instant::now() > deadline => {
+                        let _ = ch.kill();
+                        let _ = ch.wait();
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                }
+            }
+        }
+        std::fs::read_to_string(&self.path).unwrap_or_default()
+    }
+}
+
+/// 只推 sample_hw.sh。推不上不致命: 采不到就跳过这一项核对, 报告里看得到 n=0。
+/// (gray 自审查 R1 #1 起改走 push_tools 推全套; 这个函数留给只需要 sample_hw.sh 的调用方。)
+#[allow(dead_code)]
+pub(crate) fn push_hw_script(serial: &str) {
+    let p = repo_root().join("loop_v1/auto/sample_hw.sh");
+    if p.exists() {
+        let _ = adb(serial, &["push", &p.to_string_lossy(), DEV_TMP], 60);
+    }
+}
+
+/// 游程编码: [[值, 连续样本数], ...], 保留先后顺序。
+fn runs_of<T: PartialEq + Clone>(xs: &[T]) -> Vec<(T, usize)> {
+    let mut out: Vec<(T, usize)> = Vec::new();
+    for x in xs {
+        match out.last_mut() {
+            Some((v, n)) if v == x => *n += 1,
+            _ => out.push((x.clone(), 1)),
+        }
+    }
+    out
+}
+
+/// 各取值所占样本比例。
+fn fractions<T: Ord + Clone>(xs: &[T]) -> std::collections::BTreeMap<T, f64> {
+    let mut m: std::collections::BTreeMap<T, f64> = Default::default();
+    for x in xs {
+        *m.entry(x.clone()).or_default() += 1.0;
+    }
+    let n = xs.len().max(1) as f64;
+    m.values_mut().for_each(|v| *v /= n);
+    m
+}
+
+/// sample_hw.sh 输出 → {n, gpu_pwrlevel_runs, gpu_pwrlevel_frac, fan_runs, fan_states}。纯函数, 不截窗。
+pub(crate) fn hw_stats(text: &str) -> Value {
+    hw_stats_window(text, None)
+}
+
+/// 同 [`hw_stats`], 但只取 uptime 落在 trace 采集窗 `[a, b]` 里的 HW 行 (审查 R1 #12: 记录覆盖
+/// run_once 的 LEAD 段与采完之后的 pull 段, 那两段里厂商服务改档位会错剔一对)。
+/// 输出多 `n_total` (截窗前的行数) 与 `window`; `window` 为 None 时不截, 与 [`hw_stats`] 相同。
+pub(crate) fn hw_stats_window(text: &str, window: Option<(f64, f64)>) -> Value {
+    let (mut levels, mut fans): (Vec<i64>, Vec<String>) = (vec![], vec![]);
+    let (mut n, mut n_total) = (0usize, 0usize);
+    // 停止标记在脚本开始时就已存在 (脚本不认它, 只按最长秒数停): 记下来, 说明这一臂的记录可能比测量窗长
+    let stop_preexisting = text.lines().any(|l| l.trim().starts_with("#stop_preexisting"));
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("HW ") else { continue };
+        let p: Vec<&str> = rest.split_whitespace().collect();
+        if p.len() < 3 {
+            continue;
+        }
+        n_total += 1;
+        if let Some((a, b)) = window {
+            let up = p[0].parse::<f64>().unwrap_or(f64::NAN);
+            if !(a <= up && up <= b) {
+                continue;
+            }
+        }
+        n += 1;
+        if let Ok(l) = p[1].parse::<i64>() {
+            levels.push(l);
+        }
+        if p[2] != "-" {
+            fans.push(p[2].to_string());
+        }
+    }
+    let lv_frac: serde_json::Map<String, Value> =
+        fractions(&levels).into_iter().map(|(k, v)| (k.to_string(), json!((v * 1000.0).round() / 1000.0))).collect();
+    let fan_states: Vec<String> = fractions(&fans).into_keys().collect();
+    json!({
+        "n": n,
+        "n_total": n_total,
+        "window": window.map(|(a, b)| json!([a, b])),
+        "gpu_pwrlevel_runs": runs_of(&levels).into_iter().map(|(v, c)| json!([v, c])).collect::<Vec<_>>(),
+        "gpu_pwrlevel_frac": lv_frac,
+        "fan_runs": runs_of(&fans).into_iter().map(|(v, c)| json!([v, c])).collect::<Vec<_>>(),
+        "fan_states": fan_states,
+        "stop_preexisting": stop_preexisting,
+    })
+}
+
+/// 两个档位分布的总变差距离。
+fn level_tv(a: &Value, b: &Value) -> Option<f64> {
+    let (a, b) = (a.as_object()?, b.as_object()?);
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let tv = keys
+        .into_iter()
+        .map(|k| (a.get(k).and_then(Value::as_f64).unwrap_or(0.0) - b.get(k).and_then(Value::as_f64).unwrap_or(0.0)).abs())
+        .sum::<f64>()
+        / 2.0;
+    Some(tv)
+}
+
+/// 一臂测量期间见到的风扇设定档集合: 优先逐秒记录 (hw.fan_states), 没有就退回 sample_env 开头那一行。
+fn arm_fan_states(m: &Value) -> Option<std::collections::BTreeSet<String>> {
+    if let Some(xs) = m["hw"]["fan_states"].as_array().filter(|x| !x.is_empty()) {
+        return Some(xs.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+    }
+    m["env"]["fan_state"].as_str().map(|s| std::iter::once(s.to_string()).collect())
+}
+
+/// 同一对两臂的测量环境是否可比: 风扇设定档集合必须相同; `check_gpu` 时 GPU 上限档分布的
+/// 总变差距离不超过 [`GPU_LEVEL_TV_MAX`]。缺数据的那一项不判 (旧证据、没采到), 只判两臂都有的。
+/// sysparam 改的就是 GPU 档位时调用方传 `check_gpu = false` (改写臂档位不同是设计如此)。
+pub(crate) fn pair_env_check(knob: &Value, ctrl: &Value, check_gpu: bool) -> Result<(), String> {
+    if let (Some(fk), Some(fc)) = (arm_fan_states(knob), arm_fan_states(ctrl)) {
+        if fk != fc {
+            return Err(format!("风扇状态不一致: 改写臂 {fk:?} / 对照臂 {fc:?}"));
+        }
+    }
+    // 审计 #10: 两臂的「每帧几次提交」不同 = 帧时口径不同 (一臂 p50 算成 6 倍), 不可比
+    let spf = |m: &Value| m["summary"]["submits_per_frame"].as_u64();
+    if let (Some(a), Some(b)) = (spf(knob), spf(ctrl)) {
+        if a != b {
+            return Err(format!(
+                "帧时口径不一致: 每帧提交数 改写臂 {a} / 对照臂 {b} (各臂自检猜的不一样; 请求里用 workload.spf 声明可固定)"
+            ));
+        }
+    }
+    if check_gpu {
+        if let Some(tv) = level_tv(&knob["hw"]["gpu_pwrlevel_frac"], &ctrl["hw"]["gpu_pwrlevel_frac"]) {
+            if tv > GPU_LEVEL_TV_MAX {
+                return Err(format!(
+                    "GPU 上限档分布不一致 (总变差 {tv:.2} > {GPU_LEVEL_TV_MAX}): 改写臂 {} / 对照臂 {}",
+                    knob["hw"]["gpu_pwrlevel_frac"], ctrl["hw"]["gpu_pwrlevel_frac"]
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 第 `round` 对两臂都量完时核对环境一致性; 不可比就把这一对两臂都拿出统计, 记进 `dropped`。
+/// 只剔这一对, 其余对照常判定 (以前风扇不一致是整组作废)。回 true = 剔除了。
+pub(crate) fn settle_pair(
+    round: u32,
+    knob_runs: &mut Vec<Value>,
+    ctrl_runs: &mut Vec<Value>,
+    dropped: &mut Vec<Value>,
+    check_gpu: bool,
+) -> bool {
+    let is_round = |r: &Value| r["round"].as_u64() == Some(round as u64);
+    let (Some(ki), Some(ci)) = (knob_runs.iter().position(is_round), ctrl_runs.iter().position(is_round)) else {
+        return false;
+    };
+    match pair_env_check(&knob_runs[ki], &ctrl_runs[ci], check_gpu) {
+        Ok(()) => false,
+        Err(why) => {
+            let (k, c) = (knob_runs.remove(ki), ctrl_runs.remove(ci));
+            dropped.push(json!({
+                "round": round, "reason": why,
+                "knob": {"label": k["label"], "hw": k["hw"], "fan_state": k["env"]["fan_state"], "layer_hits": k["layer_hits"]},
+                "ctrl": {"label": c["label"], "hw": c["hw"], "fan_state": c["env"]["fan_state"]},
+            }));
+            true
+        }
+    }
+}
+
+/// 回包里的一致性记录 (`conditions_observed.env_consistency`)。
+pub(crate) fn consistency_note(dropped: &[Value], check_gpu: bool) -> Value {
+    json!({
+        "dropped_pairs": dropped.len(),
+        "dropped": dropped,
+        "gpu_level_checked": check_gpu,
+        "rule": format!(
+            "每对两臂: 风扇设定档集合必须相同; GPU 上限档分布 (按 trace 采集窗截) 总变差 <= {GPU_LEVEL_TV_MAX} (sysparam 改 GPU 档位时不比这一项); \
+             每帧提交数 (submits_per_frame) 必须相同。不可比只剔除那一对, 写在这里"
+        ),
+    })
+}
+
+/// 审查 R1 #9: 两臂「进入被测窗口 (标记出现) → 开采」的延时相差超过它就标出 (改写臂多一步施加, 固定晚 1–3 s,
+/// 臂序随机抵消不了; fix-G 之后 Megacity 按时间推进路线, 晚开采就是另一段路)。只标不剔。
+pub(crate) const MARKER_DELAY_ASYM_MAX_S: f64 = 1.0;
+
+/// 逐对比较 marker→capture_start 延时 (`run_one_launch` 记的 `marker_to_capture_s`)。
+/// 回 {per_round, flagged_rounds, max_asymmetry_s, rule}; 没有自驱动负载 (没记延时) 时 per_round 为空。
+pub(crate) fn marker_delay_note(knob_runs: &[Value], ctrl_runs: &[Value]) -> Value {
+    let round_of = |r: &Value| r["round"].as_u64();
+    let delay = |r: &Value| r["marker_to_capture_s"].as_f64();
+    let mut per_round: Vec<Value> = Vec::new();
+    let mut flagged: Vec<u64> = Vec::new();
+    let mut max_asym: Option<f64> = None;
+    for k in knob_runs {
+        let (Some(i), Some(dk)) = (round_of(k), delay(k)) else { continue };
+        let Some(dc) = ctrl_runs.iter().find(|c| round_of(c) == Some(i)).and_then(delay) else { continue };
+        let diff = ((dk - dc) * 100.0).round() / 100.0;
+        let bad = diff.abs() > MARKER_DELAY_ASYM_MAX_S;
+        if bad {
+            flagged.push(i);
+        }
+        max_asym = Some(max_asym.map_or(diff.abs(), |m: f64| m.max(diff.abs())));
+        per_round.push(json!({"round": i, "knob_s": dk, "ctrl_s": dc, "diff_s": diff, "flagged": bad}));
+    }
+    json!({
+        "per_round": per_round,
+        "flagged_rounds": flagged,
+        "max_asymmetry_s": max_asym,
+        "rule": format!("每对两臂 标记出现→采集开始 的延时相差 > {MARKER_DELAY_ASYM_MAX_S} s 就标出 (只标不剔); 延时 = capture_start_uptime − 标记出现时的设备 uptime"),
+    })
+}
+
+/// 有标出的对时, 在判定理由后面补一句。
+pub(crate) fn append_marker_delay_reason(report: &mut Value, note: &Value) {
+    let rounds: Vec<String> = note["flagged_rounds"].as_array().into_iter().flatten().map(|v| v.to_string()).collect();
+    if rounds.is_empty() {
+        return;
+    }
+    let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
+    report["verdict"]["reason"] = json!(format!(
+        "{r} (第 {} 对两臂从标记出现到开采的延时相差 > {MARKER_DELAY_ASYM_MAX_S} s, 见 conditions_observed.marker_to_capture)",
+        rounds.join("、")
+    ));
+}
+
+/// 请求声明的每帧提交数 (审计 #10)。
+pub(crate) fn declared_spf(req: &Value) -> Option<usize> {
+    req["workload"]["spf"].as_u64().filter(|n| *n >= 1).map(|n| n as usize)
+}
+
+/// 请求声明的帧率上限 (审查 R2 #9)。
+pub(crate) fn declared_fps_cap(req: &Value) -> Option<f64> {
+    req["workload"]["fps_cap"].as_f64().filter(|x| *x > 0.0)
+}
+
+/// 判定理由后面补上剔除了几对。
+pub(crate) fn append_dropped_reason(report: &mut Value, dropped: &[Value]) {
+    if dropped.is_empty() {
+        return;
+    }
+    let r = report["verdict"]["reason"].as_str().unwrap_or("").to_string();
+    let rounds: Vec<String> = dropped.iter().map(|d| d["round"].to_string()).collect();
+    report["verdict"]["reason"] = json!(format!(
+        "{r} (第 {} 对两臂测量环境不一致, 已剔除, 见 conditions_observed.env_consistency)",
+        rounds.join("、")
+    ));
+}
+
+/// 停充后电池电流 (µA, 正 = 在充) 低于它, 算电池已不再吸电。与 charge_suspend.sh 的 BYPASS_IDLE_UA 一致。
+const CHARGE_SETTLE_UA: i64 = 50_000;
+/// 停充后等电池停止吸电的上限。10-11 实测电流约 45 s 才落到 ~0。
+const CHARGE_SETTLE_MAX_S: u64 = 120;
+
+/// 这一读数算不算已停止吸电。读不出数的不算。
+pub(crate) fn charge_settled(ua: Option<i64>) -> bool {
+    ua.is_some_and(|x| x <= CHARGE_SETTLE_UA)
+}
+
+/// 停充成功后、第一臂之前: 等电池电流降到约 0 (连续两次读数 <= [`CHARGE_SETTLE_UA`])。
+/// 审计 #13: 以前最初约 45 秒电池仍在吸电, 那段总落在先跑的那一臂上。超时不作废, 如实记录。
+pub(crate) fn wait_charge_settled(serial: &str) -> Value {
+    let t0 = std::time::Instant::now();
+    let mut samples: Vec<Value> = Vec::new();
+    let mut ok_streak = 0;
+    loop {
+        let out = su(serial, "cat /sys/class/power_supply/battery/current_now", 15);
+        let ua = crate::graylayer::GrayLayer::adb_stdout(&out).trim().parse::<i64>().ok();
+        let t = t0.elapsed().as_secs();
+        samples.push(json!([t, ua]));
+        ok_streak = if charge_settled(ua) { ok_streak + 1 } else { 0 };
+        if ok_streak >= 2 {
+            return json!({"settled": true, "waited_s": t, "threshold_ua": CHARGE_SETTLE_UA, "samples": samples});
+        }
+        if t >= CHARGE_SETTLE_MAX_S {
+            return json!({"settled": false, "waited_s": t, "threshold_ua": CHARGE_SETTLE_UA, "samples": samples});
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// `charge_suspend.sh suspend` 的主机端超时 (秒)。审查 R1 #2: 以前 90 s, 单候选最坏就要 90 s + 启动,
+/// 超时先到, 设备端脚本却接着跑、几分钟后写成 STATE, 没人还原。现在脚本自己限总时长
+/// (SUSPEND_TOTAL_MAX_S=300, 每个候选开始前与等旁路的每一秒都查), 主机端只要盖过它加一个候选的收尾
+/// (12 s 等放电 + 几次读数)。
+pub(crate) const CHARGE_SUSPEND_TIMEOUT_S: u64 = 300 + 60;
+
+/// charge_suspend.sh 的输出 (suspend 的回显, 超时后再接上 status 的回显) 里认出「现在是停充状态」:
+/// `CHARGE_SUSPENDED` / `_BYPASS` / `_MIXED`, `CHARGE_ALREADY_SUSPENDED` (别人留下的, 这次也负责还原,
+/// 审查 R1 #2 #10), 或 status 的 `state: 已停充`。返回记进报告的那一行。
+pub(crate) fn charge_suspended_via(out: &str) -> Option<String> {
+    out.lines().map(str::trim).find_map(|l| {
+        if l.starts_with("CHARGE_SUSPENDED") || l.starts_with("CHARGE_ALREADY_SUSPENDED") || l.starts_with("state: 已停充") {
+            Some(l.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// 开跑前对账 (审查 R1 #10): `knob_sysparam.sh status` / `charge_suspend.sh status` 的回显里有没有
+/// 上一次留下的状态。返回 (旋钮已施加, 已停充)。
+pub(crate) fn parse_preexisting(knob_status: &str, charge_status: &str) -> (bool, bool) {
+    let has = |s: &str, tok: &str| s.lines().any(|l| l.trim().starts_with(tok));
+    (has(knob_status, "state: 已施加"), has(charge_status, "state: 已停充"))
+}
+
+/// 开跑前对账并还原残留 (审查 R1 #10): 上一次崩溃 / Ctrl-C 留下的旋钮 STATE 会让这次 apply 回
+/// `KNOB_ALREADY_APPLIED`, 停充 STATE 会让这次 suspend 回 `CHARGE_ALREADY_SUSPENDED`、结束时不还原。
+/// 回包 `conditions_observed.preexisting_state` 原样记下对账结果与还原回显。
+pub(crate) fn reconcile_preexisting(serial: &str, evidence: &Path) -> Value {
+    let ks = su(serial, &format!("sh {DEV_TMP}/knob_sysparam.sh status"), 60);
+    let cs = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh status"), 60);
+    let (knob_applied, charge_suspended) = parse_preexisting(&ks, &cs);
+    let mut v = json!({
+        "knob_applied": knob_applied,
+        "charge_suspended": charge_suspended,
+        "knob_status": ks.trim(),
+        "charge_status": cs.trim(),
+    });
+    if knob_applied {
+        let r = su(serial, &format!("sh {DEV_TMP}/knob_sysparam.sh restore"), 120);
+        eprintln!("[eval] 开跑前发现上次留下的旋钮状态, 已还原: {}", r.lines().last().unwrap_or(""));
+        v["knob_restore"] = json!(r.trim());
+    }
+    if charge_suspended {
+        let r = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh restore"), 60);
+        eprintln!("[eval] 开跑前发现上次留下的停充状态, 已还原: {}", r.lines().last().unwrap_or(""));
+        v["charge_restore"] = json!(r.trim());
+    }
+    let _ = std::fs::write(evidence.join("preexisting_state.txt"), format!("# knob status\n{ks}\n# charge status\n{cs}\n"));
+    v
+}
+
+/// 截断用的「两臂还会各跑几臂」(审查 R1 #3)。contested 的改写臂 (守不住, 不进 knob_runs) 与
+/// settle_pair 剔掉的对 (两臂都移走) 都已经跑过了, 不能再算成「还没跑」—— 否则 keep_possible 永远偏乐观,
+/// 守不住的候选会把 10 臂全跑完。
+pub(crate) fn remaining_arms(rounds: usize, ctrl_done: usize, knob_done: usize, contested: usize, dropped: usize) -> (usize, usize) {
+    (
+        rounds.saturating_sub(ctrl_done + dropped),
+        rounds.saturating_sub(knob_done + contested + dropped),
+    )
+}
+
+/// 跑满后两臂最多能凑到 `n_a_max` / `n_b_max` 个样本, 这个样本量在数学上还判得出显著改善吗
+/// (审查 R1 #3)。两臂等量时就是 [`loopstat::ensure_resolvable`] 的判据 (最小双侧 p = 2/C(2n,n));
+/// 不等量时精确置换的最小 p 是 1/C(na+nb, na) (与 curtail::win_p_floor 的系数一致)。
+/// 取各检验里最宽的 alpha_win: 连它都够不着, KEEP 才真不可达。没有检验时不截。
+pub(crate) fn keep_reachable(n_a_max: usize, n_b_max: usize, tests: &[curtail::WinTest]) -> bool {
+    let Some(alpha_win) = tests.iter().map(|t| t.alpha_win).reduce(f64::max) else {
+        return true;
+    };
+    if n_a_max == n_b_max {
+        return loopstat::ensure_resolvable(n_a_max, alpha_win, "").is_ok();
+    }
+    if n_a_max < 2 || n_b_max < 2 {
+        return false;
+    }
+    let (n, k) = (n_a_max + n_b_max, n_a_max.min(n_b_max));
+    let mut c = 1.0_f64;
+    for i in 0..k {
+        c = c * (n - i) as f64 / (i + 1) as f64;
+    }
+    crate::pyjson::py_round(1.0 / c, 6) < alpha_win
+}
+
+/// 审查 R1 #10: Ctrl-C / SIGTERM 时把登记的还原命令跑掉 (旋钮 restore、停充 restore、停掉游戏),
+/// 不留残留。信号处理函数里只置一个标志; 真正跑 adb 的是一条看门线程 —— 信号上下文里不能起进程。
+pub(crate) mod cleanup {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, Once};
+
+    static HIT: AtomicBool = AtomicBool::new(false);
+    static INSTALLED: Once = Once::new();
+    static ACTIONS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+    #[cfg(unix)]
+    extern "C" {
+        // libc 的 signal(2); 只为这两个信号引一个 libc crate 不划算, 直接声明外部符号 (同 decision.rs 的 kill)
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+
+    extern "C" fn on_signal(_sig: i32) {
+        HIT.store(true, Ordering::SeqCst);
+    }
+
+    /// 登记一条「被打断时要跑」的 adb shell 命令 (su 的自己带 `su -c '...'`)。同一条只登记一次。
+    pub fn register(serial: &str, shell_cmd: &str) {
+        if let Ok(mut a) = ACTIONS.lock() {
+            let item = (serial.to_string(), shell_cmd.to_string());
+            if !a.contains(&item) {
+                a.push(item);
+            }
+        }
+    }
+
+    /// 目前登记的命令 (单测与报错用)。
+    pub fn pending() -> Vec<(String, String)> {
+        ACTIONS.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+
+    pub fn clear() {
+        if let Ok(mut a) = ACTIONS.lock() {
+            a.clear();
+        }
+    }
+
+    /// 装一次信号处理 + 看门线程。进程本来就要在 eval 结束时退出, 看门线程不必回收。
+    pub fn install() {
+        INSTALLED.call_once(|| {
+            #[cfg(unix)]
+            unsafe {
+                signal(2, on_signal); // SIGINT
+                signal(15, on_signal); // SIGTERM
+            }
+            std::thread::spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if HIT.load(Ordering::SeqCst) {
+                    eprintln!("[eval] 收到中断, 先跑还原再退出");
+                    for (serial, cmd) in pending() {
+                        let out = super::adb(&serial, &["shell", &cmd], 120);
+                        eprintln!("[eval] 还原 {cmd}: {}", out.lines().last().unwrap_or(""));
+                    }
+                    std::process::exit(130);
+                }
+            });
+        });
+    }
+}
+
 /// 功耗的辅助证据: GPU 平均频率 (sample_env 的 GPU 行)、总线带宽投票中位与 GPU 忙碌时间
 /// (parse-trace)。只报不判 —— 不进 wins / regressions, 不影响是否保留; 功耗量不准时它们说明
 /// 「GPU 那头确实少干了活」(2026-10-12 W1: 去 MSAA 后频率 −13%、带宽投票 −15%, 5 对完全分开,
@@ -1883,9 +3308,16 @@ pub(crate) fn aux_compare(a_runs: &[Run], b_runs: &[Run]) -> Value {
 }
 
 /// ABBA 两臂的统计判定 (sysparam / gray 共用): 帧时 p95、平均帧率, 两臂都放电时加功耗。
+/// `fps_cap_declared` = 请求声明的帧率上限 (workload.fps_cap, 审查 R2 #9): 锁帧规则由它定, 数据只确认。
 /// 回 (verdict JSON, 是否保留, 两臂是否都在放电态)。
-pub(crate) fn judge_runs(ctrl_runs: &[Value], knob_runs: &[Value], alpha: f64, rounds: u32) -> (Value, bool, bool) {
-    judge_runs_with(ctrl_runs, knob_runs, alpha, rounds, None)
+pub(crate) fn judge_runs(
+    ctrl_runs: &[Value],
+    knob_runs: &[Value],
+    alpha: f64,
+    rounds: u32,
+    fps_cap_declared: Option<f64>,
+) -> (Value, bool, bool) {
+    judge_runs_with(ctrl_runs, knob_runs, alpha, rounds, fps_cap_declared, None)
 }
 
 /// 同 [`judge_runs`]; `required` 给了 (实验资格冻结的 policy.required_metrics) 就按它判,
@@ -1895,14 +3327,18 @@ pub(crate) fn judge_runs_with(
     knob_runs: &[Value],
     alpha: f64,
     rounds: u32,
+    fps_cap_declared: Option<f64>,
     required: Option<&[String]>,
 ) -> (Value, bool, bool) {
     let primary = "frame_p95";
-    let (a_runs, b_runs) = (eval_runs(ctrl_runs), eval_runs(knob_runs));
-    // 与 autoloop 一致的判定指标表: 功耗只在两臂轨道一致且都量到时才进判定。
-    // 一致 ≠ 一定是放电态: 停充后拿 USB 旁路轨的两臂相减也成立 (同一轨、同一套损耗),
+    // 功耗按对取舍 (审计 #5): 一臂不合格只剔除那一对; 口径不一致时统一成两轨同刻相加。
+    // 同口径 ≠ 一定是放电态: 停充后 USB+电池两轨相加的两臂相减也成立 (同一套损耗),
     // 但那个绝对值不能跨任务比, 回包里用 power.rail / cross_run_comparable 标清楚。
-    let on_battery_all = all_on_battery(knob_runs, ctrl_runs);
+    let pp = power_pairs_of(knob_runs, ctrl_runs);
+    let (a_runs, b_runs) = (eval_runs_power(ctrl_runs, &pp.ctrl), eval_runs_power(knob_runs, &pp.knob));
+    let on_battery_all = pp.usable();
+    // 实验资格冻结的 required_metrics (main) 给了就按它判, 功耗不随这一轮量没量到而缩窄;
+    // 没给时沿用「按对取舍后功耗可用才进表」(ruler fix-D)。
     let metrics_list: Vec<(String, &str)> = match required {
         Some(ms) => ms.iter().map(|m| (m.clone(), if m == "fps_mean" { "higher" } else { "lower" })).collect(),
         None => {
@@ -1917,7 +3353,12 @@ pub(crate) fn judge_runs_with(
     let mut wins: Vec<String> = Vec::new();
     let mut regressions: Vec<String> = Vec::new();
     let mut per_metric: Vec<(String, Value)> = Vec::new();
-    let alpha_win = alpha / metrics_list.len() as f64;
+    // 审计 #8: 负载被帧率上限钉住时 (Megacity 旧包锁 30 fps), fps_mean 不可能显著改善,
+    // 只用来守退化, 不占 Bonferroni 预算, 也不能算 win。
+    // 审查 R2 #9: 锁帧由请求声明, 数据只确认 (规则先于数据冻结), 不再事后按数据决定 K。
+    let (fps_cap, fps_lock_note) = fps_lock_confirmed(fps_cap_declared, ctrl_runs, knob_runs);
+    let guard_only = |m: &str| fps_cap.is_some() && m == "fps_mean";
+    let alpha_win = alpha / metrics_list.iter().filter(|(m, _)| !guard_only(m)).count() as f64;
     for (metric, better) in &metrics_list {
         let cmp = loopstat::compare(&a_runs, &b_runs, metric);
         let diff = cmp.get("diff_mean").and_then(|v| v.as_f64());
@@ -1927,14 +3368,26 @@ pub(crate) fn judge_runs_with(
             (Some(d), "higher") => d > 0.0,
             _ => false,
         };
+        // 锁帧时的帧预算 (judge/v1-scorecard): 负载被上限钉住时, frame_p95 变长但帧还放得进
+        // 帧预算 (p95 ≤ 1000/cap × (1+余量)、fps 守住上限、丢帧不增加) 就不算退化; 帧预算用掉多少照报。
+        let capped = match (fps_cap, metric.as_str()) {
+            (Some(cap), "frame_p95") => Some(crate::scorecard::capped_budget_check(cap, knob_runs, ctrl_runs)),
+            _ => None,
+        };
+        let mut capped_exempt = false;
         let status = if cmp.get("error").is_some() || diff.is_none() {
             "缺数据"
-        } else if improved && p.is_some_and(|x| x < alpha_win) {
+        } else if improved && !guard_only(metric) && p.is_some_and(|x| x < alpha_win) {
             wins.push(metric.to_string());
             "显著改善"
         } else if !improved && diff.is_some_and(|x| x != 0.0) && p.is_some_and(|x| x < alpha) {
-            regressions.push(metric.to_string());
-            "显著变差"
+            if capped.as_ref().is_some_and(|c| c["ok"].as_bool() == Some(true)) {
+                capped_exempt = true;
+                "锁帧内变长 (帧预算内, 不算退化)"
+            } else {
+                regressions.push(metric.to_string());
+                "显著变差"
+            }
         } else {
             "无显著变化"
         };
@@ -1945,7 +3398,7 @@ pub(crate) fn judge_runs_with(
             metric.to_string(),
             {
                 let sv = |k: &str| cmp.get(k).map(to_serde).unwrap_or(Value::Null);
-                json!({
+                let mut e = json!({
                     "status": status,
                     "a_mean": sv("a_mean"),
                     "b_mean": sv("b_mean"),
@@ -1953,12 +3406,30 @@ pub(crate) fn judge_runs_with(
                     "diff_pct": sv("diff_pct"),
                     "p": sv("perm_p_two_sided"),
                     "ci95": sv("ci95"),
-                })
+                });
+                if guard_only(metric) {
+                    e["role"] = json!("guard_only");
+                }
+                if let Some(c) = &capped {
+                    e["capped"] = c.clone();
+                    if capped_exempt {
+                        e["role"] = json!("capped_budget");
+                    }
+                }
+                e
             }
         ));
     }
-    let keep = !wins.is_empty() && regressions.is_empty();
+    // 冻结的必需指标缺数据 (例如功耗按对剔完) 时不能 KEEP: 不得静默缩窄目标 (main)
+    let required_missing: Vec<String> = match required {
+        Some(_) => per_metric.iter().filter(|(_, e)| e["status"] == "缺数据").map(|(m, _)| m.clone()).collect(),
+        None => Vec::new(),
+    };
+    let keep = !wins.is_empty() && regressions.is_empty() && required_missing.is_empty();
     let aux = aux_compare(&a_runs, &b_runs);
+    // 审查 R2 #8: 分辨率按**实际进判定的臂数**算, 不按计划轮数: 剔了对、contested 之后 3v3 的最小 p 是 0.1,
+    // 再写 reachable:true 上层就会把「判不出」记成负样本。功耗那一项按功耗保留的对数, 取最严。
+    let res = actual_resolution(ctrl_runs.len(), knob_runs.len(), if on_battery_all { Some(pp.kept()) } else { None }, alpha_win);
     let verdict = json!({
         "is_pareto_improvement": keep,
         "p_value": p_primary,
@@ -1966,14 +3437,27 @@ pub(crate) fn judge_runs_with(
         "alpha_actual": alpha,
         "alpha_win": alpha_win,
         "alpha_regression": alpha,
-        // 轮数下界: alpha_win 是否够得着 (2/C(2n,n) < alpha_win)
-        "reachable": reachable(rounds, alpha_win),
+        // 实际臂数下 alpha_win 是否够得着 (帧时/帧率按 n_ctrl v n_knob, 功耗按保留的对数, 都够着才 true)
+        "reachable": res["reachable"],
+        // 实际臂数下精确置换检验最小能出多小的 p (各项里最大的那个)。调用方 (如 game_opt_loop 的初筛)
+        // 拿它定「最极端排列」的门槛, 不必自己再算一遍
+        "min_reachable_p": res["min_reachable_p"],
+        "resolution": res,
+        // 按计划轮数算的旧口径, 只供对照
+        "reachable_planned": reachable(rounds, alpha_win),
         "wins": wins,
         "regressions": regressions,
         "per_metric": Value::Object(per_metric.into_iter().collect()),
         "aux": aux,
+        "power_pairs": pp.to_json(),
+        // 请求声明且数据确认的帧率上限: fps_mean 只守退化 (per_metric.fps_mean.role)
+        "fps_locked_cap": fps_cap,
+        "required_missing": required_missing,
+        "fps_lock": fps_lock_note,
         "reason": if keep {
             json!(format!("改善 {} 且无显著退化", metrics_list.iter().find(|(m, _)| wins.first() == Some(&m.to_string())).map(|(m, _)| m.clone()).unwrap_or_default()))
+        } else if !required_missing.is_empty() {
+            json!(format!("冻结的必需指标缺数据: {}", required_missing.join(",")))
         } else if !regressions.is_empty() {
             json!(format!("存在显著退化: {}", regressions.join(",")))
         } else {
@@ -1981,6 +3465,116 @@ pub(crate) fn judge_runs_with(
         },
     });
     (verdict, keep, on_battery_all)
+}
+
+/// 负载是不是被帧率上限钉住了: 每一轮的 frame_p50 都贴着同一个常见限帧上限
+/// (沿用归因那一处的口径 [`crate::looptrace::detect_fps_cap`]: 帧周期中位数离 1000/cap 不超过 2%)。
+/// 是就回这个上限 (fps)。没有轮、有一轮缺 frame_p50、或有一轮离开上限都回 None。
+/// 实测依据 (审计 #8): Megacity 旧包 targetFrameRate=-1 锁 30 fps, frame_p50 约 33.3 ms。
+/// 只看两臂合在一起的帧周期水平, 不看两臂之差; 候选若真把上限打破 (有一轮离开上限), fps_mean 照常可以 win。
+pub(crate) fn fps_lock_cap<'a>(runs: impl IntoIterator<Item = &'a Value>) -> Option<f64> {
+    let mut cap = None;
+    for r in runs {
+        let c = crate::looptrace::detect_fps_cap(r["summary"]["frame_p50"].as_f64()?)?;
+        if cap.is_some_and(|x| x != c) {
+            return None;
+        }
+        cap = Some(c);
+    }
+    cap.map(|c| c as f64)
+}
+
+/// 两臂 fps_mean 均值相差不超过这个比例, 锁帧才算「确认」(审查 R2 #9)。
+pub(crate) const FPS_LOCK_MEAN_TOL: f64 = 0.01;
+/// 每轮 frame_p50 离 1000/cap 不超过这个比例 (与 [`crate::looptrace::detect_fps_cap`] 同一容差)。
+const FPS_LOCK_P50_TOL: f64 = 0.02;
+
+/// 审查 R2 #9: 锁帧由请求声明 (`workload.fps_cap`), 数据只确认, 不再事后按数据放宽 K。
+/// 确认 = 每一轮 frame_p50 都贴着 1000/cap (±2%) 且两臂 fps_mean 均值相差 < 1%。
+/// 回 (确认后的上限, 记录)。没声明时即使数据像锁帧也回 None (规则先于数据冻结), 只在记录里提示。
+pub(crate) fn fps_lock_confirmed(declared: Option<f64>, ctrl_runs: &[Value], knob_runs: &[Value]) -> (Option<f64>, Value) {
+    let all: Vec<&Value> = ctrl_runs.iter().chain(knob_runs.iter()).collect();
+    let detected = fps_lock_cap(all.iter().copied());
+    let mean_fps = |runs: &[Value]| -> Option<f64> {
+        let xs: Vec<f64> = runs.iter().filter_map(|r| r["summary"]["fps_mean"].as_f64()).collect();
+        (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
+    };
+    let Some(cap) = declared else {
+        return (
+            None,
+            json!({
+                "declared": null,
+                "confirmed": false,
+                "detected_from_data": detected,
+                "note": if detected.is_some() {
+                    "数据像锁在这个帧率上, 但请求没声明 workload.fps_cap: 不按锁帧判 (K 不放宽), 要锁帧请在请求里声明"
+                } else {
+                    "请求没声明帧率上限, 按不锁帧判"
+                },
+            }),
+        );
+    };
+    let target = 1000.0 / cap;
+    let p50_at_cap = !all.is_empty()
+        && all.iter().all(|r| {
+            r["summary"]["frame_p50"].as_f64().is_some_and(|p| (p - target).abs() / target <= FPS_LOCK_P50_TOL)
+        });
+    let (mc, mk) = (mean_fps(ctrl_runs), mean_fps(knob_runs));
+    let fps_mean_diff = match (mc, mk) {
+        (Some(a), Some(b)) if a > 0.0 => Some(((b - a) / a * 10000.0).round() / 10000.0),
+        _ => None,
+    };
+    let fps_close = fps_mean_diff.is_some_and(|d| d.abs() < FPS_LOCK_MEAN_TOL);
+    let confirmed = p50_at_cap && fps_close;
+    let note = json!({
+        "declared": cap,
+        "confirmed": confirmed,
+        "p50_at_cap": p50_at_cap,
+        "fps_mean_diff_frac": fps_mean_diff,
+        "fps_mean_within_tol": fps_close,
+        "detected_from_data": detected,
+        "note": if confirmed {
+            "请求声明的上限被数据确认: fps_mean 只守退化, 不占预算"
+        } else {
+            "请求声明了上限但数据没确认 (有一轮 p50 离开上限, 或两臂 fps_mean 相差 >= 1%): 按不锁帧判"
+        },
+    });
+    (confirmed.then_some(cap), note)
+}
+
+/// 审查 R2 #8: 按实际进判定的臂数算分辨率。帧时/帧率用 (n_ctrl, n_knob) 的精确置换
+/// (最小双侧 p = 2/C(na+nb, na)), 功耗用保留的对数 (kept)。回 {reachable, min_reachable_p, n_ctrl, n_knob,
+/// power_kept, min_p_frame, min_p_power}; `reachable` 要各项都够得着 alpha_win, `min_reachable_p` 取各项最大。
+pub(crate) fn actual_resolution(n_ctrl: usize, n_knob: usize, power_kept: Option<(usize, usize)>, alpha_win: f64) -> Value {
+    let p_frame = min_two_sided_p_unequal(n_ctrl, n_knob);
+    let p_power = power_kept.map(|(a, b)| min_two_sided_p_unequal(a, b));
+    let min_p = p_power.map_or(p_frame, |p| p.max(p_frame));
+    json!({
+        "reachable": min_p < alpha_win,
+        "min_reachable_p": min_p,
+        "n_ctrl": n_ctrl,
+        "n_knob": n_knob,
+        "power_kept": power_kept.map(|(a, b)| json!([a, b])),
+        "min_p_frame": p_frame,
+        "min_p_power": p_power,
+    })
+}
+
+/// na v nb 精确置换检验的最小双侧 p = 2/C(na+nb, na) (等量时就是 [`loopstat::min_two_sided_p`]); 任一臂 < 2 回 1.0。
+/// 舍入到 6 位, 与 loopstat 的 p 同精度。
+pub(crate) fn min_two_sided_p_unequal(na: usize, nb: usize) -> f64 {
+    if na == nb {
+        return loopstat::min_two_sided_p(na);
+    }
+    if na < 2 || nb < 2 {
+        return 1.0;
+    }
+    let (n, k) = (na + nb, na.min(nb));
+    let mut c = 1.0_f64;
+    for i in 0..k {
+        c = c * (n - i) as f64 / (i + 1) as f64;
+    }
+    crate::pyjson::py_round((2.0 / c).min(1.0), 6)
 }
 
 /// 逐臂聚合进 metrics (B 臂 = 候选臂)。回候选臂功耗 (放电态才有)。
@@ -2000,7 +3594,8 @@ pub(crate) fn aggregate_metrics(m: &mut Value, knob_runs: &[Value], ctrl_runs: &
     m["soc_temp_max_c"] = json!(temps.iter().cloned().reduce(f64::max));
     // 功耗: 只在放电态均值可信时给; 与帧时一样取候选臂全部轮的均值, 不取最后一轮
     let power = if on_battery_all {
-        let xs: Vec<f64> = knob_runs.iter().filter_map(|r| r["env"]["power_w_mean"].as_f64()).collect();
+        // 按对取舍后的候选臂值 (被剔除的对不算, 口径统一时是两轨相加的值)
+        let xs: Vec<f64> = power_pairs_of(knob_runs, ctrl_runs).knob.into_iter().flatten().collect();
         (!xs.is_empty()).then(|| xs.iter().sum::<f64>() / xs.len() as f64)
     } else {
         None
@@ -2018,6 +3613,99 @@ pub(crate) struct GrayKnobs {
     pub loadop: bool,
     /// 「去掉多余写回」指定串 ("0" = 关)。
     pub storeop: String,
+    /// NPU 超分 (npu/n1-pipeline 的层): 调参 + 本机文件 (层 .so / 模型 / 运行库目录)。None = 关。
+    pub npuop: Option<NpuopKnob>,
+}
+
+/// `npuop` 开关的 args: `{"lag":2,"wait_ms":2,"budget_ms":12,"budget_frames":30,"init_frame":300,"zc":1,"ts":1,
+/// "model":"<本机 .tflite>","layer_so":"<本机层 .so>","runtime_dir":"<放齐运行库的目录>"}`, 每项都可省。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NpuopKnob {
+    pub props: crate::graylayer::NpuopProps,
+    pub files: crate::npuop_device::NpuopFileArgs,
+}
+
+/// npuop 的 args 里认的键 (多出来的键一律拒收: 写错键名会静默按缺省跑)。
+pub(crate) const NPUOP_ARG_KEYS: [&str; 10] =
+    ["lag", "wait_ms", "budget_ms", "budget_frames", "init_frame", "zc", "ts", "model", "layer_so", "runtime_dir"];
+
+/// 解析 npuop 的 args 并核范围 (都在碰设备之前)。
+pub(crate) fn parse_npuop_args(args: &Value) -> Result<NpuopKnob, String> {
+    let mut props = crate::graylayer::NpuopProps::default();
+    let mut files = crate::npuop_device::NpuopFileArgs::default();
+    let Some(obj) = args.as_object() else {
+        if args.is_null() {
+            return Ok(NpuopKnob { props, files });
+        }
+        return Err(format!("npuop 的 args 要是对象, 收到 {args}"));
+    };
+    for k in obj.keys() {
+        if !NPUOP_ARG_KEYS.contains(&k.as_str()) {
+            return Err(format!("npuop 的 args 不认识 {k:?} (认: {})", NPUOP_ARG_KEYS.join(", ")));
+        }
+    }
+    let num = |k: &str, lo: f64, hi: f64| -> Result<Option<f64>, String> {
+        match obj.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => {
+                let x = v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())).ok_or_else(|| format!("npuop.{k} 要是数字, 收到 {v}"))?;
+                if !(lo..=hi).contains(&x) {
+                    return Err(format!("npuop.{k}={x} 超出 [{lo}, {hi}]"));
+                }
+                Ok(Some(x))
+            }
+        }
+    };
+    let flag = |k: &str| -> Result<Option<bool>, String> {
+        match obj.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(v) => match v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())) {
+                Some(x) if x == 0.0 || x == 1.0 => Ok(Some(x == 1.0)),
+                _ => Err(format!("npuop.{k} 要是 0/1 或 true/false, 收到 {v}")),
+            },
+        }
+    };
+    let text = |k: &str| -> Result<Option<String>, String> {
+        match obj.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(t)) if !t.trim().is_empty() => Ok(Some(t.trim().to_string())),
+            Some(v) => Err(format!("npuop.{k} 要是非空路径字符串, 收到 {v}")),
+        }
+    };
+    if let Some(x) = num("lag", 1.0, 2.0)? {
+        if x != 1.0 && x != 2.0 {
+            return Err(format!("npuop.lag 只认 1 / 2, 收到 {x}"));
+        }
+        props.lag = x as u8;
+    }
+    if let Some(x) = num("wait_ms", 0.0, 50.0)? {
+        props.wait_ms = x;
+    }
+    if let Some(x) = num("budget_ms", 0.5, 100.0)? {
+        props.budget_ms = x;
+    }
+    if let Some(x) = num("budget_frames", 1.0, 10000.0)? {
+        props.budget_frames = x as u32;
+    }
+    if let Some(x) = num("init_frame", 1.0, 100000.0)? {
+        props.init_frame = x as u64;
+    }
+    if let Some(b) = flag("zc")? {
+        props.zc = b;
+    }
+    if let Some(b) = flag("ts")? {
+        props.ts = b;
+    }
+    files.model = text("model")?;
+    if let Some(m) = &files.model {
+        if !m.ends_with(".tflite") {
+            return Err(format!("npuop.model 要是 .tflite, 收到 {m:?}"));
+        }
+    }
+    files.layer_so = text("layer_so")?;
+    files.runtime_dir = text("runtime_dir")?;
+    Ok(NpuopKnob { props, files })
 }
 
 /// 读 payload.rewrites。不认识的开关、缺范围的写回改写一律拒收 —— 在碰设备之前。
@@ -2032,11 +3720,18 @@ pub(crate) fn parse_gray_rewrites(payload: &Value) -> Result<GrayKnobs, String> 
         return Err("payload.rewrites 是空的: 没有要改写的".into());
     }
     let mut loadop = false;
+    let mut npuop: Option<NpuopKnob> = None;
     let mut items: Vec<(String, u32)> = Vec::new();
     for r in &arr {
         let knob = r["knob"].as_str().unwrap_or("");
         match knob {
             "loadop_dont_care" => loadop = true,
+            "npuop" => {
+                if npuop.is_some() {
+                    return Err("npuop 出现了两次".into());
+                }
+                npuop = Some(parse_npuop_args(&r["args"])?);
+            }
             "storeop_dont_care" => {
                 let scope = r["scope"].as_str().unwrap_or("");
                 let (sig, att) = scope.split_once(':').ok_or_else(|| {
@@ -2048,11 +3743,14 @@ pub(crate) fn parse_gray_rewrites(payload: &Value) -> Result<GrayKnobs, String> 
                     .map_err(|_| format!("storeop_dont_care 的附件下标看不懂: {scope:?}"))?;
                 items.push((sig.trim().to_string(), att));
             }
-            other => return Err(format!("接收端不认识改写开关 {other:?} (认: loadop_dont_care / storeop_dont_care)")),
+            other => return Err(format!("接收端不认识改写开关 {other:?} (认: loadop_dont_care / storeop_dont_care / npuop)")),
         }
     }
+    if npuop.is_some() && loadop {
+        return Err("npuop 不能与 loadop_dont_care 同组 (loadop 已撤回, 且会把超分算子的输入画错)".into());
+    }
     let storeop = crate::graylayer::storeop_spec(&items)?;
-    Ok(GrayKnobs { loadop, storeop })
+    Ok(GrayKnobs { loadop, storeop, npuop })
 }
 
 /// 画面比对缺省门槛: 改写臂与对照臂同位置截图的 PSNR 低于它就判画面出错。
@@ -2182,6 +3880,12 @@ fn recover_gray_eval(args:&[String])->i32 {
     match result {Ok(r)=>{println!("{}",serde_json::to_string_pretty(&r).unwrap());if r["status"]=="reported_complete"{0}else{2}},Err(e)=>{eprintln!("{e}");2}}
 }
 
+pub(crate) fn save_png(path: &Path, shot: &(u32, u32, Vec<u8>)) {
+    if let Some(img) = image::RgbaImage::from_raw(shot.0, shot.1, shot.2.clone()) {
+        let _ = img.save(path);
+    }
+}
+
 fn wait_owned_launch(parent:&crate::gray_eval_session::Parent, launch:&LaunchSpec, layered:bool)->Result<(),String> {
     let start=std::time::Instant::now();
     loop {
@@ -2193,6 +3897,90 @@ fn wait_owned_launch(parent:&crate::gray_eval_session::Parent, launch:&LaunchSpe
         if start.elapsed().as_secs()>=LAUNCH_MARKER_TIMEOUT_S {return Err("launch marker or current layer evidence timed out".into());}
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
+}
+
+/// 原神包名。灰档评测对它缺省走「点门进大世界」(见 [`genshin_gate_entry`])。
+pub(crate) const GENSHIN_PKG: &str = "com.miHoYo.Yuanshen";
+
+/// 灰档每臂挂层重启原神之后要不要点门进大世界: 包是原神、没有自驱动启动参数、
+/// 也没指定别的进门方式 (`workload.enter`) 时要。以前不点, 两臂量的都是登录页。
+pub(crate) fn genshin_gate_entry(req: &Value) -> bool {
+    req["package"].as_str() == Some(GENSHIN_PKG)
+        && launch_spec(req).is_none()
+        && req["workload"]["enter"].as_str().is_none()
+}
+
+/// 灰档评测外壳: 设备端脚本先推最新版 (采样器版本要和主机端解析一致), 按请求停充,
+
+/// 离线校验 (`eval --validate-only`): validate_v2 之外, 把上机时才会查的东西先查一遍 ——
+/// gray 改写解析成的层属性串、负载脚本、层 .so 是否带 storeop 开关、轮数够不够判显著。不碰设备。
+pub(crate) fn offline_check(req: &Value) -> Result<Value, String> {
+    let kind = req["kind"].as_str().unwrap_or("");
+    let rounds = req["protocol"]["rounds"].as_i64().unwrap_or(0).max(0) as usize;
+    let alpha = req["protocol"]["p_threshold"].as_f64().unwrap_or(0.05);
+    let mut out = json!({
+        "ok": true,
+        "kind": kind,
+        "candidate_id": req["candidate_id"],
+        "package": req["package"],
+        "rounds": rounds,
+        "min_reachable_p": loopstat::min_two_sided_p(rounds),
+        "alpha_win_strictest": alpha / loopstat::MAX_WIN_METRICS as f64,
+    });
+    if kind != "gray" {
+        return Ok(out);
+    }
+    let knobs = parse_gray_rewrites(&req["payload"])?;
+    out["debug.knobs.loadop"] = json!(if knobs.loadop { "1" } else { "0" });
+    out["debug.knobs.storeop"] = json!(knobs.storeop);
+    out["debug.knobs.npuop"] = json!(knobs.npuop.as_ref().map(|n| n.props.setprop_cmd(true)));
+    out["image_policy"] = json!(gray_image_policy(req, &knobs).map(|p| p.as_str()).unwrap_or("?"));
+    out["require_hit"] = json!(req["payload"]["require_hit"].as_bool().unwrap_or(true));
+    out["world_entry"] = json!(if genshin_gate_entry(req) {
+        "genshin_gate"
+    } else {
+        req["workload"]["enter"].as_str().unwrap_or("none")
+    });
+    if launch_spec(req).is_none() {
+        let wl = req["workload"]["script"].as_str().unwrap_or("loop_v1/scripts/workload_spin_touch_v1.json");
+        let p = resolve_path(wl).ok_or_else(|| format!("负载脚本不在: {wl} (按 cwd 与仓库根都找不到)"))?;
+        let txt = std::fs::read_to_string(&p).map_err(|e| format!("读不了负载脚本 {}: {e}", p.display()))?;
+        serde_json::from_str::<Value>(&txt).map_err(|e| format!("负载脚本 {} 不是合法 JSON: {e}", p.display()))?;
+        out["workload_script"] = json!(p.display().to_string());
+    }
+    // npuop: 层 / 模型 / 运行库按 eval 上机时同一套规则定位并核验 (层必须带 npuop), 用的就是这一份层
+    if let Some(n) = &knobs.npuop {
+        let f = crate::npuop_device::NpuopFiles::locate(&n.files).map_err(|e| format!("npuop 本机文件: {e}"))?;
+        out["npuop_files"] = f.to_json();
+        out["owned_eval_supported"] = json!(false);
+        out["owned_eval_note"] = json!("npuop 只过离线校验: 受控灰档会话尚未接管 NPU 运行库/模型挂载, 上机 eval 会在碰设备前拒绝");
+        out["layer_so"] = json!(f.layer_so.display().to_string());
+        return Ok(out);
+    }
+    let so = crate::graylayer::layer_so_path();
+    let so_path = resolve_path(&so).ok_or_else(|| format!("层 .so 不在: {so} (先跑 knobs/gray/build/build_layer.sh)"))?;
+    let bytes = std::fs::read(&so_path).map_err(|e| format!("读不了层 .so {}: {e}", so_path.display()))?;
+    if knobs.storeop != "0" && !bytes.windows(crate::graylayer::STOREOP_PROP.len()).any(|w| w == crate::graylayer::STOREOP_PROP.as_bytes()) {
+        return Err(format!("层 .so {} 里没有 {} 开关 (旧版层), 上机会成 A/A", so_path.display(), crate::graylayer::STOREOP_PROP));
+    }
+    out["layer_so"] = json!(so_path.display().to_string());
+    Ok(out)
+}
+
+/// gray 请求的画质策略: 显式写了就按写的; 没写时 npuop (基于模型的候选) 缺省 report, 其余缺省 gate。
+pub(crate) fn gray_image_policy(req: &Value, knobs: &GrayKnobs) -> Result<crate::scorecard::ImagePolicy, String> {
+    let explicit = req["protocol"].get("image_policy").filter(|v| !v.is_null()).is_some();
+    if !explicit && knobs.npuop.is_some() {
+        return Ok(crate::scorecard::ImagePolicy::Report);
+    }
+    crate::scorecard::ImagePolicy::from_request(req)
+}
+
+/// marker 的 npuop 段里「用上 NPU 结果」的帧数 (`counts.unpack`); 没有 npuop 段回 None。
+/// (旧 gray_eval 用它核对 NPU 臂; 受控会话接入 npuop 之前只有单测在用)
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn npuop_frames(marker: &Value) -> Option<u64> {
+    marker.get("npuop").filter(|v| v.is_object()).map(|np| np["counts"]["unpack"].as_u64().unwrap_or(0))
 }
 
 enum OwnedGrayWorkload { Launch(LaunchSpec), Script(crate::gray_script::Plan) }
@@ -2401,6 +4189,9 @@ fn effective_gray_hits(marker:&Value)->u64 {
 
 fn gray_eval_owned(req:&Value, lease:crate::devlease::Lease, evidence:&Path, origin:&str)->Result<Value,String> {
     let knobs=parse_gray_rewrites(&req["payload"])?;
+    // npuop (NPU 超分) 的设备端布置 (运行库/模型 bind mount, npuop_device) 还没接进受控会话的
+    // 恢复记录; 在会话里静默忽略它会把候选臂变成对照臂 (A/A), 所以碰设备前明确拒绝。
+    if knobs.npuop.is_some() {return Err("owned gray eval does not support npuop yet: NPU runtime/model mounts are not owned or recoverable by the gray session".into());}
     if req["workload"]["enter"].as_str()==Some("onboard") {return Err("owned gray eval does not support onboard/HID input".into());}
     let seconds=match req["workload"].get("seconds") {None=>30,Some(v)=>v.as_u64().ok_or("workload.seconds must be an integer")?};
     let workload=if let Some(launch)=launch_spec(req) {
@@ -2546,7 +4337,7 @@ fn gray_eval_owned(req:&Value, lease:crate::devlease::Lease, evidence:&Path, ori
     else if !complete {report["verdict"]["reason"]=json!("owned gray eval recovery not complete; evidence retained");}
     else if !qualified.as_ref().is_ok_and(|q|q.conclusion_allowed) {report["verdict"]["reason"]=json!("conclusion qualification not satisfied");}
     else if req["payload"]["require_hit"].as_bool().unwrap_or(true)&&hits==0 {report["verdict"]["reason"]=json!("candidate rewrite never hit");}
-    else {finish_gray_statistics(&mut report,&candidate,&ctrl,alpha,rounds,psnr_pairs.iter().copied().reduce(f64::min),&facts.policy.required_metrics)?;}
+    else {finish_gray_statistics(&mut report,&candidate,&ctrl,alpha,rounds,psnr_pairs.iter().copied().reduce(f64::min),&facts.policy.required_metrics,declared_fps_cap(req))?;}
     if let Err(e)=qualified {report["qualification_error"]=json!(e);}
     let path=dir.join("eval-report.json");report["report_path"]=json!(path);
     if let Err(e)=crate::confirmation_transport::new_file(&path,&serde_json::to_vec_pretty(&report).unwrap()) {report["report_error"]=json!(e);}
@@ -2554,13 +4345,13 @@ fn gray_eval_owned(req:&Value, lease:crate::devlease::Lease, evidence:&Path, ori
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_gray_statistics(report:&mut Value, knob_runs:&[Value], ctrl_runs:&[Value], alpha:f64, rounds:u32, psnr:Option<f64>, required:&[String])->Result<(),String> {
+fn finish_gray_statistics(report:&mut Value, knob_runs:&[Value], ctrl_runs:&[Value], alpha:f64, rounds:u32, psnr:Option<f64>, required:&[String], fps_cap_declared:Option<f64>)->Result<(),String> {
     if let Some(e) = fan_mismatch(&knob_runs, &ctrl_runs) {
         report["verdict"]["reason"] = json!(e);
         return Ok(());
     }
     // 画面过了门槛: 照常做统计判定。psnr_db 是约束不是目标, 记最差的那一轮。
-    let (verdict, keep, on_battery_all) = judge_runs_with(ctrl_runs, knob_runs, alpha, rounds, Some(required));
+    let (verdict, keep, on_battery_all) = judge_runs_with(ctrl_runs, knob_runs, alpha, rounds, fps_cap_declared, Some(required));
     report["verdict"] = verdict;
     let mut m = report["metrics"].take();
     let power = aggregate_metrics(&mut m, &knob_runs, &ctrl_runs, on_battery_all);
@@ -2580,7 +4371,110 @@ fn finish_gray_statistics(report:&mut Value, knob_runs:&[Value], ctrl_runs:&[Val
 mod tests {
     use super::*;
 
-    fn v2_req(kind: &str, payload: Value) -> Value {
+    /// 审查 R1 #1 #6: 旧脚本的 summary (没有 frame_attribution) 与目标进程没找到 (n_target_tids=0) 都 Err。
+    #[test]
+    fn frame_attribution_must_be_present_and_nonempty() {
+        let old = json!({"n_frames": 1800, "frame_p95": 16.7});
+        let e = check_frame_attribution(&old).unwrap_err();
+        assert!(e.contains("frame_attribution") && e.contains("旧版"), "{e}");
+        let none = json!({"frame_attribution": "target_tids", "target_pid": "", "n_target_tids": 0, "n_frames": 0});
+        let e = check_frame_attribution(&none).unwrap_err();
+        assert!(e.contains("n_target_tids=0"), "{e}");
+        let ok = json!({"frame_attribution": "target_tids", "target_pid": "100", "n_target_tids": 3, "n_frames": 1800});
+        assert!(check_frame_attribution(&ok).is_ok());
+    }
+
+    /// 审查 R1 #2 #10: 三种停充成功回显、别人留下的 STATE、超时后 status 的对账都认成「已停充, 结束要还原」。
+    #[test]
+    fn charge_suspended_is_recognized_from_every_success_shape_and_from_status() {
+        assert!(charge_suspended_via("CHARGE_SUSPENDED /sys/x: 1 -> 0\nCHARGE_STATE ...\n#adb_exit=0").is_some());
+        assert!(charge_suspended_via("CHARGE_SUSPENDED_BYPASS /sys/x: 1 -> 0 (...)\n#adb_exit=0").is_some());
+        let m = charge_suspended_via("CHARGE_TRY_FAILED /sys/a (写 1 无效)\nCHARGE_SUSPENDED_MIXED /sys/x: 1 -> 0 (混合供电)\n#adb_exit=0").unwrap();
+        assert!(m.starts_with("CHARGE_SUSPENDED_MIXED"));
+        assert!(charge_suspended_via("CHARGE_ALREADY_SUSPENDED (state=/data/local/tmp/loop_v1_charge.state)\n#adb_exit=0").is_some());
+        // 主机端超时, 再接上 status 的回显: 设备端其实已经停充
+        let timed_out = "#adb_exit=timeout\nstate: 已停充 (/sys/x 原值 1 供电 battery)\nCHARGE_STATE ...\n#adb_exit=0";
+        assert!(charge_suspended_via(timed_out).unwrap().starts_with("state: 已停充"));
+        assert!(charge_suspended_via("CHARGE_FAIL: 所有候选节点都没能把设备转成放电态\n#adb_exit=1").is_none());
+        assert!(charge_suspended_via("#adb_exit=timeout\nstate: 未停充\n#adb_exit=0").is_none());
+        assert!(charge_suspended_via("CHARGE_SKIP: 电量 20% 低于停充下限 30%, 不停充\n#adb_exit=1").is_none());
+        assert_eq!(CHARGE_SUSPEND_TIMEOUT_S, 360);
+    }
+
+    /// 审查 R1 #10: 开跑前对账只看 status 的 state 行。
+    #[test]
+    fn preexisting_state_is_parsed_from_status_outputs() {
+        assert_eq!(parse_preexisting("state: 未施加\n#adb_exit=0", "state: 未停充\nCHARGE_STATE ...\n#adb_exit=0"), (false, false));
+        assert_eq!(
+            parse_preexisting("state: 已施加\n/sys/a cur=1 orig=0\n#adb_exit=0", "state: 已停充 (/sys/x 原值 1 供电 bypass)\n#adb_exit=0"),
+            (true, true)
+        );
+        assert_eq!(parse_preexisting("#adb_exit=timeout", ""), (false, false));
+    }
+
+    /// 审查 R1 #3: contested 的改写臂与剔掉的对都已经跑过, 剩余臂数要扣掉; 样本量够不着 alpha_win 时 KEEP 不可达。
+    #[test]
+    fn curtail_counts_contested_and_dropped_as_already_run() {
+        // rounds=5: 跑完第 2 轮, 第 2 轮改写臂 contested → knob 1 臂、ctrl 2 臂
+        assert_eq!(remaining_arms(5, 2, 1, 1, 0), (3, 3));
+        // 旧算法把 contested 当没跑: left_b 会是 4
+        assert_ne!(remaining_arms(5, 2, 1, 1, 0).1, 4);
+        // 再剔掉一对 (第 3 轮两臂不可比): ctrl 2、knob 1、dropped 1 → 各剩 2
+        assert_eq!(remaining_arms(5, 2, 1, 1, 1), (2, 2));
+        assert_eq!(remaining_arms(5, 5, 3, 2, 0), (0, 0));
+        assert_eq!(remaining_arms(5, 9, 9, 9, 9), (0, 0));
+
+        let tests = sysparam_win_tests(0.05, false, false); // 最宽 alpha_win = 0.025
+        // 5v5 够 (2/C(10,5) = 0.0079); 3v3 不够 (0.1); 3v5 不等量 1/C(8,3) = 0.0179 够, 3v6 够
+        assert!(keep_reachable(5, 5, &tests));
+        assert!(!keep_reachable(3, 3, &tests));
+        assert!(keep_reachable(5, 3, &tests));
+        // alpha/3 (功耗可能进表) 下 3v5 (0.0179 > 0.0167) 就不够了
+        let t3 = sysparam_win_tests(0.05, true, false);
+        assert_eq!(t3.iter().map(|t| t.alpha_win).reduce(f64::max), Some(0.025), "取的是最宽的");
+        let strict = vec![curtail::WinTest::new("power_w_mean", true, 0.05 / 3.0)];
+        assert!(!keep_reachable(5, 3, &strict));
+        assert!(keep_reachable(5, 4, &strict), "4v5: 1/C(9,4) = 0.0079");
+        // 一臂凑不到 2 个: 不可达; 没有检验: 不截
+        assert!(!keep_reachable(1, 5, &tests));
+        assert!(keep_reachable(1, 1, &[]));
+        // 审查里的现场: rounds=5、第 2 个 contested 出现后 knob 最多 3 臂 vs ctrl 5 臂, alpha/3 下够不着
+        let (la, lb) = remaining_arms(5, 3, 1, 2, 0);
+        assert!(!keep_reachable(3 + la, 1 + lb, &strict));
+    }
+
+    /// 审查 R1 #10: 中断时要跑的还原命令登记一次、可查、可清。
+    #[test]
+    fn cleanup_registry_dedups_and_clears() {
+        cleanup::clear();
+        cleanup::register("S1", "su -c 'sh /data/local/tmp/knob_sysparam.sh restore'");
+        cleanup::register("S1", "su -c 'sh /data/local/tmp/knob_sysparam.sh restore'");
+        cleanup::register("S1", "am force-stop com.x");
+        let p = cleanup::pending();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[1].1, "am force-stop com.x");
+        cleanup::clear();
+        assert!(cleanup::pending().is_empty());
+    }
+
+    /// 审查 R1 #2 #7: 设备端脚本里的判据与保护要在 (脚本没有单测, 这里锁住关键行)。
+    #[test]
+    fn device_scripts_carry_the_r1_fixes() {
+        let root = repo_root();
+        let cs = std::fs::read_to_string(root.join("loop_v1/auto/charge_suspend.sh")).unwrap();
+        assert!(cs.contains("CHARGE_SUSPENDED_MIXED"));
+        assert!(cs.contains("mixed_one()"));
+        assert!(cs.contains("SUSPEND_TOTAL_MAX_S=${SUSPEND_TOTAL_MAX_S:-300}"));
+        assert!(cs.contains("CHARGE_TIMEOUT"));
+        assert!(CHARGE_SUSPEND_TIMEOUT_S >= 300 + 12, "主机端超时要盖过脚本总时限 + 一个候选的收尾");
+        let se = std::fs::read_to_string(root.join("loop_v1/auto/sample_env.sh")).unwrap();
+        assert!(se.contains("sleep \"$PWR_IVL\" 2>/dev/null || PWR_IVL=1"));
+        assert!(se.contains("power_interval=$PWR_IVL stop="));
+        // 头部要在保护之后打, 记的才是实际生效的间隔
+        assert!(se.find("|| PWR_IVL=1").unwrap() < se.find("#sample_env v2 dur=").unwrap());
+    }
+
+    pub(super) fn v2_req(kind: &str, payload: Value) -> Value {
         json!({
             "version": 2,
             "kind": kind,
@@ -2596,17 +4490,37 @@ mod tests {
         })
     }
 
-    fn validate_ok(req: &Value) -> bool { validate_v2(req).is_ok() }
-    fn validate_err(req: &Value) -> String { validate_v2(req).unwrap_err() }
+    pub(super) fn validate_ok(req: &Value) -> bool { validate_v2(req).is_ok() }
+    pub(super) fn validate_err(req: &Value) -> String { validate_v2(req).unwrap_err() }
 
     #[test]
     fn probe_only_never_claims_reverted_from_failed_or_missing_snapshot() {
         for (a,b) in [("",""),("x=1\n#adb_exit=1","x=1\n#adb_exit=1"),("x=1\n#adb_exit=0","x=2\n#adb_exit=0")] {
             let mut r=base_report(&v2_req("sysparam",json!({"params":{}})),"sysparam");
-            probe_report(&mut r,a,b,&vec![]);
+            probe_report(&mut r,a,b,"",&vec![]);
             assert_eq!(r["status"],"ABORT");assert_eq!(r["conditions_observed"]["restored"],false);
         }
         assert!(snapshots_identical("x=1\n#adb_exit=0","x=1\n#adb_exit=0"));
+    }
+
+    #[test]
+    fn probe_tolerates_vendor_drift_only_when_every_probe_write_was_restored() {
+        let before = "kgsl.max_pwrlevel=17\ncpu.policy6.scaling_max=1632000\nfan.x=0\n#adb_exit=0";
+        let vendor = "kgsl.max_pwrlevel=0\ncpu.policy6.scaling_max=4608000\nfan.x=0\n#adb_exit=0";
+        let other = "kgsl.max_pwrlevel=0\ncpu.policy6.scaling_max=4608000\nfan.x=1\n#adb_exit=0";
+        let ok = "cpu.policy6.scaling_max_freq.effect=live\ncpu.policy6.scaling_max_freq.effect_restored=yes\n";
+        let left = "cpu.policy6.scaling_max_freq.effect_restored=yes\ngpu.max_pwrlevel.effect_restored=NO(want=17 got=18)\n";
+        assert!(probe_snapshots_restored(before, vendor, ok));
+        // 探测把自己的写入留下了: 当场回读报 NO, 拦下
+        assert!(!probe_snapshots_restored(before, vendor, left));
+        // 没有探测核对记录: 退回严格比对
+        assert!(!probe_snapshots_restored(before, vendor, ""));
+        // 厂商自管之外的键变了: 拦下
+        assert!(!probe_snapshots_restored(before, other, ok));
+        let mut r = base_report(&v2_req("sysparam", json!({"params": {}})), "sysparam");
+        probe_report(&mut r, before, vendor, ok, &vec![]);
+        assert_eq!(r["status"], "REVERTED");
+        assert_eq!(r["conditions_observed"]["snapshot_identical"], false);
     }
 
     #[test]
@@ -2615,6 +4529,17 @@ mod tests {
         let mut r = v2_req("sysparam", json!({"params": {}}));
         r.as_object_mut().unwrap().remove("protocol");
         assert_eq!(validate_err(&r), "v2 缺必填字段 protocol");
+    }
+
+    /// judge/v1-scorecard: image_policy 只认 gate / report, 写错在碰设备前拒收。
+    #[test]
+    fn image_policy_is_validated_before_any_device_touch() {
+        let mut r = v2_req("sysparam", json!({"params": {}}));
+        assert!(validate_ok(&r), "缺省 = gate");
+        r["protocol"]["image_policy"] = json!("report");
+        assert!(validate_ok(&r));
+        r["protocol"]["image_policy"] = json!("ignore");
+        assert!(validate_err(&r).contains("image_policy"));
     }
 
     #[test]
@@ -2631,6 +4556,147 @@ mod tests {
         assert!(validate_err(&r).contains("alternating"));
     }
 
+    /// 精确置换检验的三条路: rounds 够不着 alpha/3 就拒收并给出最少轮数;
+    /// 初筛 (stage=screen) 不判显著, 放行; shader 走 Welch, 不在此列。
+    #[test]
+    fn rounds_that_cannot_reach_significance_are_refused() {
+        for (kind, payload) in [
+            ("sysparam", json!({"params": {}})),
+            ("gray", json!({"rewrites": [{"knob": GRAY_SUPPORTED_KNOBS[0], "args": {}}]})),
+        ] {
+            let mut r = v2_req(kind, payload);
+            for n in [2, 3, 4] {
+                r["protocol"]["rounds"] = json!(n);
+                let e = validate_err(&r);
+                assert!(e.contains(&format!("{n}v{n}")) && e.contains("protocol.rounds 至少给 5"), "{kind} {n}: {e}");
+                r["protocol"]["stage"] = json!("screen");
+                assert!(validate_ok(&r), "{kind} 初筛 {n} 轮应放行: {:?}", validate_v2(&r));
+                r["protocol"].as_object_mut().unwrap().remove("stage");
+            }
+            r["protocol"]["rounds"] = json!(5);
+            assert!(validate_ok(&r));
+            r["protocol"]["stage"] = json!("full");
+            assert!(validate_ok(&r));
+            // 门槛收紧到 0.01 时 5 轮也不够 (2/252 = 0.0079 > 0.0033), 要 6 轮
+            r["protocol"]["p_threshold"] = json!(0.01);
+            assert!(validate_err(&r).contains("protocol.rounds 至少给 6"));
+            r["protocol"]["stage"] = json!("quick");
+            assert!(validate_err(&r).contains("protocol.stage"));
+        }
+        let mut sh = v2_req("shader", json!({"track": "sr", "shader_path": "a", "spirv_path": "b", "budget_ms": 1.0}));
+        sh["protocol"]["rounds"] = json!(2);
+        assert!(validate_ok(&sh), "shader 不走置换检验: {:?}", validate_v2(&sh));
+    }
+
+    #[test]
+    fn workload_must_cover_lead_plus_capture() {
+        let dir = std::env::temp_dir().join(format!("wl-cover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("wl.json");
+        std::fs::write(&f, r#"[{"action":"sleep","ms":3000},{"action":"exec","cmd":"input swipe 900 400 2000 400 12000"},
+            {"action":"exec","cmd":"input swipe 900 400 2000 400 12000"},{"action":"exec","cmd":"input swipe 900 400 2000 400 12000"},
+            {"action":"sleep","ms":1000}]"#).unwrap();
+        assert_eq!(workload_script_seconds(&f), Some(40.0));
+        let mut r = json!({"kind": "sysparam", "workload": {"carrier": "game_replay", "script": f.display().to_string(), "seconds": 30}});
+        assert!(workload_covers_capture(&r).is_ok());
+        r["workload"]["seconds"] = json!(60);
+        assert!(workload_covers_capture(&r).unwrap_err().contains("撑不满"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn baseline_plan_defaults_to_five_runs_plus_one_warmup_and_never_below_contract() {
+        let mut r = json!({"protocol": {}});
+        assert_eq!(baseline_plan(&r).unwrap(), (5, 1));
+        r["protocol"]["baseline_runs"] = json!(3);
+        r["protocol"]["baseline_warmup"] = json!(0);
+        assert_eq!(baseline_plan(&r).unwrap(), (3, 0));
+        r["protocol"]["baseline_runs"] = json!(2);
+        assert!(baseline_plan(&r).is_err(), "收端合同至少三轮基线");
+        r["protocol"]["baseline_runs"] = json!(5);
+        r["protocol"]["baseline_warmup"] = json!(4);
+        assert!(baseline_plan(&r).is_err());
+    }
+
+    #[test]
+    fn screen_stage_turns_off_curtailment() {
+        let mut r = v2_req("sysparam", json!({"params": {}}));
+        assert!(!is_screen(&r));
+        r["protocol"]["stage"] = json!("screen");
+        assert!(is_screen(&r));
+    }
+
+    #[test]
+    fn verdict_reports_the_resolution_floor() {
+        // 审查 R2 #8: 按实际进判定的臂数算, 不按计划轮数
+        let arms = |tag: &str, n: usize| -> Vec<Value> {
+            (0..n).map(|i| json!({"label": format!("{tag}{i}"), "round": i + 1, "summary": {"frame_p95": 10.0 + i as f64, "fps_mean": 60.0, "frame_p50": 12.0}, "env": {}})).collect()
+        };
+        let (v, _, _) = judge_runs(&[], &[], 0.05, 2, None);
+        assert_eq!(v["min_reachable_p"], json!(1.0));
+        assert_eq!(v["reachable"], false);
+        let (v, _, _) = judge_runs(&arms("c", 2), &arms("k", 2), 0.05, 2, None);
+        assert!((v["min_reachable_p"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(v["reachable"], false);
+        let (v, _, _) = judge_runs(&arms("c", 5), &arms("k", 5), 0.05, 5, None);
+        assert!((v["min_reachable_p"].as_f64().unwrap() - 2.0 / 252.0).abs() < 1e-6);
+        assert_eq!(v["reachable"], true);
+        assert_eq!(v["reachable_planned"], true);
+        // 计划 5 轮、剔了 2 对只剩 3v3: 最小 p = 0.1 > 0.025, 判不出 (以前按计划轮数写 true)
+        let (v, _, _) = judge_runs(&arms("c", 3), &arms("k", 3), 0.05, 5, None);
+        assert_eq!(v["reachable"], false, "{v}");
+        assert!((v["min_reachable_p"].as_f64().unwrap() - 0.1).abs() < 1e-6);
+        assert_eq!(v["reachable_planned"], true);
+        // 不等量 5v3: 2/C(8,3) = 0.0357 > 0.025
+        let (v, _, _) = judge_runs(&arms("c", 5), &arms("k", 3), 0.05, 5, None);
+        assert_eq!(v["reachable"], false);
+        assert!((v["min_reachable_p"].as_f64().unwrap() - 2.0 / 56.0).abs() < 1e-6);
+        assert_eq!(v["resolution"]["n_ctrl"], 5);
+        assert_eq!(v["resolution"]["n_knob"], 3);
+    }
+
+    #[test]
+    fn min_p_unequal_matches_equal_case_and_floors() {
+        assert_eq!(min_two_sided_p_unequal(5, 5), loopstat::min_two_sided_p(5));
+        assert_eq!(min_two_sided_p_unequal(1, 5), 1.0);
+        assert!((min_two_sided_p_unequal(2, 3) - 0.2).abs() < 1e-9, "2/C(5,2) = 0.2");
+    }
+
+    /// 审查 R2 #9: 锁帧由请求声明, 数据只确认; 没声明时数据再像锁帧也不放宽 K。
+    #[test]
+    fn fps_lock_is_declared_and_only_confirmed_by_data() {
+        let arm = |tag: &str, p50: f64, fps: &[f64]| -> Vec<Value> {
+            fps.iter().enumerate().map(|(i, f)| json!({"label": format!("{tag}{i}"), "summary": {"frame_p95": 36.0, "fps_mean": f, "frame_p50": p50}, "env": {}})).collect()
+        };
+        let ctrl = arm("c", 33.33, &[29.40, 29.41, 29.42]);
+        let knob = arm("k", 33.33, &[29.60, 29.61, 29.62]);
+        // 声明 30 且数据贴着 30: 确认
+        let (cap, note) = fps_lock_confirmed(Some(30.0), &ctrl, &knob);
+        assert_eq!(cap, Some(30.0));
+        assert_eq!(note["confirmed"], true);
+        // 没声明: 数据像锁帧也不算, 只提示
+        let (cap, note) = fps_lock_confirmed(None, &ctrl, &knob);
+        assert_eq!(cap, None);
+        assert_eq!(note["detected_from_data"], json!(30.0));
+        assert!(note["note"].as_str().unwrap().contains("没声明"));
+        // 声明 60 但数据在 30: 不确认
+        let (cap, note) = fps_lock_confirmed(Some(60.0), &ctrl, &knob);
+        assert_eq!(cap, None);
+        assert_eq!(note["p50_at_cap"], false);
+        // 声明 30, p50 贴着, 但两臂 fps_mean 差 2%: 不确认
+        let knob_fast = arm("k", 33.33, &[30.0, 30.0, 30.0]);
+        let (cap, note) = fps_lock_confirmed(Some(30.0), &ctrl, &knob_fast);
+        assert_eq!(cap, None);
+        assert_eq!(note["fps_mean_within_tol"], false);
+        // judge_runs 里: 没声明时 fps_mean 照常占预算 (K=2), 声明并确认时只守退化 (K=1)
+        let (v, _, _) = judge_runs(&ctrl, &knob, 0.05, 3, None);
+        assert_eq!(v["fps_locked_cap"], Value::Null);
+        assert!((v["alpha_win"].as_f64().unwrap() - 0.025).abs() < 1e-12);
+        let (v, _, _) = judge_runs(&ctrl, &knob, 0.05, 3, Some(30.0));
+        assert_eq!(v["fps_locked_cap"], json!(30.0));
+        assert!((v["alpha_win"].as_f64().unwrap() - 0.05).abs() < 1e-12);
+    }
+
     #[test]
     fn gray_rejects_unimplemented_knobs() {
         assert!(validate_ok(&v2_req("gray",json!({"rewrites":[{"knob":"storeop_dont_care","scope":"15a51a87:0"}]}))));
@@ -2641,6 +4707,268 @@ mod tests {
         assert!(validate_ok(&r));
         r["payload"]["rewrites"] = json!([]);
         assert!(validate_err(&r).contains("至少 1 项"));
+    }
+
+    /// 审计 #1: 上层唯一 Landed 的 storeop 必须能过校验; 缺 scope / scope 写错在校验阶段就拒。
+    #[test]
+    fn gray_accepts_storeop_with_scope_and_rejects_bad_scope() {
+        let mut r = v2_req("gray", json!({"rewrites": [{"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"}]}));
+        assert!(validate_ok(&r), "{:?}", validate_v2(&r));
+        r["payload"]["rewrites"] = json!([
+            {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"},
+            {"knob": "storeop_dont_care", "scope": "9d0b4db80bf552b8:0"},
+        ]);
+        assert!(validate_ok(&r));
+        r["payload"]["rewrites"] = json!([{"knob": "storeop_dont_care"}]);
+        assert!(validate_err(&r).contains("scope"));
+        r["payload"]["rewrites"] = json!([{"knob": "storeop_dont_care", "scope": "15a5:2"}]);
+        assert!(!validate_ok(&r));
+    }
+
+    /// 原神灰档缺省点门进大世界; 别的包、自驱动启动、显式 enter 都不点。
+    #[test]
+    fn genshin_gate_entry_only_for_plain_genshin_requests() {
+        let mut r = v2_req("gray", json!({"rewrites": [{"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"}]}));
+        assert!(!genshin_gate_entry(&r), "别的包不点门");
+        r["package"] = json!(GENSHIN_PKG);
+        assert!(genshin_gate_entry(&r));
+        r["workload"]["enter"] = json!("onboard");
+        assert!(!genshin_gate_entry(&r), "显式 onboard 优先");
+        r["workload"]["enter"] = Value::Null;
+        r["workload"]["launch"] = json!({"extras": "--es scene x"});
+        assert!(!genshin_gate_entry(&r), "自驱动启动不点门");
+    }
+
+    /// 离线校验: 三处写回合成一条层属性串 (排序去重), 与 11_storeop_check 机制验证用的串一字不差;
+    /// 负载脚本找不到时在碰设备前就拒。
+    /// npu/n6 跨仓库夹具: game_opt_loop 的 tests/fixtures/phonefarm_request/gray_npuop.json 原样拷来
+    /// (那边的契约测试校验同一份: 合契约、Request 往返不变、过开关目录)。这边: 收端照收, image_policy=report,
+    /// 属性串就是 lag=1 + 其余缺省; 本机文件齐了就过 validate-only, 不齐只在 npuop 本机文件这一步拒。
+    #[test]
+    fn the_cross_repo_npuop_request_is_accepted() {
+        let r: Value = serde_json::from_str(include_str!("testdata/gray_npuop_request.json")).unwrap();
+        validate_v2(&r).unwrap();
+        let k = parse_gray_rewrites(&r["payload"]).unwrap();
+        assert_eq!(gray_image_policy(&r, &k).unwrap(), crate::scorecard::ImagePolicy::Report);
+        assert_eq!(crate::scorecard::min_applied_frac(&r), 0.95);
+        let want = "setprop debug.knobs.npuop 1; setprop debug.knobs.npuop_lag 1; setprop debug.knobs.npuop_wait_ms 2; setprop debug.knobs.npuop_budget_ms 12; setprop debug.knobs.npuop_budget_frames 30; setprop debug.knobs.npuop_init_frame 300; setprop debug.knobs.npuop_zc 1; setprop debug.knobs.npuop_ts 1";
+        assert_eq!(k.npuop.as_ref().unwrap().props.setprop_cmd(true), want);
+        match offline_check(&r) {
+            Ok(v) => assert_eq!(v["image_policy"], "report"),
+            Err(e) => assert!(e.contains("npuop 本机文件"), "{e}"),
+        }
+        // 本机文件给齐 (临时目录里的假层 / 假模型 / 9 个运行库) → validate-only 收
+        let dir = std::env::temp_dir().join(format!("npuop_offline_{}", std::process::id()));
+        let rt = dir.join("rt");
+        std::fs::create_dir_all(&rt).unwrap();
+        std::fs::write(dir.join("layer.so"), b"\x7fELF debug.knobs.npuop_wait_ms").unwrap();
+        std::fs::write(dir.join("m.tflite"), b"x").unwrap();
+        for n in crate::npuop_device::RUNTIME_LIBS {
+            std::fs::write(rt.join(n), b"so").unwrap();
+        }
+        let mut r2 = r.clone();
+        r2["payload"]["rewrites"][0]["args"]["layer_so"] = json!(dir.join("layer.so").display().to_string());
+        r2["payload"]["rewrites"][0]["args"]["model"] = json!(dir.join("m.tflite").display().to_string());
+        r2["payload"]["rewrites"][0]["args"]["runtime_dir"] = json!(rt.display().to_string());
+        let v = offline_check(&r2).unwrap();
+        assert_eq!(v["image_policy"], "report");
+        assert_eq!(v["world_entry"], "genshin_gate");
+        assert_eq!(v["debug.knobs.npuop"], want);
+        assert_eq!(v["npuop_files"]["runtime"].as_array().unwrap().len(), 9);
+        // 名单两边一致: game_opt_loop gray::NPUOP_ARG_KEYS 同这 10 个
+        assert_eq!(NPUOP_ARG_KEYS, ["lag", "wait_ms", "budget_ms", "budget_frames", "init_frame", "zc", "ts", "model", "layer_so", "runtime_dir"]);
+    }
+
+    #[test]
+    fn offline_check_builds_the_verified_storeop_rule() {
+        let mut r = v2_req("gray", json!({"rewrites": [
+            {"knob": "storeop_dont_care", "scope": "9d0b4db80bf552b8:1"},
+            {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"},
+            {"knob": "storeop_dont_care", "scope": "9d0b4db80bf552b8:0"},
+        ]}));
+        r["package"] = json!(GENSHIN_PKG);
+        r["workload"]["script"] = json!("knobs/gray/workload_spin_touch_v1.json");
+        match offline_check(&r) {
+            Ok(v) => {
+                assert_eq!(v["debug.knobs.storeop"], "15a51a879df99c32:2,9d0b4db80bf552b8:0,9d0b4db80bf552b8:1");
+                assert_eq!(v["world_entry"], "genshin_gate");
+                assert_eq!(v["min_reachable_p"].as_f64().unwrap(), loopstat::min_two_sided_p(5));
+            }
+            // 没构建层 .so 的检出 (worktree) 只允许在最后一步 .so 检查上失败
+            Err(e) => assert!(e.contains("层 .so"), "{e}"),
+        }
+        r["workload"]["script"] = json!("knobs/gray/no_such_workload.json");
+        assert!(offline_check(&r).unwrap_err().contains("负载脚本不在"));
+    }
+
+    #[test]
+    fn validate_only_flag_parses() {
+        let a = parse_args(&["--request".into(), "x.json".into(), "--validate-only".into()]).unwrap();
+        assert!(a.validate_only);
+        let a = parse_args(&["--request".into(), "x.json".into()]).unwrap();
+        assert!(!a.validate_only);
+    }
+
+    /// npuop: 请求没写 image_policy 时缺省 report (基于模型的候选, gate 会把每个超分候选判成画面出错);
+    /// 显式写了 gate 照 gate; 其它开关缺省仍是 gate。
+    #[test]
+    fn npuop_defaults_image_policy_to_report() {
+        use crate::scorecard::ImagePolicy;
+        let np = parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop"}]})).unwrap();
+        let so = parse_gray_rewrites(&json!({"rewrites": [{"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"}]})).unwrap();
+        let mut r = v2_req("gray", json!({"rewrites": [{"knob": "npuop"}]}));
+        assert_eq!(gray_image_policy(&r, &np).unwrap(), ImagePolicy::Report);
+        assert_eq!(gray_image_policy(&r, &so).unwrap(), ImagePolicy::Gate);
+        r["protocol"]["image_policy"] = json!("gate");
+        assert_eq!(gray_image_policy(&r, &np).unwrap(), ImagePolicy::Gate);
+        r["protocol"]["image_policy"] = json!(null);
+        assert_eq!(gray_image_policy(&r, &np).unwrap(), ImagePolicy::Report);
+        assert!(validate_ok(&v2_req("gray", json!({"rewrites": [{"knob": "npuop", "args": {"lag": 1, "budget_ms": 10}}]}))));
+    }
+
+    /// npuop 的 args: 范围核验、不认识的键拒收、不能与 loadop 同组 —— 都在碰设备之前。
+    #[test]
+    fn npuop_args_are_checked_before_touching_the_device() {
+        let n = parse_npuop_args(&json!({"lag": 1, "wait_ms": "2.5", "budget_ms": 10, "budget_frames": 20, "init_frame": 200, "zc": 0, "ts": true,
+            "model": "/m/genshin_sr_v2_a.tflite", "layer_so": "/l/libVkLayer_refknobs.so", "runtime_dir": "/rt"})).unwrap();
+        assert_eq!(n.props.lag, 1);
+        assert_eq!(n.props.wait_ms, 2.5);
+        assert_eq!(n.props.budget_frames, 20);
+        assert!(!n.props.zc && n.props.ts);
+        assert_eq!(n.files.model.as_deref(), Some("/m/genshin_sr_v2_a.tflite"));
+        assert_eq!(n.files.runtime_dir.as_deref(), Some("/rt"));
+        assert_eq!(parse_npuop_args(&Value::Null).unwrap().props, crate::graylayer::NpuopProps::default());
+        for (bad, why) in [
+            (json!({"lag": 3}), "lag"),
+            (json!({"budget_ms": 0}), "budget_ms"),
+            (json!({"zc": 2}), "zc"),
+            (json!({"model": "a.onnx"}), ".tflite"),
+            (json!({"modle": "a.tflite"}), "不认识"),
+            (json!(["lag"]), "对象"),
+        ] {
+            let e = parse_npuop_args(&bad).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        assert!(parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop"}, {"knob": "npuop"}]})).unwrap_err().contains("两次"));
+        assert!(parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop"}, {"knob": "loadop_dont_care"}]})).unwrap_err().contains("loadop"));
+        // storeop 可以与 npuop 同组 (属性互不相干)
+        let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop"}, {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"}]})).unwrap();
+        assert!(k.npuop.is_some());
+        assert_eq!(k.storeop, "15a51a879df99c32:2");
+        // marker 里的 NPU 帧数
+        assert_eq!(npuop_frames(&json!({"npuop": {"counts": {"unpack": 1234}}})), Some(1234));
+        assert_eq!(npuop_frames(&json!({"npuop": {"phase": "wait_init", "counts": {}}})), Some(0));
+        assert_eq!(npuop_frames(&json!({"effective": []})), None);
+    }
+
+    /// 校验用的名单和施加用的解析不能再各说各话: 名单里每个开关都要被解析认, 解析不认的不能在名单里。
+    #[test]
+    fn gray_supported_list_matches_parser() {
+        for k in GRAY_SUPPORTED_KNOBS {
+            let scope = if k == "storeop_dont_care" { json!("15a51a879df99c32:2") } else { Value::Null };
+            assert!(
+                parse_gray_rewrites(&json!({"rewrites": [{"knob": k, "scope": scope}]})).is_ok(),
+                "名单里的 {k} 解析不认"
+            );
+        }
+        assert!(parse_gray_rewrites(&json!({"rewrites": [{"knob": "render_scale"}]})).is_err());
+    }
+
+    /// 跨仓库契约: game_opt_loop `src/optimize/gray.rs` 的 CATALOG 里每个 Landed 开关, 都必须能过
+    /// 收端 `validate_v2`; Declared 的必须被拒 (收端没实现)。
+    ///
+    /// 找 game_opt_loop: 环境变量 GAME_OPT_LOOP_DIR, 否则从本仓库往上逐级找 `game_opt_loop/`。
+    /// 找不到时跳过并打印原因; 设 HGAMEY_REQUIRE_CONTRACT=1 则找不到直接失败。
+    #[test]
+    fn gray_catalog_landed_knobs_pass_receiver_validation() {
+        let rel = "src/optimize/gray.rs";
+        let mut found = std::env::var("GAME_OPT_LOOP_DIR")
+            .ok()
+            .map(|d| Path::new(&d).join(rel))
+            .filter(|p| p.exists());
+        if found.is_none() {
+            let mut dir = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
+            while let Some(d) = dir {
+                let p = d.join("game_opt_loop").join(rel);
+                if p.exists() {
+                    found = Some(p);
+                    break;
+                }
+                dir = d.parent();
+            }
+        }
+        let Some(path) = found else {
+            assert!(
+                std::env::var("HGAMEY_REQUIRE_CONTRACT").ok().as_deref() != Some("1"),
+                "HGAMEY_REQUIRE_CONTRACT=1 但找不到 game_opt_loop/{rel}"
+            );
+            eprintln!("跳过跨仓库契约测试: 找不到 game_opt_loop/{rel} (可设 GAME_OPT_LOOP_DIR)");
+            return;
+        };
+        let src = std::fs::read_to_string(&path).unwrap();
+        let cat_start = src.find("pub const CATALOG").expect("gray.rs 里没有 CATALOG");
+        let cat_end = cat_start + src[cat_start..].find("\n];").expect("CATALOG 没有结尾");
+        let cat = &src[cat_start..cat_end];
+        let field = |block: &str, name: &str| -> Option<String> {
+            let i = block.find(&format!("{name}:"))? + name.len() + 1;
+            let rest = block[i..].trim_start();
+            let end = rest.find(|c: char| c == ',' || c == '\n').unwrap_or(rest.len());
+            Some(rest[..end].trim().trim_matches('"').to_string())
+        };
+        let mut landed = 0;
+        for block in cat.split("Knob {").skip(1) {
+            let id = field(block, "id").expect("Knob 缺 id");
+            let status = field(block, "status").expect("Knob 缺 status");
+            let needs_scope = field(block, "needs_scope").as_deref() == Some("true");
+            let mut rw = json!({"knob": id});
+            if needs_scope {
+                rw["scope"] = json!("15a51a879df99c32:2");
+            }
+            let r = v2_req("gray", json!({"rewrites": [rw]}));
+            match status.as_str() {
+                "KnobStatus::Landed" => {
+                    landed += 1;
+                    assert!(
+                        validate_ok(&r),
+                        "game_opt_loop 把 {id} 标成 Landed, 收端 validate_v2 却拒收: {:?} ({})",
+                        validate_v2(&r),
+                        path.display()
+                    );
+                }
+                "KnobStatus::Declared" => assert!(
+                    !validate_ok(&r),
+                    "game_opt_loop 把 {id} 标成 Declared (层里没实现), 收端却收了"
+                ),
+                "KnobStatus::Withdrawn" => {}
+                other => panic!("不认识的 KnobStatus {other:?} ({id})"),
+            }
+        }
+        assert!(landed >= 1, "{} 的 CATALOG 里一个 Landed 都没解析出来, 解析规则可能过时了", path.display());
+
+        // 再拿上层出主意器的真实产出回放一遍: tests/fixtures/proposer_golden/*/gray_*.json
+        // 是 game_opt_loop 按固定种子生成、真会发给收端的灰档请求, 每一份都必须过校验。
+        let gol = path.ancestors().nth(3).unwrap();
+        let golden = gol.join("tests/fixtures/proposer_golden");
+        let mut replayed = 0;
+        if let Ok(seeds) = std::fs::read_dir(&golden) {
+            for seed in seeds.flatten() {
+                for f in std::fs::read_dir(seed.path()).into_iter().flatten().flatten() {
+                    let name = f.file_name().to_string_lossy().into_owned();
+                    if !(name.starts_with("gray_") && name.ends_with(".json")) {
+                        continue;
+                    }
+                    let req: Value = serde_json::from_str(&std::fs::read_to_string(f.path()).unwrap()).unwrap();
+                    assert!(
+                        validate_ok(&req),
+                        "上层真实灰档请求 {} 被收端拒收: {:?}",
+                        f.path().display(),
+                        validate_v2(&req)
+                    );
+                    replayed += 1;
+                }
+            }
+        }
+        eprintln!("跨仓库契约: CATALOG Landed {landed} 个通过; 回放上层真实灰档请求 {replayed} 份全部通过");
     }
 
     #[test]
@@ -2809,6 +5137,212 @@ bus.DDR.boost_freq.effect=live\n";
         assert!(fan_mismatch(&[json!({"env": {}})], &[off]).is_none());
     }
 
+    /// 审计 #9 #11: 逐秒 GPU 档位/风扇记录的解析, 以及同一对两臂环境不一致时只剔除那一对。
+    #[test]
+    fn hw_stop_path_is_fresh_per_arm_and_preexisting_stop_is_recorded() {
+        // 同一 label 两次评测: nonce 不同, 文件名就不同 (设备端不删旧标记, 只能换名字)
+        let a = hw_stop_path("sp_knob1", "1_2");
+        let b = hw_stop_path("sp_knob1", "3_2");
+        assert_ne!(a, b);
+        assert!(a.starts_with(DEV_TMP) && a.ends_with(".stop") && a.contains("sp_knob1"));
+        assert_ne!(hw_stop_nonce(), "");
+        let s = hw_stats("#sample_hw v1 max=900 stop=/x\n#stop_preexisting /x\nHW 1.0 0 -\n#sample_hw done\n");
+        assert_eq!(s["stop_preexisting"], true);
+        assert_eq!(s["n"], 1);
+        assert_eq!(hw_stats("HW 1.0 0 -\n")["stop_preexisting"], false);
+    }
+
+    #[test]
+    fn hw_stats_parses_per_second_levels_and_fan() {
+        let t = "#sample_hw v1 max=900\n\
+HW 10.0 0 fan_enable=0,fan_speed_level=5\n\
+HW 11.0 0 fan_enable=0,fan_speed_level=5\n\
+HW 12.0 17 fan_enable=1,fan_speed_level=4\n\
+HW 13.0 NA -\n\
+junk\n\
+#sample_hw done\n";
+        let s = hw_stats(t);
+        assert_eq!(s["n"], 4);
+        assert_eq!(s["gpu_pwrlevel_runs"], json!([[0, 2], [17, 1]]));
+        assert_eq!(s["gpu_pwrlevel_frac"], json!({"0": 0.667, "17": 0.333}));
+        assert_eq!(s["fan_runs"], json!([["fan_enable=0,fan_speed_level=5", 2], ["fan_enable=1,fan_speed_level=4", 1]]));
+        assert_eq!(s["fan_states"].as_array().unwrap().len(), 2);
+        // 空输入 (脚本不在设备上): n=0, 什么都不判
+        let e = hw_stats("");
+        assert_eq!(e["n"], 0);
+        assert_eq!(e["gpu_pwrlevel_frac"], json!({}));
+    }
+
+    fn arm_hw(round: u32, label: &str, levels: &[(i64, usize)], fan: &str) -> Value {
+        let mut t = String::new();
+        for (l, c) in levels {
+            for _ in 0..*c {
+                t.push_str(&format!("HW 1.0 {l} {fan}\n"));
+            }
+        }
+        json!({"label": label, "round": round, "hw": hw_stats(&t), "env": {"fan_state": "fan_enable=0"}})
+    }
+
+    #[test]
+    fn pair_env_check_flags_fan_and_gpu_level_differences() {
+        let k = arm_hw(1, "k1", &[(0, 30)], "fan_enable=0");
+        let c = arm_hw(1, "c1", &[(0, 28), (17, 2)], "fan_enable=0");
+        // 档位分布只差 2/30 → 可比
+        assert!(pair_env_check(&k, &c, true).is_ok());
+        // 1/3 时间被压到 17 档 → 不可比
+        let c2 = arm_hw(1, "c1", &[(0, 20), (17, 10)], "fan_enable=0");
+        let e = pair_env_check(&k, &c2, true).unwrap_err();
+        assert!(e.contains("GPU 上限档"), "{e}");
+        // sysparam 改的就是档位: 不比这一项
+        assert!(pair_env_check(&k, &c2, false).is_ok());
+        // 风扇中途被打开 → 不可比 (不管 GPU 查不查)
+        let c3 = arm_hw(1, "c1", &[(0, 30)], "fan_enable=1");
+        assert!(pair_env_check(&k, &c3, false).unwrap_err().contains("风扇"));
+        // 没有逐秒记录的旧证据: 退回 sample_env 开头那一行, 一致就可比
+        let old_k = json!({"env": {"fan_state": "fan_enable=0"}});
+        let old_c = json!({"env": {"fan_state": "fan_enable=0"}});
+        assert!(pair_env_check(&old_k, &old_c, true).is_ok());
+        let old_on = json!({"env": {"fan_state": "fan_enable=1"}});
+        assert!(pair_env_check(&old_k, &old_on, true).is_err());
+        // 别的机型没风扇节点: 不判
+        assert!(pair_env_check(&json!({"env": {}}), &json!({"env": {}}), true).is_ok());
+    }
+
+    #[test]
+    fn settle_pair_drops_only_the_inconsistent_pair() {
+        let mut knob = vec![arm_hw(1, "k1", &[(0, 30)], "fan_enable=0")];
+        let mut ctrl = vec![arm_hw(1, "c1", &[(0, 30)], "fan_enable=0")];
+        let mut dropped = Vec::new();
+        assert!(!settle_pair(1, &mut knob, &mut ctrl, &mut dropped, true));
+        // 第 2 对只量完一臂: 不判
+        ctrl.push(arm_hw(2, "c2", &[(0, 30)], "fan_enable=1"));
+        assert!(!settle_pair(2, &mut knob, &mut ctrl, &mut dropped, true));
+        knob.push(arm_hw(2, "k2", &[(0, 30)], "fan_enable=0"));
+        assert!(settle_pair(2, &mut knob, &mut ctrl, &mut dropped, true));
+        assert_eq!((knob.len(), ctrl.len()), (1, 1));
+        assert_eq!(knob[0]["label"], "k1");
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0]["round"], 2);
+        let note = consistency_note(&dropped, true);
+        assert_eq!(note["dropped_pairs"], 1);
+        let mut report = json!({"verdict": {"reason": "没有任何指标显著改善"}});
+        append_dropped_reason(&mut report, &dropped);
+        assert!(report["verdict"]["reason"].as_str().unwrap().contains("第 2 对"));
+    }
+
+    #[test]
+    fn charge_settled_means_battery_no_longer_charging() {
+        assert!(!charge_settled(Some(1_930_000))); // 停充刚生效, 电池还在吸电
+        assert!(!charge_settled(Some(60_000)));
+        assert!(charge_settled(Some(30_000))); // 旁路: 约 0
+        assert!(charge_settled(Some(-800_000))); // 放电
+        assert!(!charge_settled(None));
+    }
+
+    /// 审计 #8: 锁帧负载上 fps_mean 只守退化。
+    #[test]
+    fn fps_lock_cap_detects_frame_capped_loads() {
+        let runs = |xs: &[f64]| -> Vec<Value> { xs.iter().map(|&p| json!({"summary": {"frame_p50": p}})).collect() };
+        // Megacity 旧包实测 frame_p50 约 33.3 ms
+        assert_eq!(fps_lock_cap(&runs(&[33.3, 33.4, 33.2, 33.5])), Some(30.0));
+        assert_eq!(fps_lock_cap(&runs(&[16.6, 16.7])), Some(60.0));
+        // 解锁后帧率跳台阶 (审计 #9 的 231 / 258 / 287 fps): 不是锁帧
+        assert_eq!(fps_lock_cap(&runs(&[4.33, 3.88, 3.48])), None);
+        // 有一轮离开上限 (候选把上限打破了) 就不算锁帧
+        assert_eq!(fps_lock_cap(&runs(&[33.3, 33.4, 24.0])), None);
+        // 两轮贴着不同上限: 不算同一个锁
+        assert_eq!(fps_lock_cap(&runs(&[33.3, 16.6])), None);
+        // 没有数据、或有一轮缺 frame_p50: 不下结论
+        assert_eq!(fps_lock_cap(&runs(&[])), None);
+        let mut r = runs(&[33.3, 33.4]);
+        r.push(json!({"summary": {}}));
+        assert_eq!(fps_lock_cap(&r), None);
+    }
+
+    /// judge/v1-scorecard: 锁帧时 p95 变长但帧还放得进帧预算 → 不算退化, 报帧预算用掉多少;
+    /// 帧真丢了照样算退化; 不锁帧时规则不变。
+    #[test]
+    fn capped_p95_within_budget_is_not_a_regression() {
+        let arm = |tag: &str, p95: &[f64], fps: f64, p50: f64| -> Vec<Value> {
+            p95.iter()
+                .enumerate()
+                .map(|(i, p)| json!({"label": format!("{tag}{i}"), "summary": {"frame_p95": p, "fps_mean": fps, "frame_p50": p50}, "env": {}}))
+                .collect()
+        };
+        // 锁 30: 帧预算 33.33 ms。候选臂 p95 全部更长 (33.0..33.4), 但都 ≤ 33.33 × 1.05, fps 一样守在 29.95
+        let ctrl = arm("c", &[30.0, 30.1, 30.2, 30.3, 30.4], 29.95, 33.33);
+        let knob = arm("k", &[33.0, 33.1, 33.2, 33.3, 33.4], 29.95, 33.33);
+        let (v, _keep, _) = judge_runs(&ctrl, &knob, 0.05, 5, Some(30.0));
+        assert_eq!(v["regressions"], json!([]), "{v}");
+        let pm = &v["per_metric"]["frame_p95"];
+        assert_eq!(pm["role"], "capped_budget");
+        assert!(pm["status"].as_str().unwrap().contains("帧预算内"));
+        assert_eq!(pm["capped"]["ok"], true);
+        assert!((pm["capped"]["headroom_used_pct"].as_f64().unwrap() - 100.2).abs() < 0.1, "{pm}");
+        // 帧真丢了 (fps 掉出上限): 照样显著变差
+        let knob_lost = arm("k", &[33.0, 33.1, 33.2, 33.3, 33.4], 28.5, 33.33);
+        let (v, keep, _) = judge_runs(&ctrl, &knob_lost, 0.05, 5, Some(30.0));
+        assert!(v["regressions"].as_array().unwrap().contains(&json!("frame_p95")), "{v}");
+        assert!(!keep);
+        // p95 超出帧预算: 照样显著变差
+        let knob_over = arm("k", &[36.0, 36.1, 36.2, 36.3, 36.4], 29.95, 33.33);
+        let (v, _, _) = judge_runs(&ctrl, &knob_over, 0.05, 5, Some(30.0));
+        assert!(v["regressions"].as_array().unwrap().contains(&json!("frame_p95")));
+        // 不锁帧 (p50 12.5 ms ≈ 80 fps, 不是常见上限): 严格规则不变
+        let ctrl_u = arm("c", &[10.0, 10.1, 10.2, 10.3, 10.4], 80.0, 12.5);
+        let knob_u = arm("k", &[11.0, 11.1, 11.2, 11.3, 11.4], 80.0, 12.5);
+        let (v, _, _) = judge_runs(&ctrl_u, &knob_u, 0.05, 5, None);
+        assert_eq!(v["regressions"], json!(["frame_p95"]));
+        assert!(v["per_metric"]["frame_p95"].get("capped").is_none());
+    }
+
+    #[test]
+    fn locked_fps_is_guard_only_and_frees_the_budget() {
+        let arm = |tag: &str, p95: &[f64], fps: &[f64]| -> Vec<Value> {
+            p95.iter()
+                .zip(fps)
+                .enumerate()
+                .map(|(i, (p, f))| json!({"label": format!("{tag}{i}"), "summary": {"frame_p95": p, "fps_mean": f, "frame_p50": if *f < 40.0 { 33.33 } else { 1000.0 / f }}, "env": {}}))
+                .collect()
+        };
+        // 5v5 锁 30 fps (frame_p50 33.33 ms, 与 Megacity 旧包实测相同), 候选臂帧时 p95 全部更短, 帧率全部略高
+        let ctrl = arm("c", &[36.0, 36.1, 36.2, 36.3, 36.4], &[29.40, 29.41, 29.42, 29.43, 29.44]);
+        let knob = arm("k", &[34.0, 34.1, 34.2, 34.3, 34.4], &[29.60, 29.61, 29.62, 29.63, 29.64]);
+        let (v, keep, on_batt) = judge_runs(&ctrl, &knob, 0.05, 5, Some(30.0));
+        assert!(!on_batt);
+        assert_eq!(v["fps_locked_cap"], json!(30.0));
+        assert_eq!(v["per_metric"]["fps_mean"]["role"], json!("guard_only"));
+        assert_eq!(v["per_metric"]["fps_mean"]["status"], json!("无显著变化"));
+        // 表里只剩 frame_p95 占预算: alpha_win = 0.05 / 1
+        assert!((v["alpha_win"].as_f64().unwrap() - 0.05).abs() < 1e-12);
+        assert_eq!(v["wins"], json!(["frame_p95"]));
+        assert!(keep);
+
+        // 锁帧照样守退化: 候选臂帧率全部更低 → 显著变差
+        let knob_slow = arm("k", &[34.0, 34.1, 34.2, 34.3, 34.4], &[29.20, 29.21, 29.22, 29.23, 29.24]);
+        let (v, keep, _) = judge_runs(&ctrl, &knob_slow, 0.05, 5, Some(30.0));
+        assert_eq!(v["regressions"], json!(["fps_mean"]));
+        assert!(!keep);
+
+        // 不锁帧时 fps_mean 照常占一份预算、可以 win
+        let ctrl_u = arm("c", &[8.0, 8.1, 8.2, 8.3, 8.4], &[231.0, 232.0, 233.0, 234.0, 235.0]);
+        let knob_u = arm("k", &[7.0, 7.1, 7.2, 7.3, 7.4], &[258.0, 259.0, 260.0, 261.0, 262.0]);
+        let (v, _, _) = judge_runs(&ctrl_u, &knob_u, 0.05, 5, None);
+        assert_eq!(v["fps_locked_cap"], Value::Null);
+        assert!(v["per_metric"]["fps_mean"].get("role").is_none());
+        assert!((v["alpha_win"].as_f64().unwrap() - 0.025).abs() < 1e-12);
+        assert_eq!(v["wins"], json!(["frame_p95", "fps_mean"]));
+    }
+
+    #[test]
+    fn curtail_tests_widen_when_fps_may_be_locked() {
+        let get = |t: &[curtail::WinTest], m: &str| t.iter().find(|x| x.metric == m).map(|x| x.alpha_win);
+        let t = sysparam_win_tests(0.05, true, false);
+        assert_eq!((get(&t, "frame_p95"), get(&t, "power_w_mean")), (Some(0.025), Some(0.05 / 3.0)));
+        let t = sysparam_win_tests(0.05, true, true);
+        assert_eq!((get(&t, "frame_p95"), get(&t, "fps_mean"), get(&t, "power_w_mean")), (Some(0.05), Some(0.025), Some(0.025)));
+    }
+
     #[test]
     fn run_view_carries_power_and_temp_from_env() {
         let m = json!({
@@ -2866,8 +5400,11 @@ mod path_tests {
         std::fs::create_dir(&root).unwrap();
         for (name,status,current,trace_present) in [("legacy_bypass","Charging",0,true),("battery","Discharging",-1_000_000,true),("failed","Discharging",-1_000_000,false),("battery_policy_failed","Discharging",-1_000_000,true)] {
             let out = root.join(name);std::fs::create_dir(&out).unwrap();
-            let mut env = format!("#sample_env v1 dur=13 interval=2\n#battery_status={status}\n#charge_suspended=yes\n#charge_mode=bypass\n");
-            for t in (100..=112).step_by(2) {env.push_str(&format!("ENV {t} 3800000 {current} NA 5000000 1000000 gpuss 40000\n"));}
+            // 放电用例是纯电池: 停充模式 battery、USB 输入电流 0。写成 bypass 或带 5 V × 1 A 输入,
+            // 混合供电规则会 (正确地) 把它判成 usb_plus_battery, 电池能量积分就不成立了
+            let (mode,usb_ua) = if status=="Charging" {("bypass",1_000_000)} else {("battery",0)};
+            let mut env = format!("#sample_env v1 dur=13 interval=2\n#battery_status={status}\n#charge_suspended=yes\n#charge_mode={mode}\n");
+            for t in (100..=112).step_by(2) {env.push_str(&format!("ENV {t} 3800000 {current} NA 5000000 {usb_ua} gpuss 40000\n"));}
             env.push_str(&format!("#battery_status_after={status}\n#sample_env done\n"));
             std::fs::write(out.join("env.txt"),env).unwrap();
             if trace_present {std::fs::write(out.join("trace.txt"),"#loop_v1_meta capture_start_uptime=106 capture_end_uptime=109 duration_req=3\n").unwrap();}
@@ -2943,6 +5480,9 @@ mod path_tests {
         let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "loadop_dont_care"}]})).unwrap();
         assert!(k.loadop);
         assert_eq!(k.storeop, "0");
+        assert!(k.npuop.is_none());
+        let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop", "args": {"lag": 1}}]})).unwrap();
+        assert_eq!(k.npuop.unwrap().props.setprop_cmd(true), "setprop debug.knobs.npuop 1; setprop debug.knobs.npuop_lag 1; setprop debug.knobs.npuop_wait_ms 2; setprop debug.knobs.npuop_budget_ms 12; setprop debug.knobs.npuop_budget_frames 30; setprop debug.knobs.npuop_init_frame 300; setprop debug.knobs.npuop_zc 1; setprop debug.knobs.npuop_ts 1");
     }
 
     #[test]
@@ -2950,10 +5490,10 @@ mod path_tests {
         let arm=|power:f64| (0..6).map(|i|json!({"label":format!("r{i}"),"summary":{"frame_p95":16.0,"fps_mean":60.0},
             "env":{"power_w_mean":power+i as f64*0.01,"on_battery":true}})).collect::<Vec<_>>();
         let (ctrl,knob)=(arm(6.0),arm(3.0));
-        assert!(judge_runs(&ctrl,&knob,0.05,6).1); // old adaptive metric list would accept this
+        assert!(judge_runs(&ctrl,&knob,0.05,6,None).1); // old adaptive metric list would accept this
         let required=Goal::RenderCadence.metrics();
         let mut report=base_report(&json!({}),"gray");
-        finish_gray_statistics(&mut report,&knob,&ctrl,0.05,6,None,&required).unwrap();
+        finish_gray_statistics(&mut report,&knob,&ctrl,0.05,6,None,&required,None).unwrap();
         assert_eq!(report["status"],"REJECT");
         assert_eq!(report["verdict"]["alpha_win"],0.025);
         assert!(report["verdict"]["per_metric"].get("power_w_mean").is_none());
@@ -3014,6 +5554,114 @@ mod path_tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m[0], ("/sys/class/kgsl/kgsl-3d0/min_pwrlevel".into(), "3".into(), "17".into()));
         assert_eq!(m[1].2, "<读不到>");
+    }
+
+    /// 窗口内定时回读 → 守住比例。adb 失败的那次不进分母; 读不到的节点算没守住;
+    /// 对照臂靠 values_seen 看节点有没有被动过。
+    #[test]
+    fn hold_stats_counts_time_fraction_and_values_seen() {
+        let ok = "/sys/class/kgsl/kgsl-3d0/min_pwrlevel=3\nsystem:refresh_rate_mode=2\n#adb_exit=0".to_string();
+        let lost = "/sys/class/kgsl/kgsl-3d0/min_pwrlevel=17\nsystem:refresh_rate_mode=2\n#adb_exit=0".to_string();
+        let mut samples: Vec<(f64, String)> = (0..9).map(|k| (k as f64 * 3.0, ok.clone())).collect();
+        samples.push((27.0, lost.clone()));
+        samples.push((30.0, "#adb_exit=timeout".to_string()));
+        let h = hold_stats(PLAN, &samples);
+        assert_eq!((h.samples, h.held, h.failed_calls), (10, 9, 1));
+        assert_eq!(h.frac(), Some(0.9));
+        assert_eq!(h.first_lost_s, Some(27.0));
+        assert_eq!(h.mismatches, vec!["/sys/class/kgsl/kgsl-3d0/min_pwrlevel: 写 3 读到 17".to_string()]);
+        assert_eq!(
+            h.values_seen[0],
+            ("/sys/class/kgsl/kgsl-3d0/min_pwrlevel".to_string(), vec!["3".to_string(), "17".to_string()])
+        );
+        assert!(hold_verdict(&h, 0.9).is_ok(), "刚好 90% 算守住");
+        assert!(hold_verdict(&h, 0.95).is_err());
+        let j = h.to_json();
+        assert_eq!(j["hold_frac"], json!(0.9));
+        assert_eq!(j["values_seen"]["system:refresh_rate_mode"], json!(["2"]));
+    }
+
+    /// 回读次数不够 (adb 一直失败) 时说不清, 不算守住; 门槛从请求里取, 不合法用缺省。
+    #[test]
+    fn hold_verdict_needs_enough_samples_and_sane_threshold() {
+        let ok = "/sys/class/kgsl/kgsl-3d0/min_pwrlevel=3\nsystem:refresh_rate_mode=2\n#adb_exit=0".to_string();
+        let h = hold_stats(PLAN, &[(0.0, ok.clone()), (3.0, ok), (6.0, "#adb_exit=1".into())]);
+        assert_eq!(h.frac(), Some(1.0));
+        assert!(hold_verdict(&h, 0.9).unwrap_err().contains("说不清"));
+        assert_eq!(hold_stats(PLAN, &[]).frac(), None);
+        assert_eq!(hold_min_frac(&json!({})), HOLD_MIN_FRAC);
+        assert_eq!(hold_min_frac(&json!({"protocol": {"sysparam_hold_min": 0.75}})), 0.75);
+        assert_eq!(hold_min_frac(&json!({"protocol": {"sysparam_hold_min": 1.5}})), HOLD_MIN_FRAC);
+        assert_eq!(hold_min_frac(&json!({"protocol": {"sysparam_hold_min": 0}})), HOLD_MIN_FRAC);
+    }
+
+    /// 真实数据 (megacity-power-1012c gen1 sys_g1c1, 2026-10-13): plan 写 max_pwrlevel=6,
+    /// 旧流程在游戏重启前施加, +12s 与末尾回读都是 4 (厂商默认值)。新口径下守住 0%, 照样不进统计。
+    #[test]
+    fn hold_replay_1012c_knob_arm_is_contested() {
+        let plan = "# loop_v1 sysparam plan (from request payload)\nsysfs\t/sys/class/kgsl/kgsl-3d0/max_pwrlevel\t6\n";
+        let rb = "/sys/class/kgsl/kgsl-3d0/max_pwrlevel=4\n#adb_exit=0".to_string();
+        let h = hold_stats(plan, &[(12.0, rb.clone()), (40.0, rb.clone()), (43.0, rb)]);
+        assert_eq!(h.frac(), Some(0.0));
+        assert!(hold_verdict(&h, HOLD_MIN_FRAC).unwrap_err().contains("0%"));
+    }
+
+    /// 厂商服务会动的节点按设备端路径认; 普通节点 (总线 boost、governor) 不算。
+    #[test]
+    fn vendor_managed_paths_match_snapshot_keys() {
+        for p in [
+            "/sys/class/kgsl/kgsl-3d0/max_pwrlevel",
+            "/sys/class/kgsl/kgsl-3d0/min_pwrlevel",
+            "/sys/class/devfreq/3d00000.qcom,kgsl-3d0/max_freq",
+            "/sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq",
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq",
+        ] {
+            assert!(vendor_managed_path(p), "{p}");
+        }
+        for p in [
+            "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor",
+            "/sys/devices/system/cpu/bus_dcvs/DDR/boost_freq",
+            "/sys/class/kgsl/kgsl-3d0/devfreq/governor",
+        ] {
+            assert!(!vendor_managed_path(p), "{p}");
+        }
+    }
+
+    /// 探测时游戏没在前台跑 (旧探测结果根本没有 probe.game_* 行) → 厂商会动的节点不进白名单;
+    /// 游戏从头到尾都在前台 → 照常 (这时守不住的节点探测脚本自己已经判 contested 了)。
+    #[test]
+    fn whitelist_drops_vendor_nodes_when_probe_ran_without_game() {
+        let base = "cpu.policies=0\n\
+cpu.policy0.avail_freqs=300000 600000 900000\n\
+cpu.policy0.scaling_min_freq.cur=300000\ncpu.policy0.scaling_max_freq.cur=900000\n\
+cpu.policy0.scaling_min_freq.writable=yes\ncpu.policy0.scaling_min_freq.effect=live\n\
+cpu.policy0.scaling_max_freq.writable=yes\ncpu.policy0.scaling_max_freq.effect=live\n\
+gpu.num_pwrlevels=18\ngpu.min_pwrlevel.cur=17\ngpu.max_pwrlevel.cur=4\n\
+gpu.min_pwrlevel.writable=yes\ngpu.max_pwrlevel.writable=yes\n\
+gpu.min_pwrlevel.effect=live\ngpu.max_pwrlevel.effect=live\n\
+bus.DDR.boost_freq.cur=0\nbus.DDR.avail_freqs=547000 1555000 2092000\nbus.DDR.hw_max_freq=2092000\n\
+bus.DDR.boost_freq.writable=yes\nbus.DDR.boost_freq.effect=live\n";
+        let probe = sysparam::parse_probe(base);
+        let full = sysparam::build_whitelist(&probe);
+        assert!(full.iter().any(|(_, s)| vendor_managed_path(&s.path)), "夹具里得有厂商节点: {full:?}");
+        assert!(!probe_game_up(&probe));
+        let (kept, dropped) = gate_whitelist_by_probe(full.clone(), probe_game_up(&probe));
+        assert!(!dropped.is_empty());
+        assert!(kept.iter().all(|(_, s)| !vendor_managed_path(&s.path)), "{kept:?}");
+        assert_eq!(kept.len() + dropped.len(), full.len());
+
+        let with_game = format!(
+            "probe.game_pkg=com.x\nprobe.game_running_start=yes\nprobe.game_foreground_start=yes\n{base}\
+probe.game_running_end=yes\nprobe.game_foreground_end=yes\n"
+        );
+        let probe = sysparam::parse_probe(&with_game);
+        assert!(probe_game_up(&probe));
+        let (kept, dropped) = gate_whitelist_by_probe(sysparam::build_whitelist(&probe), true);
+        assert!(dropped.is_empty());
+        assert_eq!(kept.len(), full.len());
+        // 中途游戏退了也不算
+        let quit = with_game.replace("probe.game_running_end=yes", "probe.game_running_end=no");
+        assert!(!probe_game_up(&sysparam::parse_probe(&quit)));
     }
 
     /// 只有厂商服务会动的频率边界变了 → 不判留痕; 别的键变了 → 判留痕。
@@ -3122,5 +5770,231 @@ mod path_tests {
         dead["game_alive"] = json!(false);
         assert!(live_check_verdict(&dead).is_err());
     }
-}
 
+    /// 审计 #5: 一臂功耗不合格只剔除那一对, 不再让整组功耗静默退出判定。
+    #[test]
+    fn judge_runs_drops_only_the_bad_power_pair() {
+        let run = |label: &str, p95: f64, w: Option<f64>| {
+            json!({
+                "label": label,
+                "summary": {"frame_p95": p95, "fps_mean": 60.0},
+                "env": match w {
+                    Some(w) => json!({"power_valid": true, "power_source": "usb_plus_battery",
+                                      "power_w_mean": w, "power_mixed_w_mean": w, "soc_temp_max_c": 50.0}),
+                    None => json!({"power_valid": false, "power_source": "usb", "power_w_mean": null,
+                                   "power_usable_reason": "非放电态 (测试)", "soc_temp_max_c": 50.0}),
+                },
+            })
+        };
+        // 6 轮剔 1 对剩 5 对: 5v5 精确置换最小 p = 2/252 < alpha/3, 够得着显著
+        let ctrl: Vec<Value> = (1..=6).map(|i| run(&format!("ctrl{i}"), 16.0 + i as f64 * 0.01, if i == 2 { None } else { Some(3.0 + i as f64 * 0.01) })).collect();
+        let knob: Vec<Value> = (1..=6).map(|i| run(&format!("knob{i}"), 16.0 + i as f64 * 0.01, Some(2.5 + i as f64 * 0.01))).collect();
+        let (verdict, _keep, power_in) = judge_runs(&ctrl, &knob, 0.05, 6, None);
+        assert!(power_in, "剔一对还剩五对, 功耗照常进判定");
+        assert!(verdict["per_metric"].get("power_w_mean").is_some());
+        let pm = &verdict["per_metric"]["power_w_mean"];
+        assert_eq!(pm["status"], "显著改善", "{pm}");
+        assert_eq!(verdict["power_pairs"]["dropped"][0]["round"], 2);
+        assert_eq!(verdict["power_pairs"]["kept_ctrl"], 5);
+        // 候选臂功耗 = 剔除后那五臂的均值 (第 2 轮的候选臂也不算)
+        let mut m = json!({});
+        let w = aggregate_metrics(&mut m, &knob, &ctrl, power_in).unwrap();
+        assert!((w - (2.51 + 2.53 + 2.54 + 2.55 + 2.56) / 5.0).abs() < 1e-9, "{w}");
+    }
+
+    /// 合并后 C/D/B/F 的组合: 功耗按「轮」配对, 不按下标。
+    /// 第 2 轮改写臂被判 contested (B) 只拿掉候选臂; 第 4 轮对照臂功耗不可信 (D)。
+    /// 按下标配对时 ctrl[1] (第 2 轮) 会和 knob[1] (第 3 轮) 配成一对, 第 4 轮的剔除也会错位。
+    #[test]
+    fn power_pairs_align_by_round_when_an_arm_is_missing() {
+        let run = |label: &str, round: u64, w: Option<f64>| {
+            json!({
+                "label": label, "round": round,
+                "summary": {"frame_p95": 16.0, "fps_mean": 60.0},
+                "env": match w {
+                    Some(w) => json!({"power_valid": true, "power_source": "battery",
+                                      "power_w_mean": w, "power_mixed_w_mean": w}),
+                    None => json!({"power_valid": false, "power_source": "usb", "power_w_mean": null,
+                                   "power_usable_reason": "非放电态 (测试)"}),
+                },
+            })
+        };
+        let ctrl = vec![run("c1", 1, Some(3.01)), run("c2", 2, Some(3.02)), run("c3", 3, Some(3.03)), run("c4", 4, None), run("c5", 5, Some(3.05))];
+        // 第 2 轮候选臂 contested, 没进 knob_runs
+        let knob = vec![run("k1", 1, Some(2.51)), run("k3", 3, Some(2.53)), run("k4", 4, Some(2.54)), run("k5", 5, Some(2.55))];
+        let pp = power_pairs_of(&knob, &ctrl);
+        // 结果与传入 runs 一一对应
+        assert_eq!(pp.ctrl, vec![Some(3.01), Some(3.02), Some(3.03), None, Some(3.05)]);
+        assert_eq!(pp.knob, vec![Some(2.51), Some(2.53), None, Some(2.55)]);
+        assert_eq!(pp.dropped.len(), 1);
+        assert_eq!(pp.dropped[0].0, 4, "剔的是真实的第 4 轮");
+        assert!(pp.dropped[0].1.contains("对照臂"));
+        // 没有 round 的旧证据: 仍按下标配对 (行为不变)
+        let strip = |v: &[Value]| -> Vec<Value> {
+            v.iter().map(|r| { let mut r = r.clone(); r.as_object_mut().unwrap().remove("round"); r }).collect()
+        };
+        let old = power_pairs_of(&strip(&knob), &strip(&ctrl));
+        assert_eq!(old.ctrl.len(), 5);
+        assert_eq!(old.knob.len(), 4);
+        assert_eq!(old.dropped[0].0, 4);
+        assert_eq!(old.knob[3], None, "按下标时第 4 个候选臂 (实为第 5 轮) 被错剔");
+    }
+
+    // ══════════════ 审计 #9 #10, 审查 R1 #5 #9 #12, R2 #11 ══════════════
+    use super::tests::{v2_req, validate_err, validate_ok};
+
+    #[test]
+    fn pwrlevel_parse_and_commands() {
+        let out = "max_pwrlevel=0\nmin_pwrlevel=17\nnum_pwrlevels=18\n#adb_exit=0";
+        assert_eq!(parse_pwrlevels(out), Some((0, 17, Some(18))));
+        assert_eq!(parse_pwrlevels("max_pwrlevel=\nmin_pwrlevel=17\n#adb_exit=0"), None);
+        assert_eq!(parse_pwrlevels("max_pwrlevel=3\nmin_pwrlevel=3\nnum_pwrlevels=\n"), Some((3, 3, None)));
+        // 锁: max → min → max; 还原: 先 min (数值大) 再 max
+        let lock = pwrlevel_lock_cmd(4);
+        let (i_max, i_min) = (lock.find("max_pwrlevel").unwrap(), lock.find("min_pwrlevel").unwrap());
+        assert!(i_max < i_min && lock.rfind("max_pwrlevel").unwrap() > i_min, "{lock}");
+        let r = pwrlevel_restore_cmd(0, 17);
+        assert!(r.find("echo 17 > ").unwrap() < r.find("echo 0 > ").unwrap(), "{r}");
+        assert!(r.contains(KGSL_DIR));
+    }
+
+    #[test]
+    fn gpu_lock_refuses_candidates_that_change_pwrlevel() {
+        let r = v2_req("sysparam", json!({"params": {"gpu.max_pwrlevel": "6"}}));
+        assert!(gpu_lock_conflict(&r).unwrap_err().contains("gpu.max_pwrlevel"));
+        let r = v2_req("sysparam", json!({"params": {}, "plan": [{"kind": "sysfs", "path": "/sys/class/kgsl/kgsl-3d0/min_pwrlevel", "value": "3"}]}));
+        assert!(gpu_lock_conflict(&r).is_err());
+        let r = v2_req("sysparam", json!({"params": {"cpu.policy6.scaling_max": "1497600"}}));
+        assert!(gpu_lock_conflict(&r).is_ok());
+        assert!(gpu_lock_conflict(&v2_req("gray", json!({"rewrites": []}))).is_ok());
+    }
+
+    #[test]
+    fn gpu_lock_note_goes_into_conditions_and_flags_failed_restore() {
+        let rep = r#"{"status":"PASS","verdict":{"reason":"改善 frame_p95"}}"#;
+        let ok = json!({"level": 0, "restored": true});
+        let v: Value = serde_json::from_str(&attach_gpu_lock_note(rep, Some(&ok))).unwrap();
+        assert_eq!(v["conditions_observed"]["gpu_level_lock"]["level"], 0);
+        assert_eq!(v["verdict"]["reason"], "改善 frame_p95");
+        let bad = json!({"level": 0, "restored": false});
+        let v: Value = serde_json::from_str(&attach_gpu_lock_note(rep, Some(&bad))).unwrap();
+        assert!(v["verdict"]["reason"].as_str().unwrap().contains("还原失败"));
+        assert_eq!(v["status"], "PASS", "测量本身有效, 不改状态");
+        let v: Value = serde_json::from_str(&attach_gpu_lock_note(rep, None)).unwrap();
+        assert_eq!(v["conditions_observed"]["gpu_level_lock"], Value::Null);
+    }
+
+    #[test]
+    fn nonempty_out_dir_is_refused() {
+        let d = std::env::temp_dir().join(format!("pf_eval_out_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        assert!(refuse_nonempty_out(&d).is_ok(), "不存在的目录放行");
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(refuse_nonempty_out(&d).is_ok(), "空目录放行");
+        std::fs::write(d.join("plan.txt"), "x").unwrap();
+        let e = refuse_nonempty_out(&d).unwrap_err();
+        assert!(e.contains("非空") && e.contains("plan.txt"), "{e}");
+    }
+
+    #[test]
+    fn hw_stats_clips_to_capture_window() {
+        let t = "#sample_hw v1 max=900 stop=/x\nHW 100.0 17 fan_enable=0\nHW 101.0 0 fan_enable=0\nHW 102.0 0 fan_enable=0\nHW 103.0 0 fan_enable=0\nHW 104.0 4 fan_enable=1\n#sample_hw done\n";
+        let all = hw_stats(t);
+        assert_eq!(all["n"], 5);
+        assert_eq!(all["n_total"], 5);
+        assert_eq!(all["window"], Value::Null);
+        // LEAD 段的 17 档与采完之后的 4 档/风扇都不算
+        let w = hw_stats_window(t, Some((101.0, 103.0)));
+        assert_eq!(w["n"], 3);
+        assert_eq!(w["n_total"], 5);
+        assert_eq!(w["gpu_pwrlevel_frac"], json!({"0": 1.0}));
+        assert_eq!(w["fan_states"], json!(["fan_enable=0"]));
+        assert_eq!(w["window"], json!([101.0, 103.0]));
+        // 以前不截窗: 一臂 LEAD 内被压到 17 档就会错剔一对
+        let other = hw_stats_window("HW 101.0 0 -\nHW 102.0 0 -\nHW 103.0 0 -\n", Some((101.0, 103.0)));
+        assert!(pair_env_check(&json!({"hw": w}), &json!({"hw": other}), true).is_ok());
+        assert!(pair_env_check(&json!({"hw": all}), &json!({"hw": hw_stats("HW 101.0 0 -\nHW 102.0 0 -\nHW 103.0 0 -\n")}), true).is_err());
+    }
+
+    #[test]
+    fn hold_stats_clips_readbacks_to_capture_window() {
+        let ok = |up: f64| format!("/sys/class/kgsl/kgsl-3d0/min_pwrlevel=3\nsystem:refresh_rate_mode=2\n#uptime={up}\n#adb_exit=0");
+        let lost = |up: f64| format!("/sys/class/kgsl/kgsl-3d0/min_pwrlevel=17\nsystem:refresh_rate_mode=2\n#uptime={up}\n#adb_exit=0");
+        assert_eq!(readback_uptime(&ok(12.5)), Some(12.5));
+        assert_eq!(readback_uptime("x=1\n#adb_exit=0"), None);
+        // 窗 [10, 20]: 准备段 (5) 守住、窗内 3 次守住 1 次丢、采完之后 (25) 丢
+        let samples = vec![(0.0, ok(5.0)), (3.0, ok(11.0)), (6.0, ok(14.0)), (9.0, lost(17.0)), (12.0, lost(25.0))];
+        let h = hold_stats_window(PLAN, &samples, Some((10.0, 20.0)));
+        assert_eq!((h.samples, h.held, h.outside_window), (3, 2, 2));
+        assert_eq!(h.first_lost_s, Some(9.0));
+        assert_eq!(h.window, Some((10.0, 20.0)));
+        assert_eq!(h.to_json()["outside_window"], 2);
+        // 不截窗 (旧口径): 5 次里 3 次守住
+        let h0 = hold_stats(PLAN, &samples);
+        assert_eq!((h0.samples, h0.held, h0.outside_window), (5, 3, 0));
+        // 没有 #uptime 的旧回读照旧计入
+        let old = "/sys/class/kgsl/kgsl-3d0/min_pwrlevel=3\nsystem:refresh_rate_mode=2\n#adb_exit=0".to_string();
+        let h = hold_stats_window(PLAN, &[(0.0, old)], Some((10.0, 20.0)));
+        assert_eq!((h.samples, h.outside_window), (1, 0));
+        assert!(readback_cmd(PLAN).contains("#uptime="));
+    }
+
+    #[test]
+    fn spf_mismatch_makes_a_pair_incomparable() {
+        let arm = |spf: u64| json!({"hw": {"n": 0}, "summary": {"submits_per_frame": spf}});
+        assert!(pair_env_check(&arm(1), &arm(1), true).is_ok());
+        let e = pair_env_check(&arm(6), &arm(1), true).unwrap_err();
+        assert!(e.contains("每帧提交数") && e.contains("workload.spf"), "{e}");
+        // 旧证据没有 summary 时不判
+        assert!(pair_env_check(&json!({"hw": {"n": 0}}), &arm(1), true).is_ok());
+    }
+
+    #[test]
+    fn request_declares_spf_and_fps_cap() {
+        let mut r = v2_req("sysparam", json!({"params": {}}));
+        assert_eq!(declared_spf(&r), None);
+        assert_eq!(declared_fps_cap(&r), None);
+        r["workload"]["spf"] = json!(1);
+        r["workload"]["fps_cap"] = json!(30);
+        assert!(validate_ok(&r));
+        assert_eq!(declared_spf(&r), Some(1));
+        assert_eq!(declared_fps_cap(&r), Some(30.0));
+        r["workload"]["spf"] = json!(0);
+        assert!(validate_err(&r).contains("workload.spf"));
+        r["workload"]["spf"] = json!(2);
+        r["workload"]["fps_cap"] = json!(-1);
+        assert!(validate_err(&r).contains("workload.fps_cap"));
+        r["workload"]["fps_cap"] = Value::Null;
+        assert!(validate_ok(&r), "null 当没声明");
+    }
+
+    #[test]
+    fn marker_delay_is_recorded_per_arm_and_asymmetry_flagged() {
+        assert_eq!(marker_to_capture_s(Some(100.0), Some((103.456, 133.0))), Some(3.46));
+        assert_eq!(marker_to_capture_s(None, Some((1.0, 2.0))), None);
+        let run = |round: u64, d: Option<f64>| json!({"round": round, "marker_to_capture_s": d});
+        let knob = vec![run(1, Some(3.4)), run(2, Some(4.9)), run(3, None)];
+        let ctrl = vec![run(1, Some(2.9)), run(2, Some(2.8)), run(3, Some(2.7))];
+        let n = marker_delay_note(&knob, &ctrl);
+        assert_eq!(n["per_round"].as_array().unwrap().len(), 2, "第 3 对改写臂没记延时, 不比");
+        assert_eq!(n["flagged_rounds"], json!([2]));
+        assert!((n["max_asymmetry_s"].as_f64().unwrap() - 2.1).abs() < 1e-9);
+        assert_eq!(n["per_round"][0]["flagged"], false);
+        let mut rep = json!({"verdict": {"reason": "没有任何指标显著改善"}});
+        append_marker_delay_reason(&mut rep, &n);
+        assert!(rep["verdict"]["reason"].as_str().unwrap().contains("第 2 对"));
+        // 触控负载 (没有标记): 空记录, 理由不动
+        let n0 = marker_delay_note(&[json!({"round": 1})], &[json!({"round": 1})]);
+        assert_eq!(n0["per_round"], json!([]));
+        let mut rep = json!({"verdict": {"reason": "x"}});
+        append_marker_delay_reason(&mut rep, &n0);
+        assert_eq!(rep["verdict"]["reason"], "x");
+    }
+
+    #[test]
+    fn eval_args_take_lock_gpu_level() {
+        let a = parse_args(&["--request".into(), "r.json".into(), "--lock-gpu-level".into(), "3".into()]).unwrap();
+        assert_eq!(a.lock_gpu_level, Some(3));
+        assert!(parse_args(&["--request".into(), "r.json".into(), "--lock-gpu-level".into(), "x".into()]).is_err());
+        assert_eq!(parse_args(&["--request".into(), "r.json".into()]).unwrap().lock_gpu_level, None);
+    }
+}

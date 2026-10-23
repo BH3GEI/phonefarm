@@ -213,6 +213,24 @@ pub struct Parsed {
     pub pwrlevel: Vec<(f64, i64)>,
     pub gpufreq: Vec<(f64, i64)>,
     pub thermal_events: Vec<(f64, String)>,
+    /// 进程归属。trace 头里有 `target_tids` (采集脚本拿 `-PKG` 记下的目标进程线程号) 时为
+    /// `Some`, 只收这些线程的提交; 老 trace 没有这项, 为 `None`, 只能按线程名认, 不保证是目标应用。
+    pub attribution: Option<Attribution>,
+}
+
+/// 提交按进程归属的结果。只在 trace 头带了目标线程号时才有。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribution {
+    pub target_pid: String,
+    pub n_target_tids: usize,
+    /// 线程名对得上 (或被截成 `<...>`)、但线程号不在目标进程里的提交 —— 别的进程的, 没算。
+    pub n_foreign_submits: usize,
+}
+
+/// trace 头 `target_tids=1,2,3` → 线程号集合。缺这项返回 `None` (老 trace)。
+fn target_tids(meta: &Meta) -> Option<Vec<u64>> {
+    let raw = meta.get("target_tids")?;
+    Some(raw.split(',').filter_map(|t| t.trim().parse().ok()).collect())
 }
 
 struct Retire {
@@ -266,8 +284,9 @@ fn parse_grouped(
     let kv_re = Regex::new(KV_RE).expect("KV_RE");
 
     let mut meta = Meta::default();
-    let mut submits: Vec<(f64, i64, i64)> = Vec::new();
-    let mut truncated: Vec<(f64, i64, i64)> = Vec::new();
+    // (墙钟, ctx, ts, tid)
+    let mut submits: Vec<(f64, i64, i64, u64)> = Vec::new();
+    let mut truncated: Vec<(f64, i64, i64, u64)> = Vec::new();
     let mut retires: HashMap<(i64, i64), Retire> = HashMap::new();
     let mut buslevel = Vec::new();
     let mut pwrlevel = Vec::new();
@@ -311,14 +330,14 @@ fn parse_grouped(
                 // 名字都没有时, 才把截断的提交算进来, 避免和别的进程的提交混在一起。
                 // 给了 owned contexts 时按 ctx 归属认提交, 不看 comm。
                 let comm = m["comm"].trim();
+                let tid: u64 = m["tid"].parse().unwrap_or(0);
                 if let (Some(&ctx), Some(&ts)) = (f.get("ctx"), f.get("ts")) {
+                    // 给了 owned contexts (main 侧冻结的 ctx 归属) 时按 ctx 认; 否则按线程名。
+                    // render_ctxs 在进程归属过滤之后统一收 (ruler 侧 target_tids)。
                     if contexts.map_or(comm == render_comm, |owned| owned.contains(&ctx)) {
-                        if !render_ctxs.contains(&ctx) {
-                            render_ctxs.push(ctx);
-                        }
-                        submits.push((wall, ctx, ts));
+                        submits.push((wall, ctx, ts, tid));
                     } else if contexts.is_none() && comm == "<...>" {
-                        truncated.push((wall, ctx, ts));
+                        truncated.push((wall, ctx, ts, tid));
                     }
                 }
             }
@@ -354,12 +373,39 @@ fn parse_grouped(
         }
     }
 
-    if submits.is_empty() && !truncated.is_empty() {
-        submits = truncated;
-        for &(_, ctx, _) in &submits {
-            if !render_ctxs.contains(&ctx) {
-                render_ctxs.push(ctx);
+    // 进程归属: 线程名不认进程 —— 两个 Unity 应用的渲染线程都叫 UnityGfxDeviceW,
+    // `<...>` 更是谁都可能。trace 头带了目标进程的线程号时, 只收这些线程的提交:
+    //   - 有正常名字的: 线程号必须在目标进程里;
+    //   - `<...>`: 线程号是目标进程里、本窗内以渲染线程名出现过的线程 (名字丢了, 线程还是那条);
+    //     一条正常名字都没有时, 退一步收目标进程里任何线程的 `<...>` 提交 —— 至少还是这个进程的。
+    // 没有线程号 (老 trace) 时保持原行为, attribution 为 None, 由下游当「未归属」看待。
+    let attribution = match target_tids(&meta) {
+        Some(tids) => {
+            let before = submits.len() + truncated.len();
+            submits.retain(|s| tids.contains(&s.3));
+            let named_tids: Vec<u64> = submits.iter().map(|s| s.3).collect();
+            if named_tids.is_empty() {
+                truncated.retain(|s| tids.contains(&s.3));
+            } else {
+                truncated.retain(|s| named_tids.contains(&s.3));
             }
+            submits.append(&mut truncated);
+            Some(Attribution {
+                target_pid: meta.get("target_pid").unwrap_or("").to_string(),
+                n_target_tids: tids.len(),
+                n_foreign_submits: before - submits.len(),
+            })
+        }
+        None => {
+            if submits.is_empty() && !truncated.is_empty() {
+                submits = std::mem::take(&mut truncated);
+            }
+            None
+        }
+    };
+    for &(_, ctx, _, _) in &submits {
+        if !render_ctxs.contains(&ctx) {
+            render_ctxs.push(ctx);
         }
     }
     submits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -383,7 +429,7 @@ fn parse_grouped(
             let mut act_sum = 0.0;
             let mut q_sum = 0.0;
             let mut matched = 0usize;
-            for &(wall, ctx, ts) in &submits[i..(i + spf).min(submits.len())] {
+            for &(wall, ctx, ts, _) in &submits[i..(i + spf).min(submits.len())] {
                 let Some(r) = retires.get(&(ctx, ts)) else {
                     continue;
                 };
@@ -425,13 +471,26 @@ fn parse_grouped(
         pwrlevel,
         gpufreq,
         thermal_events,
+        attribution,
     }
 }
 
 impl Parsed {
+    /// 归属字段 (只在 trace 头带了目标线程号时追加, 老 trace 的输出逐字节不变)。
+    fn with_attribution(&self, v: PyVal) -> PyVal {
+        let (PyVal::Obj(mut kv), Some(a)) = (v.clone(), &self.attribution) else {
+            return v;
+        };
+        kv.push(("frame_attribution".into(), PyVal::Str("target_tids".into())));
+        kv.push(("target_pid".into(), PyVal::Str(a.target_pid.clone())));
+        kv.push(("n_target_tids".into(), a.n_target_tids.into()));
+        kv.push(("n_foreign_submits".into(), a.n_foreign_submits.into()));
+        PyVal::Obj(kv)
+    }
+
     /// `--full`: 逐帧序列全出。
     pub fn to_pyval(&self) -> PyVal {
-        pyobj! {
+        self.with_attribution(pyobj! {
             "meta" => self.meta.to_pyval(),
             "render_comm" => self.render_comm.clone(),
             "render_ctxs" => self.render_ctxs.clone(),
@@ -456,7 +515,7 @@ impl Parsed {
             "thermal_events" => PyVal::List(self.thermal_events.iter().map(|(t, e)| {
                 pyobj!{ "t" => py_round(*t, 4), "event" => e.clone() }
             }).collect()),
-        }
+        })
     }
 
     /// 把逐帧序列压成一行可比的账。每个字段都是确定性函数, 无随机。
@@ -467,7 +526,7 @@ impl Parsed {
         let mean4 = |xs: &[f64]| {
             (!xs.is_empty()).then(|| py_round(py_sum(xs.iter().copied()) / xs.len() as f64, 4))
         };
-        pyobj! {
+        self.with_attribution(pyobj! {
             "span_s" => self.span_s,
             "n_frames" => f.len(),
             "n_submits" => self.n_submits,
@@ -491,7 +550,7 @@ impl Parsed {
             "ddr_boost_khz" => self.meta.get("ddr_boost_khz").map(String::from),
             "llcc_boost_khz" => self.meta.get("llcc_boost_khz").map(String::from),
             "thermal_pwrlevel" => self.meta.get("thermal_pwrlevel").map(String::from),
-        }
+        })
     }
 }
 
@@ -883,6 +942,88 @@ mod tests {
         assert_eq!(auto.submits_per_frame, 3, "这段节奏正是会骗过自检的那种");
         assert_eq!(fixed.submits_per_frame, 1);
         assert!(fixed.frame_ms.len() > 2 * auto.frame_ms.len());
+    }
+
+    fn submit(comm: &str, tid: u64, t: f64, ctx: i64, ts: i64) -> String {
+        format!("     {comm}-{tid}   [001] ..... {t:.6}: adreno_cmdbatch_submitted: ctx={ctx} ctx_prio=1 ts={ts} inflight=1\n")
+    }
+
+    /// 两个进程的渲染线程同名 (两个 Unity 应用都叫 UnityGfxDeviceW): trace 头带了目标进程
+    /// 线程号时, 别的进程的提交一条都不能进帧序列。
+    #[test]
+    fn same_comm_in_another_process_is_not_counted_when_target_tids_known() {
+        let mut text = String::from("#loop_v1_meta target_pkg=com.game target_pid=100 target_tids=100,101,102\n");
+        for i in 0..60 {
+            let t = 100.0 + i as f64 * 0.0333;
+            text.push_str(&submit("UnityGfxDeviceW", 101, t, 7, i)); // 目标游戏 30fps
+            text.push_str(&submit("UnityGfxDeviceW", 900, t + 0.010, 9, i)); // 后台另一个 Unity 应用
+        }
+        let d = parse_with_spf(&text, DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(d.n_submits, 60);
+        assert_eq!(d.render_ctxs, vec![7]);
+        let fps = d.fps_mean.unwrap();
+        assert!((fps - 30.0).abs() < 0.5, "{fps}");
+        let a = d.attribution.clone().unwrap();
+        assert_eq!(a.n_foreign_submits, 60);
+        assert_eq!(a.target_pid, "100");
+        let sum = dumps(&d.summarize());
+        assert!(sum.contains("\"frame_attribution\": \"target_tids\""), "{sum}");
+        assert!(sum.contains("\"n_foreign_submits\": 60"), "{sum}");
+
+        // 不带线程号的老 trace: 两边混在一起, 帧率虚高一倍 —— 这正是要修的口子
+        let old = text.replacen("target_tids=100,101,102", "x=1", 1);
+        let o = parse_with_spf(&old, DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(o.n_submits, 120);
+        assert!(o.attribution.is_none());
+        assert!(!dumps(&o.summarize()).contains("frame_attribution"));
+    }
+
+    /// 名字被截成 `<...>` 的提交: 只收目标进程里、以渲染线程名出现过的那条线程;
+    /// SurfaceFlinger 等别的进程截名的提交不收。
+    #[test]
+    fn truncated_submits_are_kept_only_for_the_target_render_thread() {
+        let mut text = String::from("#loop_v1_meta target_pid=100 target_tids=100,101,105\n");
+        for i in 0..40 {
+            let t = 100.0 + i as f64 * 0.0166;
+            let comm = if i % 2 == 0 { "UnityGfxDeviceW" } else { "<...>" };
+            text.push_str(&submit(comm, 101, t, 7, i));
+            text.push_str(&submit("<...>", 105, t + 0.002, 8, i)); // 目标进程里的别的线程
+            text.push_str(&submit("<...>", 1500, t + 0.004, 3, i)); // 合成进程
+        }
+        let d = parse_with_spf(&text, DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(d.n_submits, 40);
+        assert_eq!(d.render_ctxs, vec![7]);
+        assert_eq!(d.attribution.unwrap().n_foreign_submits, 80);
+    }
+
+    /// 一条正常名字都没有: 老行为是把所有 `<...>` 都当渲染提交 (含别的进程的);
+    /// 有线程号时只收目标进程的。
+    #[test]
+    fn all_truncated_falls_back_to_target_process_only() {
+        let mut text = String::from("#loop_v1_meta target_pid=100 target_tids=100,101\n");
+        for i in 0..30 {
+            let t = 100.0 + i as f64 * 0.0333;
+            text.push_str(&submit("<...>", 101, t, 7, i));
+            text.push_str(&submit("<...>", 1500, t + 0.01, 3, i));
+        }
+        let d = parse_with_spf(&text, DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(d.n_submits, 30);
+        assert_eq!(d.render_ctxs, vec![7]);
+        let old = parse_with_spf(&text.replacen("target_tids=100,101", "x=1", 1), DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(old.n_submits, 60, "老口径把合成进程的提交也算成了游戏帧");
+    }
+
+    /// 目标进程不在 (pidof 为空, target_tids 为空串): 一帧都不算, 不能退回按名字认。
+    #[test]
+    fn empty_target_tids_yields_no_frames() {
+        let mut text = String::from("#loop_v1_meta target_pid= target_tids=\n");
+        for i in 0..10 {
+            text.push_str(&submit("UnityGfxDeviceW", 900, 100.0 + i as f64 * 0.0333, 9, i));
+        }
+        let d = parse(&text, DEFAULT_RENDER_COMM);
+        assert_eq!(d.n_submits, 0);
+        assert_eq!(d.fps_mean, None);
+        assert_eq!(d.attribution.unwrap().n_foreign_submits, 10);
     }
 
     #[test]

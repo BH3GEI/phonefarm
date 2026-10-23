@@ -457,10 +457,13 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
             .chain(&config.inputs)
             .map(String::as_str),
     );
-    // v1 artifacts built before the NPU integration did not snapshot npuprobe.
-    // Keep reading them without upgrading their device/deployment claims.
-    if !manifest.descriptor.inputs.contains_key("npuprobe.cpp") {
-        required_inputs.retain(|name| *name != "npuprobe.cpp");
+    // v1 artifacts built before the NPU / frame-interpolation integration did not
+    // snapshot these later layer inputs. Keep reading them without upgrading their
+    // device/deployment claims.
+    for late in ["npuprobe.cpp", "npu_rt.h", "framedump.cpp", "framedump.h", "interp.cpp", "interp.h"] {
+        if !manifest.descriptor.inputs.contains_key(late) {
+            required_inputs.retain(|name| *name != late);
+        }
     }
     if manifest.descriptor.adaptation.is_some() {
         required_inputs.extend(ADAPTATION_INPUTS.map(|(name, _)| name));
@@ -785,6 +788,11 @@ fn build_stage(
     let mut arrays = String::new();
     header_array(&mut arrays, "kCopySpv", &copy_bytes);
     header_array(&mut arrays, "kUpopSpv", &spv_bytes);
+    // The NPU route (npuop) is not part of a dynamic upop candidate: its pack/unpack
+    // shaders are built only by build_layer.sh. Empty arrays keep the shared layer
+    // source compiling; the layer reports npuop unavailable when Len is 0.
+    arrays.push_str("static const unsigned char kNpuPackSpv[] = {0};\nstatic const unsigned int kNpuPackSpvLen = 0;\n");
+    arrays.push_str("static const unsigned char kNpuUnpackSpv[] = {0};\nstatic const unsigned int kNpuUnpackSpvLen = 0;\n");
     write(&stage.join("copy_spv.h"), arrays.as_bytes())?;
     inputs.insert("copy_spv.h".into(), hash(arrays.as_bytes()));
     let descriptor = Descriptor {

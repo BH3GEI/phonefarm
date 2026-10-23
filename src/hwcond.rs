@@ -390,16 +390,16 @@ impl PowerSample {
     /// `power_now` 是可选节点, 各家内核填得五花八门 (有的 μW, 有的 nW, 有的干脆没初始化);
     /// 而 `voltage_now`(μV) / `current_now`(μA) 的单位在 power_supply class 里是有明确约定的。
     /// 所以口径改成: **能算 V x I 就算 V x I**, 两条通路从此量的是同一个东西。
-    pub fn watt(&self) -> f64 {
+    ///
+    /// 电压或电流为 0 时返回 None, **不再退回 `power_now`** (2026-10-21 审计 #15):
+    /// 本机 `power_now` 实测读到过 537393296 与 −61082000, 一旦某条样本电流恰好为 0
+    /// 就会把这种数折成几百瓦或负数混进来, 再被逐条越界检查把整组功耗作废。
+    /// 电流为 0 只说明「这一刻这条轨没在量东西」, 记成缺测, 不记成任何瓦数。
+    pub fn watt(&self) -> Option<f64> {
         if self.volt_uv != 0 && self.curr_ua != 0 {
-            return (self.volt_uv as f64 / 1.0e6).abs() * (self.curr_ua as f64 / 1.0e6).abs();
+            return Some((self.volt_uv as f64 / 1.0e6).abs() * (self.curr_ua as f64 / 1.0e6).abs());
         }
-        if let Some(uw) = self.power_uw {
-            if uw != 0 {
-                return (uw.abs() as f64) / 1.0e6;
-            }
-        }
-        0.0
+        None
     }
 }
 
@@ -431,11 +431,13 @@ pub fn parse_power_samples(text: &str) -> Vec<PowerSample> {
 }
 
 /// 一组采样的功率统计 (瓦)。返回 (均值, 中位数, 最小, 最大)。
+///
+/// 电压或电流为 0 的样本 ([`PowerSample::watt`] 为 None) 不进统计; 一条都算不出时返回 None。
 pub fn power_stats(samples: &[PowerSample]) -> Option<(f64, f64, f64, f64)> {
-    if samples.is_empty() {
+    let mut w: Vec<f64> = samples.iter().filter_map(|s| s.watt()).collect();
+    if w.is_empty() {
         return None;
     }
-    let mut w: Vec<f64> = samples.iter().map(|s| s.watt()).collect();
     let mean = w.iter().sum::<f64>() / w.len() as f64;
     w.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = w.len();
@@ -482,44 +484,77 @@ pub fn power_usable_with_battery(
     samples: &[PowerSample],
     battery: Option<&BatteryState>,
 ) -> Result<(), String> {
+    power_usable_supply(rail, samples, battery, false)
+}
+
+/// 「电压或电流为 0、算不出瓦数」的样本最多占这么多; 再多就说明这条轨这段窗口没在量东西。
+pub const POWER_MISSING_MAX_FRAC: f64 = 0.1;
+
+/// 同 [`power_usable_with_battery`], 另带「这一轮有没有停充」。供电判定走 [`classify_supply`],
+/// 与 `sysparam::env_stats` 是同一个函数 (2026-10-21 审计 #15: 以前这条路径只认放电态,
+/// 满电停充后的 USB 旁路永远判不过)。
+///
+/// 这条通路一次只采一条轨, 所以只认两种「单轨就是整机」的情形:
+/// 电池轨 + 放电态, USB 轨 + 旁路 (已停充, 电池不进不出)。混合供电 (USB 不够, 电池同时在补)
+/// 要两轨同刻相加, 单轨量不全, 明确报「供电不足」而不是交一个偏小的数。
+pub fn power_usable_supply(
+    rail: PowerRail,
+    samples: &[PowerSample],
+    battery: Option<&BatteryState>,
+    charge_suspended: bool,
+) -> Result<(), String> {
     if let Some(b) = battery {
-        if !b.on_battery() {
-            return Err(format!(
-                "{}: {}。要量整机功耗必须让设备处于放电态 —— 拔掉 USB, 或用 `--suspend-charging` 在测量期间停充 (测完自动恢复)",
-                match rail {
-                    PowerRail::Battery => "电池轨此刻量不了整机功耗",
-                    PowerRail::Usb =>
-                        "USB 输入轨此刻量的不是整机功耗 (输入功率里含着给电池充电的那一份)",
-                },
-                b.why_not_on_battery()
-            ));
+        let usb_w = match rail {
+            PowerRail::Usb => power_stats(samples).map(|t| t.0),
+            PowerRail::Battery => None,
+        };
+        let mode = classify_supply(&SupplyObs {
+            status: &b.status,
+            battery_ua: b.current_ua.map(|c| c as f64),
+            usb_w,
+            charge_suspended,
+            bypass_mode: false,
+        });
+        match (rail, mode) {
+            (PowerRail::Battery, SupplyMode::Battery) | (PowerRail::Usb, SupplyMode::Bypass) => {}
+            (_, SupplyMode::Mixed) => {
+                return Err(format!(
+                    "供电不足 (混合供电): {}, USB 输入不够, 电池同时在放电。整机功耗要 USB 与电池两轨\
+同一时刻相加, 这条通路只采 {} 一条轨, 量不全。换功率更大的 USB 电源, 或走 eval (sample_env 两轨同采)",
+                    b.why_not_on_battery(),
+                    rail.as_str()
+                ));
+            }
+            (PowerRail::Usb, SupplyMode::Battery) => {
+                return Err("设备此刻由电池供电, USB 轨量不到整机功耗。改用 --power-rail battery".into());
+            }
+            (PowerRail::Battery, SupplyMode::Bypass) => {
+                return Err("旁路供电 (已停充, 整机由 USB 直供, 电池不进不出): 电池轨没有读数。改用 --power-rail usb".into());
+            }
+            (_, SupplyMode::FullIdle) => {
+                return Err(format!(
+                    "电池已满且不进不出 ({}): 整机由 USB 供电, 但没停充, 充电器随时会补电。\
+用 `--suspend-charging` 停充后按 USB 旁路量",
+                    b.why_not_on_battery()
+                ));
+            }
+            (_, SupplyMode::NotDischarging) | (_, SupplyMode::Unknown) => {
+                return Err(format!(
+                    "{}: {}。要量整机功耗必须让设备处于放电态 —— 拔掉 USB, 或用 `--suspend-charging` 在测量期间停充 (测完自动恢复)",
+                    match rail {
+                        PowerRail::Battery => "电池轨此刻量不了整机功耗",
+                        PowerRail::Usb =>
+                            "USB 输入轨此刻量的不是整机功耗 (输入功率里含着给电池充电的那一份)",
+                    },
+                    b.why_not_on_battery()
+                ));
+            }
         }
     }
-    let Some((mean, _, _, _)) = power_stats(samples) else {
+    if samples.is_empty() {
         return Err("没有取到任何功率采样".into());
-    };
-    // 上界必须查, 而且要逐条查。
-    //
-    // 2026-09-23 实测这台红魔: `/sys/class/power_supply/battery/power_now` 读出
-    // `992195296`, 按 μW 折算就是 992 W —— 而同一时刻 current_now x voltage_now 只有
-    // 0.185 W。这个节点在这台机器上给的根本不是 μW (多半压根没初始化)。
-    // 在加上界之前, 这条通路会把 1268 W 当成一次正常的功耗实测报给上层,
-    // 而 `gpu-op` 的功耗门禁拿它去做 A/B 裁决 —— 一个物理上不可能的数字,
-    // 却因为"大于 0"就通过了唯一的一道检查。
-    //
-    // 逐条而不是判均值: 29 条 5 W 里混进一条 300 W, 均值 14.8 W 正好落在窗口内,
-    // 判均值就会把一个假数字当实测发出去。
-    if let Some(bad) = samples.iter().map(|s| s.watt()).find(|w| !(POWER_MIN_W..=POWER_MAX_W).contains(w)) {
-        let n = samples.iter().map(|s| s.watt()).filter(|w| !(POWER_MIN_W..=POWER_MAX_W).contains(w)).count();
-        return Err(format!(
-            "{n} / {} 条功率读数不在可信区间 {POWER_MIN_W}..{POWER_MAX_W} W (越界样本如 {bad:.3} W): \
-要么设备此刻正插着 USB 充电 (供电状态变过, 拿这段窗口做 A/B 对比本来就不成立), \
-要么这条轨的 power_now 节点给的不是 μW (本机 battery/power_now 就是这种情况)。\
-不确定就不给数 —— 一个物理上不可能的瓦数比没有数字危险得多",
-            samples.len()
-        ));
     }
-    if mean <= 0.0 {
+    let Some((mean, _, _, _)) = power_stats(samples) else {
         return Err(match rail {
             PowerRail::Battery => "电池轨功率恒为 0: 设备正插着 USB 充电。\
                  要量整机功耗需让设备处于放电态 (拔掉充电或停充), 或改用 --power-rail usb"
@@ -528,8 +563,215 @@ pub fn power_usable_with_battery(
                  改用 --power-rail battery"
                 .into(),
         });
+    };
+    // 电流/电压为 0 的样本不折成任何瓦数 (watt() 为 None), 但占比太高说明这段窗口没在量
+    let missing = samples.iter().filter(|s| s.watt().is_none()).count();
+    if missing as f64 > POWER_MISSING_MAX_FRAC * samples.len() as f64 {
+        return Err(format!(
+            "{missing} / {} 条功率样本的电压或电流为 0, 算不出瓦数 (超过 {:.0}%): 这条轨这段窗口没在稳定地量东西。\
+不退回 power_now —— 本机那个节点给的不是 μW",
+            samples.len(),
+            POWER_MISSING_MAX_FRAC * 100.0
+        ));
+    }
+    // 上界必须查, 而且要逐条查。
+    //
+    // 2026-09-23 实测这台红魔: `/sys/class/power_supply/battery/power_now` 读出
+    // `992195296`, 按 μW 折算就是 992 W —— 而同一时刻 current_now x voltage_now 只有
+    // 0.185 W。现在 watt() 已不再退回 power_now, 但 V x I 本身越界 (电流节点抽风) 仍要拦。
+    //
+    // 逐条而不是判均值: 29 条 5 W 里混进一条 300 W, 均值 14.8 W 正好落在窗口内,
+    // 判均值就会把一个假数字当实测发出去。
+    let out: Vec<f64> = samples.iter().filter_map(|s| s.watt()).filter(|w| !(POWER_MIN_W..=POWER_MAX_W).contains(w)).collect();
+    if let Some(bad) = out.first() {
+        return Err(format!(
+            "{} / {} 条功率读数不在可信区间 {POWER_MIN_W}..{POWER_MAX_W} W (越界样本如 {bad:.3} W): \
+要么设备此刻正插着 USB 充电 (供电状态变过, 拿这段窗口做 A/B 对比本来就不成立), \
+要么这条轨的电流/电压节点读数异常。不确定就不给数 —— 一个物理上不可能的瓦数比没有数字危险得多",
+            out.len(),
+            samples.len()
+        ));
+    }
+    if mean <= 0.0 {
+        return Err("功率均值不为正: 这条轨此刻没在量东西".into());
     }
     Ok(())
+}
+
+// ══════════════ 供电判定 (与 sysparam::env_stats 共用) ══════════════
+
+/// 「USB 在供电」的门限 (W): USB 轨 |V x I| 均值低于它就当 USB 没在出力。
+/// 输入挂起后 VBUS 仍在、电流读数抖动在几十 mA 以内, 约合 0.05–0.1 W。
+pub const USB_IDLE_W: f64 = 0.1;
+
+/// 一段窗口里整机由谁供电。只有 `Battery` / `Bypass` / `Mixed` 量得到整机功耗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupplyMode {
+    /// 电池放电, USB 不出力: 电池轨 |V x I| 就是整机功耗
+    Battery,
+    /// 已停充, USB 直供, 电池不进不出 (|I| < BYPASS_IDLE_UA)
+    Bypass,
+    /// USB 在供电但不够 (或停充旁路中途 USB 断开), 电池同时在放电:
+    /// 整机功耗 = 同一时刻 USB 轨 + 电池轨
+    Mixed,
+    /// 电池满且不进不出, 但没停充: 充电器随时会补电
+    FullIdle,
+    /// 在给电池充电 / 判不出放电方向
+    NotDischarging,
+    /// 读不到电池电流
+    Unknown,
+}
+
+impl SupplyMode {
+    /// 这个供电方式下功耗取哪个口径。旁路与混合是**同一个口径** (两轨同刻相加, 旁路时电池项≈0),
+    /// 所以满电停充时同一轮里供电在旁路与电池之间来回跳, 各臂仍是同一口径, 可以相减。
+    pub fn rail(&self) -> &'static str {
+        match self {
+            SupplyMode::Battery => "battery",
+            SupplyMode::Bypass | SupplyMode::Mixed => "usb_plus_battery",
+            _ => "usb",
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SupplyMode::Battery => "battery",
+            SupplyMode::Bypass => "bypass",
+            SupplyMode::Mixed => "mixed",
+            SupplyMode::FullIdle => "full_idle",
+            SupplyMode::NotDischarging => "not_discharging",
+            SupplyMode::Unknown => "unknown",
+        }
+    }
+
+    pub fn measurable(&self) -> bool {
+        matches!(self, SupplyMode::Battery | SupplyMode::Bypass | SupplyMode::Mixed)
+    }
+}
+
+/// 供电判定的输入。`battery_ua` 是电池电流 (本机约定正 = 充, 负 = 放), 一段窗口时取均值。
+#[derive(Debug, Clone, Copy)]
+pub struct SupplyObs<'a> {
+    pub status: &'a str,
+    pub battery_ua: Option<f64>,
+    /// USB 轨 |V x I| 均值 (W); 没采 USB 轨时 None
+    pub usb_w: Option<f64>,
+    /// 这一轮用 root 停了充电
+    pub charge_suspended: bool,
+    /// 停充脚本判成了 USB 供电的旁路 (charge_suspend.sh 状态文件第三行 bypass)
+    pub bypass_mode: bool,
+}
+
+/// 「电池确实在放电」: status 不是 Charging, 不是满电空闲, 且电流为负。
+/// 与 [`BatteryState::on_battery`] 同一判据 (它就调这个)。
+pub fn battery_discharging(status: &str, current_ua: f64) -> bool {
+    if status.eq_ignore_ascii_case("Charging") {
+        return false;
+    }
+    if status.eq_ignore_ascii_case("Full") && current_ua.abs() < crate::sysparam::BYPASS_IDLE_UA {
+        return false;
+    }
+    current_ua < 0.0
+}
+
+/// 唯一的供电判定。`sysparam::env_stats` (eval / autoloop / selftest 的 sample_env 通路) 与
+/// 本模块的单轨通路 (gpu-op / perf) 都走这里。
+///
+/// 规则 (按顺序):
+/// 1. 电池在充 (> BYPASS_IDLE_UA): `NotDischarging`。
+/// 2. 停充脚本记了旁路: 电池在放 (< −门限) 是 `Mixed`, 否则 `Bypass`。**不看 status** ——
+///    满电停充时 status 在 Full / Charging / Discharging 间跳, 2026-10-12 Megacity 目标运行
+///    4 代里 3 代同一轮内一部分臂电池放电、一部分臂 USB 直供; 两者按同一口径
+///    (两轨同刻相加) 算, 才不会把整组功耗作废。
+/// 3. 电池在放电: USB 也在出力就是 `Mixed`, 否则 `Battery`。
+/// 4. 已停充、电池在放但 status 仍写 Charging (USB 限流约 0.49 A 时实测如此): `Mixed`。
+/// 5. 已停充、电池不进不出、USB 在出力: `Bypass` (没有旁路标记的停充路径)。
+/// 6. 满电空闲没停充: `FullIdle`。其余 `NotDischarging`。
+pub fn classify_supply(o: &SupplyObs) -> SupplyMode {
+    let thr = crate::sysparam::BYPASS_IDLE_UA;
+    let Some(c) = o.battery_ua else {
+        return SupplyMode::Unknown;
+    };
+    let usb_on = o.usb_w.is_some_and(|w| w >= USB_IDLE_W);
+    if c > thr {
+        return SupplyMode::NotDischarging;
+    }
+    if o.charge_suspended && o.bypass_mode {
+        return if c < -thr { SupplyMode::Mixed } else { SupplyMode::Bypass };
+    }
+    if battery_discharging(o.status, c) {
+        return if usb_on { SupplyMode::Mixed } else { SupplyMode::Battery };
+    }
+    if o.charge_suspended && c < -thr {
+        return SupplyMode::Mixed;
+    }
+    if o.charge_suspended && c.abs() < thr && usb_on {
+        return SupplyMode::Bypass;
+    }
+    if o.status.eq_ignore_ascii_case("Full") && c.abs() < thr {
+        return SupplyMode::FullIdle;
+    }
+    SupplyMode::NotDischarging
+}
+
+// ══════════════ USB 输入上限 (开跑前检查) ══════════════
+
+/// 开跑前判「USB 够不够供整机」的默认需求 (W)。手游满载整机约 3–8 W;
+/// 停充后 USB 被限到约 0.49 A (≈ 2.4 W) 时重负载必然要电池补。
+pub const USB_SUPPLY_NEED_W: f64 = 6.0;
+
+/// 读 USB 输入上限: `USBLIM <input_current_limit|NA> <current_max|NA> <voltage_now|NA>`。
+pub fn usb_supply_cmd() -> String {
+    let u = "/sys/class/power_supply/usb";
+    format!(
+        "su -c 'echo USBLIM $(cat {u}/input_current_limit 2>/dev/null || echo NA) \
+$(cat {u}/current_max 2>/dev/null || echo NA) \
+$(cat {u}/voltage_now 2>/dev/null || echo NA)'"
+    )
+}
+
+/// USB 输入上限检查的结果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsbSupplyCheck {
+    /// 输入电流上限 (μA): 先取 input_current_limit, 没有再取 current_max
+    pub limit_ua: Option<i64>,
+    pub volt_uv: Option<i64>,
+    /// 上限 x 电压 (W)
+    pub max_w: Option<f64>,
+    /// 明确判出供电不足
+    pub short: bool,
+    pub note: String,
+}
+
+/// 解析 [`usb_supply_cmd`] 的输出并判够不够 `need_w`。读不到上限时不判 (short=false), 说明里写清。
+pub fn usb_supply_check(text: &str, need_w: f64) -> UsbSupplyCheck {
+    let line = text.lines().find(|l| l.trim_start().starts_with("USBLIM")).unwrap_or("");
+    let c: Vec<&str> = line.split_whitespace().collect();
+    let num = |i: usize| c.get(i).and_then(|v| v.parse::<i64>().ok()).filter(|v| *v > 0);
+    let limit_ua = num(1).or(num(2));
+    let volt_uv = num(3);
+    let max_w = match (limit_ua, volt_uv) {
+        (Some(i), Some(v)) => Some(i as f64 / 1e6 * v as f64 / 1e6),
+        _ => None,
+    };
+    let (short, note) = match max_w {
+        Some(w) if w < need_w => (
+            true,
+            format!(
+                "供电不足: USB 输入上限 {:.2} A x {:.2} V ≈ {w:.2} W, 低于 {need_w:.1} W。负载大时电池会补电, \
+功耗按 USB 与电池两轨同刻相加计 (混合口径, 不能跨任务比)",
+                limit_ua.unwrap_or(0) as f64 / 1e6,
+                volt_uv.unwrap_or(0) as f64 / 1e6
+            ),
+        ),
+        Some(w) => (false, format!("USB 输入上限约 {w:.2} W, 不低于 {need_w:.1} W")),
+        None => (false, "读不到 USB 输入上限 (input_current_limit/current_max/voltage_now), 没法开跑前判供电够不够".into()),
+    };
+    UsbSupplyCheck { limit_ua, volt_uv, max_w, short, note }
+}
+
+pub fn read_usb_supply(phone: &crate::device::Device, need_w: f64) -> UsbSupplyCheck {
+    usb_supply_check(&phone.shell(&usb_supply_cmd(), 8_000), need_w)
 }
 
 // ══════════════ 电池状态与停充 ══════════════
@@ -552,20 +794,14 @@ impl BatteryState {
     /// `Not charging` 而不是 `Discharging`; 而 `current_now` 在充放平衡的瞬间会过零。
     /// 只有「没在充电」且「电流确实是放电方向」才算数。
     pub fn on_battery(&self) -> bool {
-        // 状态未知/缺失不能证明在放电, 即便电流为负。
+        // 状态未知/缺失不能证明在放电, 即便电流为负 (main 侧收紧)。
         let status = self.status.trim().to_ascii_lowercase();
-        if status == "charging" {
+        if !matches!(status.as_str(), "discharging" | "not charging" | "full") {
             return false;
         }
-        // 满电空闲: 电池不进不出, 整机由 USB 供电 —— 不是放电态 (与 charge_suspend.sh /
-        // sysparam::env_stats 同一判据, 门限 sysparam::BYPASS_IDLE_UA)
-        if status == "full"
-            && matches!(self.current_ua, Some(c) if (c.abs() as f64) < crate::sysparam::BYPASS_IDLE_UA)
-        {
-            return false;
-        }
-        matches!(status.as_str(), "discharging" | "not charging" | "full")
-            && matches!(self.current_ua, Some(c) if c < 0)
+        // 满电空闲 (电池不进不出, 整机由 USB 供电) 不是放电态 —— 与 charge_suspend.sh /
+        // sysparam::env_stats 同一判据 ([`battery_discharging`])
+        self.current_ua.is_some_and(|c| battery_discharging(&status, c as f64))
     }
 
     /// 人能读的一句话, 进 `unavailable` 的原因里。
@@ -676,6 +912,51 @@ pub struct ChargeSuspend {
     saved: String,
     state_path: std::path::PathBuf,
     restored: bool,
+    /// 停充后的供电方式: `Battery` (电池放电)、`Bypass` (USB 直供, 电池不进不出) 或
+    /// `Mixed` (USB 供电不足, 电池同时在放电; 审查 R1 #2)
+    mode: SupplyMode,
+}
+
+/// 旁路判定最多等多久 (毫秒)。电量计读数是平滑过的, 2026-10-11 实测停充后约 45 s
+/// 电池电流才落到 ~0; 与 charge_suspend.sh 的 BYPASS_MAX_S 一致。
+pub const BYPASS_MAX_MS: u64 = 90_000;
+
+/// 写停充节点后, 这一串电池电流读数能不能判成「旁路成立」(与 charge_suspend.sh 的
+/// `bypass_wait` 同一判据): 写之前在充 (> 门限) 时, 第一次读数要比写之前降三成以上
+/// (节点确实起作用); 写之前在放电 (< −门限) 不是旁路的样子; 然后某一刻 |I| < 门限。
+pub fn bypass_settled(pre_ua: Option<i64>, after_ua: &[i64]) -> bool {
+    let thr = crate::sysparam::BYPASS_IDLE_UA;
+    let Some(first) = after_ua.first() else { return false };
+    if let Some(pre) = pre_ua {
+        if (pre.abs() as f64) > thr {
+            if pre < 0 || first * 10 > pre * 7 {
+                return false;
+            }
+        }
+    }
+    after_ua.iter().any(|c| (c.abs() as f64) < thr)
+}
+
+/// 审查 R1 #2: 混合供电现场 (USB 供电不足, status 仍写 Charging, 电池却在放电; fix-D 单测锁定的
+/// 就是 Charging、−0.6 A) 的停充成功判据, 与 charge_suspend.sh 的 `mixed_one` 同一判据:
+/// 写后电池电流 < −BYPASS_IDLE_UA (确实在放电), 且比写前降了至少 |写前| 的三成 (节点确实起作用;
+/// 写前 ≈ 0 时只要在放电就算)。`on_battery` (status 不是 Charging) 与 `bypass_settled` (|I| → 0)
+/// 在这种现场都判不过, 以前会换候选再来、最后 CHARGE_FAIL。
+pub fn mixed_settled(pre_ua: Option<i64>, after_ua: i64) -> bool {
+    let thr = crate::sysparam::BYPASS_IDLE_UA;
+    if (after_ua as f64) >= -thr {
+        return false;
+    }
+    let Some(pre) = pre_ua else { return false };
+    ((pre - after_ua) as f64) * 10.0 >= (pre.abs() as f64) * 3.0
+}
+
+/// 混合判据要连续几次读数都成立 (电量计读数会抖)。与 charge_suspend.sh 的 MIXED_TRIES 一致。
+pub const MIXED_TRIES: usize = 3;
+
+/// 这一串写后读数的末尾是否连续 [`MIXED_TRIES`] 次满足 [`mixed_settled`]。
+pub fn mixed_streak(pre_ua: Option<i64>, after_ua: &[i64]) -> bool {
+    after_ua.len() >= MIXED_TRIES && after_ua.iter().rev().take(MIXED_TRIES).all(|c| mixed_settled(pre_ua, *c))
 }
 
 /// 状态文件的格式: 第一行节点路径, 第二行原值。两行都在才算一份有效的遗留状态。
@@ -777,11 +1058,61 @@ impl ChargeSuspend {
                     saved,
                     state_path: state_path.to_path_buf(),
                     restored: false,
+                    mode: SupplyMode::Battery,
+                });
+            }
+            // 没转成放电态, 再看是不是旁路 (满电机器停充后 USB 直供、电池不进不出 ——
+            // 审计 #15: 以前这里只认放电态, 满电时 gpu-op --suspend-charging 必以退出码 2 退出)
+            let mut seen: Vec<i64> = Vec::new();
+            let polls = ((BYPASS_MAX_MS - SUSPEND_SETTLE_MS) / 1_000).max(1);
+            for i in 0..polls {
+                if let Some(c) = read_battery_state(phone).current_ua {
+                    seen.push(c);
+                    if bypass_settled(bat.current_ua, &seen) {
+                        break;
+                    }
+                    // 混合供电 (审查 R1 #2): 连续几次读数都在放电且比写前降了三成, 不用等到 |I| → 0
+                    if mixed_streak(bat.current_ua, &seen) {
+                        break;
+                    }
+                    // 第一次读数就没降三成: 节点没起作用, 不用再等
+                    if i == 0 && !bypass_settled(bat.current_ua, &[c, 0]) && !mixed_settled(bat.current_ua, c) {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1_000));
+            }
+            if mixed_streak(bat.current_ua, &seen) && !bypass_settled(bat.current_ua, &seen) {
+                progress(
+                    "charge",
+                    &format!("已停充 (混合供电: USB 供电不足, 电池同时在放电): {} {saved} → {want}", node.path),
+                );
+                return Ok(ChargeSuspend {
+                    path: node.path.to_string(),
+                    saved,
+                    state_path: state_path.to_path_buf(),
+                    restored: false,
+                    mode: SupplyMode::Mixed,
+                });
+            }
+            if bypass_settled(bat.current_ua, &seen) {
+                progress(
+                    "charge",
+                    &format!("已停充 (旁路: USB 直供, 电池不进不出): {} {saved} → {want}", node.path),
+                );
+                return Ok(ChargeSuspend {
+                    path: node.path.to_string(),
+                    saved,
+                    state_path: state_path.to_path_buf(),
+                    restored: false,
+                    mode: SupplyMode::Bypass,
                 });
             }
             // 没生效: 就地还原, 试下一个
             let mut candidate = ChargeSuspend {
                 path: node.path.into(), saved, state_path: state_path.into(), restored: false,
+                // 只用于就地回滚, 供电方式无意义
+                mode: SupplyMode::Battery,
             };
             before_rollback()?;
             if !candidate.restore_checked(phone)? {
@@ -800,6 +1131,11 @@ impl ChargeSuspend {
     /// 改的是哪个节点 (进报告, 让「这轮到底动过什么」可回溯)。
     pub fn node(&self) -> &str {
         &self.path
+    }
+
+    /// 停充后的供电方式 (`Battery` 或 `Bypass`)。
+    pub fn mode(&self) -> SupplyMode {
+        self.mode
     }
 
     /// 恢复充电并清掉状态文件; 返回是否确认恢复。
@@ -830,7 +1166,9 @@ impl ChargeSuspend {
             None if restoration_started=>{},
             _=>return Err("charging record differs from the current parent binding".into()),
         }
-        Ok(Self{path:path.into(),saved:saved.into(),state_path:state_path.into(),restored:false})
+        // Recovery reconstructs only the restore obligation; the supply mode observed
+        // when charging was suspended is not part of the bound record.
+        Ok(Self{path:path.into(),saved:saved.into(),state_path:state_path.into(),restored:false,mode:SupplyMode::Battery})
     }
 
 }
@@ -1165,7 +1503,7 @@ mod tests {
         // 2026-09-23 实测: 插着 USB 时电池轨 0.213 W / USB 轨 7.20 W, 两个都落在
         // 0.05..30 W 窗口里 —— 区间一个都拦不住, 只有电池状态拦得住。
         let s = PowerSample { volt_uv: 4_207_000, curr_ua: -66_000, power_uw: None };
-        assert!((POWER_MIN_W..=POWER_MAX_W).contains(&s.watt()), "这个量级本来就合理");
+        assert!((POWER_MIN_W..=POWER_MAX_W).contains(&s.watt().unwrap()), "这个量级本来就合理");
         // 不带电池状态: 照常放行 (旧行为)
         assert!(power_usable(PowerRail::Battery, &[s]).is_ok());
         // 带上充电态: 作废
@@ -1276,12 +1614,11 @@ mod tests {
         // 这个节点在这台机器上给的根本不是 μW。加上界之前, 它会当成一次正常实测报上去。
         let s = PowerSample { volt_uv: 4_208_000, curr_ua: -44_000, power_uw: Some(992_195_296) };
         // 改了口径之后, 同一条采样算出的是 V x I 的 0.185 W, 而不再是 992 W
-        assert!((s.watt() - 0.185_152).abs() < 1e-6, "实得 {}", s.watt());
-        // 万一哪天 V x I 也算不出来, 退回 power_now 时上界必须仍然拦得住它
+        assert!((s.watt().unwrap() - 0.185_152).abs() < 1e-6, "实得 {:?}", s.watt());
+        // V x I 算不出来时不退回 power_now (审计 #15): 不给数, 整窗判「量不了」
         let only_pn = PowerSample { volt_uv: 0, curr_ua: 0, power_uw: Some(992_195_296) };
-        assert!(only_pn.watt() > 900.0);
-        let e = power_usable(PowerRail::Battery, &[only_pn]).unwrap_err();
-        assert!(e.contains("可信区间"), "{e}");
+        assert_eq!(only_pn.watt(), None);
+        assert!(power_usable(PowerRail::Battery, &[only_pn]).is_err());
     }
 
     #[test]
@@ -1537,17 +1874,18 @@ mod tests {
         };
         // 口径 2026-09-23 反转过: 能算 V x I 就算 V x I, 不信 power_now。
         // 原因见 watt() 的注释 —— 本机 power_now 给的不是 μW, 会算出几百瓦。
-        assert!((s.watt() - 4.4).abs() < 1e-9, "实得 {}", s.watt());
+        assert!((s.watt().unwrap() - 4.4).abs() < 1e-9, "实得 {:?}", s.watt());
     }
 
     #[test]
-    fn power_now_is_only_a_fallback_when_v_or_i_is_missing() {
-        // 电流读不到 (节点缺失/恒 0) 时才退回 power_now
-        let s = PowerSample { volt_uv: 4_400_000, curr_ua: 0, power_uw: Some(3_900_000) };
-        assert!((s.watt() - 3.9).abs() < 1e-9);
-        // 三样都没有就是 0 —— 调用方靠 power_usable 把它判成「量不了」, 不会当成实测
+    fn power_now_is_never_used_when_v_or_i_is_missing() {
+        // 审计 #15: 电流为 0 时不再退回 power_now —— 本机实测读到过 537393296 和 −61082000
+        let s = PowerSample { volt_uv: 4_400_000, curr_ua: 0, power_uw: Some(537_393_296) };
+        assert_eq!(s.watt(), None);
+        let s = PowerSample { volt_uv: 4_400_000, curr_ua: 0, power_uw: Some(-61_082_000) };
+        assert_eq!(s.watt(), None);
         let none = PowerSample { volt_uv: 0, curr_ua: 0, power_uw: None };
-        assert_eq!(none.watt(), 0.0);
+        assert_eq!(none.watt(), None);
         assert!(power_usable(PowerRail::Battery, &[none]).is_err());
     }
 
@@ -1558,7 +1896,7 @@ mod tests {
             curr_ua: 144_000,
             power_uw: None,
         };
-        assert!((s.watt() - 5.127 * 0.144).abs() < 1e-6);
+        assert!((s.watt().unwrap() - 5.127 * 0.144).abs() < 1e-6);
     }
 
     /// 放电电流在不同内核上有正有负, 功率取大小。
@@ -1566,8 +1904,8 @@ mod tests {
     fn power_is_sign_agnostic() {
         let pos = PowerSample { volt_uv: 4_000_000, curr_ua: 500_000, power_uw: None };
         let neg = PowerSample { volt_uv: 4_000_000, curr_ua: -500_000, power_uw: None };
-        assert!((pos.watt() - neg.watt()).abs() < 1e-12);
-        assert!((pos.watt() - 2.0).abs() < 1e-9);
+        assert!((pos.watt().unwrap() - neg.watt().unwrap()).abs() < 1e-12);
+        assert!((pos.watt().unwrap() - 2.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1618,5 +1956,128 @@ mod tests {
         assert!(power_sample_cmd(PowerRail::Usb).contains("power_supply/usb/voltage_now"));
         assert!(power_sample_cmd(PowerRail::Battery).contains("power_supply/battery/power_now"));
         assert!(power_sample_cmd(PowerRail::Usb).starts_with("su -c '"));
+    }
+
+    // ---------- 供电判定 (审计 #5 / #15) ----------
+
+    fn obs(status: &str, ua: f64, usb_w: Option<f64>, susp: bool, bypass: bool) -> SupplyMode {
+        classify_supply(&SupplyObs { status, battery_ua: Some(ua), usb_w, charge_suspended: susp, bypass_mode: bypass })
+    }
+
+    #[test]
+    fn supply_classification_matches_the_measured_cases() {
+        // 放电、USB 不出力: 电池轨
+        assert_eq!(obs("Discharging", -900_000.0, Some(0.0), false, false), SupplyMode::Battery);
+        // 放电、USB 也在出力: 混合
+        assert_eq!(obs("Not charging", -1_500_000.0, Some(0.5), true, false), SupplyMode::Mixed);
+        // 2026-10-21 selftest: 停充后 USB 被限到约 0.49 A, status 仍写 Charging, 电池在放
+        assert_eq!(obs("Charging", -600_000.0, Some(2.4), true, false), SupplyMode::Mixed);
+        // 没停充时同样的读数不认 (充电器随时会变)
+        assert_eq!(obs("Charging", -600_000.0, Some(2.4), false, false), SupplyMode::NotDischarging);
+        // 满电停充旁路, 电池 ≈ 0
+        assert_eq!(obs("Full", -2_000.0, Some(4.0), true, true), SupplyMode::Bypass);
+        // 2026-10-12 Megacity: 同一轮里旁路模式下有臂 USB 掉成 0、电池放 0.64 A —— 仍是同一口径
+        let flipped = obs("Full", -640_000.0, Some(0.0), true, true);
+        assert_eq!(flipped, SupplyMode::Mixed);
+        assert_eq!(flipped.rail(), SupplyMode::Bypass.rail());
+        // 没有旁路标记的停充 (hwcond 单轨通路): 电池 ≈ 0 且 USB 在出力
+        assert_eq!(obs("Charging", 10_000.0, Some(1.0), true, false), SupplyMode::Bypass);
+        // 满电空闲没停充
+        assert_eq!(obs("Full", -3_000.0, Some(4.0), false, false), SupplyMode::FullIdle);
+        // 在充
+        assert_eq!(obs("Charging", 771_000.0, Some(7.2), true, true), SupplyMode::NotDischarging);
+        assert_eq!(
+            classify_supply(&SupplyObs { status: "Charging", battery_ua: None, usb_w: None, charge_suspended: true, bypass_mode: true }),
+            SupplyMode::Unknown
+        );
+        assert!(!SupplyMode::FullIdle.measurable() && SupplyMode::Mixed.measurable());
+    }
+
+    #[test]
+    fn single_rail_path_accepts_bypass_and_refuses_mixed_with_a_reason() {
+        let usb = vec![PowerSample { volt_uv: 5_000_000, curr_ua: 800_000, power_uw: None }; 5];
+        // 停充后旁路: USB 轨就是整机
+        assert!(power_usable_supply(PowerRail::Usb, &usb, Some(&bat("Charging", 10_000, 100)), true).is_ok());
+        // 没停充: 同样的读数不认
+        assert!(power_usable_supply(PowerRail::Usb, &usb, Some(&bat("Charging", 10_000, 100)), false).is_err());
+        // 停充后电池在补: 单轨量不全, 明确说供电不足
+        let e = power_usable_supply(PowerRail::Usb, &usb, Some(&bat("Charging", -600_000, 100)), true).unwrap_err();
+        assert!(e.contains("供电不足"), "{e}");
+        // 电池不进不出时电池轨量不到整机 (单轨通路看不到 USB, 判不出旁路, 只能拒绝)
+        assert!(power_usable_supply(PowerRail::Battery, &usb, Some(&bat("Charging", 10_000, 100)), true).is_err());
+        // 放电态 + 电池轨照旧
+        let b = vec![PowerSample { volt_uv: 4_000_000, curr_ua: -900_000, power_uw: None }; 5];
+        assert!(power_usable_supply(PowerRail::Battery, &b, Some(&bat("Discharging", -900_000, 80)), false).is_ok());
+    }
+
+    #[test]
+    fn zero_current_samples_are_missing_not_garbage_watts() {
+        let ok = PowerSample { volt_uv: 4_000_000, curr_ua: -1_000_000, power_uw: Some(537_393_296) };
+        let zero = PowerSample { volt_uv: 4_000_000, curr_ua: 0, power_uw: Some(-61_082_000) };
+        // 20 条里 1 条电流为 0: 跳过它, 其余照常, 统计里没有 power_now 的怪数
+        let mut v = vec![ok; 19];
+        v.push(zero);
+        assert!(power_usable(PowerRail::Battery, &v).is_ok());
+        let (mean, _, min, max) = power_stats(&v).unwrap();
+        assert!((mean - 4.0).abs() < 1e-9 && (min - 4.0).abs() < 1e-9 && (max - 4.0).abs() < 1e-9);
+        // 超过一成缺测: 这段窗口不认
+        let mut v = vec![ok; 8];
+        v.extend([zero, zero]);
+        let e = power_usable(PowerRail::Battery, &v).unwrap_err();
+        assert!(e.contains("电压或电流为 0"), "{e}");
+        assert!(power_stats(&[zero]).is_none());
+    }
+
+    #[test]
+    fn bypass_needs_the_node_to_have_cut_the_charge_current() {
+        // 写之前 +1.93 A, 第一次读数 +0.2 A (降了九成), 后来落到 30 mA: 旁路成立
+        assert!(bypass_settled(Some(1_930_000), &[200_000, 90_000, 30_000]));
+        // 没降三成: 节点没起作用
+        assert!(!bypass_settled(Some(1_930_000), &[1_800_000, 20_000]));
+        // 写之前在放电: 不是旁路的样子
+        assert!(!bypass_settled(Some(-600_000), &[10_000]));
+        // 满电空闲 (写之前就 ≈0): 只要 |I| < 门限
+        assert!(bypass_settled(Some(-3_000), &[-2_000]));
+        // 一直没落到门限以下
+        assert!(!bypass_settled(Some(1_000_000), &[600_000, 400_000, 200_000]));
+        assert!(!bypass_settled(Some(1_000_000), &[]));
+    }
+
+    /// 审查 R1 #2: 混合供电现场 (Charging、−0.6 A) 的停充判据, 与 charge_suspend.sh 的 mixed_one 一致。
+    #[test]
+    fn mixed_supply_counts_as_suspended_when_battery_discharges_after_the_write() {
+        // 写前 +1.93 A 在充, 写后 −0.6 A 在放电: 降了远超三成
+        assert!(mixed_settled(Some(1_930_000), -600_000));
+        // 写后只是接近 0 (旁路的样子), 不是混合
+        assert!(!mixed_settled(Some(1_930_000), -20_000));
+        // 写后仍在充
+        assert!(!mixed_settled(Some(1_930_000), 1_500_000));
+        // 写前就在放电 −0.6 A: 要再降三成才算节点起了作用 (−0.9 A 算, −0.7 A 不算)
+        assert!(mixed_settled(Some(-600_000), -900_000));
+        assert!(!mixed_settled(Some(-600_000), -700_000));
+        // 写前 ≈ 0: 只要在放电
+        assert!(mixed_settled(Some(0), -100_000));
+        // 写前读不到: 判不了
+        assert!(!mixed_settled(None, -600_000));
+        // 要连续 MIXED_TRIES 次; 这两串都不是旁路
+        assert!(mixed_streak(Some(1_930_000), &[1_800_000, -500_000, -600_000, -620_000]));
+        assert!(!mixed_streak(Some(1_930_000), &[-600_000, -620_000]));
+        assert!(!mixed_streak(Some(1_930_000), &[-600_000, 100_000, -620_000, -600_000]));
+        assert!(!bypass_settled(Some(1_930_000), &[-500_000, -600_000, -620_000]));
+    }
+
+    #[test]
+    fn usb_limit_check_reports_supply_short_explicitly() {
+        let c = usb_supply_check("USBLIM 490000 NA 5000000\n", USB_SUPPLY_NEED_W);
+        assert_eq!(c.limit_ua, Some(490_000));
+        assert!((c.max_w.unwrap() - 2.45).abs() < 1e-9);
+        assert!(c.short && c.note.starts_with("供电不足"), "{}", c.note);
+        // input_current_limit 读不到时退回 current_max
+        let c = usb_supply_check("USBLIM NA 3000000 9000000\n", USB_SUPPLY_NEED_W);
+        assert_eq!(c.limit_ua, Some(3_000_000));
+        assert!(!c.short);
+        // 读不到就不判, 但说清楚
+        let c = usb_supply_check("garbage", USB_SUPPLY_NEED_W);
+        assert!(!c.short && c.note.contains("读不到"));
     }
 }
