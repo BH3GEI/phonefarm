@@ -159,6 +159,26 @@ for pol_dir in "$CPU"/policy*; do
   curgov=$(cat "$pol_dir/scaling_governor" 2>/dev/null)
   othergov=$(cat "$pol_dir/scaling_available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curgov" | head -1)
   [ -n "$othergov" ] && effect_test "$k.scaling_governor" "$pol_dir/scaling_governor" "$othergov"
+  # walt 调速器的冲高规则与升降频速率 (只在当前 governor 是 walt、目录存在时探)。
+  # 这几项决定「负载多高就直接拉到多高频」, 不碰渲染, 画面天然不变; 红魔超大核 hispeed_load=90
+  # 比中核 (100) 冲得积极, 是省电的候选方向。试写值都取与当前不同的合法值。
+  wd="$pol_dir/walt"
+  if [ "$curgov" = walt ] && [ -d "$wd" ]; then
+    for t in hispeed_load hispeed_freq up_rate_limit_us down_rate_limit_us; do
+      [ -e "$wd/$t" ] || continue
+      printf '%s.walt.%s.cur=%s\n' "$k" "$t" "$(cat "$wd/$t" 2>/dev/null)"
+      writable_test "$k.walt.$t" "$wd/$t"
+    done
+    hl=$(cat "$wd/hispeed_load" 2>/dev/null)
+    case "$hl" in ''|*[!0-9]*) ;; *) [ "$hl" -ge 100 ] && hl2=95 || hl2=$((hl + 5)); effect_test "$k.walt.hispeed_load" "$wd/hispeed_load" "$hl2" ;; esac
+    hf=$(cat "$wd/hispeed_freq" 2>/dev/null)
+    hf2=$(echo "$avail" | awk -v cur="$hf" '$1!=cur' | head -1)
+    [ -n "$hf" ] && [ -n "$hf2" ] && effect_test "$k.walt.hispeed_freq" "$wd/hispeed_freq" "$hf2"
+    for t in up_rate_limit_us down_rate_limit_us; do
+      v=$(cat "$wd/$t" 2>/dev/null)
+      case "$v" in ''|*[!0-9]*) ;; *) effect_test "$k.walt.$t" "$wd/$t" "$((v + 500))" ;; esac
+    done
+  fi
 done
 
 # ════ GPU (kgsl) ════

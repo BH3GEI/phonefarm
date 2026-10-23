@@ -21,34 +21,40 @@ import sys
 from pathlib import Path
 
 REPRO_SH = r'''#!/bin/sh
-# 一条命令复现: sh repro.sh <serial> [phonefarm 二进制]
-# 前提: 手机已 root、游戏已装好并能进大世界; 主机上有 phonefarm 仓库 (PF_REPO_ROOT 指过去)。
+# 一条命令复现: sh repro.sh <serial> [phonefarm 仓库根]
+# 前提: 手机已 root、游戏已装好; 测功耗要纯电池供电 (拔线用无线 adb, 或厂商停充可靠的机器)。
+# 仓库根缺省取 PF_REPO_ROOT; 二进制取 PF_BIN, 缺省 <仓库根>/src/target/release/phonefarm。
 set -eu
-SERIAL="${1:?用法: sh repro.sh <serial> [phonefarm 二进制]}"
-PF="${2:-${PF_BIN:-phonefarm}}"
+SERIAL="${1:?用法: sh repro.sh <serial> [phonefarm 仓库根]}"
+ROOT="${2:-${PF_REPO_ROOT:?给第二个参数或设 PF_REPO_ROOT}}"
+PF="${PF_BIN:-$ROOT/src/target/release/phonefarm}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT="$HERE/rerun_$(date +%Y%m%d-%H%M%S)"
-mkdir "$OUT"
-python3 - "$HERE/request.json" "$SERIAL" "$OUT/request.json" <<'PY'
+. "$HERE/driver.env"
+export PF_BIN="$PF" PHONEFARM_BIN="$PF" PF_REPO_ROOT="$ROOT"
+cd "$ROOT"
+if [ "$DRIVER" = o2_sweep ]; then
+  # 与原会话同一驱动: 设帧率档、进大世界、温控闸门、每臂核对放电、结束还原都由它做
+  tools/devlock run repro -- python3 -I loop_v1/o2_dvfs/o2_sweep.py confirm --serial "$SERIAL" \
+      --cap "$CAP" --rounds "$ROUNDS" --seconds "$ARM_SECONDS" --cand "$CAND" --out "$OUT"
+  NEW=$(ls "$OUT"/reports/conf*_1.json)
+else
+  mkdir "$OUT"
+  python3 - "$HERE/request.json" "$SERIAL" "$OUT/request.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1])); r["serial"] = sys.argv[2]
-r.get("protocol", {}).pop("order_seed", None)   # 新的随机轮序, 不复用原来的
+r.get("protocol", {}).pop("order_seed", None)   # 新的随机轮序
 json.dump(r, open(sys.argv[3], "w"), ensure_ascii=False, indent=1)
 PY
-STAGE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["protocol"].get("stage","full"))' "$OUT/request.json")
-EXTRA=""; [ "$STAGE" = full ] && EXTRA="--no-curtail"
-LOCK="${PF_REPO_ROOT:-.}/tools/devlock"
-if [ -x "$LOCK" ] && [ -z "${DEVLOCK_LABEL:-}" ]; then
-  "$LOCK" run repro -- "$PF" eval --request "$OUT/request.json" --serial "$SERIAL" --out "$OUT/evid" $EXTRA > "$OUT/report.json"
-else
-  "$PF" eval --request "$OUT/request.json" --serial "$SERIAL" --out "$OUT/evid" $EXTRA > "$OUT/report.json"
+  tools/devlock run repro -- "$PF" eval --request "$OUT/request.json" --serial "$SERIAL" --out "$OUT/evid" --no-curtail > "$OUT/report.json"
+  NEW="$OUT/report.json"
 fi
-python3 "$HERE/compare.py" "$HERE/report.json" "$OUT/report.json"
+python3 "$HERE/compare.py" "$HERE/report.json" "$NEW"
 '''
 
 COMPARE_PY = r'''import json, sys
 def view(p):
-    r = json.load(open(p)); v = r.get("verdict") or {}; m = r.get("metrics") or {}
+    t = open(p).read(); r = json.loads(t[t.index("{"):]); v = r.get("verdict") or {}; m = r.get("metrics") or {}
     return {"status": r.get("status"), "pareto": v.get("is_pareto_improvement"), "p": v.get("p_value"),
             "power_w": m.get("power_watt"), "fps_mean": m.get("fps_mean"), "p95_ms": m.get("fps_p95_ms"),
             "eligible": (r.get("qualification") or {}).get("eligible"), "reason": v.get("reason")}
@@ -103,6 +109,15 @@ def main():
     if wl is not None:
         (dest / "whitelist.json").write_text(json.dumps(wl, ensure_ascii=False, indent=1))
     (dest / "summary.txt").write_text(summary(cid, req, rep, q, evid.resolve()))
+    o2 = req.get("o2")
+    params = json.dumps((req.get("payload") or {}).get("params") or {}, ensure_ascii=False)
+    proto, wl_ = req.get("protocol") or {}, req.get("workload") or {}
+    if o2:
+        env = (f"DRIVER=o2_sweep\nCAP={o2.get('cap_fps')}\nROUNDS={proto.get('rounds')}\n"
+               f"ARM_SECONDS={wl_.get('seconds')}\nCAND='{params}'\n")
+    else:
+        env = "DRIVER=eval\n"
+    (dest / "driver.env").write_text(env)
     (dest / "repro.sh").write_text(REPRO_SH)
     (dest / "repro.sh").chmod(0o755)
     (dest / "compare.py").write_text(COMPARE_PY)

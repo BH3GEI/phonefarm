@@ -291,6 +291,25 @@ pub fn build_whitelist(probe: &ProbeMap) -> Whitelist {
                 Some(&gkey),
             );
         }
+        // walt 冲高规则与升降频速率 (探测脚本只在 governor=walt 时报)。取值是一组离散档, 当前值一定在内:
+        // hispeed_load 百分比、hispeed_freq 用本簇可用频点、rate_limit 微秒。
+        for (t, vals) in [
+            ("hispeed_load", (60..=100).step_by(5).map(|v: i64| v.to_string()).collect::<Vec<_>>()),
+            ("hispeed_freq", strs(&freqs)),
+            ("up_rate_limit_us", [0i64, 500, 1000, 2000, 5000, 10000].iter().map(|v| v.to_string()).collect()),
+            ("down_rate_limit_us", [0i64, 500, 1000, 2000, 5000, 10000].iter().map(|v| v.to_string()).collect()),
+        ] {
+            let key = format!("{k}.walt.{t}");
+            let cur = probe.s(&format!("{key}.cur")).to_string();
+            if cur.is_empty() || vals.is_empty() || !usable(probe, &key) {
+                continue;
+            }
+            let mut vals = vals;
+            if !vals.contains(&cur) {
+                vals.push(cur.clone());
+            }
+            b.add(&key, "sysfs", &format!("{base}/walt/{t}"), vals, &cur, None, Some(&key));
+        }
     }
 
     // ── GPU ──
@@ -1776,6 +1795,25 @@ thermal.cpu-1-0=42000
     }
 
     // ── 白名单 ──
+
+    #[test]
+    fn walt_tunables_get_in_only_when_writable_and_held() {
+        let wl = wl_of("cpu.policy0.walt.hispeed_load.cur=90
+cpu.policy0.walt.hispeed_load.writable=yes
+cpu.policy0.walt.hispeed_load.effect=live
+cpu.policy0.walt.hispeed_freq.cur=1000000
+cpu.policy0.walt.hispeed_freq.writable=yes
+cpu.policy0.walt.hispeed_freq.effect=contested(wrote=300000 1s=300000 lost=1000000)
+cpu.policy0.walt.up_rate_limit_us.cur=0
+cpu.policy0.walt.up_rate_limit_us.writable=no
+");
+        assert!(has(&wl, "cpu.policy0.walt.hispeed_load"));
+        let e = wl_get(&wl, "cpu.policy0.walt.hispeed_load").unwrap();
+        assert!(e.values.contains(&"100".to_string()) && e.values.contains(&"90".to_string()));
+        assert!(e.path.ends_with("/policy0/walt/hispeed_load") && e.current == "90");
+        assert!(!has(&wl, "cpu.policy0.walt.hispeed_freq"), "厂商抢回的不收");
+        assert!(!has(&wl, "cpu.policy0.walt.up_rate_limit_us"), "写不动的不收");
+    }
 
     #[test]
     fn only_writable_and_effective_nodes_get_in() {
