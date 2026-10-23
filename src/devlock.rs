@@ -6,12 +6,12 @@
 //!
 //! 流程 (`devlock run` 的进程内版本):
 //!
-//! 1. 先 `devlock renew <label>`: 成功 = 这把锁已经在 `<label>` 手里 (外层的
+//! 1. 先 `devlock renew <label>`: 成功 = 继承的实例身份与活的外层进程树已核验 (外层的
 //!    game_opt_loop optimize、外层的 `devlock run <label>`, 或调起我们的父 phonefarm)。
 //!    这时**原地执行**, 心跳归外层管, 收尾也不释放 —— 否则就是自己等自己。
-//! 2. 否则 `devlock acquire <label>`, 没轮到就每 45 秒重试 (重试不丢队位), 等到
+//! 2. 无继承实例时 `devlock acquire <label>`, 没轮到就每 45 秒重试 (重试不丢队位), 等到
 //!    `--lock-wait` 用完还没拿到就退出 2, **一个字节都不碰设备**。
-//! 3. 拿到之后把同一条命令作为子进程再跑一遍 (环境里带 `DEVLOCK_LABEL=<label>`, 子进程
+//! 3. 拿到之后把同一条命令作为子进程再跑一遍 (环境里带 `DEVLOCK_LABEL` 与 `DEVLOCK_INSTANCE_ID`, 子进程
 //!    走第 1 步原地执行), 父进程每 60 秒续一次心跳, 子进程退出就释放, 退出码原样透传。
 //!    子进程里任何一处 `process::exit` 或 panic 都不会漏掉释放 —— 释放在父进程里。
 //!
@@ -191,29 +191,32 @@ pub fn script_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-fn call(script: &PathBuf, args: &[&str]) -> (bool, String) {
+fn call(script: &PathBuf, args: &[&str], instance: Option<&str>) -> (Option<i32>, String) {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
-        Err(e) => return (false, format!("cannot select phonefarm storage resolver: {e}")),
+        Err(e) => return (None, format!("cannot select phonefarm storage resolver: {e}")),
     };
-    match Command::new(script).args(args).env("PHONEFARM_BIN", exe).output() {
+    let mut command = Command::new(script);
+    command.args(args).env("PHONEFARM_BIN", exe).env_remove("DEVLOCK_INSTANCE_ID");
+    if let Some(instance) = instance { command.env("DEVLOCK_INSTANCE_ID", instance); }
+    match command.output() {
         Ok(o) => (
-            o.status.success(),
-            format!(
+            o.status.code(),
+            if o.status.success() { String::from_utf8_lossy(&o.stdout).trim().to_string() } else { format!(
                 "{}{}",
                 String::from_utf8_lossy(&o.stdout),
                 String::from_utf8_lossy(&o.stderr)
             )
             .trim()
-            .to_string(),
+            .to_string() },
         ),
-        Err(e) => (false, format!("调不起 {}: {e}", script.display())),
+        Err(e) => (None, format!("调不起 {}: {e}", script.display())),
     }
 }
 
 /// 拿锁的结果。
 pub enum Gate {
-    /// 原地执行 (锁已在本 label 手里, 或显式 `--no-devlock`)。
+    /// 原地执行 (继承的外层实例已核验, 或显式 `--no-devlock`)。
     Proceed,
     /// 已经在子进程里跑完了, 带着它的退出码退出。
     Exit(i32),
@@ -249,22 +252,26 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
         );
         return Gate::Exit(2);
     };
-    // 1. 已经在自己这一侧手里: 原地跑, 心跳与释放归外层
-    if call(&script, &["renew", &label]).0 {
+    // An inherited instance must verify; a stale identity is not a new queue request.
+    if let Ok(instance) = std::env::var("DEVLOCK_INSTANCE_ID") {
+        let (code, out) = call(&script, &["renew", &label], Some(&instance));
+        if code != Some(0) {
+            eprintln!("inherited device lock identity rejected: {out}");
+            return Gate::Exit(2);
+        }
         std::env::set_var("DEVLOCK_LABEL", &label);
         return Gate::Proceed;
     }
-    // 2. 排队拿锁
-    if let Err(e) = acquire(&script, &label, opts.wait) {
-        eprintln!("{e}");
-        return Gate::Exit(2);
-    }
+    let instance = match acquire(&script, &label, opts.wait) {
+        Ok(instance) => instance,
+        Err(e) => { eprintln!("{e}"); return Gate::Exit(2); }
+    };
     // 3. 子进程里跑, 父进程心跳 + 释放
     let stop = Arc::new(AtomicBool::new(false));
-    let hb = heartbeat(script.clone(), label.clone(), stop.clone());
+    let hb = heartbeat(script.clone(), label.clone(), instance.clone(), stop.clone());
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm"));
     let mut command = Command::new(&exe);
-    command.args(args.iter()).env("DEVLOCK_LABEL", &label);
+    command.args(args.iter()).env("DEVLOCK_LABEL", &label).env("DEVLOCK_INSTANCE_ID", &instance);
     let code = if args.first().is_some_and(|a| a == "gray-layer")
         && args.get(1).is_some_and(|a| a == "session") {
         // The node cancels the entire command group. Keep this queue owner
@@ -280,11 +287,11 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
     };
     stop.store(true, Ordering::SeqCst);
     let _ = hb.join();
-    let (ok, out) = call(&script, &["release", &label]);
-    if !ok {
+    let (release_code, out) = call(&script, &["release", &label], Some(&instance));
+    if release_code != Some(0) {
         eprintln!("设备锁释放失败 ({label}): {out}");
     }
-    Gate::Exit(code)
+    Gate::Exit(if code == 0 && release_code != Some(0) { 2 } else { code })
 }
 
 static CONTROL_INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -330,15 +337,22 @@ fn wait_control_child(command: &mut Command) -> i32 {
 }
 
 /// 排队直到拿到, 或等满 `wait`。
-fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<(), String> {
+fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<String, String> {
     let t0 = Instant::now();
     loop {
         crate::lease_storage::resolve().require_ready()?;
-        let (ok, out) = call(script, &["acquire", label]);
-        if ok {
+        let (code, out) = call(script, &["acquire", label], None);
+        if code == Some(0) {
+            let owner: crate::queue_owner::QueueOwner = serde_json::from_str(&out)
+                .map_err(|_| "devlock returned no typed instance; upgrade the selected phonefarm/devlock together")?;
+            if owner.schema != "phonefarm/devlock-owner@1" || owner.label != label
+                || owner.holder_pid != std::process::id() || !crate::queue_owner::valid_instance(&owner.instance_id) {
+                return Err("devlock acquisition identity does not match this holder".into());
+            }
             eprintln!("设备锁: 已拿到 ({label})");
-            return Ok(());
+            return Ok(owner.instance_id);
         }
+        if code != Some(1) { return Err(format!("device queue unavailable ({code:?}): {out}")); }
         if t0.elapsed() + POLL > wait {
             return Err(format!(
                 "设备锁: 等了 {} 秒还没轮到 {label}, 没碰设备就退出 ({out})。\
@@ -357,7 +371,7 @@ fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<(), String> 
 
 /// 后台心跳。续期失败 (锁被当成废弃接管了) 只喊一次 —— 子进程已经在跑, 杀它会把
 /// 设备留在半施加态, 比让它收尾更糟。
-fn heartbeat(script: PathBuf, label: String, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+fn heartbeat(script: PathBuf, label: String, instance: String, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut warned = false;
         loop {
@@ -368,8 +382,8 @@ fn heartbeat(script: PathBuf, label: String, stop: Arc<AtomicBool>) -> std::thre
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
-            let (ok, out) = call(&script, &["renew", &label]);
-            if !ok && !warned {
+            let (code, out) = call(&script, &["renew", &label], Some(&instance));
+            if code != Some(0) && !warned {
                 eprintln!("⚠ 设备锁续期失败 ({label}): {out} —— 锁可能已被接管, 这一轮数据要存疑");
                 warned = true;
             }

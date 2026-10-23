@@ -13,6 +13,7 @@ pub struct Lease {
     _bridge: File,
     legacy: PathBuf,
     token: String,
+    outer_instance: Option<String>,
     stop: Option<mpsc::Sender<()>>,
     heartbeat: Option<JoinHandle<()>>,
     preserve_marker: bool,
@@ -65,33 +66,18 @@ pub(crate) fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .and_then(|d| d.sync_all())
         .map_err(|e| e.to_string())
 }
-/// 农场设备锁 (`tools/devlock`, 由 main 的 `devlock::gate` 在碰设备的子命令外层拿) 已被本进程树
-/// 持有时 (`DEVLOCK_LABEL=L` 且 devlock.d/owner 是 `L since ...`), 租约不能再去抢同一个 devlock.d
-/// (否则自己等自己), 改用旁边的 `phonefarm-lease.d` 放 owner/marker/恢复屏障; 外层锁照旧排斥别的参与者。
+/// The typed outer queue owner may be borrowed only by its current instance's
+/// process tree. A label is never an ownership credential.
 const NESTED_DIR: &str = "phonefarm-lease.d";
-fn outer_devlock_is_ours(legacy_root: &Path) -> bool {
-    let Some(label) = std::env::var("DEVLOCK_LABEL")
-        .ok()
-        .filter(|l| !l.trim().is_empty())
-    else {
-        return false;
-    };
-    fs::read_to_string(legacy_root.join("devlock.d").join("owner"))
-        .is_ok_and(|o| !o.contains("token=") && o.split_whitespace().next() == Some(label.trim()))
-}
-/// 本次租约用的目录: 外层农场锁归本进程树时用 [`NESTED_DIR`], 否则就是 devlock.d。
-fn lease_dir(legacy_root: &Path) -> PathBuf {
-    if outer_devlock_is_ours(legacy_root) {
-        legacy_root.join(NESTED_DIR)
-    } else {
-        legacy_root.join("devlock.d")
-    }
-}
-/// 恢复类入口: 哪个目录里有 phonefarm marker 就用哪个 (devlock.d 优先)。
 fn recovery_dir(legacy_root: &Path) -> PathBuf {
     let main = legacy_root.join("devlock.d");
-    if marker(&main).is_none() && marker(&legacy_root.join(NESTED_DIR)).is_some() {
-        legacy_root.join(NESTED_DIR)
+    let nested = legacy_root.join(NESTED_DIR);
+    let main_marker = marker(&main);
+    // Queue identity is not a strong recovery context. Malformed/foreign outer
+    // records remain barriers; do not silently route around them.
+    let outer_queue = crate::queue_owner::read(legacy_root).ok().flatten().is_some();
+    if (main_marker.is_none() || outer_queue) && marker(&nested).is_some() {
+        nested
     } else {
         main
     }
@@ -123,6 +109,7 @@ fn marker_state(m: &Value) -> Result<(bool, bool), String> {
         "previous_owner",
         "job_id",
         "lease_id",
+        "outer_instance_id",
     ];
     if let Some(key) = m
         .as_object()
@@ -142,6 +129,9 @@ fn marker_state(m: &Value) -> Result<(bool, bool), String> {
     };
     let pending = flag("command_pending")?;
     let recovery = flag("recovery_required")?;
+    if m.get("outer_instance_id").is_some_and(|id| !id.as_str().is_some_and(crate::queue_owner::valid_instance)) {
+        return Err("invalid outer queue instance reference".into());
+    }
     match (m.get("job_id"), m.get("lease_id")) {
         (None, None) => {}
         (Some(job), Some(lease))
@@ -247,16 +237,25 @@ impl Lease {
         let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
         // Legacy devlock is global. Same order for every participant, no ABBA deadlock.
         let bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
+        // Serialize the outer identity check and nested publication with outer
+        // release/replacement. This guard is never held during device work.
+        let mut queue_guard = if observation { None } else { Some(crate::queue_owner::lock(legacy_root)?) };
+        let outer = if observation { None } else { crate::queue_owner::inherited(legacy_root)? };
+        if outer.is_none() { drop(queue_guard.take()); }
         let legacy = if observation {
             observation_available(legacy_root)?;
             legacy_root.join("devlock.d")
-        } else { lease_dir(legacy_root) };
+        } else if outer.is_some() { legacy_root.join(NESTED_DIR) }
+        else { legacy_root.join("devlock.d") };
         // 另一个目录里残留的租约 (崩溃/恢复屏障) 同样阻断, 不因换了目录而被忽略
         for other in [legacy_root.join("devlock.d"), legacy_root.join(NESTED_DIR)] {
             if other == legacy {
                 continue;
             }
             if let Some(m) = marker(&other) {
+                if other == legacy_root.join("devlock.d") && outer.as_ref().is_some_and(|owner| {
+                    serde_json::to_value(owner).ok().as_ref() == Some(&m)
+                }) { continue; }
                 if !marker_state(&m).is_ok_and(|(pending, recovery)| !pending && !recovery) {
                     return Err(format!(
                         "lease barrier present in {}; reconcile/recover it first",
@@ -291,7 +290,7 @@ impl Lease {
                             }
                         }
                     }
-                    if Instant::now() >= deadline {
+                    if outer.is_some() || Instant::now() >= deadline {
                         return Err(format!("manual/legacy devlock busy: {}. Release the outer manual devlock; ownership cannot be inferred from its label", legacy.display()));
                     }
                     std::thread::sleep(Duration::from_millis(25));
@@ -313,6 +312,8 @@ impl Lease {
         );
         let mut info = json!({"format":1,"producer":"phonefarm","pid":std::process::id(),
                           "token":token,"serial":serial,"label":label,"owner":owner});
+        let outer_instance = outer.map(|owner| owner.instance_id);
+        if let Some(instance) = &outer_instance { info["outer_instance_id"] = json!(instance); }
         if let Some(r) = &receipt {
             r.bind_marker(&mut info)?;
         }
@@ -332,6 +333,7 @@ impl Lease {
         File::open(legacy_root)
             .and_then(|d| d.sync_all())
             .map_err(|e| e.to_string())?;
+        drop(queue_guard);
         let (tx, rx) = mpsc::channel();
         let hb_path = legacy.clone();
         let hb_token = token.clone();
@@ -351,6 +353,7 @@ impl Lease {
             _bridge: bridge,
             legacy,
             token,
+            outer_instance,
             stop: Some(tx),
             heartbeat: Some(heartbeat),
             preserve_marker: false,
@@ -384,7 +387,11 @@ impl Lease {
         if self.receipt_failed.load(Ordering::Relaxed) {
             return Err("job lease receipt publication failed; recovery remains unverified".into());
         }
-        marker_state(&marker(&self.legacy).ok_or("lease marker unavailable")?)?;
+        let current = marker(&self.legacy).ok_or("lease marker unavailable")?;
+        marker_state(&current)?;
+        if current["outer_instance_id"].as_str() != self.outer_instance.as_deref() {
+            return Err("lease outer instance reference changed".into());
+        }
         if !owns(&self.legacy, &self.token) {
             return Err("lease owner changed; experiment contaminated/unknown".into());
         }
@@ -710,6 +717,7 @@ impl Lease {
             _bridge: bridge,
             legacy,
             token,
+            outer_instance: next["outer_instance_id"].as_str().map(str::to_owned),
             stop: Some(tx),
             heartbeat: Some(heartbeat),
             preserve_marker: true,
@@ -822,6 +830,8 @@ impl Drop for Lease {
             Some("receipt_publication_failed")
         } else if marker_state(&m).is_err() {
             Some("marker_unknown")
+        } else if m["outer_instance_id"].as_str() != self.outer_instance.as_deref() {
+            Some("outer_reference_changed")
         } else if !owns(&self.legacy, &self.token) {
             Some("ownership_changed")
         } else if m["command_pending"] == true {
@@ -875,10 +885,34 @@ fn lease_status(legacy_root: &Path) -> Value {
     let bridge_held = bridge.as_ref().ok().copied();
     let mut errors = bridge.err().into_iter().collect::<Vec<_>>();
     let mut entries = Vec::new();
+    let queue_owner = crate::queue_owner::read(legacy_root);
     for directory in ["devlock.d", NESTED_DIR] {
         let path = legacy_root.join(directory);
         let mut entry = json!({"directory":directory,"serial":null,"label":null,"job_id":null,"lease_id":null,
+            "role":null,"instance_id":null,"outer_instance_id":null,"holder_verified":null,
             "state":"unknown","reason":null,"recovery_context":null});
+        if directory == "devlock.d" {
+            if let Ok(Some(owner)) = &queue_owner {
+                entry["role"] = json!("outer_queue");
+                entry["instance_id"] = json!(owner.instance_id);
+                entry["label"] = json!(owner.label);
+                entry["holder_pid"] = json!(owner.holder_pid);
+                match crate::queue_owner::check_live(owner) {
+                    Ok(()) => {
+                        entry["holder_verified"] = json!(true);
+                        entry["state"] = json!("active");
+                        entry["reason"] = json!("outer queue holder process instance is verified; not a device recovery receipt");
+                    }
+                    Err(error) => {
+                        entry["holder_verified"] = json!(false);
+                        entry["reason"] = json!(error);
+                        errors.push(format!("{directory}: {}", entry["reason"].as_str().unwrap()));
+                    }
+                }
+                entries.push(entry);
+                continue;
+            }
+        }
         let inspect = || -> Result<Option<(Value, bool, bool)>, String> {
             match fs::symlink_metadata(&path) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -903,6 +937,7 @@ fn lease_status(legacy_root: &Path) -> Value {
             Ok(None) => continue,
             Err(reason) => entry["reason"] = json!(reason),
             Ok(Some((m, pending, recovery))) => {
+                entry["role"] = json!("device_lease");
                 for key in ["serial", "label", "recovery_context", "job_id", "lease_id"] {
                     entry[key] = m[key].as_str().map_or(Value::Null, |s| json!(s));
                 }
@@ -918,6 +953,10 @@ fn lease_status(legacy_root: &Path) -> Value {
                     .filter(|n| *n > 0 && *n <= u32::MAX as u64);
                 let identity = m["serial"].as_str().is_some_and(|s| !s.trim().is_empty())
                     && m["token"].as_str().is_some_and(|token| owns(&path, token));
+                let outer_ref = m["outer_instance_id"].as_str();
+                entry["outer_instance_id"] = outer_ref.map_or(Value::Null, |id| json!(id));
+                let outer_matches = outer_ref.is_none_or(|id| queue_owner.as_ref().ok().and_then(|v| v.as_ref())
+                    .is_some_and(|owner| owner.instance_id == id));
                 let (state, reason) = if !identity || pid.is_none() {
                     ("unknown", "lease owner identity is missing or inconsistent")
                 } else if pending {
@@ -935,6 +974,8 @@ fn lease_status(legacy_root: &Path) -> Value {
                         "abandoned",
                         "owner exited; remote workload and restoration remain unverified",
                     )
+                } else if !outer_matches {
+                    ("unknown", "recorded outer instance is absent or does not match; strong owner may still finish restoration")
                 } else if bridge_held == Some(true)
                     && age.is_some_and(|a| a <= Duration::from_secs(10))
                 {
@@ -1365,6 +1406,7 @@ mod tests {
             ("child_pgid", json!(123)),
             ("recovery_required", json!(true)),
             ("owner", json!("replacement-owner")),
+            ("outer_instance_id", json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
         ] {
             let scratch = Scratch::new();
             let mut lease = scratch.lease();
@@ -1397,6 +1439,8 @@ mod tests {
     #[test]
     fn corrupt_marker_extensions_block_every_release_and_transfer() {
         let invalid = [
+            ("outer_instance_id", Value::Null),
+            ("outer_instance_id", json!("")),
             ("future_recovery_gate", json!(false)),
             ("format", json!(2)),
             ("command_pending", json!("true")),

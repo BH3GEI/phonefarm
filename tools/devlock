@@ -1,20 +1,15 @@
 #!/bin/zsh
-# 手机设备锁（原子 mkdir + 心跳 + 排队）。所有碰手机的命令都必须经过它。
-#   devlock status                 谁持有、谁在排队
-#   devlock acquire <label>        拿到返回0; 被占或没轮到返回1, 并自动排进队尾
-#   devlock renew   <label>        续期(持锁期间至少每5分钟一次)
-#   devlock release <label>
-#   devlock run <label> -- <cmd…>  拿锁→后台每60秒续期→跑命令→释放; 没拿到返回1
-#   devlock queue <l1> <l2> …      lead 预排队列(覆盖); 不带参数则清空
-# 队列非空时只有队首能拿锁。普通旧锁心跳超过 STALE 秒(默认600)可接管; 强 lease/恢复记录必须显式核查。
-# 文件格式与 phonefarm/src/fleet.rs 只读的三个文件一致: devlock.d/owner, devlock.queue, devlock.log。
-# run 会把 DEVLOCK_LABEL=<label> 传给命令: 里面再调 phonefarm / game_opt_loop 时它们认得这把锁是自己这一侧的,
-# 不会再去排一次队 (否则自己等自己)。phonefarm 与 game_opt_loop 碰设备的入口会自己拿锁, 一般不必再包 run。
+# devlock status | acquire LABEL | renew LABEL | release LABEL
+# devlock run LABEL -- command... | queue LABEL...
+# devlock reconcile INSTANCE --participants-stopped --confirm-device-idle
+# Existing ordered queue; identity and owner mutation belong to phonefarm.
+# Successful acquire prints only the typed owner JSON. Preserve its instance in
+# DEVLOCK_INSTANCE_ID (with DEVLOCK_LABEL) for renew/release and nested commands.
+PF=${PHONEFARM_BIN:-${0:A:h:h}/phonefarm}
 if (( ${+DEVLOCK_DIR} )); then
   B=$DEVLOCK_DIR
   [[ "$B" == /* ]] || { print -u2 'DEVLOCK_DIR must be an absolute path'; exit 2; }
 else
-  PF=${PHONEFARM_BIN:-${0:A:h:h}/phonefarm}
   lease_status=$("$PF" lease status --json) || { print -u2 'phonefarm lease storage unavailable'; exit 2; }
   B=$(print -r -- "$lease_status" | python3 -c '
 import json, os, sys
@@ -31,103 +26,95 @@ except (ValueError, KeyError, TypeError) as error:
     sys.exit(2)
 ') || exit 2
 fi
-# Observation must not initialize a new lock domain. Only mutations create it.
+# This read-only capability check also refuses malformed/legacy owners. Missing
+# or old phonefarm must never fall back to the former label/TTL authorization.
+queue_snapshot=$("$PF" __queue-owner check --root "$B") || { print -u2 'phonefarm queue identity unavailable'; exit 2; }
+print -r -- "$queue_snapshot" | python3 -c '
+import json, sys
+try:
+    if json.load(sys.stdin).get("schema") != "phonefarm/devlock-check@1":
+        raise ValueError("incompatible phonefarm queue identity protocol")
+except (ValueError, TypeError, AttributeError) as error:
+    print(error, file=sys.stderr)
+    sys.exit(2)
+' || exit 2
+# Observation does not initialize a lock domain.
 [[ "$1" == status ]] || mkdir -p -- "$B" || exit 2
 D=$B/devlock.d; LOG=$B/devlock.log; Q=$B/devlock.queue; SEEN=$B/devlock.seen; M=$B/devlock.qmutex
 N=$B/phonefarm-lease.d
 STALE=${DEVLOCK_STALE:-600}
 now(){ date +%s; }
 ts(){ date '+%F %T'; }
-age(){ echo $(( $(now) - $(stat -f %m "$D/owner") )); }
-owner(){ cat "$D/owner" 2>/dev/null; }
-mine(){ [[ "$(owner)" == "$1 "* ]]; }
-strong(){ [[ -e "$D/phonefarm-lease.json" || -L "$D/phonefarm-lease.json" || "$(owner)" == *token=* ]]; }
+valid_label(){ [[ -n "$1" && ${#1} -le 128 && "$1" != *[[:space:][:cntrl:]]* ]]; }
 nested(){ [[ -e "$N" || -L "$N" ]]; }
-barrier(){ strong || nested; }
-# Only renew the ordinary outer owner, never its nested marker. The live bridge
-# plus a matching lease owner in this process tree permits parent heartbeats and
-# nested commands; an unrelated caller cannot bypass recovery using the label.
-nested_renewable(){
-  python3 - "$N" "$B/phonefarm-bridge.lock" "$1" <<'PY'
-import fcntl, json, os, pathlib, subprocess, sys, time
-try:
-    directory, bridge, caller = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), int(sys.argv[3])
-    marker, owner = directory / "phonefarm-lease.json", directory / "owner"
-    if any(p.is_symlink() for p in (directory, marker, owner, bridge)):
-        sys.exit(1)
-    m = json.loads(marker.read_text())
-    pid = m["pid"]
-    if (type(m["format"]) is not int or m["format"] != 1 or m["producer"] != "phonefarm" or type(pid) is not int or pid <= 1
-            or not isinstance(m["token"], str) or not m["token"]
-            or m["owner"] != owner.read_text() or f'token={m["token"]}' not in m["owner"]
-            or not 0 <= time.time() - owner.stat().st_mtime <= 10):
-        sys.exit(1)
-    with bridge.open("rb") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            pass
-        else:
-            sys.exit(1)  # No current lease owns the bridge; a live PID alone is not enough.
-    def ancestor(parent, child):
-        for _ in range(128):
-            if child <= 1:
-                return False
-            if parent == child:
-                return True
-            child = int(subprocess.check_output(["ps", "-p", str(child), "-o", "ppid="], text=True))
-        return False
-    sys.exit(0 if ancestor(pid, caller) or ancestor(caller, pid) else 1)
-except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
-    sys.exit(1)
-PY
+# qmutex protects only the ordered queue. A lost mutex is not stolen on timeout.
+qlock(){
+  local i=0
+  until mkdir -- "$M" 2>/dev/null; do
+    (( ++i > 20 )) && { print -u2 'queue mutex unavailable; existing state preserved'; return 2; }
+    sleep 0.1
+  done
 }
-renew(){
-  mine "$1" || { echo "not owner: $(owner)"; return 1; }
-  strong && { echo "lease protected: legacy renew cannot renew a strong owner"; return 1; }
-  if nested && ! nested_renewable "$2"; then
-    echo "lease protected: nested owner is not verifiably active in this process tree"; return 1
+qunlock(){ rmdir -- "$M"; }
+qhead(){ [[ -s "$Q" ]] && grep -v '^[[:space:]]*$' "$Q" | head -1; }
+qhas(){ [[ -f "$Q" ]] && grep -Fqx -- "$1" "$Q"; }
+qappend(){ qhas "$1" || print -r -- "$1" >> "$Q"; }
+qdrop(){
+  if [[ -f "$Q" ]]; then
+    grep -Fvx -- "$1" "$Q" > "$Q.tmp"
+    mv -- "$Q.tmp" "$Q"
   fi
-  touch "$D/owner"
 }
-release(){
-  mine "$1" || { echo "not owner: $(owner)"; return 1; }
-  strong && { echo "lease protected: legacy release cannot clear a strong owner"; return 1; }
-  # Leave nested restoration records for native reconciliation. Never recursively
-  # delete this directory either: unexpected files are not ours to clean up.
-  rm "$D/owner" || return 1
-  rmdir "$D" || return 1
-  echo "$(ts) release $1" >> $LOG
+seen(){
+  awk -v label="$1" '$1 != label' "$SEEN" 2>/dev/null > "$SEEN.tmp"
+  print -r -- "$1 $(now)" >> "$SEEN.tmp"
+  mv -- "$SEEN.tmp" "$SEEN"
 }
-qlock(){ local i=0; until mkdir $M 2>/dev/null; do (( ++i > 100 )) && { rm -rf $M; }; sleep 0.1; done; }
-qunlock(){ rm -rf $M; }
-qhead(){ [[ -s $Q ]] && grep -v '^[[:space:]]*$' $Q | head -1; }
-qhas(){ [[ -f $Q ]] && grep -qx -- "$1" $Q; }
-qappend(){ qhas $1 || echo $1 >> $Q; }
-qdrop(){ [[ -f $Q ]] && { grep -vx -- "$1" $Q > $Q.tmp; mv $Q.tmp $Q; }; }
-seen(){ grep -v "^$1 " $SEEN 2>/dev/null > $SEEN.tmp; echo "$1 $(now)" >> $SEEN.tmp; mv $SEEN.tmp $SEEN; }
-seen_age(){ local t=$(grep "^$1 " $SEEN 2>/dev/null | tail -1 | cut -d' ' -f2); [[ -n $t ]] && echo $(( $(now) - t )) || echo 0; }
-take(){
-  barrier && { qappend "$1"; echo "lease protected: strong/nested records require explicit reconciliation"; return 1; }
-  echo "$1 since $(ts)" > "$D/owner"; echo "$(ts) acquire $1" >> $LOG; qdrop $1; return 0
+seen_age(){
+  local seen_time=$(awk -v label="$1" '$1 == label {value=$2} END {print value}' "$SEEN" 2>/dev/null)
+  [[ "$seen_time" == <-> ]] && print $(( $(now) - seen_time )) || print 0
 }
 acquire(){
-  local L=$1 h a rc
-  qlock; seen $L
-  if barrier; then qappend $L; qunlock; echo "lease protected: strong/nested records require explicit reconciliation"; return 1; fi
-  h=$(qhead)
-  while [[ -n $h && $h != $L ]] && (( $(seen_age $h) > STALE )); do
-    echo "$(ts) skip $h (queue head idle $(seen_age $h)s)" >> $LOG; qdrop $h; h=$(qhead)
+  local label=$1 holder=$2 head result rc
+  valid_label "$label" || { print -u2 'queue label must be 1..128 non-whitespace characters'; return 2; }
+  (( ${+DEVLOCK_INSTANCE_ID} )) && { print -u2 'acquire cannot replace an inherited instance; use its checked owner'; return 2; }
+  qlock || return 2
+  seen "$label"
+  if [[ -e "$D" || -L "$D" ]] || nested; then
+    qappend "$label"; qunlock
+    print -u2 'busy: queue/strong/nested records are protected; inspect phonefarm lease status --json'
+    return 1
+  fi
+  head=$(qhead)
+  while [[ -n "$head" && "$head" != "$label" ]] && (( $(seen_age "$head") > STALE )); do
+    print -r -- "$(ts) skip $head (queue head idle $(seen_age "$head")s)" >> "$LOG"
+    qdrop "$head"; head=$(qhead)
   done
-  if [[ -n $h && $h != $L ]]; then qappend $L; qunlock; echo "not your turn (已自动排进队尾): head=$h"; return 1; fi
-  if mkdir "$D" 2>/dev/null; then take $L; rc=$?; qunlock; return $rc; fi
-  # mkdir publishes ownership before its owner file. Never steal that publication
-  # window (or an abandoned, unidentified directory) from a strong participant.
-  [[ -f "$D/owner" ]] || { qappend $L; qunlock; echo 'busy: owner not published or unknown'; return 1; }
-  a=$(age)
-  if (( a > STALE )); then echo "$(ts) steal by $L from [$(owner)] idle ${a}s" >> $LOG; take $L; rc=$?; qunlock; return $rc; fi
-  qappend $L; qunlock
-  echo "busy: $(owner) (heartbeat ${a}s ago); queued as $L"; return 1
+  if [[ -n "$head" && "$head" != "$label" ]]; then
+    qappend "$label"; qunlock
+    print -u2 -- "not your turn (queued): head=$head"
+    return 1
+  fi
+  if ! mkdir -- "$D" 2>/dev/null; then
+    qappend "$label"; qunlock
+    print -u2 'busy: owner directory appeared'
+    return 1
+  fi
+  result=$("$PF" __queue-owner create --root "$B" --label "$label" --holder-pid "$holder")
+  rc=$?
+  if (( rc == 0 )); then
+    print -r -- "$(ts) acquire $label" >> "$LOG"
+    qdrop "$label"
+  fi
+  qunlock
+  # A partially published identity is retained on error, never guessed empty.
+  (( rc == 0 )) || return 2
+  print -r -- "$result"
+}
+renew(){ "$PF" __queue-owner renew --root "$B" --label "$1"; }
+release(){
+  "$PF" __queue-owner release --root "$B" --label "$1" || return 2
+  print -r -- "$(ts) release $1" >> "$LOG"
 }
 stop_heartbeat(){
   [[ -n "$HB" ]] || return 0
@@ -137,33 +124,62 @@ stop_heartbeat(){
 }
 case $1 in
   status)
-    if barrier; then
-      echo 'lease protected: inspect phonefarm lease status --json'
-    elif [[ -d $D ]]; then
-      [[ -f "$D/owner" ]] && echo "held: $(owner) (heartbeat $(age)s ago)" || echo 'unknown: owner unavailable'
+    if nested; then
+      print 'lease protected: inspect phonefarm lease status --json'
     else
-      echo free
+      print -r -- "$queue_snapshot" | python3 -c '
+import json, sys
+value=json.load(sys.stdin)
+state=value["status"]
+print("free" if state == "absent" else
+      "held: " + value["owner"]["owner"].strip() if state == "held" else
+      "lease protected: inspect phonefarm lease status --json" if state == "protected" else
+      "unknown: " + (value.get("error") or "owner identity unavailable"))
+'
     fi
-    [[ -s $Q ]] && echo "queue: $(grep -v '^[[:space:]]*$' $Q | tr '\n' ' ')"; true ;;
-  acquire) acquire $2 ;;
-  renew) renew "$2" "$PPID" ;;
+    [[ -s "$Q" ]] && print -r -- "queue: $(grep -v '^[[:space:]]*$' "$Q" | tr '\n' ' ')"
+    true ;;
+  acquire) acquire "$2" "$PPID" ;;
+  renew) renew "$2" ;;
   release) release "$2" ;;
-  queue) shift; qlock; : > $Q; for l in "$@"; do echo $l >> $Q; seen $l; done; qunlock; echo "$(ts) queue set: $*" >> $LOG ;;
-  run) L=$2; shift 3
-       zmodload zsh/zselect || exit 2
-       acquire $L || exit 1
-       HB=
-       trap stop_heartbeat EXIT
-       # A cancelled wrapper cannot claim its command restored the device. Keep
-       # the lock records, but always reap the one heartbeat process we created.
-       trap 'exit 130' INT
-       trap 'exit 143' TERM
-       trap 'exit 129' HUP
-       ( trap 'exit 0' INT TERM HUP
-         while renew "$L" "$$"; do zselect -t 6000; done
-       ) & HB=$!
-       # zselect waits inside the heartbeat shell: there is no external sleep
-       # child left holding stdout/stderr after this shell has been reaped.
-       DEVLOCK_LABEL=$L "$@"; rc=$?; stop_heartbeat; release "$L"; exit $rc ;;
-  *) sed -n 2,10p $0 ;;
+  reconcile)
+    instance=$2; shift 2
+    "$PF" __queue-owner reconcile --root "$B" --instance "$instance" "$@" ;;
+  queue)
+    shift
+    for label in "$@"; do valid_label "$label" || { print -u2 'invalid queue label'; exit 2; }; done
+    qlock || exit 2
+    : > "$Q"
+    for label in "$@"; do print -r -- "$label" >> "$Q"; seen "$label"; done
+    qunlock
+    print -r -- "$(ts) queue set: $*" >> "$LOG" ;;
+  run)
+    L=$2
+    [[ "$3" == -- && $# -ge 4 ]] || { print -u2 'usage: devlock run LABEL -- command...'; exit 2; }
+    shift 3
+    zmodload zsh/zselect || exit 2
+    record=$(acquire "$L" "$$") || exit $?
+    DEVLOCK_INSTANCE_ID=$(print -r -- "$record" | python3 -c '
+import json, re, sys
+v=json.load(sys.stdin)
+if v.get("schema") != "phonefarm/devlock-owner@1" or not re.fullmatch("[0-9a-f]{32}",v.get("instance_id", "")):
+    sys.exit(2)
+print(v["instance_id"])
+') || exit 2
+    export DEVLOCK_INSTANCE_ID DEVLOCK_LABEL=$L
+    HB=
+    trap stop_heartbeat EXIT
+    # Cancellation leaves the queue record for explicit reconciliation. Neither
+    # process exit nor a successful child proves that the device was restored.
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    ( trap 'exit 0' INT TERM HUP
+      while renew "$L" >/dev/null; do zselect -t 6000; done
+    ) & HB=$!
+    "$@"; rc=$?
+    stop_heartbeat
+    release "$L" >/dev/null || { (( rc != 0 )) || rc=2; }
+    exit $rc ;;
+  *) sed -n '2,7p' "$0" >&2; exit 2 ;;
 esac

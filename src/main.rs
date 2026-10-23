@@ -40,6 +40,7 @@ mod device;
 mod platform;
 mod devlock;
 mod devlease;
+mod queue_owner;
 mod observation;
 mod lease_receipt;
 mod lease_storage;
@@ -445,6 +446,9 @@ fn main() {
         }
     }
     match args.first().map(|s| s.as_str()) {
+        Some("__queue-owner") => {
+            std::process::exit(queue_owner::run(&args[1..]));
+        }
         Some("__capture-worker") => {
             std::process::exit(capture::run_worker(&args[1..]));
         }

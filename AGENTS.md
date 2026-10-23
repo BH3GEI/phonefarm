@@ -280,7 +280,7 @@ typed off/status和历史/离线分析保留；shell off改为同一typed入口�
      锁脚本在 `tools/devlock`（安装：`ln -sf "$PWD/tools/devlock" ~/.local/bin/devlock`）。
      碰设备的子命令自己拿锁（`src/devlock.rs`，通用参数 `--lock-label` / `--lock-wait` / `--no-devlock`，
      label 缺省取 `$DEVLOCK_LABEL` 再缺省 `phonefarm`），不必在外面包 `devlock run`；
-     锁已在同一 label 手里时原地执行，所以外面包了 `devlock run <label>` 也不会自己等自己。
+     只有继承实例与实际holder进程树核验通过才借用；label仅显示和排队。`devlock run`会传同一实例。
      lead 预排了队列时 label 用队列里的名字。
    - 影响稳态的环境条件（风扇开关、冷机阈值、供电状态）逐轮记进证据。这些不是无关细节，
      条件不同的两批数据不能混在一起比。
@@ -382,3 +382,7 @@ tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campa
 - 不关闭必需检查、禁止强推或删除规则；rebase 改变提交后重新检查。
 - 主 Agent 聚焦系统结构、协议与整合；前端等独立模块可交具体 subagent，划分文件所有权。
 - 每批记录已做、未做、测试层级和恢复义务；模拟通过不等于真机或全流程已可用。
+
+## 外层队列实例（源码与隔离宿主已验，未部署）
+
+`tools/devlock` 与 PF/GOL 必须一起升级。队列owner用phonefarm/devlock-owner@1持久化实例与宿主进程/启动身份；继承ID校验失败不创建新实例。nested强lease显式关联outer_instance_id，父holder退出不阻断已有强owner有界恢复。`devlock reconcile INSTANCE --participants-stopped --confirm-device-idle`仅退休已退出且无nested的外层元数据，不能代替设备恢复。旧/坏/缺失记录不按TTL自动删除。实现与验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/LEASE-IDENTITY.md 。

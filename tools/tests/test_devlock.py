@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -15,14 +16,16 @@ DEVLOCK = ROOT / "tools/devlock"
 BINARY = Path(os.environ.get("PHONEFARM_TEST_BINARY", ROOT / "src/target/debug/phonefarm"))
 
 
-@unittest.skipUnless(shutil.which("zsh"), "devlock requires zsh")
+@unittest.skipUnless(shutil.which("zsh") and BINARY.is_file(), "devlock requires zsh and a signed PHONEFARM_TEST_BINARY")
 class DevlockBridgeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="devlock-bridge-test-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.env = dict(os.environ, DEVLOCK_DIR=str(self.root), DEVLOCK_STALE="1",
-                        PHONEFARM_LEASE_DIR=str(self.root / "leases"))
+                        PHONEFARM_LEASE_DIR=str(self.root / "devices"), PHONEFARM_BIN=str(BINARY))
+        self.env.pop("DEVLOCK_INSTANCE_ID", None)
+        self.env.pop("DEVLOCK_LABEL", None)
 
     def call(self, *args):
         return subprocess.run(["zsh", str(DEVLOCK), *args], env=self.env,
@@ -40,7 +43,10 @@ class DevlockBridgeTests(unittest.TestCase):
         target = self.root / "selected persistent locks"
         response = self.root / "storage.json"
         resolver = self.root / "selected-phonefarm"
-        resolver.write_text("#!/bin/sh\n[ \"$*\" = 'lease status --json' ] || exit 2\ncat \"$(dirname \"$0\")/storage.json\"\n")
+        resolver.write_text("#!/bin/sh\n"
+                            f'[ "$1" != __queue-owner ] || exec {shlex.quote(str(BINARY))} "$@"\n'
+                            '[ "$*" = \'lease status --json\' ] || exit 2\n'
+                            'cat "$(dirname "$0")/storage.json"\n')
         resolver.chmod(0o755)
         self.env["PHONEFARM_BIN"] = str(resolver)
         response.write_text(json.dumps({"storage": {"schema_version": 1, "readiness": "migration_required",
@@ -85,24 +91,41 @@ class DevlockBridgeTests(unittest.TestCase):
                     self.assertTrue(marker.is_symlink())
 
     def test_nested_residue_blocks_reuse_but_outer_release_preserves_recovery(self):
-        owner = self.stale_owner()
+        acquired = self.call("acquire", "outer")
+        self.assertEqual(acquired.returncode, 0, acquired.stdout + acquired.stderr)
+        identity = json.loads(acquired.stdout)
+        self.assertEqual(identity["schema"], "phonefarm/devlock-owner@1")
+        self.assertEqual(identity["holder_pid"], os.getpid())
+        owner = self.root / "devlock.d/owner"
+        before_owner = owner.read_bytes()
+        # A matching label, even from this holder's child, grants no authority.
+        self.assertEqual(self.call("renew", "outer").returncode, 2)
+        self.assertEqual(self.call("release", "outer").returncode, 2)
+        self.env.update(DEVLOCK_LABEL="outer", DEVLOCK_INSTANCE_ID="0" * 32)
+        self.assertEqual(self.call("renew", "outer").returncode, 2)
+        self.assertEqual(owner.read_bytes(), before_owner)
+        self.env["DEVLOCK_INSTANCE_ID"] = identity["instance_id"]
         nested = self.root / "phonefarm-lease.d"
         nested.mkdir()
         marker = nested / "phonefarm-lease.json"
         marker.write_text('{"format":1,"recovery_required":true}')
         before = marker.read_bytes()
         self.assertNotEqual(self.call("acquire", "other").returncode, 0)
-        self.assertNotEqual(self.call("renew", "outer").returncode, 0)
-        self.assertEqual(owner.stat().st_mtime, 1)
+        # Outer identity can renew/release itself without weakening any nested record.
+        self.assertEqual(self.call("renew", "outer").returncode, 0)
         self.assertEqual(self.call("release", "outer").returncode, 0)
         self.assertFalse(owner.parent.exists())
         self.assertEqual(marker.read_bytes(), before)
+        self.env.pop("DEVLOCK_INSTANCE_ID")
+        self.env.pop("DEVLOCK_LABEL")
         self.assertIn("lease protected", self.call("status").stdout)
         self.assertNotEqual(self.call("acquire", "other").returncode, 0)
-        marker.unlink()  # Even an empty leftover directory still blocks old acquisition.
+        marker.unlink()  # Even an empty leftover directory still blocks acquisition.
         self.assertNotEqual(self.call("acquire", "other").returncode, 0)
         nested.rmdir()
-        self.assertEqual(self.call("acquire", "other").returncode, 0)
+        acquired = self.call("acquire", "other")
+        self.assertEqual(acquired.returncode, 0, acquired.stdout + acquired.stderr)
+        self.env.update(DEVLOCK_LABEL="other", DEVLOCK_INSTANCE_ID=json.loads(acquired.stdout)["instance_id"])
         self.assertEqual(self.call("renew", "other").returncode, 0)
         self.assertEqual(self.call("release", "other").returncode, 0)
 
@@ -110,8 +133,8 @@ class DevlockBridgeTests(unittest.TestCase):
         directory = self.root / "devlock.d"
         directory.mkdir()
         result = self.call("acquire", "writer")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("unknown", result.stdout)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("queue identity unavailable", result.stderr)
         self.assertFalse((directory / "owner").exists())
 
     def assert_processes_gone(self, pids):
@@ -169,10 +192,15 @@ while True:
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate(timeout=5)
-                self.assertEqual(self.call("release", "outer").returncode, 0)
+                identity = json.loads((self.root / "devlock.d/phonefarm-lease.json").read_text())
+                self.assertNotEqual(self.call("release", "outer").returncode, 0)
+                reconciled = self.call("reconcile", identity["instance_id"], "--participants-stopped", "--confirm-device-idle")
+                self.assertEqual(reconciled.returncode, 0, reconciled.stdout + reconciled.stderr)
+                self.assertFalse(json.loads(reconciled.stdout)["device_recovery_verified"])
+                self.assertTrue((self.root / "devlock-reconciliations" / (identity["instance_id"] + ".json")).is_file())
 
     @unittest.skipUnless(BINARY.is_file(), "set PHONEFARM_TEST_BINARY to an existing signed test build")
-    def test_real_nested_lease_allows_child_and_outer_ancestor_renew_only(self):
+    def test_real_nested_lease_allows_inherited_child_but_not_outside_caller(self):
         ready, finish = self.root / "ready.json", self.root / "finish"
         command = """
 import json, pathlib, subprocess, sys, time
@@ -194,9 +222,14 @@ while not pathlib.Path(finish).exists():
             self.assertEqual(json.loads(ready.read_text())["code"], 0, ready.read_text())
             marker = self.root / "phonefarm-lease.d/phonefarm-lease.json"
             before = marker.read_bytes()
-            # Like the outer gate heartbeat, this caller is an ancestor of the lease owner.
+            identity = json.loads((self.root / "devlock.d/phonefarm-lease.json").read_text())
+            self.assertEqual(json.loads(before)["outer_instance_id"], identity["instance_id"])
+            # Being an ancestor of the holder is not borrowing it. Even knowing
+            # its public ID does not authorize this unrelated caller subtree.
+            self.assertNotEqual(self.call("renew", "outer").returncode, 0)
+            self.env.update(DEVLOCK_LABEL="outer", DEVLOCK_INSTANCE_ID=identity["instance_id"])
             renewed = self.call("renew", "outer")
-            self.assertEqual(renewed.returncode, 0, renewed.stdout + renewed.stderr)
+            self.assertNotEqual(renewed.returncode, 0, renewed.stdout + renewed.stderr)
             unrelated = subprocess.run(
                 [sys.executable, "-c", "import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))",
                  "zsh", str(DEVLOCK), "renew", "outer"], env=self.env, capture_output=True, text=True, timeout=5)
