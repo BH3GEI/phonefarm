@@ -761,17 +761,42 @@ pub(crate) fn snapshots_restored(before: &str, after: &str) -> bool {
 }
 
 /// 探测脚本的每一次差异写都当场回读核对过已还原: 至少一条 `.effect_restored=yes`, 没有一条 `=NO`。
+/// 例外只有一种: 厂商自管的频率边界节点, 我们的写当场就被退回/抢走 (`rejected`/`contested`),
+/// 还原时读到的也不是我们写的值 —— 节点上留的是厂商的值, 不是我们的残留。
+/// 2026-10-23 红魔实测: gpu.max_pwrlevel 写 12 回读 3, 写回 11 回读 17, 整轮被判「未还原」禁跑。
 pub(crate) fn probe_writes_verified(probe_txt: &str) -> bool {
     let mut ok = 0;
     for l in probe_txt.lines() {
-        if l.contains(".effect_restored=NO") {
-            return false;
+        if let Some((key, rest)) = l.split_once(".effect_restored=NO") {
+            if !vendor_write_lost(probe_txt, key, rest) {
+                return false;
+            }
+            continue;
         }
         if l.trim_end().ends_with(".effect_restored=yes") {
             ok += 1;
         }
     }
     ok > 0
+}
+
+/// `key.effect_restored=NO(want=.. got=G)` 是不是厂商抢写: key 是厂商自管的频率边界,
+/// 同一 key 的 effect 是 rejected/contested(wrote=W ..), 且 G != W。
+fn vendor_write_lost(probe_txt: &str, key: &str, restored_rest: &str) -> bool {
+    let managed = matches!(key, "gpu.max_pwrlevel" | "gpu.min_pwrlevel")
+        || (key.starts_with("cpu.policy") && (key.ends_with(".scaling_max_freq") || key.ends_with(".scaling_min_freq")));
+    let Some(got) = restored_rest.split("got=").nth(1).map(|g| g.trim_end().trim_end_matches(')')) else {
+        return false;
+    };
+    let effect_prefix = format!("{key}.effect=");
+    let Some(effect) = probe_txt.lines().find_map(|l| l.strip_prefix(effect_prefix.as_str())) else {
+        return false;
+    };
+    let lost = effect.starts_with("rejected(") || effect.starts_with("contested(");
+    let Some(wrote) = effect.split("wrote=").nth(1).and_then(|w| w.split_whitespace().next()) else {
+        return false;
+    };
+    managed && lost && !got.is_empty() && got != wrote
 }
 
 /// 探测前后的「已还原」。快照逐项相等; 或者只有厂商自管的频率边界变了, 且探测的每一次写入
@@ -5683,6 +5708,26 @@ probe.game_running_end=yes\nprobe.game_foreground_end=yes\n"
         // 中途游戏退了也不算
         let quit = with_game.replace("probe.game_running_end=yes", "probe.game_running_end=no");
         assert!(!probe_game_up(&sysparam::parse_probe(&quit)));
+    }
+
+    /// 厂商当场抢走的频率边界写入不算我们没还原; 我们的值留在节点上、或非厂商节点没还原, 照样拦。
+    #[test]
+    fn probe_restore_tolerates_only_vendor_lost_writes() {
+        let ok = "gpu.min_pwrlevel.effect=live\ngpu.min_pwrlevel.effect_restored=yes\n";
+        assert!(probe_writes_verified(ok));
+        let lost = format!("{ok}gpu.max_pwrlevel.effect=rejected(wrote=12 readback=3)\ngpu.max_pwrlevel.effect_restored=NO(want=11 got=17)\n");
+        assert!(probe_writes_verified(&lost));
+        let contested = format!("{ok}cpu.policy6.scaling_max_freq.effect=contested(wrote=1000 1s=1000 lost=2000)\ncpu.policy6.scaling_max_freq.effect_restored=NO(want=3000 got=2000)\n");
+        assert!(probe_writes_verified(&contested));
+        // 我们写的值还留在节点上
+        let ours = format!("{ok}gpu.max_pwrlevel.effect=contested(wrote=12 1s=12 lost=3)\ngpu.max_pwrlevel.effect_restored=NO(want=11 got=12)\n");
+        assert!(!probe_writes_verified(&ours));
+        // 写守住了 (live) 却没还原
+        let live = format!("{ok}gpu.max_pwrlevel.effect=live\ngpu.max_pwrlevel.effect_restored=NO(want=11 got=17)\n");
+        assert!(!probe_writes_verified(&live));
+        // 不是厂商自管节点
+        let walt = format!("{ok}cpu.policy0.walt.hispeed_load.effect=rejected(wrote=100 readback=90)\ncpu.policy0.walt.hispeed_load.effect_restored=NO(want=90 got=95)\n");
+        assert!(!probe_writes_verified(&walt));
     }
 
     /// 只有厂商服务会动的频率边界变了 → 不判留痕; 别的键变了 → 判留痕。
