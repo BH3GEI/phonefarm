@@ -452,6 +452,9 @@ class Session:
                 return
             if time.time() - t0 > 3 * 3600:
                 raise RuntimeError(f"充了 3 小时电量还是 {lvl}%")
+            if "AC powered: true" not in out and "USB powered: true" not in out:
+                # 拔线跑 (纯电池, 无线 adb): 没有电源可充, 等下去只会耗尽; 如实停下
+                raise RuntimeError(f"电量 {lvl}% < {lo}% 且没接电源, 不开下一个请求")
             self.dev.note(f"电量 {lvl}% < {lo}%, 充电中等到 {lo + 25}% ...")
             self.dev.su(f"echo 1 > {CHARGE_NODE}")
             while True:
@@ -767,7 +770,9 @@ def cmd_confirm(a):
             seed = random.SystemRandom().randrange(1 << 31)
             req = make_request(f"conf{a.cap}_{i}", p, wl, a.cap, "full", a.rounds, a.cool_c, seed,
                                f"O2 确认: 锁 {a.cap} 帧时 {describe(p)} 对厂商原样", a.seconds)
-            s.battery_gate(max(a.battery_min, 50), 95)
+            # 下限取 --battery-min (缺省 30, 与 charge_suspend.sh 的 MIN_CAPACITY 一致); 以前写死 50,
+            # 拔线纯电池跑时一轮约耗 20%, 50 只够跑一轮。ABBA 交替 + 随机臂序抵消电量缓降的漂移。
+            s.battery_gate(a.battery_min, 95)
             rep = s.eval(req)
             if a.dry_run:
                 continue
