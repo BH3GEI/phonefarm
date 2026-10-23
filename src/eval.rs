@@ -2300,6 +2300,10 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
         let cold=match facts.policy.cool_c {Some(c)=>crate::autoloop::wait_cool(serial,c,420),None=>crate::pyobj! {"ok"=>false}};
         let _=std::fs::write(evidence.join(format!("cold_baseline{i}.json")),py_dumps(&cold));
         if cold.get("ok").and_then(|v|v.as_bool())!=Some(true) {facts.cold_ok=Some(false);break;}
+        if want_suspend {
+            let (_, log) = ensure_on_battery(serial);
+            std::fs::write(evidence.join(format!("supply_baseline{i}.log")), log).ok();
+        }
         match run_one_for(serial,&format!("baseline{i}"),&evidence.join(format!("baseline{i}")),seconds,&workload_path,pkg,req["workload"]["render_comm"].as_str(),launch.as_ref(),spf) {
             Ok(m)=>facts.baseline.push(m),Err(e)=>{report["verdict"]["reason"]=json!(e);break;}
         }
@@ -2382,6 +2386,10 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             if let Some(e) = fan_still_on(&fan) {
                 abort_reason = Some(format!("{arm}{i}: {e}"));
                 break;
+            }
+            if want_suspend {
+                let (_, log) = ensure_on_battery(serial);
+                std::fs::write(evidence.join(format!("supply_{arm}{i}.log")), log).ok();
             }
             let label = format!("sp_{arm}{i}");
             let arm_dir = evidence.join(format!("{arm}{i}"));
@@ -3143,6 +3151,19 @@ pub(crate) const CHARGE_SUSPEND_TIMEOUT_S: u64 = 300 + 60;
 /// charge_suspend.sh 的输出 (suspend 的回显, 超时后再接上 status 的回显) 里认出「现在是停充状态」:
 /// `CHARGE_SUSPENDED` / `_BYPASS` / `_MIXED`, `CHARGE_ALREADY_SUSPENDED` (别人留下的, 这次也负责还原,
 /// 审查 R1 #2 #10), 或 status 的 `state: 已停充`。返回记进报告的那一行。
+/// 每臂开跑前核对还在放电; 不在就重新停充 (这回由 charge_suspend.sh 接管、留 STATE, 结束时它负责还原)。
+/// 2026-10-23 红魔: 调用方开跑前自己关了充电, charge_suspend.sh 见「本来就在放电」没接管; 十几分钟后
+/// 充电被重新打开 (厂商充电管理), 后面 11 臂全在充电, 功耗全部作废。回 (此刻在放电, 日志)。
+pub(crate) fn ensure_on_battery(serial: &str) -> (bool, String) {
+    let st = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh status"), 30);
+    if st.contains("on_battery=yes") {
+        return (true, st);
+    }
+    let out = su(serial, &format!("sh {DEV_TMP}/charge_suspend.sh suspend"), CHARGE_SUSPEND_TIMEOUT_S);
+    let ok = charge_suspended_via(&out).is_some() || out.contains("CHARGE_ALREADY_ON_BATTERY");
+    (ok, format!("{st}\n--- 不在放电, 重新停充 ---\n{out}"))
+}
+
 pub(crate) fn charge_suspended_via(out: &str) -> Option<String> {
     out.lines().map(str::trim).find_map(|l| {
         if l.starts_with("CHARGE_SUSPENDED") || l.starts_with("CHARGE_ALREADY_SUSPENDED") || l.starts_with("state: 已停充") {

@@ -472,7 +472,8 @@ class Session:
             self.dev.note("(dry-run) 温控关: 停充, 等 thermal_pwrlevel 连续两次为 0")
             return
         node = "/sys/class/kgsl/kgsl-3d0/thermal_pwrlevel"
-        if self.dev.su(f"cat {CHARGE_NODE}").strip() != "0":
+        was = self.dev.su(f"cat {CHARGE_NODE}").strip()
+        if was != "0":
             self.dev.su(f"echo 0 > {CHARGE_NODE}")
             self.dev.note("温控关: 先停充 (充电发热会让厂商温控提前压频)")
         t0, ok = time.time(), 0
@@ -480,6 +481,10 @@ class Session:
             lv = self.dev.su(f"cat {node}").strip()
             ok = ok + 1 if lv == "0" else 0
             if ok >= 2:
+                # 等完把充电还原, 停充交给 eval 的 charge_suspend.sh 接管 (它留 STATE、每臂核对、结束还原)。
+                # 我们这边一直关着的话, 它见「本来就在放电」不接管; 中途被厂商重新打开就没人再停 (2026-10-23 实测)
+                if was != "0":
+                    self.dev.su(f"echo {was} > {CHARGE_NODE}")
                 return
             if time.time() - t0 > timeout_s:
                 raise RuntimeError(f"等了 {timeout_s // 60} 分钟 GPU 温控档还是 {lv}, 手机在温控降频, 不开跑")
