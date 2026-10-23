@@ -576,6 +576,40 @@ pub(crate) fn is_screen(req: &Value) -> bool {
     req["protocol"]["stage"].as_str() == Some("screen")
 }
 
+/// 回放脚本的标称时长 (秒): sleep 的 ms、swipe 的 duration_ms、exec 里 `input swipe x1 y1 x2 y2 D` 的 D 相加。
+/// 读不了或不是动作数组时 None。不含 adb 往返开销, 所以是下限。
+pub(crate) fn workload_script_seconds(path: &Path) -> Option<f64> {
+    let steps: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let ms: u64 = steps.iter().map(|st| match st["action"].as_str().unwrap_or("") {
+        "sleep" => st["ms"].as_u64().unwrap_or(0),
+        "swipe" => st["duration_ms"].as_u64().unwrap_or(0),
+        "exec" => st["cmd"].as_str().and_then(|c| {
+            let t: Vec<&str> = c.split_whitespace().collect();
+            (t.len() == 7 && t[0] == "input" && t[1] == "swipe").then(|| t[6].parse::<u64>().ok()).flatten()
+        }).unwrap_or(0),
+        _ => 0,
+    }).sum();
+    Some(ms as f64 / 1000.0)
+}
+
+/// run_once.sh 在负载起跑 LEAD=6 s 后开采 seconds 秒; 负载必须撑满整个采集窗。
+/// 2026-10-23 红魔: 确认阶段 60 s 窗配 42 s 的转镜头脚本, 后 24 s 画面静止, frame_p95 在 20/30 ms 两档间跳
+/// (基线离散 44%), 资格当场被拒 —— 宁可开跑前拒绝, 也不让静止段混进采集窗。
+pub(crate) fn workload_covers_capture(req: &Value) -> Result<(), String> {
+    // 只管走 run_once.sh 的 sysparam: gray 等走自己的会话采样, 时序不同
+    if req["kind"].as_str() != Some("sysparam") || req["workload"]["carrier"].as_str() != Some("game_replay") || launch_spec(req).is_some() {
+        return Ok(());
+    }
+    let Some(file) = req["workload"]["script"].as_str() else { return Ok(()) };
+    let Some(path) = resolve_path(file) else { return Ok(()) };   // 找不到脚本由 eval 本身报
+    let seconds = req["workload"]["seconds"].as_f64().unwrap_or(30.0);
+    match workload_script_seconds(&path) {
+        Some(d) if d + 0.5 < 6.0 + seconds => Err(format!(
+            "负载脚本 {file} 标称 {d:.0} s, 撑不满「起跑后 6 s + 采集 {seconds:.0} s」; 换更长的脚本或缩短 workload.seconds")),
+        _ => Ok(()),
+    }
+}
+
 fn validate_v2(req: &Value) -> Result<(), String> {
     for k in ["kind", "candidate_id", "package", "workload", "conditions", "protocol", "payload"] {
         if req.get(k).is_none() {
@@ -587,6 +621,7 @@ fn validate_v2(req: &Value) -> Result<(), String> {
     if !matches!(carrier, "headless" | "refbench" | "game_replay") {
         return Err(format!("workload.carrier 不合法: {carrier:?}"));
     }
+    workload_covers_capture(req)?;
     let p = &req["protocol"];
     if p.get("rounds").and_then(|v| v.as_i64()).unwrap_or(0) < 1 {
         return Err("protocol.rounds 必须 >= 1".into());
@@ -776,7 +811,9 @@ pub(crate) fn verify_workload(serial: &str, workload: &Path, pkg: &str, outdir: 
         .filter(|o|o.status.success()).map(|o|o.stdout).unwrap_or_default();
     std::thread::sleep(std::time::Duration::from_secs(3)); let a=capture();
     std::thread::sleep(std::time::Duration::from_secs(5)); let b=capture();
-    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(65);
+    // 等脚本跑完: 标称时长 + 30 s 余量 (长脚本以前会在 65 s 被杀、判成脚本失败)
+    let budget=workload_script_seconds(workload).map_or(65.0,|d|d+30.0).max(65.0);
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs_f64(budget);
     let success=loop {match child.try_wait() {
         Ok(Some(s))=>break s.success(),
         Ok(None) if std::time::Instant::now()<deadline=>std::thread::sleep(std::time::Duration::from_millis(100)),
@@ -2271,7 +2308,9 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
     std::fs::write(evidence.join("baseline_charge_restore.log"),&baseline_restore).ok();
     let baseline_after=snapshot(serial);
     std::fs::write(evidence.join("snap_after_baseline.txt"),&baseline_after).ok();
-    facts.restored=Some(snapshots_identical(&snap_before,&baseline_after) && adb_ok(&baseline_restore)
+    // 基线阶段我们一个节点都不写 (停充另由 charge_suspend.sh restore 核对), 快照差异只可能来自厂商性能服务
+    // 自管的频率边界; 严格逐字节比会把它判成还原失败 (2026-10-23 红魔: kgsl.max_pwrlevel 17→0、policy6 max 4608000→1632000)
+    facts.restored=Some(snapshots_restored(&snap_before,&baseline_after) && adb_ok(&baseline_restore)
         && !baseline_restore.contains("CHARGE_RESTORE_FAIL"));
     facts.stage=Stage::Experiment;
     let before_candidates=record_qualification(&mut report,evidence,&facts)?;
@@ -4547,6 +4586,22 @@ mod tests {
         let mut sh = v2_req("shader", json!({"track": "sr", "shader_path": "a", "spirv_path": "b", "budget_ms": 1.0}));
         sh["protocol"]["rounds"] = json!(2);
         assert!(validate_ok(&sh), "shader 不走置换检验: {:?}", validate_v2(&sh));
+    }
+
+    #[test]
+    fn workload_must_cover_lead_plus_capture() {
+        let dir = std::env::temp_dir().join(format!("wl-cover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("wl.json");
+        std::fs::write(&f, r#"[{"action":"sleep","ms":3000},{"action":"exec","cmd":"input swipe 900 400 2000 400 12000"},
+            {"action":"exec","cmd":"input swipe 900 400 2000 400 12000"},{"action":"exec","cmd":"input swipe 900 400 2000 400 12000"},
+            {"action":"sleep","ms":1000}]"#).unwrap();
+        assert_eq!(workload_script_seconds(&f), Some(40.0));
+        let mut r = json!({"kind": "sysparam", "workload": {"carrier": "game_replay", "script": f.display().to_string(), "seconds": 30}});
+        assert!(workload_covers_capture(&r).is_ok());
+        r["workload"]["seconds"] = json!(60);
+        assert!(workload_covers_capture(&r).unwrap_err().contains("撑不满"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

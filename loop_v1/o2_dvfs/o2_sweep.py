@@ -33,7 +33,8 @@ PKG = "com.miHoYo.Yuanshen"
 PREFS = f"/data/data/{PKG}/shared_prefs/{PKG}.v2.playerprefs.xml"
 DEV = "/data/local/tmp/o2"
 CHARGE_NODE = "/sys/class/qcom-battery/charging_enabled"
-WORKLOAD = "loop_v1/scripts/workload_spin_touch_v1.json"
+WORKLOAD = "loop_v1/scripts/workload_spin_touch_v1.json"          # 标称 40 s: 撑得住 6 s + 30 s 的初筛窗
+WORKLOAD_LONG = "loop_v1/scripts/workload_spin_touch_long_v1.json"  # 标称 100 s: 确认阶段 60 s 窗 (eval 会拒绝撑不满的组合)
 
 # ── 频率表: 2026-10-12 红魔 NX809J probe (megacity-power-1012c/inputs_probe/probe.txt), 实测 ──
 P0_FREQS = [384000, 537600, 691200, 787200, 883200, 998400, 1113600, 1228800, 1324800, 1440000,
@@ -134,7 +135,7 @@ TEMP_CAP_C = 80.0
 def make_request(cid, params, whitelist, cap, stage, rounds, cool_c, seed, why, seconds=30):
     req = {
         "version": 2, "kind": "sysparam", "candidate_id": cid, "package": PKG,
-        "workload": {"carrier": "game_replay", "seconds": seconds, "script": WORKLOAD,
+        "workload": {"carrier": "game_replay", "seconds": seconds, "script": WORKLOAD if seconds <= 30 else WORKLOAD_LONG,
                      "render_comm": "UnityGfxDeviceW"},
         "conditions": {"cool_c": cool_c, "temp_cap_c": TEMP_CAP_C, "require_root": True,
                        "require_discharging": True,
