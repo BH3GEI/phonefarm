@@ -352,8 +352,8 @@ fn archive(root: &Path, revision: u64, bytes: &[u8]) -> Result<()> {
         .and_then(|f| f.sync_all())
         .map_err(unavailable)
 }
-fn update_locked(root: &Path, request: Request) -> Result<Value> {
-    require_clear(root)?;
+fn update_locked(root: &Path, queue_dir: &Path, request: Request) -> Result<Value> {
+    require_clear(queue_dir)?;
     let current = read_current(root)?;
     let revision = current.as_ref().map_or(0, |(r, _)| r.revision);
     if request.expected_revision != revision {
@@ -402,7 +402,7 @@ fn update_locked(root: &Path, request: Request) -> Result<Value> {
     crate::devlease::durable_replace(&root.join(CURRENT), &bytes).map_err(unavailable)?;
     serde_json::to_value(next).map_err(unavailable)
 }
-fn set(root: &Path, request: Request) -> Result<Value> {
+fn set(root: &Path, device_root: &Path, request: Request) -> Result<Value> {
     crate::shared_access::create_dir_all(root).map_err(unavailable)?;
     check_directory(root)?;
     let bridge = crate::shared_access::lock_file(&root.join("phonefarm-bridge.lock"), 0o600)
@@ -418,8 +418,12 @@ fn set(root: &Path, request: Request) -> Result<Value> {
             unavailable(e)
         }
     })?;
-    let mut queue = QueueMutex::acquire(root)?;
-    let result = update_locked(root, request);
+    let paths = crate::lease_domain::inspect(root).map_err(unavailable)?;
+    paths
+        .require_device_root(device_root)
+        .map_err(unavailable)?;
+    let mut queue = QueueMutex::acquire(&paths.queue_dir)?;
+    let result = update_locked(root, &paths.queue_dir, request);
     queue.release()?;
     result
 }
@@ -478,11 +482,11 @@ fn run(args: &[String]) -> Result<Value> {
             ))
         }
     };
-    let (_, root) = crate::lease_storage::resolve()
+    let (devices, root) = crate::lease_storage::resolve()
         .require_ready()
         .map_err(unavailable)?;
     match request {
-        Some(request) => set(&root, request),
+        Some(request) => set(&root, &devices, request),
         None => get(&root),
     }
 }
@@ -505,6 +509,9 @@ pub(crate) fn run_cli(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn set(root: &Path, request: Request) -> Result<Value> {
+        super::set(root, &root.join("devices"), request)
+    }
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {
@@ -586,6 +593,12 @@ mod tests {
             fs::read(scratch.0.join(HISTORY).join("1.json")).unwrap(),
             bytes
         );
+        crate::lease_domain::init(&scratch.0, &scratch.0.join("devices")).unwrap();
+        assert_eq!(
+            set(&scratch.0, request(4, "B", &["usb-A"], false)).unwrap()["revision"],
+            5
+        );
+        assert!(scratch.0.join("devlock.d").is_file());
     }
     #[test]
     fn registry_writes_refuse_bridge_queue_and_unknown_owner_without_cleanup() {

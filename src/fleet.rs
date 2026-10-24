@@ -995,6 +995,7 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
             lease["status"].as_str().unwrap_or("unknown"),
             lease["error"].as_str().unwrap_or("host device domain is occupied or requires recovery")));
     }
+    let queue_dir = storage.domain_paths()?.queue_dir;
     let adb = crate::device::locate_adb();
     let mut notes = Vec::new();
     if adb.is_none() {
@@ -1010,7 +1011,7 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     if !hdc_ok {
         notes.push("没找到 hdc, 鸿蒙这一族整族跳过".to_string());
     }
-    let lock = storage.devlock_dir.as_deref().and_then(read_lock);
+    let lock = read_lock(&queue_dir);
 
     let tmp = std::env::temp_dir()
         .join(format!("phonefarm-fleet-{}", std::process::id()))

@@ -18,6 +18,9 @@ pub(crate) struct Storage {
     pub state_dir: Option<PathBuf>,
     pub devlock_dir: Option<PathBuf>,
     pub device_lease_dir: Option<PathBuf>,
+    pub layout_version: Option<u32>,
+    pub domain_id: Option<String>,
+    pub queue_dir: Option<PathBuf>,
     pub readiness: &'static str,
     pub error: Option<String>,
     #[serde(skip)]
@@ -25,7 +28,7 @@ pub(crate) struct Storage {
 }
 
 // Resolve existing ancestors too: macOS /var and /private/var must bind one target.
-fn absolute(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn absolute(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err(format!(
             "lease storage path must be absolute: {}",
@@ -57,9 +60,11 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn configured_state_dir() -> Option<PathBuf> {
-    std::env::var_os("PHONEFARM_STATE_DIR").map(PathBuf::from).or_else(|| {
-        std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state/phonefarm"))
-    })
+    std::env::var_os("PHONEFARM_STATE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state/phonefarm"))
+        })
 }
 
 fn state_path(path: &Path) -> Result<PathBuf, String> {
@@ -74,8 +79,10 @@ fn state_path(path: &Path) -> Result<PathBuf, String> {
 
 /// Resolve recovery and lease storage identically, without creating directories.
 pub(crate) fn state_root() -> Result<PathBuf, String> {
-    state_path(&configured_state_dir()
-        .ok_or("PHONEFARM_STATE_DIR or HOME is required for persistent state storage")?)
+    state_path(
+        &configured_state_dir()
+            .ok_or("PHONEFARM_STATE_DIR or HOME is required for persistent state storage")?,
+    )
 }
 
 fn exists(path: &Path) -> bool {
@@ -144,6 +151,9 @@ impl Storage {
             state_dir: None,
             devlock_dir: None,
             device_lease_dir: None,
+            layout_version: None,
+            domain_id: None,
+            queue_dir: None,
             readiness: "unavailable",
             error: None,
             legacy,
@@ -177,30 +187,46 @@ impl Storage {
         s
     }
 
-    fn assess(&mut self) {
+    fn base_ready(&self) -> Result<bool, String> {
         let root = self.devlock_dir.as_ref().unwrap();
-        let check = (|| {
-            if self.mode == "custom" {
-                if record(&root.join("devlock.d/phonefarm-lease.json"))?
+        if self.mode == "custom" {
+            // A v2 fence is a regular file; its separate parser validates it.
+            if !exists(&root.join("domain.json"))
+                && record(&root.join("devlock.d/phonefarm-lease.json"))?
                     .is_some_and(|v| v["schema"] == RETIRED)
-                {
-                    return Err(
-                        "custom DEVLOCK_DIR is a retired domain; use its persistent target".into(),
-                    );
-                }
-                return Ok(true);
+            {
+                return Err(
+                    "custom DEVLOCK_DIR is a retired domain; use its persistent target".into(),
+                );
             }
-            if !self.legacy.parent().is_some_and(Path::is_dir) {
-                return Err("old default parent is unavailable; configure an explicit persistent DEVLOCK_DIR for a custom deployment".into());
+            return Ok(true);
+        }
+        if !self.legacy.parent().is_some_and(Path::is_dir) {
+            return Err("old default parent is unavailable; configure an explicit persistent DEVLOCK_DIR for a custom deployment".into());
+        }
+        let registered = record(&root.join("storage.json"))?;
+        let retired = retired_matches(&self.legacy.join("devlock.d"), root)?;
+        Ok(registered.is_some_and(|v| {
+            v["schema"] == RECORD
+                && v["devlock_dir"] == json!(root)
+                && v["legacy_devlock_dir"] == json!(self.legacy)
+        }) && retired)
+    }
+
+    fn assess(&mut self) {
+        self.layout_version = None;
+        self.domain_id = None;
+        self.queue_dir = None;
+        let check = self.base_ready().and_then(|ready| {
+            if ready {
+                let paths = crate::lease_domain::inspect(self.devlock_dir.as_ref().unwrap())?;
+                paths.require_device_root(self.device_lease_dir.as_ref().unwrap())?;
+                self.layout_version = Some(paths.layout_version);
+                self.domain_id = paths.domain_id;
+                self.queue_dir = Some(paths.queue_dir);
             }
-            let registered = record(&root.join("storage.json"))?;
-            let retired = retired_matches(&self.legacy.join("devlock.d"), root)?;
-            Ok(registered.is_some_and(|v| {
-                v["schema"] == RECORD
-                    && v["devlock_dir"] == json!(root)
-                    && v["legacy_devlock_dir"] == json!(self.legacy)
-            }) && retired)
-        })();
+            Ok(ready)
+        });
         match check {
             Ok(true) => {
                 self.readiness = "ready";
@@ -212,7 +238,11 @@ impl Storage {
                 "lease storage is not initialized or the old domain fence is missing/mismatched; stop all participants, then run phonefarm lease init --participants-stopped (old domain {})", self.legacy.display()));
             }
             Err(e) => {
-                self.readiness = "unavailable";
+                self.readiness = if e.starts_with("domain migration required:") {
+                    "migration_required"
+                } else {
+                    "unavailable"
+                };
                 self.error = Some(e);
             }
         }
@@ -229,6 +259,34 @@ impl Storage {
             self.device_lease_dir.clone().unwrap(),
             self.devlock_dir.clone().unwrap(),
         ))
+    }
+
+    pub(crate) fn domain_paths(&self) -> Result<crate::lease_domain::Paths, String> {
+        let (devices, root) = self.require_ready()?;
+        let paths = crate::lease_domain::inspect(&root)?;
+        paths.require_device_root(&devices)?;
+        Ok(paths)
+    }
+
+    pub(crate) fn upgrade_domain(&self) -> Result<Self, String> {
+        let root = self
+            .devlock_dir
+            .as_ref()
+            .ok_or("lease storage root unavailable")?;
+        let devices = self
+            .device_lease_dir
+            .as_ref()
+            .ok_or("device lease root unavailable")?;
+        if !self.base_ready()? {
+            return Err(
+                "base lease storage requires its existing explicit initialization first".into(),
+            );
+        }
+        crate::lease_domain::init(root, devices)?;
+        let mut ready = self.clone();
+        ready.assess();
+        ready.require_ready()?;
+        Ok(ready)
     }
 
     pub(crate) fn custom(path: &Path) -> Self {
@@ -458,11 +516,18 @@ mod tests {
         assert!(!f.0.join("old-domain").exists());
         assert!(!f.0.join("state").exists());
         fs::write(f.0.join("state"), "not a directory").unwrap();
-        let invalid_state = Storage::from_paths(Some(f.0.join("state")),
-            Some(f.0.join("custom")), None, f.0.join("old-domain"));
+        let invalid_state = Storage::from_paths(
+            Some(f.0.join("state")),
+            Some(f.0.join("custom")),
+            None,
+            f.0.join("old-domain"),
+        );
         assert_eq!(invalid_state.readiness, "unavailable");
         assert!(state_path(&f.0.join("state")).is_err());
-        assert_eq!(fs::read_to_string(f.0.join("state")).unwrap(), "not a directory");
+        assert_eq!(
+            fs::read_to_string(f.0.join("state")).unwrap(),
+            "not a directory"
+        );
     }
 
     #[test]

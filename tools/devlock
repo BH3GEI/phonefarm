@@ -29,15 +29,20 @@ fi
 # This read-only capability check also refuses malformed/legacy owners. Missing
 # or old phonefarm must never fall back to the former label/TTL authorization.
 queue_snapshot=$("$PF" __queue-owner check --root "$B") || { print -u2 'phonefarm queue identity unavailable'; exit 2; }
-print -r -- "$queue_snapshot" | python3 -c '
-import json, sys
+QROOT=$(print -r -- "$queue_snapshot" | python3 -c '
+import json, os, sys
 try:
-    if json.load(sys.stdin).get("schema") != "phonefarm/devlock-check@1":
+    value = json.load(sys.stdin)
+    if value.get("schema") != "phonefarm/devlock-check@2" or value.get("layout_version") not in (1, 2):
         raise ValueError("incompatible phonefarm queue identity protocol")
+    path = value.get("queue_dir")
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise ValueError("phonefarm returned an invalid queue directory")
+    print(path)
 except (ValueError, TypeError, AttributeError) as error:
     print(error, file=sys.stderr)
     sys.exit(2)
-' || exit 2
+') || exit 2
 # The typed check above validates the declared shared root and existing queue
 # files. Setgid directories supply the group; only these queue writes use 0007.
 original_umask=$(umask)
@@ -46,8 +51,8 @@ if (( ${+PHONEFARM_SHARED_GID} )); then
 fi
 # Observation does not initialize a lock domain.
 [[ "$1" == status ]] || mkdir -p -- "$B" || exit 2
-D=$B/devlock.d; LOG=$B/devlock.log; Q=$B/devlock.queue; SEEN=$B/devlock.seen; M=$B/devlock.qmutex
-N=$B/phonefarm-lease.d
+D=$QROOT/devlock.d; LOG=$QROOT/devlock.log; Q=$QROOT/devlock.queue; SEEN=$QROOT/devlock.seen; M=$QROOT/devlock.qmutex
+N=$QROOT/phonefarm-lease.d
 STALE=${DEVLOCK_STALE:-600}
 now(){ date +%s; }
 ts(){ date '+%F %T'; }
@@ -101,12 +106,7 @@ acquire(){
     print -u2 -- "not your turn (queued): head=$head"
     return 1
   fi
-  if ! mkdir -- "$D" 2>/dev/null; then
-    qappend "$label"; qunlock
-    print -u2 'busy: owner directory appeared'
-    return 1
-  fi
-  result=$("$PF" __queue-owner create --root "$B" --label "$label" --holder-pid "$holder")
+  result=$("$PF" __queue-owner create --root "$B" --queue-dir "$QROOT" --label "$label" --holder-pid "$holder")
   rc=$?
   if (( rc == 0 )); then
     print -r -- "$(ts) acquire $label" >> "$LOG"

@@ -49,11 +49,24 @@ fn root_path(root: &Path) -> Result<(), String> {
     }
     if checked_dir(root)? {
         crate::shared_access::check_directory(root).map_err(|e| e.to_string())?;
-        for name in ["devlock.queue", "devlock.queue.tmp", "devlock.seen", "devlock.seen.tmp", "devlock.log"] {
-            crate::shared_access::check_existing(&root.join(name), true).map_err(|e| e.to_string())?;
+        for name in [
+            "devlock.queue",
+            "devlock.queue.tmp",
+            "devlock.seen",
+            "devlock.seen.tmp",
+            "devlock.log",
+        ] {
+            crate::shared_access::check_existing(&root.join(name), true)
+                .map_err(|e| e.to_string())?;
         }
     }
     Ok(())
+}
+fn queue_path(root: &Path) -> Result<PathBuf, String> {
+    root_path(root)?;
+    let path = crate::lease_domain::inspect(root)?.queue_dir;
+    root_path(&path)?;
+    Ok(path)
 }
 fn bounded(path: &Path) -> Result<Vec<u8>, String> {
     crate::shared_access::check_existing(path, false).map_err(|e| e.to_string())?;
@@ -78,8 +91,7 @@ fn bounded(path: &Path) -> Result<Vec<u8>, String> {
 
 /// No writes and no liveness assumption. A known strong marker belongs to devlease.
 pub(crate) fn read(root: &Path) -> Result<Option<QueueOwner>, String> {
-    root_path(root)?;
-    let dir = root.join("devlock.d");
+    let dir = queue_path(root)?.join("devlock.d");
     if !checked_dir(&dir)? {
         return Ok(None);
     }
@@ -222,7 +234,12 @@ fn bridge(root: &Path) -> Result<File, String> {
         .map_err(|e| format!("bridge held or unknown: {e}"))?;
     Ok(file)
 }
-fn create(root: &Path, label: &str, holder: u32) -> Result<QueueOwner, String> {
+fn create(
+    root: &Path,
+    expected_queue: &Path,
+    label: &str,
+    holder: u32,
+) -> Result<QueueOwner, String> {
     if !valid_label(label) || holder <= 1 || holder > i32::MAX as u32 {
         return Err("invalid queue label or holder PID".into());
     }
@@ -230,13 +247,16 @@ fn create(root: &Path, label: &str, holder: u32) -> Result<QueueOwner, String> {
         return Err("inherited instance cannot create a replacement queue owner".into());
     }
     let _lock = lock(root)?;
-    let dir = root.join("devlock.d");
-    if !checked_dir(&dir)? {
-        return Err("queue directory must first be acquired by devlock".into());
-    }
-    exact_files(&dir, &[])?;
     let _bridge = bridge(root)?;
-    if exists(&root.join("phonefarm-lease.d"))? {
+    let queue = queue_path(root)?;
+    if !expected_queue.is_absolute() || expected_queue != queue {
+        return Err("queue directory changed since check; no owner was created".into());
+    }
+    let dir = queue.join("devlock.d");
+    if exists(&dir)? {
+        return Err("queue/strong owner slot is occupied; preserved".into());
+    }
+    if exists(&queue.join("phonefarm-lease.d"))? {
         return Err("nested lease entry requires reconciliation".into());
     }
     let info = process(holder)?
@@ -263,25 +283,28 @@ fn create(root: &Path, label: &str, holder: u32) -> Result<QueueOwner, String> {
         host_boot_id: boot_id()?,
     };
     check_live(&owner)?;
+    crate::shared_access::create_dir(&dir)
+        .map_err(|e| format!("queue owner slot changed; preserved: {e}"))?;
     crate::devlease::durable_replace(
         &dir.join(MARKER),
         &serde_json::to_vec(&owner).map_err(|e| e.to_string())?,
     )?;
     crate::devlease::durable_replace(&dir.join("owner"), owner.owner.as_bytes())?;
-    File::open(root)
+    File::open(&queue)
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
     same(root, &owner)?;
     Ok(owner)
 }
 fn retire(root: &Path, owner: &QueueOwner) -> Result<(), String> {
-    let dir = root.join("devlock.d");
+    let queue = queue_path(root)?;
+    let dir = queue.join("devlock.d");
     exact_files(&dir, &[MARKER, "owner"])?;
     same(root, owner)?;
     fs::remove_file(dir.join("owner")).map_err(|e| e.to_string())?;
     fs::remove_file(dir.join(MARKER)).map_err(|e| e.to_string())?;
     fs::remove_dir(dir).map_err(|e| e.to_string())?;
-    File::open(root)
+    File::open(&queue)
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())
 }
@@ -298,7 +321,10 @@ fn renew_or_release(
     if release {
         retire(root, &owner)?;
     } else {
-        crate::devlease::durable_replace(&root.join("devlock.d/owner"), owner.owner.as_bytes())?;
+        crate::devlease::durable_replace(
+            &queue_path(root)?.join("devlock.d/owner"),
+            owner.owner.as_bytes(),
+        )?;
         same(root, &owner)?;
     }
     Ok(
@@ -318,12 +344,13 @@ fn reconcile(root: &Path, instance: &str) -> Result<Value, String> {
     if is_live(&owner)? {
         return Err("queue holder is still live; reconciliation refused".into());
     }
-    if exists(&root.join("phonefarm-lease.d"))? {
+    let queue = queue_path(root)?;
+    if exists(&queue.join("phonefarm-lease.d"))? {
         return Err("nested lease entry must be recovered first".into());
     }
     let _bridge = bridge(root)?;
     same(root, &owner)?;
-    if exists(&root.join("phonefarm-lease.d"))? {
+    if exists(&queue.join("phonefarm-lease.d"))? {
         return Err("nested lease appeared; reconciliation refused".into());
     }
     let archive = root.join("devlock-reconciliations");
@@ -370,6 +397,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
     let result = (|| -> Result<Value, String> {
         let operation = args.first().ok_or("queue helper requires an operation")?;
         let mut root: Option<PathBuf> = None;
+        let mut expected_queue: Option<PathBuf> = None;
         let mut label = None;
         let mut instance = None;
         let mut holder = None;
@@ -379,10 +407,11 @@ pub(crate) fn run(args: &[String]) -> i32 {
             match arg.as_str() {
                 "--participants-stopped" => stopped = true,
                 "--confirm-device-idle" => idle = true,
-                "--root" | "--label" | "--instance" | "--holder-pid" => {
+                "--root" | "--queue-dir" | "--label" | "--instance" | "--holder-pid" => {
                     let value = it.next().ok_or_else(|| format!("{arg} needs a value"))?;
                     match arg.as_str() {
                         "--root" => root = Some(PathBuf::from(value)),
+                        "--queue-dir" => expected_queue = Some(PathBuf::from(value)),
                         "--label" => label = Some(value.clone()),
                         "--instance" => instance = Some(value.clone()),
                         _ => holder = Some(value.parse::<u32>().map_err(|_| "invalid holder PID")?),
@@ -393,9 +422,15 @@ pub(crate) fn run(args: &[String]) -> i32 {
         }
         let root = root.ok_or("queue helper requires --root")?;
         root_path(&root)?;
+        if operation != "create" && expected_queue.is_some() {
+            return Err("--queue-dir is only an expected path for create".into());
+        }
         match operation.as_str() {
             "create" => serde_json::to_value(create(
                 &root,
+                expected_queue
+                    .as_deref()
+                    .ok_or("create requires --queue-dir from check")?,
                 label.as_deref().ok_or("create requires --label")?,
                 holder.ok_or("create requires --holder-pid")?,
             )?)
@@ -413,10 +448,12 @@ pub(crate) fn run(args: &[String]) -> i32 {
                         return Err("instance check also requires --label".into());
                     }
                     let owner = read(&root)?;
+                    let paths = crate::lease_domain::inspect(&root)?;
                     let live = owner.as_ref().map(check_live);
                     Ok(
-                        json!({"schema":"phonefarm/devlock-check@1","status":match &live {
-                        Some(Ok(())) => "held", Some(Err(_)) => "unknown", None if exists(&root.join("devlock.d"))? => "protected", None => "absent" },
+                        json!({"schema":"phonefarm/devlock-check@2","layout_version":paths.layout_version,
+                        "domain_id":paths.domain_id,"queue_dir":paths.queue_dir,"status":match &live {
+                        Some(Ok(())) => "held", Some(Err(_)) => "unknown", None if exists(&paths.queue_dir.join("devlock.d"))? => "protected", None => "absent" },
                         "owner":owner,"error":live.and_then(Result::err)}),
                     )
                 }

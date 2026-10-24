@@ -68,17 +68,18 @@ pub(crate) fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// The typed outer queue owner may be borrowed only by its current instance's
 /// process tree. A label is never an ownership credential.
 const NESTED_DIR: &str = "phonefarm-lease.d";
-fn recovery_dir(legacy_root: &Path) -> PathBuf {
-    let main = legacy_root.join("devlock.d");
-    let nested = legacy_root.join(NESTED_DIR);
+fn recovery_dir(legacy_root: &Path) -> Result<PathBuf, String> {
+    let queue = crate::lease_domain::inspect(legacy_root)?.queue_dir;
+    let main = queue.join("devlock.d");
+    let nested = queue.join(NESTED_DIR);
     let main_marker = marker(&main);
     // Queue identity is not a strong recovery context. Malformed/foreign outer
     // records remain barriers; do not silently route around them.
     let outer_queue = crate::queue_owner::read(legacy_root).ok().flatten().is_some();
     if (main_marker.is_none() || outer_queue) && marker(&nested).is_some() {
-        nested
+        Ok(nested)
     } else {
-        main
+        Ok(main)
     }
 }
 fn marker(path: &Path) -> Option<Value> {
@@ -425,23 +426,28 @@ impl Lease {
         let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
         // Legacy devlock is global. Same order for every participant, no ABBA deadlock.
         let bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
+        // Resolve after acquiring the stable bridge: a waiting participant may
+        // have observed the previous layout before an explicit domain upgrade.
+        let paths = crate::lease_domain::inspect(legacy_root)?;
+        paths.require_device_root(root)?;
+        let queue_root = &paths.queue_dir;
         // Serialize the outer identity check and nested publication with outer
         // release/replacement. This guard is never held during device work.
         let mut queue_guard = if observation { None } else { Some(crate::queue_owner::lock(legacy_root)?) };
         let outer = if observation { None } else { crate::queue_owner::inherited(legacy_root)? };
         if outer.is_none() { drop(queue_guard.take()); }
         let legacy = if observation {
-            observation_available(legacy_root)?;
-            legacy_root.join("devlock.d")
-        } else if outer.is_some() { legacy_root.join(NESTED_DIR) }
-        else { legacy_root.join("devlock.d") };
+            observation_available(queue_root)?;
+            queue_root.join("devlock.d")
+        } else if outer.is_some() { queue_root.join(NESTED_DIR) }
+        else { queue_root.join("devlock.d") };
         // 另一个目录里残留的租约 (崩溃/恢复屏障) 同样阻断, 不因换了目录而被忽略
-        for other in [legacy_root.join("devlock.d"), legacy_root.join(NESTED_DIR)] {
+        for other in [queue_root.join("devlock.d"), queue_root.join(NESTED_DIR)] {
             if other == legacy {
                 continue;
             }
             if let Some(m) = marker(&other) {
-                if other == legacy_root.join("devlock.d") && outer.as_ref().is_some_and(|owner| {
+                if other == queue_root.join("devlock.d") && outer.as_ref().is_some_and(|owner| {
                     serde_json::to_value(owner).ok().as_ref() == Some(&m)
                 }) { continue; }
                 if !marker_state(&m).is_ok_and(|(pending, recovery)| !pending && !recovery) {
@@ -519,7 +525,7 @@ impl Lease {
             let _ = fs::remove_dir(&legacy);
             return Err(format!("devlock heartbeat: {e}"));
         }
-        File::open(legacy_root)
+        File::open(queue_root)
             .and_then(|d| d.sync_all())
             .map_err(|e| e.to_string())?;
         drop(queue_guard);
@@ -554,7 +560,7 @@ impl Lease {
         lease.publish_receipt(&info, "active", None)?;
         // A writer may have joined between our first queue check and atomic mkdir.
         // Yield before any transport is launched, without leaving a queue entry.
-        if observation { observation_queue_empty(legacy_root)?; }
+        if observation { observation_queue_empty(queue_root)?; }
         Ok(lease)
     }
 
@@ -836,7 +842,8 @@ impl Lease {
         let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
         let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
         let bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
-        let legacy = recovery_dir(legacy_root);
+        crate::lease_domain::inspect(legacy_root)?.require_device_root(root)?;
+        let legacy = recovery_dir(legacy_root)?;
         let prior = marker(&legacy).ok_or("missing/corrupt recovery owner")?;
         let (pending, _) = marker_state(&prior)?;
         let recovery_of = if prior.get("job_id").is_some() {
@@ -948,7 +955,8 @@ impl Lease {
         let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
         let _device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
         let _bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
-        let legacy = recovery_dir(legacy_root);
+        crate::lease_domain::inspect(legacy_root)?.require_device_root(root)?;
+        let legacy = recovery_dir(legacy_root)?;
         let m = marker(&legacy)
             .ok_or("no verifiable phonefarm owner; cannot recover manual/unknown lock")?;
         let (pending, recovery) = marker_state(&m)?;
@@ -1062,6 +1070,11 @@ fn host_process_fact(m: &Value, observed: &Result<Option<InstanceState>, String>
 
 /// Observe existing host state only. This is neither a recovery receipt nor write authorization.
 fn lease_status(legacy_root: &Path) -> Value {
+    let paths = match crate::lease_domain::inspect(legacy_root) {
+        Ok(paths) => paths,
+        Err(error) => return json!({"schema_version":1,"status":"unknown","bridge_held":null,
+            "entries":[],"error":error}),
+    };
     let probe_bridge = || -> Result<bool, String> {
         crate::shared_access::check_directory(legacy_root).map_err(|e| e.to_string())?;
         let path = legacy_root.join("phonefarm-bridge.lock");
@@ -1085,7 +1098,7 @@ fn lease_status(legacy_root: &Path) -> Value {
     let mut entries = Vec::new();
     let queue_owner = crate::queue_owner::read(legacy_root);
     for directory in ["devlock.d", NESTED_DIR] {
-        let path = legacy_root.join(directory);
+        let path = paths.queue_dir.join(directory);
         let mut entry = json!({"directory":directory,"serial":null,"label":null,"job_id":null,"lease_id":null,
             "role":null,"instance_id":null,"outer_instance_id":null,"holder_verified":null,
             "state":"unknown","reason":null,"recovery_context":null});
@@ -1239,6 +1252,20 @@ pub(crate) fn storage_status(storage: &crate::lease_storage::Storage) -> Value {
 }
 
 pub fn run_lease(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("domain-init") {
+        let result = if args.len() == 3 && args[1] == "--participants-stopped" && args[2] == "--json" {
+            crate::lease_storage::resolve().upgrade_domain().map_err(|error| ("unavailable", error))
+        } else {
+            Err(("invalid_request", "phonefarm lease domain-init --participants-stopped --json".into()))
+        };
+        return match result {
+            Ok(storage) => { println!("{}", storage_status(&storage)); 0 }
+            Err((code, error)) => {
+                println!("{}", json!({"schema":"phonefarm/lease-domain-error@1","code":code,"error":error}));
+                2
+            }
+        };
+    }
     if matches!(args.first().map(String::as_str), Some("devices" | "devices-set")) {
         return crate::device_registry::run_cli(args);
     }
