@@ -36,6 +36,9 @@ jobs:
         with:
           workspaces: src
       - name: cargo build --release
+        env:
+          HGAMEY_BUILD_REVISION: ${{ github.sha }}
+          HGAMEY_BUILD_DIRTY: 'false'
         run: cd src && cargo build --release
       - name: 检查产物
         run: |

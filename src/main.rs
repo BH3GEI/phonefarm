@@ -60,6 +60,7 @@ mod game_deploy;
 mod game_deploy_session;
 mod game_deploy_transport;
 mod remote_control;
+mod runtime_identity;
 mod game_initialize;
 mod game_scene;
 mod game_install_session;
@@ -229,6 +230,7 @@ impl Config {
 }
 
 const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
+身份:  runtime-info --json                        (本程序构建声明；纯宿主，不查询设备)
 跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--max-steps N] [--app P] [--assert \"词1,词2\"] [--perceive ocr] \"<目标>\"
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
@@ -434,6 +436,7 @@ fn spawn_detached_with(args: &[String], console: &str, envs: &[(&str, &str)]) ->
 }
 
 fn main() {
+    runtime_identity::report_startup();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // 碰设备的子命令先过设备锁 (src/devlock.rs): 没拿到锁不碰设备
     if let Some(sub) = args.first().cloned() {
@@ -479,6 +482,13 @@ fn main() {
         }
     }
     match args.first().map(|s| s.as_str()) {
+        Some("runtime-info") => {
+            if args.len() > 2 || args.get(1).is_some_and(|arg| arg != "--json") {
+                eprintln!("usage: phonefarm runtime-info --json");
+                std::process::exit(2);
+            }
+            println!("{}", runtime_identity::identity());
+        }
         Some("__queue-owner") => {
             std::process::exit(queue_owner::run(&args[1..]));
         }
