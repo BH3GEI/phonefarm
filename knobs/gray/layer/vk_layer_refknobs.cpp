@@ -3697,6 +3697,14 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyImageView(VkDevice dev, VkImageView 
 
 void npuprobe_on_present(uint64_t frame);   // npuprobe.cpp
 
+// selfsr 与 interp 同时开: selfsr 先就地超分, 它的「下层 present」换成 interp (interp 再调真正的下层)。
+// 两者都只在游戏的 present 线程里同步调用, 用线程局部变量把真正的下层与帧号带过去。
+static thread_local PFN_vkQueuePresentKHR tl_present_next = nullptr;
+static thread_local uint64_t tl_present_frame = 0;
+static VKAPI_ATTR VkResult VKAPI_CALL rk_present_via_interp(VkQueue q, const VkPresentInfoKHR* pi) {
+    return ip_on_present(q, pi, tl_present_next, tl_present_frame);
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR* pi) {
     DevDisp d;
     if (!dev_of(key(q), &d) || !d.QueuePresentKHR) {
@@ -3728,6 +3736,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
     if ((f % 300) == 0) write_marker();  // 周期落盘, 无需等退出
     VkPresentInfoKHR fd_pi;
     if (fd_on()) pi = fd_on_present(q, pi, &fd_pi, f);   // 抓帧窗口内: 先拷贝, present 改等我们的信号量
+    if (sr_on() && ip_on()) {   // 超分 + 插帧 (第 5 步)
+        tl_present_next = d.QueuePresentKHR; tl_present_frame = f;
+        return sr_on_present(q, pi, rk_present_via_interp, f);
+    }
     if (sr_on()) return sr_on_present(q, pi, d.QueuePresentKHR, f);   // 送显前超分 (selfsr.cpp)
     if (ip_on()) return ip_on_present(q, pi, d.QueuePresentKHR, f);   // 两帧之间多送一张合成帧 (interp.cpp)
     return d.QueuePresentKHR(q, pi);
@@ -3965,7 +3977,7 @@ static bool lower_optional_device(VkDevice dev,const char* name) {
 
 static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* name) {
     RK_HOOK("vkGetInstanceProcAddr", dispatch_instance);
-    if (PFN_vkVoidFunction p = sr_hook(name)) return p;   // selfsr 没开时恒为空 (与 interp/framedump 不同时开)
+    if (PFN_vkVoidFunction p = sr_hook(name)) return p;   // selfsr 没开时恒为空; 同名钩子由它往下转给 interp
     if (PFN_vkVoidFunction p = ip_hook(name)) return p;   // interp 没开时恒为空; 同名钩子由它往下转给 framedump
     if (PFN_vkVoidFunction p = fd_hook(name)) return p;   // framedump 没开时恒为空
     // 注意: vkEnumerateInstance{Layer,Extension}Properties 这里**不挂**。那两个导出符号
@@ -4077,7 +4089,7 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
 
 static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     RK_HOOK("vkGetDeviceProcAddr", dispatch_device);
-    if (PFN_vkVoidFunction p = sr_hook(name)) return p;   // selfsr 没开时恒为空 (与 interp/framedump 不同时开)
+    if (PFN_vkVoidFunction p = sr_hook(name)) return p;   // selfsr 没开时恒为空; 同名钩子由它往下转给 interp
     if (PFN_vkVoidFunction p = ip_hook(name)) return p;   // interp 没开时恒为空; 同名钩子由它往下转给 framedump
     if (PFN_vkVoidFunction p = fd_hook(name)) return p;   // framedump 没开时恒为空
     RK_HOOK("vkDestroyDevice", rk_DestroyDevice);

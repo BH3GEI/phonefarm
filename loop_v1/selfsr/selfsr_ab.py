@@ -8,6 +8,7 @@
   layer               只挂透传层 (gray-layer session --mode probe), 第 2 步用
   hwc:<F>             Android Game Mode 降分辨率 F (cmd game mode custom + cmd game set --downscale F), 放大交给 HWC
   ip:<合成方式>[:<帧率>]  挂层并开层内插帧 (debug.knobs.interp=1, interp_mode=dup/dupcur/bm, interp_fps=给窗口投的帧率)
+  srip:<F>:<宽>x<高>:<锐化>:<合成方式>[:<帧率>]  超分 + 插帧叠加 (第 5 步)
   sr:<F>:<宽>x<高>[:<锐化>]  同上降分辨率 F, 再挂层并设 debug.knobs.selfsr=<宽>x<高>[:<锐化>]: 层在送显前把游戏的小图超分到 <宽>x<高>
 每臂: (devlock 下) 设好 Game Mode 与 selfsr 属性 → 冷启动进大世界 → 静置 --settle 秒 → --window 秒窗口并行采
   - SurfaceFlinger timestats: 上屏帧率 / 刷新率 / 丢帧
@@ -41,13 +42,16 @@ def parse_kind(s):
         return {"kind": "ip", "downscale": None, "selfsr": None, "interp": p[1], "fps": p[2] if len(p) == 3 else ""}
     if p[0] == "hwc" and len(p) == 2:
         return {"kind": "hwc", "downscale": float(p[1]), "selfsr": None}
+    if p[0] == "srip" and len(p) in (5, 6) and "x" in p[2]:   # srip:<F>:<宽>x<高>:<锐化>:<合成方式>[:<投帧率>]
+        return {"kind": "srip", "downscale": float(p[1]), "selfsr": f"{p[2]}:{p[3]}", "interp": p[4],
+                "fps": p[5] if len(p) == 6 else ""}
     if p[0] == "sr" and len(p) in (3, 4) and "x" in p[2]:   # sr:<F>:<宽>x<高>[:<锐化>]
         return {"kind": "sr", "downscale": float(p[1]), "selfsr": ":".join(p[2:])}
     raise argparse.ArgumentTypeError(f"不认识的臂: {s}")
 
 
 def uses_layer(k):
-    return k["kind"] in ("layer", "sr", "ip")
+    return k["kind"] in ("layer", "sr", "ip", "srip")
 
 
 def pf_json(pf, *args, inp=None, timeout=600):
@@ -241,14 +245,14 @@ def arm_layer(a, out, name, k, note, locked):
         f0 = (m0.get("readonly_stats") or {}).get("frames")
         f1 = (m1.get("readonly_stats") or {}).get("frames")
         rec["layer_frames_in_window"] = (f1 - f0) if (f0 is not None and f1 is not None) else None
-        if k["kind"] == "sr":
+        if k["kind"] in ("sr", "srip"):
             s0, s1 = m0.get("selfsr") or {}, m1.get("selfsr") or {}
             rec["selfsr"] = s1
             up = (s1.get("upscaled") or 0) - (s0.get("upscaled") or 0)
             rec["selfsr_upscaled_in_window"] = up
             if up <= 0:
                 rec["error"] = f"层没在超分 (selfsr={s1})"
-        if k["kind"] == "ip":
+        if k["kind"] in ("ip", "srip"):
             rec["interp"] = m1.get("interp")
         if not rec["layer_loaded"]:
             rec["error"] = "层没加载 (marker layer_loaded 不为真)"
@@ -391,7 +395,7 @@ def main():
                 note(f"{name} ({k_str}): 显示 {rec.get('display_fps')} fps @{rec.get('display_hz')}Hz 游戏 {rec.get('game_fps')} fps "
                      f"p95 {rec.get('game_frame_p95_ms')} ms 锐度 {rec.get('sharp_full', 0):.1f} 输出 {rec.get('out_res')}"
                      + (f" 层帧数 {rec.get('layer_frames_in_window')}" if uses_layer(k) else "")
-                     + (f" 超分 {rec.get('selfsr_upscaled_in_window')} 次 {(rec.get('selfsr') or {}).get('game_extent')}→{(rec.get('selfsr') or {}).get('swap_extent')}" if k['kind'] == 'sr' else ""))
+                     + (f" 超分 {rec.get('selfsr_upscaled_in_window')} 次 {(rec.get('selfsr') or {}).get('game_extent')}→{(rec.get('selfsr') or {}).get('swap_extent')}" if k['kind'] in ('sr', 'srip') else ""))
             if uses_layer(k) and not rec.get("layer_removed", False):
                 note(f"{name}: 层没摘干净, 中止整轮 (先人工核对再继续)")
                 break

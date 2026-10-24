@@ -7,6 +7,7 @@
 //      N→PRESENT_SRC。提交: 等游戏给 present 的信号量, 发这张图自己的信号量;
 //   3. present: 照游戏的参数, 只把等待的信号量换成我们的。
 #include "selfsr.h"
+#include "interp.h"
 
 #include <android/log.h>
 #include <sys/system_properties.h>
@@ -229,7 +230,9 @@ VKAPI_ATTR void VKAPI_CALL sr_DestroySwapchainKHR(VkDevice dev, VkSwapchainKHR s
             if (it != D->swaps.end()) { release_swap_locked(D, it->second); D->swaps.erase(it); }
         }
     }
-    if (D && D->DestroySwapchainKHR) D->DestroySwapchainKHR(dev, sc, a);
+    // interp 同时开着时它也要收这条 swapchain 的对象: 往下转给它的钩子 (它再转 framedump / 下层)
+    if (auto ipn = reinterpret_cast<PFN_vkDestroySwapchainKHR>(ip_hook("vkDestroySwapchainKHR"))) ipn(dev, sc, a);
+    else if (D && D->DestroySwapchainKHR) D->DestroySwapchainKHR(dev, sc, a);
 }
 
 }  // namespace

@@ -12,6 +12,7 @@
 //      → 拷回 swapchain 图 → 送显。
 //   游戏要的尺寸本来就等于 <宽>x<高> 时不改 swapchain, 只计数 (same_size), 画面与不开时相同。
 // 任何一步不成立都退回原样送显, 原因计数进 marker 的 selfsr.fallbacks。
+// 与 interp 同时开时 (第 5 步): 先超分, 再由 interp 在超分后的画面上插帧 (见 rk_QueuePresentKHR)。
 #pragma once
 #include <vulkan/vulkan.h>
 #include <string>
