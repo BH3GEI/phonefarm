@@ -72,26 +72,38 @@ pub(crate) fn process(_: u32) -> Result<Option<Process>, String> {
     Err("queue process identity is unsupported on this host".into())
 }
 
+/// macOS: kern.bootsessionuuid, fixed for one boot session. Not kern.boottime: that is
+/// wall clock minus uptime and is recomputed when the clock is slewed or stepped (NTP,
+/// sleep/wake). Measured 2026-10-23: three reads within ~2 h gave 1792348212.184773,
+/// 1792348212.030105 and 1792348211.511555, so every hour-long devlock holder was
+/// declared dead and its nested eval and release were refused.
 #[cfg(target_os = "macos")]
 pub(crate) fn boot_id() -> Result<String, String> {
-    let mut boot: libc::timeval = unsafe { std::mem::zeroed() };
-    let mut size = std::mem::size_of_val(&boot);
+    let mut buf = [0u8; 64];
+    let mut size = buf.len();
     let result = unsafe {
         libc::sysctlbyname(
-            b"kern.boottime\0".as_ptr().cast(),
-            &mut boot as *mut _ as *mut libc::c_void,
+            b"kern.bootsessionuuid\0".as_ptr().cast(),
+            buf.as_mut_ptr().cast(),
             &mut size,
             std::ptr::null_mut(),
             0,
         )
     };
-    if result != 0 || size != std::mem::size_of_val(&boot) || boot.tv_sec <= 0 {
+    if result != 0 || size == 0 || size > buf.len() {
         return Err(format!(
             "cannot read host boot identity: {}",
             std::io::Error::last_os_error()
         ));
     }
-    Ok(format!("{}.{:06}", boot.tv_sec, boot.tv_usec))
+    let id = std::str::from_utf8(&buf[..size])
+        .map_err(|_| "invalid host boot identity")?
+        .trim_end_matches('\0')
+        .trim();
+    if !clean_identity(id) {
+        return Err("invalid host boot identity".into());
+    }
+    Ok(id.into())
 }
 #[cfg(target_os = "linux")]
 pub(crate) fn boot_id() -> Result<String, String> {
@@ -166,4 +178,15 @@ pub(crate) fn inspect(identity: &Identity) -> Result<InstanceState, String> {
         return Ok(InstanceState::Zombie);
     }
     Ok(InstanceState::Alive)
+}
+
+#[cfg(test)]
+mod boot_tests {
+    #[test]
+    fn boot_identity_is_clean_and_stable_across_reads() {
+        let a = super::boot_id().unwrap();
+        assert!(super::clean_identity(&a), "{a}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(super::boot_id().unwrap(), a);
+    }
 }

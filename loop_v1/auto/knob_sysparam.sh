@@ -27,6 +27,10 @@ allowed_sysfs() {
     /sys/devices/system/cpu/cpufreq/policy*/scaling_min_freq) return 0 ;;
     /sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq) return 0 ;;
     /sys/devices/system/cpu/cpufreq/policy*/scaling_governor)  return 0 ;;
+    /sys/devices/system/cpu/cpufreq/policy*/walt/hispeed_load)       return 0 ;;
+    /sys/devices/system/cpu/cpufreq/policy*/walt/hispeed_freq)       return 0 ;;
+    /sys/devices/system/cpu/cpufreq/policy*/walt/up_rate_limit_us)   return 0 ;;
+    /sys/devices/system/cpu/cpufreq/policy*/walt/down_rate_limit_us) return 0 ;;
     /sys/class/kgsl/kgsl-3d0/min_pwrlevel)                     return 0 ;;
     /sys/class/kgsl/kgsl-3d0/max_pwrlevel)                     return 0 ;;
     /sys/class/kgsl/kgsl-3d0/devfreq/min_freq)                 return 0 ;;
