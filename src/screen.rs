@@ -171,25 +171,12 @@ fn capture_sample(sh: &Shared, tmp: &str, selected: &mut Option<String>) -> Resu
     std::fs::create_dir(&work).map_err(|e| capture_error(format!("创建截图临时目录失败: {e}")))?;
     let result = (|| {
         let work = work.canonicalize().map_err(|e| capture_error(e.to_string()))?;
-        let mut args = vec!["--work-dir".into(), work.to_string_lossy().into_owned(),
-            "--width".into(), sh.dev_w.load(Ordering::Relaxed).to_string(),
-            "--height".into(), sh.dev_h.load(Ordering::Relaxed).to_string()];
-        if let Some(serial) = selected.as_ref() { args.extend(["--serial".into(), serial.clone()]); }
-        let out = crate::observation::run("screen", &args, &crate::lease_storage::resolve(), CAPTURE_TIMEOUT)?;
-        if !out.status.success() {
-            return Err(capture_error(format!("截图 worker 失败: {}", String::from_utf8_lossy(&out.stderr).trim())));
-        }
-        let meta: Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| capture_error(format!("截图 worker 回包无效: {e}")))?;
+        let meta = capture_file(&work, selected.as_deref(),
+            sh.dev_w.load(Ordering::Relaxed), sh.dev_h.load(Ordering::Relaxed))?;
         let path = work.join("capture.jpg");
-        if meta["jpeg_path"].as_str() != path.to_str() {
-            return Err(capture_error("截图 worker 返回了非本次截图路径"));
-        }
-        let dimension = |key: &str| meta[key].as_u64().filter(|n| *n > 0 && *n <= i32::MAX as u64)
-            .ok_or_else(|| capture_error(format!("截图 worker 缺少有效{key}")));
-        let (width, height) = (dimension("width")?, dimension("height")?);
-        let serial = meta["serial"].as_str().filter(|s| !s.is_empty())
-            .ok_or_else(|| capture_error("截图 worker 缺少实际设备身份"))?;
+        let width = meta["width"].as_u64().unwrap();
+        let height = meta["height"].as_u64().unwrap();
+        let serial = meta["serial"].as_str().unwrap();
         let jpeg = std::fs::read(path).map_err(|e| capture_error(format!("读取截图失败: {e}")))?;
         sh.dev_w.store(width, Ordering::Relaxed);
         sh.dev_h.store(height, Ordering::Relaxed);
@@ -203,6 +190,73 @@ fn capture_sample(sh: &Shared, tmp: &str, selected: &mut Option<String>) -> Resu
     })();
     let _ = std::fs::remove_dir_all(&work);
     result
+}
+
+/// Shared by the local screen service and the node's single-frame adapter.
+fn capture_file(work: &std::path::Path, serial: Option<&str>, width: u64, height: u64)
+    -> Result<Value, crate::observation::Failure>
+{
+    let mut args = vec!["--work-dir".into(), work.to_string_lossy().into_owned(),
+        "--width".into(), width.to_string(), "--height".into(), height.to_string()];
+    if let Some(serial) = serial { args.extend(["--serial".into(), serial.into()]); }
+    let out = crate::observation::run("screen", &args, &crate::lease_storage::resolve(), CAPTURE_TIMEOUT)?;
+    if !out.status.success() {
+        return Err(capture_error(format!("截图 worker 失败: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    let meta: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| capture_error(format!("截图 worker 回包无效: {e}")))?;
+    if meta["jpeg_path"].as_str() != work.join("capture.jpg").to_str() {
+        return Err(capture_error("截图 worker 返回了非本次截图路径"));
+    }
+    for key in ["width", "height"] {
+        if meta[key].as_u64().filter(|n| *n > 0 && *n <= i32::MAX as u64).is_none() {
+            return Err(capture_error(format!("截图 worker 缺少有效{key}")));
+        }
+    }
+    let observed = meta["serial"].as_str().filter(|v| !v.is_empty())
+        .ok_or_else(|| capture_error("截图 worker 缺少实际设备身份"))?;
+    if serial.is_some_and(|value| value != observed) {
+        return Err(capture_error("截图 worker 设备身份不匹配"));
+    }
+    if meta["captured_at_ms"].as_u64().filter(|value| *value > 0).is_none() {
+        return Err(capture_error("截图 worker 缺少采集时间"));
+    }
+    Ok(meta)
+}
+
+fn run_capture(args: &[String]) -> i32 {
+    let mut serial = None;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--serial" if serial.is_none() => serial = it.next().cloned(),
+            "--out" if out.is_none() => out = it.next().cloned(),
+            "--json" => (),
+            _ => { eprintln!("phonefarm screen capture --serial S --out NEW_DIR --json"); return 2; }
+        }
+    }
+    let result = (|| {
+        let serial = serial.filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| capture_error("explicit serial is required"))?;
+        let out = out.map(std::path::PathBuf::from)
+            .ok_or_else(|| capture_error("new output directory is required"))?;
+        std::fs::create_dir(&out).map_err(|e| capture_error(format!("new capture directory: {e}")))?;
+        let work = out.canonicalize().map_err(|e| capture_error(e.to_string()))?;
+        capture_file(&work, Some(&serial), 0, 0)
+    })();
+    match result {
+        Ok(mut value) => {
+            value["schema"] = json!("phonefarm/screen-capture@1");
+            value["state"] = json!("ready");
+            value["ownership"] = json!("observation-v1");
+            println!("{value}"); 0
+        }
+        Err(error) => {
+            println!("{}", json!({"schema":"phonefarm/screen-capture@1",
+                "state":error.state,"reason":error.reason})); 2
+        }
+    }
 }
 
 /// Invoked only by the observation worker after the shared ownership barrier.
@@ -232,7 +286,7 @@ pub(crate) fn capture_worker(args: &[String]) -> i32 {
         if width <= 0 || height <= 0 { (width, height) = phone.size(); }
         let path = work.join("capture.jpg");
         phone.screen(&path.to_string_lossy()).ok_or("screen capture failed")?;
-        Ok(json!({"jpeg_path":path,"width":width,"height":height,"serial":serial}))
+        Ok(json!({"jpeg_path":path,"width":width,"height":height,"serial":serial,"captured_at_ms":now_ms()}))
     };
     match capture() {
         Ok(meta) => { println!("{meta}"); 0 }
@@ -304,7 +358,8 @@ impl Feed {
 // ══════════════ 子命令 ══════════════
 
 fn usage() -> &'static str {
-    "用法: phonefarm screen [--serial <设备>] [--port N] [--interval-ms N]\n\
+    "用法: phonefarm screen capture --serial S --out NEW_DIR --json\n\
+     \x20 或 phonefarm screen [--serial <设备>] [--port N] [--interval-ms N]\n\
      \x20                   [--actions <log.jsonl>] [--from-start] [--out <目录>]\n\
      \x20 在浏览器里看设备屏幕 + harness 刚才点了哪(零 Token, 只读)。\n\
      \x20 --interval-ms: 取帧间隔, 缺省 700, 下限 200\n\
@@ -317,6 +372,14 @@ fn usage() -> &'static str {
 }
 
 pub fn run_screen(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("capture") {
+        return run_capture(&args[1..]);
+    }
+    if args == ["capabilities", "--json"] {
+        println!("{}", json!({"schema":"phonefarm/screen-capabilities@1",
+            "capture_v1":true,"ownership":"observation-v1","worker_timeout_seconds":20}));
+        return 0;
+    }
     let mut serial: Option<String> = None;
     let mut port = DEFAULT_PORT;
     let mut interval_ms = DEFAULT_INTERVAL_MS;

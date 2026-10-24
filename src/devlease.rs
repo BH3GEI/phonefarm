@@ -264,6 +264,65 @@ fn prior_processes_gone(m: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn remote_recovery_evidence(
+    prior: &Value, serial: &str, context: &Path, note: &str,
+    participants_stopped: bool, evidence: &Path,
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let context = context.canonicalize().map_err(|e| e.to_string())?;
+    if note.trim().is_empty() || note.len() > 4096 || evidence.parent() != Some(context.as_path())
+        || !evidence.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with("recovery-") && s.ends_with(".json"))
+        || evidence.symlink_metadata().is_ok()
+    {
+        return Err("remote recovery requires a note and a new evidence file in the exact session context".into());
+    }
+    let file = File::options().read(true).custom_flags(libc::O_NOFOLLOW)
+        .open(context.join("session.json")).map_err(|e| e.to_string())?;
+    if !file.metadata().map_err(|e| e.to_string())?.is_file()
+        || file.metadata().map_err(|e| e.to_string())?.len() > 65536 {
+        return Err("remote recovery state is not a bounded regular file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(65537).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > 65536 { return Err("remote recovery state exceeds its limit".into()); }
+    let state: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let session_id = state["session_id"].as_str().filter(|s| !s.is_empty() && s.len() <= 64
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)))
+        .ok_or("invalid remote session identity")?;
+    if state["schema"] != "phonefarm/remote-control-state@1" || state["serial"] != serial
+        || state["context"] != json!(context) || state["token"].as_str().is_none_or(str::is_empty) {
+        return Err("remote recovery schema/serial/context mismatch".into());
+    }
+    let mut ancestor = prior;
+    let mut bound = false;
+    for _ in 0..32 {
+        if ancestor["token"] == state["token"] && ancestor["serial"] == serial
+            && ancestor["recovery_context"] == json!(context)
+            && ancestor["pid"] == state["owner"]["pid"]
+            && ancestor["pid_start"] == state["owner"]["start"]
+            && ancestor["host_boot_id"] == state["owner"]["host_boot_id"] {
+            bound = true; break;
+        }
+        let Some(previous) = ancestor.get("previous_owner") else { break; };
+        ancestor = previous;
+    }
+    if !bound { return Err("remote session does not bind the retained lease ancestry".into()); }
+    let pending = prior["command_pending"] == true;
+    if pending && (!participants_stopped || prior.get("child_pid").is_some()
+        || prior.get("child_pgid").is_some() || prior.get("child_start").is_some()) {
+        return Err("unbound remote launch requires --participants-stopped after independently verifying every possible launcher/transport stopped; recorded groups cannot be overridden".into());
+    }
+    let proof = json!({"schema":"phonefarm/remote-control-recovery@1","session_id":session_id,
+        "serial":serial,"context":context,"scope":"remote_control_commands_settled","origin":"operator_assertion",
+        "device_verified":false,"game_state_restored":false,"app_state_rollback":false,
+        "participants_stopped":participants_stopped,"unbound_pending_retired":pending,"note":note,
+        "previous_owner":prior,"pending_request":state["pending_request"],"at":chrono::Utc::now().to_rfc3339()});
+    // Preserve the original marker and assertion before transferring or clearing
+    // anything. A failed publication leaves the original barrier untouched.
+    durable_replace(evidence, &serde_json::to_vec(&proof).map_err(|e| e.to_string())?)
+}
+
 /// Verify both actual process instances before the released worker touches a device.
 pub(crate) fn verify_worker_processes(m: &Value, parent: u32, child: u32) -> Result<(), String> {
     marker_state(m)?;
@@ -754,6 +813,25 @@ impl Lease {
         context: &Path,
         timeout: Duration,
     ) -> Result<Self, String> {
+        Self::acquire_recovery_inner(root, legacy_root, serial, context, timeout, None)
+    }
+
+    /// Remote control owns no installation rollback. Its local administrator may
+    /// attest that the original finite transports stopped. Only an unbound
+    /// pending launch additionally accepts an explicit participants-stopped
+    /// assertion; a recorded child/group must still be independently absent.
+    pub(crate) fn acquire_remote_recovery(
+        root: &Path, legacy_root: &Path, serial: &str, context: &Path,
+        note: &str, participants_stopped: bool, evidence: &Path,
+    ) -> Result<Self, String> {
+        Self::acquire_recovery_inner(root, legacy_root, serial, context, Duration::ZERO,
+            Some((note, participants_stopped, evidence)))
+    }
+
+    fn acquire_recovery_inner(
+        root: &Path, legacy_root: &Path, serial: &str, context: &Path,
+        timeout: Duration, remote: Option<(&str, bool, &Path)>,
+    ) -> Result<Self, String> {
         let deadline = Instant::now() + timeout;
         let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
         let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
@@ -776,17 +854,22 @@ impl Lease {
         if prior["producer"] != "phonefarm"
             || prior["format"] != 1
             || prior["serial"] != serial
-            || prior["recovery_required"] != true
+            || (prior["recovery_required"] != true && remote.is_none())
             || prior["recovery_context"]
                 != json!(context.canonicalize().map_err(|e| e.to_string())?)
             || !owns(&legacy, prior_token)
         {
             return Err("recovery owner/identity is live, unknown or mismatched".into());
         }
-        if pending {
+        if pending && remote.is_none() {
             return Err("unbound pending transport launch; future ADB activity unknown, requires manual reconciliation".into());
         }
         prior_processes_gone(&prior)?;
+        if let Some((note, participants_stopped, evidence)) = remote {
+            // This check deliberately follows prior_processes_gone: no flag can
+            // override an unknown/live recorded child or process group.
+            remote_recovery_evidence(&prior, serial, context, note, participants_stopped, evidence)?;
+        }
         let process_identity = host_process::capture(std::process::id())?;
         // Transfer only after all old local ownership checks; persistent uncertainty remains.
         let token = format!(
@@ -804,6 +887,10 @@ impl Lease {
         next["owner"] = json!(owner);
         next["label"] = json!("confirmation-reconcile");
         next["previous_owner"] = prior;
+        if pending {
+            next["command_pending"] = json!(false);
+            next.as_object_mut().unwrap().remove("pending_operation");
+        }
         if let Some(o) = next.as_object_mut() {
             o.remove("child_pid");
             o.remove("child_pgid");
@@ -1749,5 +1836,76 @@ mod tests {
         let legacy = lease.legacy.clone();
         drop(lease);
         assert!(!legacy.exists());
+    }
+
+    fn remote_recovery_fixture(scratch: &Scratch) -> (PathBuf, Value) {
+        let context = scratch.0.canonicalize().unwrap();
+        let mut lease = scratch.lease();
+        lease.hold_for_recovery(&context).unwrap();
+        lease.record_command_pending("remote-tap").unwrap();
+        let legacy = lease.legacy.clone();
+        let mut prior = marker(&legacy).unwrap();
+        drop(lease);
+        // Model the original process instance having exited and its PID reused.
+        prior["pid_start"] = json!("retired-remote-instance");
+        durable_replace(&legacy.join("phonefarm-lease.json"), prior.to_string().as_bytes()).unwrap();
+        let state = json!({"schema":"phonefarm/remote-control-state@1","session_id":"remote-test",
+            "serial":prior["serial"],"context":context,"token":prior["token"],"pending_request":"tap.1",
+            "owner":{"pid":prior["pid"],"start":prior["pid_start"],"host_boot_id":prior["host_boot_id"]}});
+        durable_replace(&context.join("session.json"), state.to_string().as_bytes()).unwrap();
+        (context, prior)
+    }
+
+    #[test]
+    fn remote_pending_recovery_requires_explicit_assertion_and_saves_original_marker() {
+        let scratch = Scratch::new();
+        let (context, prior) = remote_recovery_fixture(&scratch);
+        let root = scratch.0.join("leases"); let legacy = scratch.0.join("legacy");
+        let serial = prior["serial"].as_str().unwrap();
+        let evidence = context.join("recovery-unit.json");
+        assert!(Lease::acquire_recovery(&root, &legacy, serial, &context, Duration::ZERO).is_err());
+        assert!(Lease::acquire_remote_recovery(&root, &legacy, serial, &context, "independent verification", false, &evidence).is_err());
+        assert!(!evidence.exists());
+        assert_eq!(marker(&legacy.join("devlock.d")).unwrap(), prior);
+        let mut recovered = Lease::acquire_remote_recovery(&root, &legacy, serial, &context,
+            "independently stopped every possible original launcher and device transport", true, &evidence).unwrap();
+        let report = read_receipt(&evidence);
+        assert_eq!(report["previous_owner"], prior);
+        assert_eq!(report["origin"], "operator_assertion");
+        assert_eq!(report["device_verified"], false);
+        assert_eq!(report["unbound_pending_retired"], true);
+        assert_eq!(marker(&legacy.join("devlock.d")).unwrap()["command_pending"], false);
+        recovered.complete_recovery("remote_control_commands_settled", "operator_assertion", &[&evidence]).unwrap();
+        drop(recovered);
+        assert!(!legacy.join("devlock.d").exists());
+    }
+
+    #[test]
+    fn remote_pending_recovery_cannot_override_schema_or_recorded_group() {
+        use std::os::unix::process::CommandExt;
+        let scratch = Scratch::new();
+        let (context, mut prior) = remote_recovery_fixture(&scratch);
+        let root = scratch.0.join("leases"); let legacy = scratch.0.join("legacy");
+        let serial = prior["serial"].as_str().unwrap().to_owned();
+        let evidence = context.join("recovery-unit.json");
+        let original = read_receipt(&context.join("session.json"));
+        for (key, invalid) in [("schema", json!("other-session@1")), ("context", json!("/wrong/context"))] {
+            let mut state = original.clone(); state[key] = invalid;
+            durable_replace(&context.join("session.json"), state.to_string().as_bytes()).unwrap();
+            assert!(Lease::acquire_remote_recovery(&root, &legacy, &serial, &context, "verified", true, &evidence).is_err());
+            assert!(!evidence.exists());
+        }
+        durable_replace(&context.join("session.json"), original.to_string().as_bytes()).unwrap();
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").process_group(0).spawn().unwrap();
+        prior["command_pending"] = json!(false);
+        prior["child_pid"] = json!(child.id()); prior["child_pgid"] = json!(child.id());
+        // Even a departed/reused recorded leader cannot make its live group safe.
+        prior["child_start"] = json!("retired-child-instance");
+        durable_replace(&legacy.join("devlock.d/phonefarm-lease.json"), prior.to_string().as_bytes()).unwrap();
+        let refused = Lease::acquire_remote_recovery(&root, &legacy, &serial, &context, "verified", true, &evidence).is_err();
+        let _ = child.kill(); let _ = child.wait();
+        assert!(refused);
+        assert!(!evidence.exists());
+        assert_eq!(marker(&legacy.join("devlock.d")).unwrap(), prior);
     }
 }

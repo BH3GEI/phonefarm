@@ -123,6 +123,37 @@ pub(crate) fn run_worker(
     supervise(lease, program, args, dir, operation, timeout, true)
 }
 
+/// A verified same-executable worker retains the liveness pipe and keeps ADB in
+/// its recorded group. The ordinary transport API remains unchanged for callers
+/// that have their own producer supervision.
+pub(crate) fn run_guarded_transport(
+    lease: &Lease,
+    program: &Path,
+    args: &[String],
+    dir: &Path,
+    operation: &str,
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut worker_args = vec!["__lease-transport-worker".into(), program.to_string_lossy().into_owned()];
+    worker_args.extend_from_slice(args);
+    run_worker(lease, &std::env::current_exe().map_err(|e| e.to_string())?,
+        &worker_args, dir, operation, timeout)
+}
+
+/// Internal only: authority is checked before a transport can be spawned.
+pub(crate) fn transport_worker(args: &[String]) -> i32 {
+    if let Err(e) = worker_guard() {
+        eprintln!("transport worker: {e}");
+        return 90;
+    }
+    let Some(program) = args.first() else { return 90; };
+    // No new session/group: the verified worker's watchdog owns this process too.
+    match Command::new(program).args(&args[1..]).stdin(Stdio::null()).status() {
+        Ok(status) => status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
+        Err(e) => { eprintln!("transport could not start: {e}"); 90 }
+    }
+}
+
 fn supervise(
     lease: &Lease,
     program: &Path,

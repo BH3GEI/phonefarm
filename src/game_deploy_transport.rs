@@ -42,6 +42,7 @@ pub(crate) struct Transport {
     dir: PathBuf,
     sequence: u64,
     stderr: ShellStderr,
+    guarded: bool,
 }
 impl Transport {
     pub(crate) fn new(
@@ -60,7 +61,14 @@ impl Transport {
             dir: dir.into(),
             sequence: 0,
             stderr,
+            guarded: false,
         })
+    }
+
+    pub(crate) fn guarded(serial: &str, token: &str, dir: &Path) -> Result<Self, String> {
+        let mut transport = Self::new(serial, token, dir, ShellStderr::Separate)?;
+        transport.guarded = true;
+        Ok(transport)
     }
 
     pub(crate) fn raw(
@@ -80,7 +88,12 @@ impl Transport {
             message,
             uncertain: false,
         })?;
-        let output = crate::lease_command::run(
+        let execute = if self.guarded {
+            crate::lease_command::run_guarded_transport
+        } else {
+            crate::lease_command::run
+        };
+        let output = execute(
             lease,
             &self.adb,
             &argv,

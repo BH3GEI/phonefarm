@@ -59,6 +59,7 @@ mod gamepad;
 mod game_deploy;
 mod game_deploy_session;
 mod game_deploy_transport;
+mod remote_control;
 mod game_initialize;
 mod game_install_session;
 mod apk_metadata;
@@ -485,6 +486,12 @@ fn main() {
         }
         Some("__observe-worker") => {
             std::process::exit(observation::run_worker(&args[1..]));
+        }
+        Some("__lease-transport-worker") => {
+            std::process::exit(lease_command::transport_worker(&args[1..]));
+        }
+        Some("remote-control") => {
+            std::process::exit(remote_control::run(&args[1..]));
         }
         Some("lease") => {
             std::process::exit(devlease::run_lease(&args[1..]));
