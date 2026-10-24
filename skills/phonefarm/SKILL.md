@@ -1,267 +1,92 @@
 ---
 name: phonefarm
-description: Drive the phonefarm device automation and measurement infrastructure (Rust core, adb + hdc backends). Use when operating Android emulators or OpenHarmony devices through the phonefarm binary — VLM-driven UI traversal (run/benchmark/parallel/quest), zero-token deterministic scripts and replay (script), conformance-test batches and result extraction (test-batch/cts-fetch), on-device model latency benchmarking (bench), frame capture (capture), device farm keep-alive (keepalive/devices/probe), the hypothesis-experiment-evidence loop (hyp/pred/caps/tools/experiment/export), inspecting results via the read-only CLI (last/runs/show/cat/stats/schema), the MCP tool service (serve), or working on the Rust codebase. Covers both Android (adb) and OpenHarmony (hdc) backends, telemetry, and the house rules for spending model tokens and pushing changes. For the task "optimize this game on this phone" use the game_opt_loop skill instead — it orchestrates the decisions and calls into phonefarm for every device write, measurement and verdict.
+description: Use phonefarm for device automation, bounded experiments, measurement and result inspection — deterministic scripts, CTS batches, screenshots, frame capture, typed eval requests, optional VLM UI traversal, local CLI/MCP tools, and Rust implementation work. Android, OpenHarmony and iOS support varies by command and device. External agents, people and optional game_opt_loop clients can use this foundation; game optimization does not require routing through GOL.
 license: MIT
 metadata:
-  version: 3.1
-  source-repo: github.com/BH3GEI/phonefarm
+  source-repo: github.com/HGamey/phonefarm
 ---
 
 # phonefarm
 
-phonefarm is a **device automation and measurement infrastructure**: one Rust
-kernel, two device backends (Android `adb` / OpenHarmony `hdc`), carrying
-several independent upper paths on one shared foundation of device abstraction,
-record contract, telemetry, and evidence grading.
+phonefarm provides device operations, measurement and evidence. Choose the smallest existing command that serves the requested task, using the current checkout's help and the target's reported capabilities. Android/ADB, OpenHarmony/HDC and iOS/WDA support is command-specific; a backend name does not promise every operation, metric or restoration path.
 
-A vision-language model drives **one** of those paths. It is not what the
-project is. `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `collect`, `decide`, `screen` and
-`keepalive` spend zero tokens and work with no model at all.
+External agents and people can plan experiments directly. `game_opt_loop` is an optional candidate-generation and evaluation client, not a required route for optimizing a game. When available, `hgamey-research` covers shared goals, directions and feedback; this skill remains usable for a single device operation or local result inspection without that workflow.
 
-Architecture: decision and execution are separated. Where a model is used at
-all, it only does screen understanding and action planning; state capture,
-validation, safety interception, post-run review, and performance monitoring
-are all enforced by deterministic Rust code in the host process.
+## Scope, cost and target
 
-This skill is self-contained: everything an agent needs to install, build,
-run, and inspect phonefarm is in this file and the `references/` folder.
+- Stay within the user's authorized devices, actions and budget. Existing authorization need not be requested again; skill availability or credentials do not authorize additional changes.
+- Deterministic commands can avoid model calls while still installing, launching, writing settings, consuming device time or changing application state. “Zero tokens” is a cost property, not unconditional permission or a safety guarantee. `decide --local` differs from a configured model sidecar; VLM traversal and other model-backed paths require their own provider/budget configuration.
+- Select the intended `--serial` for device work. Do not let a missing target silently turn a single-device task into farm-wide keep-alive or parallel work. Enumerate only as needed; device listing does not establish readiness or exclusive ownership.
+- Local PF commands are distinct from a node service. For a remote node use its explicit URL, expected node ID and credential through the current `pf-node` or `pf-remote` client. Use `hgamey-remote` for the supported remote UI actions; do not translate a missing remote capability into raw shell/ADB access.
 
-## Wrong skill? "Optimize this game on this phone"
+## Ownership and recovery
 
-If the task is **"make this game run faster / smoother / cooler on this
-device"**, that is the `game_opt_loop` skill, not this one.
-`game_opt_loop optimize --game <name>` surveys what the device actually allows,
-opens whichever change surfaces are available (system parameters / render-flow
-rewrites / image operators), has a model propose candidates for each, and then
-calls **into phonefarm** for every write, measurement, statistical verdict and
-rollback.
+Use the command's existing lease/transport path in the same configured lock domain. A queue label, shared task name or copied environment value is not lease ownership; inheritance requires the actual live owner identity. Do not add a second weak lock, change the storage domain, or bypass a busy/unknown barrier with a raw transport command.
 
-```
-game_opt_loop   decides what to try            ← that skill
-     │          (proposes, orchestrates, archives, reports)
-     ▼
-phonefarm       applies · measures · judges · restores   ← this skill
-```
+`phonefarm lease status --json` inspects host-side lease evidence. Interpret it with the operation's own status/report, not as proof that all application state was restored. Host process exit, a successful kill, TTL expiry or an empty queue alone does not prove device recovery. Retained pending work requires the relevant typed recovery path and independent evidence; preserve its original context and receipts.
 
-- Skill: `game_opt_loop/skills/game_opt_loop/SKILL.md`
-- Repo: `github.com/HGamey/game_opt_loop` — **private, needs HGamey org
-  membership.** A "Repository not found" on clone is an access problem, not a
-  typo.
-- Layout: the two repos (plus the optional white-box target `refbench`) sit as
-  **siblings** — `~/projects/{game_opt_loop,phonefarm,refbench}`. Default paths
-  assume it.
-- Interface: `game_opt_loop/contracts/eval_{request,report}.schema.json`, driven
-  through `phonefarm eval --request <json> --json`. Three change surfaces, one
-  envelope (`kind = shader | sysparam | gray`).
+`screen` now obtains a short strong observation lease for each new frame. Cached-frame reads do not capture or hold a device lease. Busy, blocked or unknown ownership can prevent a fresh frame; the service must not fall back to raw screencap. A capture timeout may retain a recovery barrier. Screenshots also disturb CPU/GPU work, so do not treat live viewing as measurement-neutral.
 
-Use **this** skill directly when the job is "drive this device" rather than
-"optimize this game" — everything below stands on its own and needs no part of
-`game_opt_loop`: deterministic replay, conformance batches, model latency
-benchmarking, frame capture, farm keep-alive, read-only inspection, MCP service.
+Persistent gray-control sessions and game initialization/scene operations have their own recorded lifecycle and recovery scope. A remote-control session closing settles its commands while deliberately retaining application changes; it is not a game restore. Likewise a successful recovery job can remain queue-blocked pending explicit release of its recovery chain. Follow the status and contract for the operation actually used.
 
-## Capability map
+## Selective command entrypoints
 
-| Path | Commands | Tokens |
-| :--- | :--- | :--- |
-| Device & farm ops | `devices` `keepalive` `probe` `exec` | none |
-| VLM UI traversal | `run` `benchmark` `parallel` `quest` `plugins` | **burns tokens** |
-| Deterministic script & replay | `script` | none |
-| Conformance tests (CTS/XTS) | `test-batch` `cts-fetch` | none |
-| On-device model benchmark | `bench` | none |
-| Frame capture | `capture` | none |
-| Bounded scroll & collect | `collect` | none |
-| Typed decisions (local degraded) | `decide` | none |
-| Live device screen (`screen`) | `screen` | none |
-| Performance optimization loop | `loop_v1/` toolchain (not a subcommand) | none |
-| Hypothesis-experiment-evidence | `hyp` `pred` `caps` `tools` `experiment` `export` `eval` | some |
-| Read-only inspection | `last` `runs` `show` `status` `stats` `cat` `tasks` `tree` `lessons` `campaign` `schema` `config` | none |
-| MCP tool service | `serve` | none |
-
-## When to use this skill
-
-- Running any of the paths above against a device
-- **Not** for "optimize this game on this device" — that is `game_opt_loop`
-  (see above); it calls back into these paths
-- Inspecting results (`last` / `runs` / `show` / `cat` / `stats`) or reading the
-  ledger schema (`schema`)
-- Modifying the Rust kernel (`runtime` / `device` / `cli` / `telemetry` / `cts`)
-  or adding new capabilities
-
-## Setup from scratch
-
-Prerequisites:
-
-- Rust toolchain (`cargo`) for building the kernel
-- Android: `adb` — auto-detected in this order: `ADB_BIN` env var →
-  `platform-tools/` in the repo root → `PATH` → common system SDK locations
-- OpenHarmony: `hdc` available on `PATH` (physical device, remote host OK — see
-  "Devices" below)
-- Optional: `swiftc` (macOS) for the OCR fallback helper (`ocr.swift`), compiled
-  automatically on first use; if compilation fails the OCR channel simply stays
-  off and the main loop is unaffected
-- A GLM API key (Zhipu coding plan) for model decisions
-
-Steps:
+These examples describe shapes, not a sequence to run for every task. Use files and IDs from the current task; inspect help before choosing version-specific options.
 
 ```bash
-# 1. Clone and enter the repo
-git clone git@github.com:BH3GEI/phonefarm.git && cd phonefarm
+# Local result inspection; no device operation.
+./phonefarm last
+./phonefarm show RUN_ID --step N
+./phonefarm stats RUN_ID
+./phonefarm cat PATH_TO_RESULT
+./phonefarm schema
+./phonefarm frame-audit analyze knobs_frameaudit.json --json audit.json
 
-# 2. Configure secrets
-cp secrets.env.example secrets.env   # fill in GLM_KEY
-# The program auto-loads ./secrets.env on startup. If a required key is
-# missing it prints setup instructions and exits safely. Never invent a key
-# for it, and never commit secrets.env (already git-ignored).
+# Host capability/ownership reads.
+./phonefarm lease status --json
+./phonefarm screen capabilities --json
 
-# 3. Build
-cd src && cargo build --release && cp target/release/phonefarm .. && cd ..
+# Authorized device work with an explicit serial and supplied input.
+./phonefarm script --serial "$SERIAL" --task "$TASK" --app "$PACKAGE" script.json
+./phonefarm test-batch --profile profile.json --environment environment.json \
+  --serial "$SERIAL" --out results/
+./phonefarm eval --request eval_request.json --serial "$SERIAL" --out eval-out/ --json
 
-# 4. Verify the environment (read-only, costs nothing)
-./phonefarm devices        # list connected adb and hdc devices
-./phonefarm last           # should print latest run info or an empty-state hint
+# Observation capture into a new directory, or a viewer using per-frame leases.
+./phonefarm screen capture --serial "$SERIAL" --out "$NEW_DIR" --json
+./phonefarm screen --serial "$SERIAL" --interval-ms 1000
 ```
 
-## Devices
+Other paths include `capture` for measurement capture, `collect` for bounded scrolling, `cts-fetch` for existing test results, `bench` for on-device model measurements, and optional VLM `run` / `benchmark` / `parallel` / `quest`. Their prerequisites and effects differ; do not infer a root requirement, rollback guarantee or platform support from another path. `keepalive` can wake/unlock and change sleep policy; use its explicit target/status options for the requested scope.
 
-- **Android emulator**: AVD named `agentphone`, must be started beforehand.
-- **OpenHarmony physical phone**: reachable over `hdc`; on the intel-mac host
-  (via ssh) — sync the repo there and rebuild before running.
-- Switch targets with `--serial`, e.g. `--serial emulator-5554` or
-  `--serial hdc:<connect key>`.
-- Farm-level keep-alive (`https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_KEEPALIVE.md`): `phonefarm keepalive`
-  wakes + unlocks every connected device and enforces the never-sleep
-  policy (idempotent, re-runnable); `--status` is the read-only report,
-  `--watch [sec]` (default 300s) is the resident watchdog that
-  re-enumerates devices every cycle. Session-level lifecycle in
-  `quest.rs` is separate (it relocks on exit to save battery) — do not
-  run both against the same device at the same time.
+For an eval client, use the accepted request schema and the resulting report's qualification/recovery fields. GOL's `contracts/eval_{request,report}.schema.json` describes that client's interface; it does not make every request kind executable on every target. For game deployment, initialization, scenes and gray-control, read the corresponding lifecycle contract before attempting a new operation or recovery.
 
-## Essential commands
+## Evidence and result use
 
-```bash
-# Single traversal session (Android)
-./phonefarm run --task news-traversal --endless --budget-calls 90 --app com.ss.android.article.news "<goal text>"
+Read existing results before repeating device work: `last`, `show`, `stats`, or the specific report named by the request. Preserve run IDs, serials, source paths, receipts and unknown/null fields. A missing metric or incomplete recovery is not zero or PASS.
 
-# Multi-round evaluation
-./phonefarm benchmark --task news-traversal --rounds 10 --budget-calls 90 --app com.ss.android.article.news --json "<goal text>"
+Shared telemetry fields and units aid comparison, but do not establish comparable workloads, time windows, clocks, sampling methods or device conditions. A diagnostic screenshot, scene launch or imported historical result is not automatically a qualified performance/quality result. Keep the report's stated scope and limitations.
 
-# OpenHarmony session
-./phonefarm run --serial hdc:<connect key> --task oh-settings-smoke --budget-calls 30 "<goal>"
+For MCP, `phonefarm serve [--root DIR]` exposes the tool list of the installed binary. Inspect those tool schemas instead of assuming an old fixed tool count or that all tools are read-only. Detached operations need their returned IDs for status queries; a client timeout is not a reason to launch the same device action again.
 
-# Multi-device parallel (one independent session per device, stdout lines
-# prefixed with [device]; any failure makes the overall exit code non-zero)
-./phonefarm parallel --job "taskA|goalA|emulator-5554|com.pkg" --job "taskB|goalB|hdc:<key>" --budget-calls 60
-# The same task name on multiple devices is refused (lessons/tree state would
-# collide) — use distinct task names.
+## Setup and implementation work
 
-# Deterministic script execution or historical run replay (zero model tokens, full telemetry)
-./phonefarm script --task game-bench --app com.pkg --repeat 10 script.json
-./phonefarm script --task replay <run-id>
+Use the existing approved checkout/binary when available. Installation, rebuilding, model configuration and device setup are separate actions, not prerequisites to reading local results. Provider credentials are needed only for paths that use that provider; do not read or copy secrets merely to run a deterministic command. Never fabricate or commit credentials.
 
-# Conformance test batches (zero tokens; Android and OpenHarmony both supported)
-./phonefarm test-batch --profile P.json --environment E.json --serial <S> --out results/
-./phonefarm test-batch --module android.content.cts/androidx.test.runner.AndroidJUnitRunner
-./phonefarm test-batch --module oh:com.example.demo/entry_test/OpenHarmonyTestRunner --serial hdc:<key>
-./phonefarm test-batch --dir /path/to/apks --install-cmd 'pm install -r {apk}'
-# Produces summary.json (per-case verdict + full assertion stack) and JUnit XML.
-# Failing cases carry the complete stack — no need to shell into the device for logs.
+When a build is needed, follow repository `AGENTS.md`. In this checkout the Rust package is under `src/`; Apple Silicon release binaries require ad-hoc signing after the configured stripping/build step. Follow applicable repository instructions for focused checks, artifacts, commits and publication rather than imposing a new blanket test or push policy from this skill.
 
-# Pull results another tool already left on the device, and scan them for assertions
-./phonefarm cts-fetch --remote /data/local/tmp/cts_result --serial hdc:<key> --out fetched/
+## References
 
-# On-device model latency ruler (needs root) and frame capture
-./phonefarm bench --serial <S> --model m.tflite --runs 3 --json   # exit 0/1/2 = PASS/FAIL/ERROR
-./phonefarm bench --serial <S> --unlock                           # roll back a stuck freq lock
-./phonefarm capture --serial <S> --out dir --frames 200 --json
+Load only the reference needed for the task:
 
-# Bounded scroll & collect: no model call, at most --max-swipes screens, stops the moment a
-# screen yields nothing new. coverage.complete says whether the whole list was covered.
-./phonefarm collect --query "About us" --max-swipes 8   # scroll-find: stop on hit
-./phonefarm collect --max-swipes 12 --json             # list collect: dedupe + coverage boundary
+The existing `repos/phonefarm/` links below are historical references at the documented migration paths. They are not bundled with this skill and their current online availability has not been checked here; use current local contracts/help for executable behavior.
 
-# Typed decisions, zero tokens. This is the DEGRADED tier, not a model: the probabilities
-# are uniform and uncalibrated. Same request + same seed -> bit-identical answers.
-./phonefarm decide --local --seed 7 --request request.json
-./phonefarm decide --sidecar "your bridge" --request request.json   # plug a real model in here
-./phonefarm decide --verify model-dir --manifest manifest.json      # assets only, no inference
+- [Architecture](references/architecture.md) — core modules, records and the VLM step loop.
+- [CLI reference](references/cli.md) — command background and examples. Some entries predate the current ownership model, including the old screen lock description; current help and the ownership contracts below take precedence.
+- [Telemetry](references/telemetry.md) — collection mechanisms; verify availability and qualification on the actual target.
+- [Design](https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DESIGN.md), [MCP](https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_MCP_SERVE.md), [keep-alive](https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_KEEPALIVE.md).
+- [Observation ownership](https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/OBSERVATION-OWNERSHIP.md), [gray-control lifecycle](https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md), [gray-control quality](https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-QUALITY.md).
+- [Game initialization](https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GAME-INITIALIZATION.md), [game scenes](https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GAME-SCENE.md), [job recovery chains](https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/SESSION-RECOVERY-CHAIN.md).
+- [loop_v1](https://github.com/HGamey/docs/blob/main/repos/phonefarm/loop_v1/README.md) and [GPU optimization routes](https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MOBILE_GPU_OPT_ROUTES.md) — useful measurement recipes. Their observations about unavailable SurfaceFlinger/gfxinfo/Perfetto paths apply to the recorded devices and versions, not all future targets. Preserve the chosen recipe's preregistered decision rule and restoration checks when using it.
 
-# Live device screen in a browser: read-only, no device lock. It does NOT cost tokens,
-# but one screencap per interval moves the GPU/CPU -- do not leave it open during a judged
-# measurement.
-./phonefarm screen
-./phonefarm screen --interval-ms 1000 --actions tasks/<task>/runs/<run>/log.jsonl
-
-# Inspecting results (read-only, offline, zero model tokens)
-./phonefarm last                                  # latest session verdict
-./phonefarm show <run-id> --step N                # drill into one step
-./phonefarm show <run-id> --raw|--hooks|--events  # model raw reply / system verdicts / event stream
-./phonefarm stats <run-id>                        # telemetry summary
-./phonefarm cat <path>                            # universal printer (.gz auto-decompress, .jsonl pretty, image info)
-./phonefarm schema                                # log.jsonl field contract (generated from code, always current)
-```
-
-The full CLI surface is in `references/cli.md`.
-
-## House rules (must follow)
-
-- **Only the VLM path burns tokens (real money)**: `run`, `benchmark`,
-  `parallel`, and the `[evolution]` quota. Quote the cost and get the user's
-  consent before long or physical-device sessions. Everything else —
-  `script`, `test-batch`, `cts-fetch`, `bench`, `capture`, `collect`, `decide`, `screen`, `keepalive`, all
-  read-only inspection, unit tests and builds — is free and safe to run.
-- Keys come from `./secrets.env` automatically. Never commit it; never
-  fabricate keys.
-- Data only lives under `tasks/<task>/`: `log.jsonl` is append-only,
-  `lessons.jsonl` is written atomically; screenshots and raw XML trees are
-  never committed to git.
-- After code changes run `cd src && cargo test` and keep everything green.
-- Bug fixes: new defects are numbered sequentially (check the latest number in
-  the codebase/docs first); fixes must be general, not special-cased; verify
-  with a regression assertion session afterwards.
-- **Pushing to git belongs to the user.** Never push unless the user
-  explicitly asks. Deploy with atomic `mv` replacement.
-- Report in plain language, no jargon. Do not write battle scores into the
-  README.
-- New capabilities: write a SPEC first, implement second. The architecture
-  contract lives in `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DESIGN.md`.
-
-## Workflow hints
-
-- Read results top-down: `phonefarm last` → `show <run-id> --step N` →
-  `cat .../stepN.xml.gz`. Run IDs accept prefix matching (ambiguous prefixes
-  list candidates).
-- In the VLM path each step has six phases: capture → context assembly → model
-  decision → three deterministic gates → execution → acceptance diff. See
-  `references/architecture.md`.
-- All inspection commands are offline local parsing and consume no API quota.
-- Telemetry is shared across every path, so a script run, a CTS run and a VLM
-  run are directly comparable — same fields, same units.
-- Verdicts are never guessed. Anything the harness could not account for is
-  labelled as such (`NOT_RUN` / `ENV_BLOCKED` / left empty), never silently
-  zeroed and never counted as a pass.
-- MCP hosts (e.g. octos): `phonefarm serve [--root <dir>]` exposes 21
-  newline-delimited JSON-RPC tools (`phonefarm_*`): 17 read-only + 4 that touch
-  the device. `run` / `benchmark` / `script` are always detached — poll with
-  `phonefarm_status`; `cat` is jailed to the tasks root; raw-shell probe/exec
-  are not exposed. Spec: `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_MCP_SERVE.md`.
-- For conformance-test work specifically, the `phonefarm-cts` skill has the
-  full contract (verdict enum, reconciliation rules, both wire protocols).
-
-## Detailed references
-
-- `references/architecture.md` — architecture, directory layout, data contract, six-step loop
-- `references/cli.md` — every CLI subcommand with flags
-- `references/telemetry.md` — the ten telemetry layers and collection mechanics
-
-In the repo checkout (not bundled with this skill):
-
-- `https://github.com/HGamey/docs/blob/main/repos/phonefarm/loop_v1/README.md` — the performance optimization loop. Read it **before**
-  attempting any frame-timing work: `SurfaceFlinger --latency`, `gfxinfo` and
-  the Perfetto GPU producer have all been ruled out on real hardware there, and
-  raw ftrace kgsl is what is actually used. Its three disciplines are binding:
-  the decision rule is frozen to disk before candidate data is seen; every
-  sysfs write is restored on exit and the device snapshot must match line for
-  line; parsing is pure functions so re-running on the same trace is
-  byte-identical.
-- `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MOBILE_GPU_OPT_ROUTES.md` — candidate optimization routes, each tagged
-  with how it would be verified inside that loop
+For CTS-specific work, the separate `phonefarm-cts` skill has the verdict and reconciliation contract. None of these references requires routing every task through one experiment loop.
