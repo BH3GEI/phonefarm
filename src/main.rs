@@ -40,6 +40,7 @@ mod device;
 mod platform;
 mod devlock;
 mod devlease;
+mod device_registry;
 mod queue_owner;
 mod host_process;
 mod observation;

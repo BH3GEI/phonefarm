@@ -1239,6 +1239,9 @@ pub(crate) fn storage_status(storage: &crate::lease_storage::Storage) -> Value {
 }
 
 pub fn run_lease(args: &[String]) -> i32 {
+    if matches!(args.first().map(String::as_str), Some("devices" | "devices-set")) {
+        return crate::device_registry::run_cli(args);
+    }
     if args.first().map(String::as_str) == Some("init") {
         if args.len() != 2 || args[1] != "--participants-stopped" {
             eprintln!("phonefarm lease init --participants-stopped (stop every old participant first)");
