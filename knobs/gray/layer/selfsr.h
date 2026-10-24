@@ -1,6 +1,6 @@
 // selfsr.h — 送显前超分 (自研超分线): 游戏按小分辨率出图, 层在 vkQueuePresentKHR 前把它放大到送显分辨率。
 //
-// 开关: debug.knobs.selfsr = "<宽>x<高>" (CreateInstance 时读一次), 例如 2141x969; 空或 "0" = 关。
+// 开关: debug.knobs.selfsr = "<宽>x<高>[:<锐化强度 0..1>]" (CreateInstance 时读一次), 例如 2141x969:0.8; 空或 "0" = 关。
 // 关着时本文件所有函数都是空操作, 不改 swapchain 参数 —— 其它档位的 A/B 不受影响。
 //
 // 做法 (游戏不知道这件事, 也不依赖游戏的 pass 结构):
@@ -8,7 +8,8 @@
 //      层把 imageExtent 换成 <宽>x<高> 并加 TRANSFER_SRC|TRANSFER_DST。游戏的帧缓冲仍是 w0 x h0
 //      (帧缓冲允许小于图像), 所以它只画在每张 swapchain 图的左上角 w0 x h0。
 //   2. vkQueuePresentKHR: 等游戏的信号量 → 左上角 w0 x h0 拷进层自有的源图 T → 计算着色器 (selfsr_up.comp,
-//      Lanczos2 + 2x2 去振铃) 写层自有的目标图 O (<宽>x<高>) → O 拷回 swapchain 图 → 送显。
+//      Lanczos2 + 2x2 去振铃) 写层自有的目标图 O (<宽>x<高>) → [锐化>0 时 selfsr_rcas.comp: O → P]
+//      → 拷回 swapchain 图 → 送显。
 //   游戏要的尺寸本来就等于 <宽>x<高> 时不改 swapchain, 只计数 (same_size), 画面与不开时相同。
 // 任何一步不成立都退回原样送显, 原因计数进 marker 的 selfsr.fallbacks。
 #pragma once

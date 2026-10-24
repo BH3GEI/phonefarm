@@ -73,16 +73,18 @@ echo "interp shaders: $(for s in $INTERP_SHADERS; do printf '%s=%sB ' $s $(wc -c
 
 # selfsr: 送显前超分 (游戏小分辨率出图 → 送显分辨率), 内嵌成 selfsr_spv.h
 "$GLSLC" --target-env=vulkan1.1 -O "$ROOT/layer/selfsr_up.comp" -o "$OUT/selfsr_up.spv"
-python3 - "$OUT/selfsr_up.spv" > "$OUT/selfsr_spv.h" <<'PYEOF'
+"$GLSLC" --target-env=vulkan1.1 -O "$ROOT/layer/selfsr_rcas.comp" -o "$OUT/selfsr_rcas.spv"
+python3 - "$OUT/selfsr_up.spv" "$OUT/selfsr_rcas.spv" > "$OUT/selfsr_spv.h" <<'PYEOF'
 import sys
-d = open(sys.argv[1], "rb").read()
-print("static const unsigned char kSelfsrUpSpv[] = {")
-for i in range(0, len(d), 16):
-    print("  " + ",".join(str(b) for b in d[i:i+16]) + ",")
-print("};")
-print(f"static const unsigned int kSelfsrUpSpvLen = {len(d)};")
+for name, path in (("kSelfsrUpSpv", sys.argv[1]), ("kSelfsrRcasSpv", sys.argv[2])):
+    d = open(path, "rb").read()
+    print(f"static const unsigned char {name}[] = {{")
+    for i in range(0, len(d), 16):
+        print("  " + ",".join(str(b) for b in d[i:i+16]) + ",")
+    print("};")
+    print(f"static const unsigned int {name}Len = {len(d)};")
 PYEOF
-echo "selfsr shader: $(wc -c < "$OUT/selfsr_up.spv" | tr -d ' ')B -> selfsr_spv.h"
+echo "selfsr shaders: up=$(wc -c < "$OUT/selfsr_up.spv" | tr -d ' ')B rcas=$(wc -c < "$OUT/selfsr_rcas.spv" | tr -d ' ')B -> selfsr_spv.h"
 
 # gray-artifact uses this same native source/flag list for its candidate build.
 python3 - "$CXX" "$ROOT" "$OUT" <<'PYEOF'

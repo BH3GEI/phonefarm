@@ -26,6 +26,8 @@
 // gray-artifact 等只生成 copy_spv.h 的构建: 没有超分着色器, 管线创建时报 shader_missing, 本模块不启用
 static const unsigned char kSelfsrUpSpv[] = {0};
 static const unsigned int kSelfsrUpSpvLen = 0;
+static const unsigned char kSelfsrRcasSpv[] = {0};
+static const unsigned int kSelfsrRcasSpvLen = 0;
 #endif
 
 #define SR_LOG(...) __android_log_print(ANDROID_LOG_INFO, "refknobs", "selfsr: " __VA_ARGS__)
@@ -47,10 +49,10 @@ struct Swap {
     bool active = false;             // 尺寸不同且资源齐全: 每帧做超分
     std::vector<VkImage> imgs;
     std::vector<VkSemaphore> sems;   // 一张图一个: 层提交 → 这张图的 present
-    VkImage T = VK_NULL_HANDLE, O = VK_NULL_HANDLE;
-    VkDeviceMemory T_mem = VK_NULL_HANDLE, O_mem = VK_NULL_HANDLE;
-    VkImageView T_view = VK_NULL_HANDLE, O_view = VK_NULL_HANDLE;
-    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkImage T = VK_NULL_HANDLE, O = VK_NULL_HANDLE, P = VK_NULL_HANDLE;   // P: 锐化后 (开 RCAS 时)
+    VkDeviceMemory T_mem = VK_NULL_HANDLE, O_mem = VK_NULL_HANDLE, P_mem = VK_NULL_HANDLE;
+    VkImageView T_view = VK_NULL_HANDLE, O_view = VK_NULL_HANDLE, P_view = VK_NULL_HANDLE;
+    VkDescriptorSet set = VK_NULL_HANDLE, set2 = VK_NULL_HANDLE;
     bool T_init = false, O_init = false;
     uint64_t frames = 0;
 };
@@ -89,7 +91,7 @@ struct Dev {
     VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
     VkDescriptorPool dpool = VK_NULL_HANDLE;
     VkPipelineLayout pl = VK_NULL_HANDLE;
-    VkPipeline pipe = VK_NULL_HANDLE;
+    VkPipeline pipe = VK_NULL_HANDLE, pipe_rcas = VK_NULL_HANDLE;
     bool pipe_tried = false;
     std::map<VkSwapchainKHR, Swap> swaps;
     std::vector<VkSemaphore> retired_sems;
@@ -98,6 +100,7 @@ struct Dev {
 std::mutex g_m;
 bool g_on = false;
 uint32_t g_want_w = 0, g_want_h = 0;
+float g_sharp = 0.f;                        // RCAS 强度, 0 = 不锐化
 std::map<void*, Dev*> g_devs;
 std::string g_reason;                       // 最近一次没能启用的原因
 uint64_t g_up = 0, g_passthrough = 0, g_same_size = 0;
@@ -173,30 +176,36 @@ bool ensure_pipeline(Dev* D) {
     VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &D->dsl, 1, &pcr};
     if (D->CreatePipelineLayout(D->dev, &pli, nullptr, &D->pl) != VK_SUCCESS) { g_reason = "pipeline_layout"; return false; }
-    if (kSelfsrUpSpvLen < 20) { g_reason = "shader_missing"; return false; }
-    VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0, kSelfsrUpSpvLen,
-                                 reinterpret_cast<const uint32_t*>(kSelfsrUpSpv)};
-    VkShaderModule sm = VK_NULL_HANDLE;
-    if (D->CreateShaderModule(D->dev, &smi, nullptr, &sm) != VK_SUCCESS) { g_reason = "shader_module"; return false; }
-    VkComputePipelineCreateInfo cpi{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    cpi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, sm, "main", nullptr};
-    cpi.layout = D->pl;
-    VkResult r = D->CreateComputePipelines(D->dev, VK_NULL_HANDLE, 1, &cpi, nullptr, &D->pipe);
-    D->DestroyShaderModule(D->dev, sm, nullptr);
-    if (r != VK_SUCCESS) { D->pipe = VK_NULL_HANDLE; g_reason = "compute_pipeline"; return false; }
-    SR_LOG("管线就绪 family=%u", D->family);
+    if (kSelfsrUpSpvLen < 20 || (g_sharp > 0 && kSelfsrRcasSpvLen < 20)) { g_reason = "shader_missing"; return false; }
+    auto make = [&](const unsigned char* spv, unsigned len, VkPipeline* out) {
+        VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, nullptr, 0, len,
+                                     reinterpret_cast<const uint32_t*>(spv)};
+        VkShaderModule sm = VK_NULL_HANDLE;
+        if (D->CreateShaderModule(D->dev, &smi, nullptr, &sm) != VK_SUCCESS) return false;
+        VkComputePipelineCreateInfo cpi{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        cpi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, sm, "main", nullptr};
+        cpi.layout = D->pl;
+        VkResult r = D->CreateComputePipelines(D->dev, VK_NULL_HANDLE, 1, &cpi, nullptr, out);
+        D->DestroyShaderModule(D->dev, sm, nullptr);
+        if (r != VK_SUCCESS) { *out = VK_NULL_HANDLE; return false; }
+        return true;
+    };
+    if (!make(kSelfsrUpSpv, kSelfsrUpSpvLen, &D->pipe)) { g_reason = "compute_pipeline"; return false; }
+    if (g_sharp > 0 && !make(kSelfsrRcasSpv, kSelfsrRcasSpvLen, &D->pipe_rcas)) {
+        D->DestroyPipeline(D->dev, D->pipe, nullptr); D->pipe = VK_NULL_HANDLE;
+        g_reason = "compute_pipeline_rcas"; return false;
+    }
+    SR_LOG("管线就绪 family=%u rcas=%d", D->family, D->pipe_rcas ? 1 : 0);
     return true;
 }
 
 void release_swap_locked(Dev* D, Swap& S) {
     for (auto& s : D->slots) if (s.busy && s.fence) { D->WaitForFences(D->dev, 1, &s.fence, VK_TRUE, 1000000000ull); s.busy = false; }
     if (S.set) D->FreeDescriptorSets(D->dev, D->dpool, 1, &S.set);
-    if (S.T_view) D->DestroyImageView(D->dev, S.T_view, nullptr);
-    if (S.O_view) D->DestroyImageView(D->dev, S.O_view, nullptr);
-    if (S.T) D->DestroyImage(D->dev, S.T, nullptr);
-    if (S.O) D->DestroyImage(D->dev, S.O, nullptr);
-    if (S.T_mem) D->FreeMemory(D->dev, S.T_mem, nullptr);
-    if (S.O_mem) D->FreeMemory(D->dev, S.O_mem, nullptr);
+    if (S.set2) D->FreeDescriptorSets(D->dev, D->dpool, 1, &S.set2);
+    for (VkImageView v : {S.T_view, S.O_view, S.P_view}) if (v) D->DestroyImageView(D->dev, v, nullptr);
+    for (VkImage i : {S.T, S.O, S.P}) if (i) D->DestroyImage(D->dev, i, nullptr);
+    for (VkDeviceMemory m : {S.T_mem, S.O_mem, S.P_mem}) if (m) D->FreeMemory(D->dev, m, nullptr);
     for (auto s : S.sems) if (s) D->retired_sems.push_back(s);
     S = Swap{};
 }
@@ -235,9 +244,12 @@ bool sr_init_from_props() {
     char v[PROP_VALUE_MAX] = {0};
     __system_property_get("debug.knobs.selfsr", v);
     unsigned w = 0, h = 0;
-    if (sscanf(v, "%ux%u", &w, &h) == 2 && w >= 64 && h >= 64 && w <= 4096 && h <= 4096) {
+    float sharp = 0.f;
+    int n = sscanf(v, "%ux%u:%f", &w, &h, &sharp);
+    if (n >= 2 && w >= 64 && h >= 64 && w <= 4096 && h <= 4096) {
         g_on = true; g_want_w = w; g_want_h = h;
-        SR_LOG("开启: 送显分辨率 %ux%u", w, h);
+        g_sharp = (n == 3 && sharp > 0.f) ? (sharp > 1.f ? 1.f : sharp) : 0.f;
+        SR_LOG("开启: 送显分辨率 %ux%u 锐化 %.2f", w, h, g_sharp);
     }
     return g_on;
 }
@@ -293,6 +305,7 @@ void sr_on_destroy_device(VkDevice dev) {
     for (auto& s : D->slots) if (s.fence) D->DestroyFence(D->dev, s.fence, nullptr);
     if (D->pool) D->DestroyCommandPool(D->dev, D->pool, nullptr);
     if (D->pipe) D->DestroyPipeline(D->dev, D->pipe, nullptr);
+    if (D->pipe_rcas) D->DestroyPipeline(D->dev, D->pipe_rcas, nullptr);
     if (D->pl) D->DestroyPipelineLayout(D->dev, D->pl, nullptr);
     if (D->dpool) D->DestroyDescriptorPool(D->dev, D->dpool, nullptr);
     if (D->dsl) D->DestroyDescriptorSetLayout(D->dev, D->dsl, nullptr);
@@ -361,19 +374,23 @@ void sr_on_swapchain(VkDevice dev, VkSwapchainKHR sc, const VkSwapchainCreateInf
     D->GetPhysicalDeviceFormatProperties(D->phys, F, &fp);
     if (ok && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) { ok = false; g_reason = "storage_unsupported"; }
     if (ok && !make_image(D, S.in_w, S.in_h, F, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &S.T, &S.T_mem, &S.T_view)) { ok = false; g_reason = "image_T"; }
-    if (ok && !make_image(D, S.out_w, S.out_h, F, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &S.O, &S.O_mem, &S.O_view)) { ok = false; g_reason = "image_O"; }
-    if (ok) {
+    const bool rc = D->pipe_rcas != VK_NULL_HANDLE;
+    if (ok && !make_image(D, S.out_w, S.out_h, F, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &S.O, &S.O_mem, &S.O_view)) { ok = false; g_reason = "image_O"; }
+    if (ok && rc && !make_image(D, S.out_w, S.out_h, F, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &S.P, &S.P_mem, &S.P_view)) { ok = false; g_reason = "image_P"; }
+    // set: T(采样) → O(写); set2: O(采样) → P(写)
+    auto bind = [&](VkDescriptorSet* set, VkImageView in, VkImageView outv) {
         VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, D->dpool, 1, &D->dsl};
-        if (D->AllocateDescriptorSets(dev, &dai, &S.set) != VK_SUCCESS) { ok = false; g_reason = "descriptor_set"; }
-    }
-    if (ok) {
-        VkDescriptorImageInfo ti{D->sampler, S.T_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkDescriptorImageInfo oi{VK_NULL_HANDLE, S.O_view, VK_IMAGE_LAYOUT_GENERAL};
+        if (D->AllocateDescriptorSets(dev, &dai, set) != VK_SUCCESS) return false;
+        VkDescriptorImageInfo ti{D->sampler, in, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkDescriptorImageInfo oi{VK_NULL_HANDLE, outv, VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet w[2] = {};
-        w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, S.set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ti, nullptr, nullptr};
-        w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, S.set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &oi, nullptr, nullptr};
+        w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, *set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ti, nullptr, nullptr};
+        w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, *set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &oi, nullptr, nullptr};
         D->UpdateDescriptorSets(dev, 2, w, 0, nullptr);
-    }
+        return true;
+    };
+    if (ok && !bind(&S.set, S.T_view, S.O_view)) { ok = false; g_reason = "descriptor_set"; }
+    if (ok && rc && !bind(&S.set2, S.O_view, S.P_view)) { ok = false; g_reason = "descriptor_set2"; }
     S.active = ok;
     SR_LOG("swapchain 游戏要 %ux%u → 实际 %ux%u fmt=%u images=%u active=%d%s%s", S.in_w, S.in_h, S.out_w, S.out_h,
            (unsigned)S.fmt, n, (int)ok, ok ? "" : " 原因=", ok ? "" : g_reason.c_str());
@@ -427,12 +444,23 @@ VkResult sr_on_present(VkQueue q, const VkPresentInfoKHR* pi, PFN_vkQueuePresent
     int32_t pc[4] = {(int32_t)S.in_w, (int32_t)S.in_h, (int32_t)S.out_w, (int32_t)S.out_h};
     D->CmdPushConstants(cb, D->pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
     D->CmdDispatch(cb, (S.out_w + 15) / 16, (S.out_h + 15) / 16, 1);
-    barrier(D, cb, S.O, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, CS, TR);
+    VkImage R = S.O;   // 拷回 swapchain 的那张
+    if (S.set2) {
+        barrier(D, cb, S.O, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, CS, CS);
+        barrier(D, cb, S.P, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, CS, CS);
+        D->CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, D->pipe_rcas);
+        D->CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, D->pl, 0, 1, &S.set2, 0, nullptr);
+        struct { int32_t w, h; float sharp; int32_t pad; } pc2{(int32_t)S.out_w, (int32_t)S.out_h, g_sharp, 0};
+        D->CmdPushConstants(cb, D->pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc2, &pc2);
+        D->CmdDispatch(cb, (S.out_w + 15) / 16, (S.out_h + 15) / 16, 1);
+        R = S.P;
+    }
+    barrier(D, cb, R, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, CS, TR);
     barrier(D, cb, N, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, TR, TR);
     VkImageCopy full{};
     full.srcSubresource = full.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     full.extent = {S.out_w, S.out_h, 1};
-    D->CmdCopyImage(cb, S.O, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, N, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &full);
+    D->CmdCopyImage(cb, R, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, N, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &full);
     barrier(D, cb, N, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0, TR, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     D->EndCommandBuffer(cb);
     std::vector<VkPipelineStageFlags> stages(pi->waitSemaphoreCount, TR);
@@ -469,9 +497,9 @@ std::string sr_json() {
     auto pct = [&](double p) -> unsigned long long { return c.empty() ? 0 : c[(size_t)(p * (c.size() - 1) + 0.5)]; };
     char b[640];
     snprintf(b, sizeof b,
-             "{\"want\":[%u,%u],\"game_extent\":[%u,%u],\"swap_extent\":[%u,%u],\"upscaled\":%llu,\"same_size\":%llu,"
+             "{\"want\":[%u,%u],\"sharp\":%.2f,\"game_extent\":[%u,%u],\"swap_extent\":[%u,%u],\"upscaled\":%llu,\"same_size\":%llu,"
              "\"passthrough\":%llu,\"reason\":\"%s\",\"cpu_us_p50\":%llu,\"cpu_us_p95\":%llu,\"fallbacks\":{",
-             g_want_w, g_want_h, g_last_in_w, g_last_in_h, g_last_out_w, g_last_out_h, (unsigned long long)g_up,
+             g_want_w, g_want_h, g_sharp, g_last_in_w, g_last_in_h, g_last_out_w, g_last_out_h, (unsigned long long)g_up,
              (unsigned long long)g_same_size, (unsigned long long)g_passthrough, g_reason.c_str(), pct(0.5), pct(0.95));
     return std::string(b) + fb + "}}";
 }
