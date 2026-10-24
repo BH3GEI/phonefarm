@@ -4,12 +4,14 @@ use crate::{
     game_deploy::{self, InitializeRequest, INITIALIZE_SCOPE},
     game_deploy_session::{digest, package_identity, valid_boot},
     game_deploy_transport::{q, Remote, ShellStderr, Transport},
+    game_scene,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs::File,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -51,11 +53,18 @@ struct State {
     application_access: Value,
     stop_observation: Value,
     source_session: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scene: Option<game_scene::State>,
 }
 impl State {
     fn validate(&self) -> Result<(), String> {
         self.request.validate()?;
-        if self.schema != SCHEMA
+        if self.schema
+            != if self.scene.is_some() {
+                game_scene::SESSION
+            } else {
+                SCHEMA
+            }
             || self.token.is_empty()
             || self.token.len() > 128
             || !self
@@ -71,6 +80,7 @@ impl State {
                     | "needs_assistance"
                     | "preflight_failed"
                     | "recovery_required"
+                    | "observed"
             )
             || self.boot_id.as_ref().is_some_and(|b| !valid_boot(b))
             || self.uid.is_some_and(|u| !(10000..100000).contains(&u))
@@ -93,12 +103,26 @@ impl State {
             || (self.stop_confirmed && (!self.stop_completed || self.stop_required))
             || (self.launch_attempted && !self.stop_confirmed && !self.stop_required)
             || (self.stop_required && !self.launch_attempted)
-            || self
-                .write_pending
-                .as_deref()
-                .is_some_and(|p| !matches!(p, "initialize_launch" | "initialize_stop"))
+            || self.write_pending.as_deref().is_some_and(|p| {
+                !matches!(p, "initialize_launch" | "initialize_stop")
+                    && !(self.scene.is_some()
+                        && matches!(p, "scene_create" | "scene_push" | "scene_publish"))
+            })
         {
             return Err("invalid initialization session identity or obligations".into());
+        }
+        if let Some(scene) = &self.scene {
+            scene.validate(&self.request, &self.token)?;
+            if (self.launch_attempted && !scene.prepared)
+                || self
+                    .component
+                    .as_deref()
+                    .is_some_and(|c| c != game_scene::COMPONENT)
+            {
+                return Err("scene launch lacks prepared inputs or fixed component".into());
+            }
+        } else if self.phase == "observed" {
+            return Err("scene phase in initialization context".into());
         }
         Ok(())
     }
@@ -110,6 +134,19 @@ impl State {
     }
     fn storage_ready(&self) -> bool {
         self.storage["status"] == "verified"
+    }
+    fn scope(&self) -> &'static str {
+        if self.scene.is_some() {
+            game_scene::SCOPE
+        } else {
+            INITIALIZE_SCOPE
+        }
+    }
+    fn base_report(&self) -> Value {
+        self.scene.as_ref().map_or_else(
+            || game_deploy::initialize_report(&self.request),
+            |s| game_scene::report(&s.request),
+        )
     }
 }
 
@@ -126,12 +163,35 @@ impl Session {
         request: InitializeRequest,
         out: &Path,
     ) -> Result<Self, String> {
+        Self::new_attempt(lease, request, None, out)
+    }
+    pub(crate) fn new_scene(
+        lease: Lease,
+        request: game_scene::Request,
+        deployment: crate::game_deploy_session::Committed,
+        out: &Path,
+    ) -> Result<Self, String> {
+        let header = request.header();
+        let scene = game_scene::State::new(request, deployment, lease.token());
+        Self::new_attempt(lease, header, Some(scene), out)
+    }
+    fn new_attempt(
+        lease: Lease,
+        request: InitializeRequest,
+        scene: Option<game_scene::State>,
+        out: &Path,
+    ) -> Result<Self, String> {
         let token = lease.token().to_owned();
         let storage = game_deploy::initialize_report(&request)["storage_initialization"].clone();
         Self::from_state(
             lease,
             State {
-                schema: SCHEMA.into(),
+                schema: if scene.is_some() {
+                    game_scene::SESSION
+                } else {
+                    SCHEMA
+                }
+                .into(),
                 request,
                 token,
                 phase: "prepared".into(),
@@ -152,6 +212,7 @@ impl Session {
                 application_access: json!({"status":"unknown"}),
                 stop_observation: json!({}),
                 source_session: None,
+                scene,
             },
             out,
         )
@@ -166,12 +227,16 @@ impl Session {
         File::open(out)
             .and_then(|f| f.sync_all())
             .map_err(|e| e.to_string())?;
-        let transport = Transport::new(
-            &state.request.serial,
-            &state.token,
-            &dir,
-            ShellStderr::Merged,
-        )?;
+        let transport = if state.scene.is_some() {
+            Transport::guarded(&state.request.serial, &state.token, &dir)?
+        } else {
+            Transport::new(
+                &state.request.serial,
+                &state.token,
+                &dir,
+                ShellStderr::Merged,
+            )?
+        };
         let session = Self {
             lease,
             state,
@@ -183,10 +248,17 @@ impl Session {
         Ok(session)
     }
     fn save(&self) -> Result<(), String> {
-        crate::devlease::durable_replace(
-            &self.dir.join("session.json"),
-            &serde_json::to_vec_pretty(&self.state).map_err(|e| e.to_string())?,
-        )
+        let bytes = serde_json::to_vec_pretty(&self.state).map_err(|e| e.to_string())?;
+        if bytes.len()
+            > if self.state.scene.is_some() {
+                524288
+            } else {
+                131072
+            }
+        {
+            return Err("attempt state exceeds recovery record bound".into());
+        }
+        crate::devlease::durable_replace(&self.dir.join("session.json"), &bytes)
     }
     fn uncertain(&mut self, error: &str) -> String {
         self.state.transport_uncertain = true;
@@ -231,12 +303,171 @@ impl Session {
         self.state.write_pending = Some(operation.into());
         self.save()?;
         let result = self.shell(operation, command, 30)?;
+        self.clear_pending()?;
+        Ok(result)
+    }
+    fn clear_pending(&mut self) -> Result<(), String> {
         let pending = self.state.write_pending.take();
         if let Err(error) = self.save() {
             self.state.write_pending = pending;
             return Err(error);
         }
-        Ok(result)
+        Ok(())
+    }
+    fn raw(
+        &mut self,
+        operation: &str,
+        args: Vec<String>,
+        seconds: u64,
+    ) -> Result<crate::lease_command::Output, String> {
+        if self.state.transport_uncertain {
+            return Err("attempt transport is uncertain; further commands refused".into());
+        }
+        self.transport
+            .raw(&self.lease, operation, args, seconds)
+            .map_err(|e| {
+                if e.uncertain {
+                    self.uncertain(&e.message)
+                } else {
+                    e.message
+                }
+            })
+    }
+    fn prepare_scene(&mut self) -> Result<(), String> {
+        let scene = self.state.scene.clone().ok_or("missing scene state")?;
+        if scene.prepare_attempted {
+            return Err("scene preparation cannot be replayed".into());
+        }
+        self.state.scene.as_mut().unwrap().prepare_attempted = true;
+        self.save()?;
+        let root = q(&scene.runtime_root);
+        let marker = q(&format!("{}/.phonefarm-owner", scene.runtime_root));
+        let created=self.write("scene_create",&format!("test ! -e {root} && test ! -L {root} && mkdir {root} && printf '%s' {} > {marker} && mkdir {root}/base {root}/base/demos {root}/base/script",q(&self.state.token)))?;
+        if created.code != 0 {
+            return Err(
+                "scene runtime creation failed; any new partial root is intentionally retained"
+                    .into(),
+            );
+        }
+        for index in 0..2 {
+            if INTERRUPTED.load(Ordering::SeqCst) {
+                return Err("scene preparation interrupted before seed".into());
+            }
+            let asset = scene.request.seed(index);
+            let file = game_deploy::source_file(asset)?;
+            let before = file.metadata().map_err(|e| e.to_string())?;
+            let part = format!("{}/.scene-seed-{index}.part", scene.runtime_root);
+            let target = format!("{}/{}", scene.runtime_root, scene.request.seed_path(index));
+            self.read("scene_seed_owner",&format!("test -d {root} && test ! -L {root} && test -f {marker} && test ! -L {marker} && test \"$(cat {marker})\" = {} && test ! -e {} && test ! -L {}",q(&self.state.token),q(&part),q(&part)))?;
+            self.lease.hold_for_recovery(&self.dir)?;
+            self.state.write_pending = Some("scene_push".into());
+            self.save()?;
+            let pushed = self.raw(
+                "scene_push",
+                vec![
+                    "push".into(),
+                    asset.path.to_string_lossy().into_owned(),
+                    part.clone(),
+                ],
+                30,
+            )?;
+            if pushed.code != 0 {
+                return Err(self.uncertain("scene seed push did not confirm transport completion"));
+            }
+            self.clear_pending()?;
+            let after = std::fs::symlink_metadata(&asset.path).map_err(|e| e.to_string())?;
+            if !after.is_file()
+                || before.dev() != after.dev()
+                || before.ino() != after.ino()
+                || before.len() != after.len()
+                || before.mtime() != after.mtime()
+                || before.mtime_nsec() != after.mtime_nsec()
+            {
+                return Err("scene seed source changed while pushing".into());
+            }
+            let bytes = self.read(
+                "scene_seed_size",
+                &format!("test -f {0} && test ! -L {0} && wc -c < {0}", q(&part)),
+            )?;
+            let hash = self.read("scene_seed_sha256", &format!("sha256sum {}", q(&part)))?;
+            if bytes.parse::<u64>().ok() != Some(asset.size) || digest(&hash)? != asset.sha256 {
+                return Err("received scene seed size/SHA-256 differs".into());
+            }
+            let published = self.write(
+                "scene_publish",
+                &format!(
+                    "test ! -e {0} && test ! -L {0} && mv {1} {0}",
+                    q(&target),
+                    q(&part)
+                ),
+            )?;
+            if published.code != 0 {
+                return Err("scene seed publication failed; new runtime retained".into());
+            }
+        }
+        let receipt = json!({"schema":"phonefarm/game-scene-seeds@1","root":scene.runtime_root,"token":self.state.token,
+            "seeds":(0..2).map(|i|json!({"path":scene.request.seed_path(i),"size":scene.request.seed(i).size,"sha256":scene.request.seed(i).sha256})).collect::<Vec<_>>(),
+            "prepared_at":now(),"content_verification":"device_receiver_sha256","retention":"intentional"});
+        crate::confirmation_transport::new_file(
+            &self.dir.join("scene-seeds.json"),
+            &serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?,
+        )?;
+        self.state.scene.as_mut().unwrap().prepared = true;
+        self.save()
+    }
+    fn observe_scene(&mut self) -> Result<(), String> {
+        let scene = self.state.scene.clone().ok_or("missing scene state")?;
+        let log_path = q(&format!("{}/base/qconsole.log", scene.runtime_root));
+        let output=self.read("scene_log",&format!("if test -f {log_path} && test ! -L {log_path}; then printf 'PF_SCENE_LOG_PRESENT\\n'; head -c 262144 {log_path}; else printf 'PF_SCENE_LOG_MISSING\\n'; fi"))?;
+        let log = output.strip_prefix("PF_SCENE_LOG_PRESENT\n");
+        let associated = self
+            .state
+            .scene
+            .as_mut()
+            .unwrap()
+            .observe_log(log.unwrap_or(""));
+        crate::confirmation_transport::new_file(
+            &self.dir.join("scene-qconsole.txt"),
+            log.unwrap_or("").as_bytes(),
+        )?;
+        let processes = self.processes("scene_started_processes")?;
+        let observation = &mut self.state.scene.as_mut().unwrap().observation;
+        observation["log_present"] = json!(log.is_some());
+        observation["log_capture"] = json!({"path":"game-deploy/scene-qconsole.txt","max_bytes":262144,"full_log":"not_claimed"});
+        observation["uid_processes"] =
+            json!({"observed":processes,"complete_visibility":"unknown","observed_at":now()});
+        self.save()?;
+        let captured = self.raw(
+            "scene_screenshot",
+            vec!["exec-out".into(), "screencap -p".into()],
+            20,
+        )?;
+        if captured.code != 0 {
+            return Err(self.uncertain("scene screenshot transport did not confirm completion"));
+        }
+        let bytes = crate::confirmation_transport::bounded(&captured.stdout_path, 8 * 1024 * 1024)?;
+        if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err("scene screenshot is not PNG".into());
+        }
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        if width == 0
+            || height == 0
+            || width > 8192
+            || height > 8192
+            || u64::from(width) * u64::from(height) > 24_000_000
+        {
+            return Err("scene screenshot dimensions exceed bounds".into());
+        }
+        image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .map_err(|e| format!("scene PNG incomplete: {e}"))?;
+        crate::confirmation_transport::new_file(&self.out.join("scene.png"), &bytes)?;
+        self.state.scene.as_mut().unwrap().observation["image"] = json!({"path":"scene.png","mime":"image/png","bytes":bytes.len(),"width":width,"height":height,"captured_at":now(),"same_state_truth":false});
+        self.save()?;
+        if !associated {
+            return Err("scene log did not associate the requested demo and paths; effective engine/profile remain unknown".into());
+        }
+        Ok(())
     }
     fn identity(&mut self, initial: bool, verify_apk: bool) -> Result<bool, String> {
         if self.read("current_user", "am get-current-user")? != "0" {
@@ -352,7 +583,7 @@ impl Session {
     fn preflight(&mut self) -> Result<(), String> {
         let stopped = self.identity(true, true)?;
         self.observe_storage(None)?;
-        if self.state.storage_ready() {
+        if self.state.scene.is_none() && self.state.storage_ready() {
             return Ok(());
         }
         if self.state.storage["shell_access"] == "invalid_type" {
@@ -369,6 +600,23 @@ impl Session {
         self.save()?;
         if !processes.is_empty() {
             return Err("target UID processes observed before initialization".into());
+        }
+        if let Some(scene) = self.state.scene.clone() {
+            if !self.state.storage_ready() {
+                return Err(
+                    "scene runtime parent is not ready; run explicit initialization first".into(),
+                );
+            }
+            if self.state.boot_id.as_deref() != Some(scene.deployment.boot_id.as_str()) {
+                return Err(
+                    "source deployment boot differs; scene resource identity needs review".into(),
+                );
+            }
+            let bytes = scene.deployment.verify(|op, cmd| self.read(op, cmd))?;
+            self.state.scene.as_mut().unwrap().resources = json!({"status":"verified","root":scene.deployment.remote_root,
+                "files":scene.deployment.request.recipe.files,"content_verification":"device_sha256","verified_bytes":bytes,"observed_at":now()});
+            self.state.component = Some(game_scene::COMPONENT.into());
+            return self.save();
         }
         let components=self.read("initialization_launcher",&format!("cmd package query-activities --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p {}",q(&self.state.request.recipe.package)))?;
         self.state.component = Some(launcher_component(
@@ -394,7 +642,16 @@ impl Session {
             .component
             .clone()
             .ok_or("missing launcher component")?;
-        let output=self.write("initialize_launch",&format!("am start -W --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n {}",q(&component)))?;
+        let command = if let Some(scene) = &self.state.scene {
+            format!(
+                "am start -W --user 0 -n {} --es game doom3 --es command {}",
+                q(&component),
+                q(&scene.command())
+            )
+        } else {
+            format!("am start -W --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n {}",q(&component))
+        };
+        let output = self.write("initialize_launch", &command)?;
         if output.code != 0 || !launch_ok(&output.stdout) {
             return Err(
                 "launcher result was not confirmed Status ok; automatic replay/stop refused".into(),
@@ -451,8 +708,26 @@ impl Session {
         self.save()
     }
     fn apply(&mut self) -> Result<(), String> {
+        if self.state.scene.is_some() {
+            self.prepare_scene()?;
+        }
         self.launch()?;
         let deadline = Instant::now() + Duration::from_secs(self.state.request.recipe.wait_seconds);
+        if self.state.scene.is_some() {
+            while Instant::now() < deadline && !INTERRUPTED.load(Ordering::SeqCst) {
+                std::thread::sleep(
+                    Duration::from_millis(100)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            let observation = if INTERRUPTED.load(Ordering::SeqCst) {
+                Err("scene observation interrupted".into())
+            } else {
+                self.observe_scene()
+            };
+            self.stop()?;
+            return observation;
+        }
         let mut collection_error = None;
         loop {
             if let Err(error) = self.observe_storage(Some(deadline)) {
@@ -477,7 +752,7 @@ impl Session {
         self.observe_storage(None)
     }
     fn report(&self, phase: &str, error: Option<&str>, settled: bool) -> Value {
-        let mut value = game_deploy::initialize_report(&self.state.request);
+        let mut value = self.state.base_report();
         value["phase"] = json!(phase);
         value["error"] = json!(error);
         value["session_path"] = json!("game-deploy");
@@ -485,14 +760,28 @@ impl Session {
         if self.state.checks["installed"].is_object() {
             value["installed"] = self.state.checks["installed"].clone();
         }
-        value["storage_initialization"] = self.state.storage.clone();
-        if phase == "needs_assistance" && !self.state.storage_ready() {
-            value["storage_initialization"]["status"] = json!("needs_assistance");
+        if let Some(scene) = &self.state.scene {
+            value["input"]["status"] = json!("verified_before_acquisition");
+            value["resources_deployed"] = scene.resources.clone();
+            value["runtime_seed"] = json!({"status":if scene.prepared{"prepared"}else if scene.prepare_attempted{"attempted"}else{"not_prepared"},
+                "root":scene.runtime_root,"retention":"intentional","seed_receipt":if scene.prepared{Some("game-deploy/scene-seeds.json")}else{None},
+                "application_outputs":"may_differ_from_seed"});
+            value["scene_observation"] = scene.observation.clone();
+        } else {
+            value["storage_initialization"] = self.state.storage.clone();
+            if phase == "needs_assistance" && !self.state.storage_ready() {
+                value["storage_initialization"]["status"] = json!("needs_assistance");
+            }
         }
         value["application_access"] = self.state.application_access.clone();
         value["launch"] = json!({"status":if self.state.launch_confirmed {"confirmed"} else if self.state.launch_attempted {"unknown"} else {"not_attempted"},
             "component":self.state.component,"prior_pm_stopped":self.state.prior_stopped,"wait_seconds":self.state.request.recipe.wait_seconds,
             "first_launch_ever":"not_claimed","application_side_effects":"retained"});
+        if let Some(scene) = &self.state.scene {
+            value["launch"]["requested_command"] = json!(scene.command());
+            value["launch"]["effective_command"] = Value::Null;
+            value["launch"]["cold_start_reproduced"] = json!("unknown");
+        }
         value["stop"] = self.state.stop_observation.clone();
         value["stop"]["status"] = json!(if self.state.stop_confirmed {
             "confirmed"
@@ -505,7 +794,7 @@ impl Session {
         });
         value["stop"]["command_completed"] = json!(self.state.stop_completed);
         value["stop"]["all_target_processes_gone"] = json!("unknown");
-        value["recovery"] = json!({"status":if settled {"verified"} else {"required"},"scope":INITIALIZE_SCOPE,
+        value["recovery"] = json!({"status":if settled {"verified"} else {"required"},"scope":self.state.scope(),
             "source_session":self.state.source_session,"context_moved":self.state.source_session.as_ref().map(|_|true),"device_restored":"not_claimed"});
         value
     }
@@ -525,7 +814,7 @@ impl Session {
         game_deploy::save_report(&self.out, &value)?;
         if settled {
             if let Err(error) = self.lease.complete_recovery(
-                INITIALIZE_SCOPE,
+                self.state.scope(),
                 "device",
                 &[&self.out.join("deployment.json")],
             ) {
@@ -542,6 +831,19 @@ impl Session {
     fn finish_observation(&mut self, error: Option<&str>) -> Result<(Value, i32), String> {
         if !self.state.settled() {
             return self.finish("recovery_required", error, false, 2);
+        }
+        if let Some(scene) = &self.state.scene {
+            let observed = scene.observation["status"] == "observed" && error.is_none();
+            return self.finish(
+                if observed {
+                    "observed"
+                } else {
+                    "needs_assistance"
+                },
+                error,
+                true,
+                if observed { 0 } else { 2 },
+            );
         }
         let ready = self.state.storage_ready() && error.is_none();
         self.finish(
@@ -612,7 +914,7 @@ impl Session {
         if self.state.request.mode == "check" {
             return self.finish("checked", None, true, 0);
         }
-        if self.state.storage_ready() {
+        if self.state.scene.is_none() && self.state.storage_ready() {
             return self.finish("initialized", None, true, 0);
         }
         let result = self.apply();
@@ -620,7 +922,7 @@ impl Session {
     }
     pub(crate) fn recover(source: &Path, serial: &str, out: &Path) -> Result<(Value, i32), String> {
         let source = source.canonicalize().map_err(|e| e.to_string())?;
-        let bytes = crate::confirmation_transport::bounded(&source.join("session.json"), 131072)?;
+        let bytes = crate::confirmation_transport::bounded(&source.join("session.json"), 524288)?;
         let mut state: State = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         state.validate()?;
         if state.request.serial != serial {
@@ -628,19 +930,17 @@ impl Session {
         }
         let lease = match game_deploy::acquire_context(&source, serial, &bytes) {
             Ok(lease) => lease,
-            Err(error) => {
-                return failed_recovery(&state.request, &source, out, &error, Some(false))
-            }
+            Err(error) => return failed_recovery(&state, &source, out, &error, Some(false)),
         };
         state.source_session = Some(source.clone());
-        let request = state.request.clone();
+        let prior = state.clone();
         let mut session = match Self::from_state(lease, state, out) {
             Ok(session) => session,
-            Err(error) => return failed_recovery(&request, &source, out, &error, Some(false)),
+            Err(error) => return failed_recovery(&prior, &source, out, &error, Some(false)),
         };
         if let Err(error) = session.lease.hold_for_recovery(&session.dir) {
             let moved = game_deploy::context_moved(&session.lease, serial, &source, &session.dir);
-            return failed_recovery(&request, &source, out, &error, moved);
+            return failed_recovery(&prior, &source, out, &error, moved);
         }
         let result = (|| {
             if session.state.transport_uncertain || session.state.write_pending.is_some() {
@@ -661,11 +961,23 @@ impl Session {
             if session.state.launch_attempted {
                 session.stop()?;
             }
-            if session.state.boot_id.is_some() {
+            if session.state.scene.is_none() && session.state.boot_id.is_some() {
                 session.observe_storage(None)?;
             }
             Ok(())
         })();
+        if session.state.scene.is_some() && !session.state.launch_attempted && result.is_ok() {
+            let check = session.state.request.mode == "check";
+            return match session.finish(
+                if check { "checked" } else { "needs_assistance" },
+                None,
+                true,
+                if check { 0 } else { 2 },
+            ) {
+                Ok(value) => Ok(value),
+                Err(error) => Ok(session.publication_failure(&error)),
+            };
+        }
         if !session.state.launch_attempted && result.is_ok() && !session.state.storage_ready() {
             let phase = if session.state.request.mode == "check" {
                 "checked"
@@ -684,13 +996,13 @@ impl Session {
     }
 }
 fn failed_recovery(
-    request: &InitializeRequest,
+    state: &State,
     source: &Path,
     out: &Path,
     error: &str,
     moved: Option<bool>,
 ) -> Result<(Value, i32), String> {
-    let mut value = game_deploy::initialize_report(request);
+    let mut value = state.base_report();
     value["phase"] = json!("recovery_required");
     value["error"] = json!(error);
     // Acquisition/handoff failure cannot assert that the source has no stop obligation.
@@ -701,7 +1013,7 @@ fn failed_recovery(
     } else {
         Value::Null
     };
-    value["recovery"] = json!({"status":"required","scope":INITIALIZE_SCOPE,"source_session":source,"context_moved":moved});
+    value["recovery"] = json!({"status":"required","scope":state.scope(),"source_session":source,"context_moved":moved});
     if let Err(error) = game_deploy::save_report(out, &value) {
         value["report_write_error"] = json!(error);
     }
@@ -897,8 +1209,15 @@ mod tests {
             application_access: json!({}),
             stop_observation: json!({}),
             source_session: None,
+            scene: None,
         };
         state.validate().unwrap();
+        let legacy = serde_json::to_value(&state).unwrap();
+        assert!(legacy.get("scene").is_none());
+        serde_json::from_value::<State>(legacy)
+            .unwrap()
+            .validate()
+            .unwrap();
         assert!(!state.settled());
         state.transport_uncertain = false;
         state.write_pending = None;
@@ -911,6 +1230,31 @@ mod tests {
         state.stop_required = false;
         state.validate().unwrap();
         assert!(state.settled());
+        // A scene uses the same stop obligation, but owns a distinct schema and
+        // frozen context. Recovery validation does not reopen input/PK4 files.
+        let (mut request, source, _, _) = game_scene::tests::fixture();
+        request.deployment.report_path = "/not-reopened/source-deployment.json".into();
+        request.deployment.state_path = "/not-reopened/source-session.json".into();
+        let mut scene_state = state.clone();
+        scene_state.schema = game_scene::SESSION.into();
+        scene_state.request = request.header();
+        scene_state.component = Some(game_scene::COMPONENT.into());
+        scene_state.scene = Some(game_scene::State::new(request, source, &state.token));
+        assert!(scene_state.validate().is_err()); // launch requires prepared seeds
+        let scene = scene_state.scene.as_mut().unwrap();
+        scene.prepare_attempted = true;
+        scene.prepared = true;
+        scene_state.validate().unwrap();
+        assert!(scene_state.settled());
+        assert_eq!(scene_state.scope(), game_scene::SCOPE);
+        let mut restored: State =
+            serde_json::from_value(serde_json::to_value(&scene_state).unwrap()).unwrap();
+        restored.validate().unwrap();
+        restored.transport_uncertain = true;
+        restored.write_pending = Some("scene_push".into());
+        assert!(!restored.settled());
+        restored.schema = SCHEMA.into();
+        assert!(restored.validate().is_err());
         state.request.recipe.wait_seconds = 31;
         assert!(state.validate().is_err());
         state.request.recipe.wait_seconds = 1;

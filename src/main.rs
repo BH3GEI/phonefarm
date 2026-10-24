@@ -61,6 +61,7 @@ mod game_deploy_session;
 mod game_deploy_transport;
 mod remote_control;
 mod game_initialize;
+mod game_scene;
 mod game_install_session;
 mod apk_metadata;
 mod frameaudit;

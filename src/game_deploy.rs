@@ -20,7 +20,7 @@ pub(crate) const INITIALIZE_REQUEST_SCHEMA: &str = "phonefarm/game-initialize-re
 pub(crate) const INITIALIZE_RECIPE_SCHEMA: &str = "phonefarm/game-initialize-recipe@1";
 pub(crate) const INITIALIZE_REPORT_SCHEMA: &str = "phonefarm/game-initialization@1";
 pub(crate) const INITIALIZE_SCOPE: &str = "owned_launcher_attempt_force_stopped";
-const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0: matching installed-engine resources, or explicitly absent single-APK installation. Explicit launcher initialization may retain new application configuration; it never grants permissions or claims scene readiness. No replacement or root escalation. Confirmed installations are retained.";
+const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0: matching installed-engine resources, explicitly absent single-APK installation, or bounded launcher/typed Doom scene attempts. Application configuration and new scene runtime files are retained; attempts never grant permissions or certify scene readiness. No replacement or root escalation. Confirmed installations are retained.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -407,7 +407,10 @@ pub(crate) fn acquire_context(
         source,
         std::time::Duration::from_secs(1),
     )?;
-    if crate::confirmation_transport::bounded(&source.join("session.json"), 131072)? != bytes {
+    if bytes.len() > 524288
+        || crate::confirmation_transport::bounded(&source.join("session.json"), bytes.len() as u64)?
+            != bytes
+    {
         return Err("source recovery context changed during acquisition".into());
     }
     Ok(lease)
@@ -469,7 +472,7 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
             let metadata = crate::apk_metadata::tool().is_some();
             Ok((
                 json!({"schema":"phonefarm/game-deploy-capabilities@1","resources_v1":true,
-                "fresh_single_apk_v1":true,"launcher_initialization_v1":true,"metadata_tool":{"available":metadata,
+                "fresh_single_apk_v1":true,"launcher_initialization_v1":true,"doom_render_scene_v1":true,"metadata_tool":{"available":metadata,
                 "error":if metadata {Value::Null} else {json!("fixed AAPT2_BIN or aapt2 on explicit PATH is required")}}}),
                 0,
             ))
@@ -486,6 +489,35 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
             let input: Value =
                 serde_json::from_slice(&crate::confirmation_transport::bounded(&request, 65536)?)
                     .map_err(|e| format!("invalid deployment JSON: {e}"))?;
+            if input["schema"] == crate::game_scene::REQUEST {
+                let request_path = request;
+                let mut request: crate::game_scene::Request = serde_json::from_value(input)
+                    .map_err(|e| format!("invalid scene request: {e}"))?;
+                request.validate()?;
+                if request.serial != serial {
+                    return Err("scene request serial differs from explicit target".into());
+                }
+                let out = output(&out)?;
+                let result = request.prepare_inputs(&request_path).and_then(|source| {
+                    crate::devlease::Lease::target(Some(&serial), "game-scene").and_then(|lease| {
+                        crate::game_initialize::Session::new_scene(
+                            lease,
+                            request.clone(),
+                            source,
+                            &out,
+                        )
+                    })
+                });
+                return match result {
+                    Ok(session) => session.execute(),
+                    Err(error) => {
+                        let mut value = crate::game_scene::report(&request);
+                        value["error"] = json!(error);
+                        save_report(&out, &value)?;
+                        Ok((value, 2))
+                    }
+                };
+            }
             if input["schema"] == INITIALIZE_REQUEST_SCHEMA {
                 let request: InitializeRequest = serde_json::from_value(input)
                     .map_err(|e| format!("invalid initialization JSON: {e}"))?;
@@ -571,10 +603,12 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
             let out = output(&out)?;
             let state: Value = serde_json::from_slice(&crate::confirmation_transport::bounded(
                 &session.join("session.json"),
-                131072,
+                524288,
             )?)
             .map_err(|e| e.to_string())?;
-            if state["schema"] == crate::game_initialize::SCHEMA {
+            if state["schema"] == crate::game_initialize::SCHEMA
+                || state["schema"] == crate::game_scene::SESSION
+            {
                 crate::game_initialize::Session::recover(&session, &serial, &out)
             } else if state["schema"] == crate::game_install_session::SCHEMA {
                 crate::game_install_session::Session::recover(&session, &serial, &out)

@@ -77,6 +77,124 @@ impl State {
         Ok(())
     }
 }
+
+/// Read-only committed resource identity, borrowed by a later owner. This is
+/// evidence, not recovery authority and not another resource Session.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Committed {
+    pub(crate) request: Request,
+    pub(crate) token: String,
+    pub(crate) boot_id: String,
+    pub(crate) remote_root: String,
+}
+impl Committed {
+    pub(crate) fn from_evidence(report: &Value, bytes: &[u8]) -> Result<Self, String> {
+        let state: State = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        state.validate()?;
+        let request = &state.request;
+        if state.phase != "committed"
+            || request.mode != "apply"
+            || state.transport_uncertain
+            || state.write_pending.is_some()
+            || report["schema"] != game_deploy::REPORT_SCHEMA
+            || report["phase"] != "committed"
+            || report["node_id"] != request.node_id
+            || report["game_id"] != request.game_id
+            || report["version"] != request.version
+            || report["serial"] != request.serial
+            || report["installed"]["status"] != "verified"
+            || report["installed"]["package"] != request.recipe.package
+            || report["installed"]["version_code"] != request.recipe.version_code
+            || report["installed"]["apk_sha256"] != request.recipe.apk_sha256
+            || report["resources_deployed"]["status"] != "verified"
+            || report["resources_deployed"]["root"] != state.remote_root
+            || report["resources_deployed"]["files"] != json!(request.recipe.files)
+            || report["recovery"]["status"] != "verified"
+            || report["recovery"]["scope"] != SCOPE
+            || report["recovery"]["transaction"] != "committed"
+        {
+            return Err(
+                "source deployment report/state is not one settled committed transaction".into(),
+            );
+        }
+        Ok(Self {
+            request: state.request,
+            token: state.token,
+            boot_id: state
+                .boot_id
+                .ok_or("committed deployment has no boot identity")?,
+            remote_root: state.remote_root,
+        })
+    }
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        self.request.validate()?;
+        if self.request.mode != "apply"
+            || self.token.is_empty()
+            || self.token.len() > 128
+            || !self
+                .token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+            || !valid_boot(&self.boot_id)
+            || self.remote_root != root(&self.request, &self.token)
+        {
+            return Err("invalid committed deployment identity".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn verify(
+        &self,
+        mut read: impl FnMut(&str, &str) -> Result<String, String>,
+    ) -> Result<u64, String> {
+        self.validate()?;
+        read("scene_resource_owner", &format!("test -d {0} && test ! -L {0} && test -f {1} && test ! -L {1} && test \"$(cat {1})\" = {2}", q(&self.remote_root), q(&marker(&self.remote_root)), q(&self.token)))?;
+        let paths = read(
+            "scene_resource_inventory",
+            &format!("cd {} && find . -mindepth 1 -print", q(&self.remote_root)),
+        )?;
+        let actual: BTreeSet<_> = paths
+            .lines()
+            .map(|line| line.strip_prefix("./").unwrap_or(line).to_owned())
+            .collect();
+        if actual != expected_paths(&self.request, false) {
+            return Err("source deployment has missing or foreign entries".into());
+        }
+        let dirs = directories(&self.request);
+        for path in actual {
+            let full = q(&format!("{}/{path}", self.remote_root));
+            let kind = if dirs.contains(&path) { "d" } else { "f" };
+            read(
+                "scene_resource_type",
+                &format!("test ! -L {full} && test -{kind} {full}"),
+            )?;
+        }
+        let mut bytes = 0u64;
+        for resource in &self.request.recipe.files {
+            let asset = self.request.asset(&resource.asset_name);
+            let path = q(&format!("{}/{}", self.remote_root, resource.path));
+            if read("scene_resource_size", &format!("wc -c < {path}"))?
+                .trim()
+                .parse::<u64>()
+                .ok()
+                != Some(asset.size)
+            {
+                return Err("source deployment resource size changed".into());
+            }
+            if digest(&read(
+                "scene_resource_sha256",
+                &format!("sha256sum {path}"),
+            )?)? != asset.sha256
+            {
+                return Err("source deployment resource SHA-256 changed".into());
+            }
+            bytes = bytes
+                .checked_add(asset.size)
+                .ok_or("resource size overflow")?;
+        }
+        Ok(bytes)
+    }
+}
 pub(crate) fn valid_boot(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, b)| {
