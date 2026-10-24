@@ -142,6 +142,7 @@ def measure(dev, a, name, out):
             "display_fps": round(ts["layer_frames"] / span, 2) if ts.get("layer_frames") else None,
             "display_hz": ts.get("display_hz"), "missed_frames": ts.get("missedFrames"),
             "game_fps": game.get("fps_mean"), "game_frame_p95_ms": game.get("frame_p95"),
+            "gpu_active_ms": game.get("gpu_active_mean"),
             "out_res": src, "sharp_full": sharpness(shot), "shot": shot}
 
 
@@ -404,7 +405,7 @@ def main():
     good = [r for r in arms if not r.get("error") and r.get("in_game")
             and (not uses_layer(parse_kind(r["kind"])) or (r.get("layer_loaded") and r.get("layer_removed")))]
     pairs = sorted({r["pair"] for r in good if sum(1 for x in good if x["pair"] == r["pair"]) == 2})
-    metrics = ["display_fps", "game_fps", "game_frame_p95_ms", "sharp_full", "ssim_vs_native_ref", "missed_frames"]
+    metrics = ["display_fps", "game_fps", "game_frame_p95_ms", "gpu_active_ms", "sharp_full", "ssim_vs_native_ref", "missed_frames"]
     res = {}
     for m in metrics:
         av = [next(x.get(m) for x in good if x["pair"] == p and x["side"] == "A") for p in pairs]
@@ -423,6 +424,7 @@ def main():
               "metrics": res, "min_p_possible": 2 / 2 ** len(pairs) if pairs else None}
     json.dump(report, open(os.path.join(out, "report.json"), "w"), ensure_ascii=False, indent=1)
     names = {"display_fps": "上屏帧率", "game_fps": "游戏渲染帧率 (GPU 提交)", "game_frame_p95_ms": "游戏渲染 p95 帧时 (ms)",
+             "gpu_active_ms": "每帧 GPU 忙碌 (ms, 均值)",
              "sharp_full": "锐度 (拉普拉斯方差)", "ssim_vs_native_ref": "与第一张原生截图的 SSIM", "missed_frames": "SF 丢帧 / 窗口"}
     md = [f"# {ka} (A) vs {kb} (B): {a.pkg}", "",
           f"每臂冷启动进大世界, 有效 {len(pairs)} 对, 精确符号翻转检验 (最小可能 p = {report['min_p_possible']})。"
