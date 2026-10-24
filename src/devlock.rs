@@ -145,9 +145,10 @@ pub fn parse_wait(s: &str) -> Result<Duration, String> {
         _ => (s, 60),
     };
     num.trim()
-        .parse::<u64>()
-        .map(|n| Duration::from_secs(n * mult))
-        .map_err(|_| format!("--lock-wait 看不懂 {s:?} (要 45m / 2h / 900s / 裸数字按分钟)"))
+        .parse::<u64>().ok()
+        .and_then(|n| n.checked_mul(mult))
+        .map(Duration::from_secs)
+        .ok_or_else(|| format!("--lock-wait 看不懂 {s:?} (要 45m / 2h / 900s / 裸数字按分钟)"))
 }
 
 /// 把 `--lock-label X` / `--lock-wait D` / `--no-devlock` 从子命令参数里剥掉
@@ -235,18 +236,39 @@ pub enum Gate {
     Exit(i32),
 }
 
+#[derive(Debug)]
+struct AdmissionError {
+    code: &'static str,
+    message: String,
+}
+impl AdmissionError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self { code, message: message.into() }
+    }
+
+    fn reject(self, command: &str) -> Gate {
+        // This describes only the dispatch guarded here. The queue helper may
+        // already have written an owner; it does not certify global recovery.
+        eprintln!("{}", self.message);
+        println!("{}", serde_json::json!({
+            "schema": "phonefarm/devlock-error@1", "stage": "admission",
+            "code": self.code, "error": self.message, "command": command,
+            "command_started": false, "exit_code": 2,
+        }));
+        Gate::Exit(2)
+    }
+}
+
 /// 子命令入口前的那一道。`args` 是去掉程序名后的整条参数 (`args[0]` = 子命令)。
 pub fn gate(args: &mut Vec<String>) -> Gate {
+    let subcommand = args.first().cloned().unwrap_or_default();
     let opts = match strip_lock_args(args) {
         Ok(o) => o,
-        Err(e) => {
-            eprintln!("{e}");
-            return Gate::Exit(2);
-        }
+        Err(e) => return AdmissionError::new("invalid_lock_arguments", e).reject(&subcommand),
     };
     if let Err(e) = crate::lease_storage::resolve().require_ready() {
-        eprintln!("device lock storage unavailable: {e}");
-        return Gate::Exit(2);
+        return AdmissionError::new("lease_storage_unavailable",
+            format!("device lock storage unavailable: {e}")).reject(&subcommand);
     }
     if opts.disabled {
         eprintln!("⚠ --no-devlock: 不拿设备锁直接碰设备。共享手机上两边的数都可能作废。");
@@ -258,26 +280,25 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
         .or_else(|| std::env::var("DEVLOCK_LABEL").ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| DEFAULT_LABEL.to_string());
     let Some(script) = script_path() else {
-        eprintln!(
+        return AdmissionError::new("devlock_unavailable", format!(
             "找不到设备锁脚本 (DEVLOCK_BIN 未设, {} 也不在)。没拿到锁不碰设备; \
              确实没有别人共用这台手机时可加 --no-devlock",
             crate::eval::repo_root().join("tools/devlock").display()
-        );
-        return Gate::Exit(2);
+        )).reject(&subcommand);
     };
     // An inherited instance must verify; a stale identity is not a new queue request.
     if let Ok(instance) = std::env::var("DEVLOCK_INSTANCE_ID") {
         let (code, out) = call(&script, &["renew", &label], Some(&instance));
         if code != Some(0) {
-            eprintln!("inherited device lock identity rejected: {out}");
-            return Gate::Exit(2);
+            return AdmissionError::new("inherited_instance_unverified",
+                format!("inherited device lock identity rejected: {out}")).reject(&subcommand);
         }
         std::env::set_var("DEVLOCK_LABEL", &label);
         return Gate::Proceed;
     }
     let instance = match acquire(&script, &label, opts.wait) {
         Ok(instance) => instance,
-        Err(e) => { eprintln!("{e}"); return Gate::Exit(2); }
+        Err(e) => return e.reject(&subcommand),
     };
     // 3. 子进程里跑, 父进程心跳 + 释放
     let stop = Arc::new(AtomicBool::new(false));
@@ -351,28 +372,34 @@ fn wait_control_child(command: &mut Command) -> i32 {
 }
 
 /// 排队直到拿到, 或等满 `wait`。
-fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<String, String> {
+fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<String, AdmissionError> {
     let t0 = Instant::now();
     loop {
-        crate::lease_storage::resolve().require_ready()?;
+        crate::lease_storage::resolve().require_ready()
+            .map_err(|e| AdmissionError::new("lease_storage_unavailable", e))?;
         let (code, out) = call(script, &["acquire", label], None);
         if code == Some(0) {
             let owner: crate::queue_owner::QueueOwner = serde_json::from_str(&out)
-                .map_err(|_| "devlock returned no typed instance; upgrade the selected phonefarm/devlock together")?;
+                .map_err(|_| AdmissionError::new("devlock_owner_invalid",
+                    "devlock returned no typed instance; upgrade the selected phonefarm/devlock together"))?;
             if owner.schema != "phonefarm/devlock-owner@1" || owner.label != label
                 || owner.holder_pid != std::process::id() || !crate::queue_owner::valid_instance(&owner.instance_id) {
-                return Err("devlock acquisition identity does not match this holder".into());
+                return Err(AdmissionError::new("devlock_owner_invalid",
+                    "devlock acquisition identity does not match this holder"));
             }
             eprintln!("设备锁: 已拿到 ({label})");
             return Ok(owner.instance_id);
         }
-        if code != Some(1) { return Err(format!("device queue unavailable ({code:?}): {out}")); }
+        if code != Some(1) {
+            return Err(AdmissionError::new("devlock_unavailable",
+                format!("device queue unavailable ({code:?}): {out}")));
+        }
         if t0.elapsed() + POLL > wait {
-            return Err(format!(
+            return Err(AdmissionError::new("devlock_wait_expired", format!(
                 "设备锁: 等了 {} 秒还没轮到 {label}, 没碰设备就退出 ({out})。\
                  --lock-wait 可以放长; lead 预排了队列时 --lock-label 要用队列里的名字",
                 t0.elapsed().as_secs()
-            ));
+            )));
         }
         eprintln!(
             "设备锁: 还没轮到 {label} ({out}); {} 秒后重试, 已等 {} 秒",
@@ -459,6 +486,7 @@ mod tests {
         assert_eq!(parse_wait("2h").unwrap(), Duration::from_secs(7200));
         assert_eq!(parse_wait("900s").unwrap(), Duration::from_secs(900));
         assert_eq!(parse_wait("5").unwrap(), Duration::from_secs(300));
+        assert!(parse_wait("18446744073709551615h").is_err());
     }
 
     #[test]

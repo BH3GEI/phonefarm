@@ -280,3 +280,148 @@ elif '/sys/class/thermal' in cmd: print('cpu-0 40000')
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     assert_eq!(std::fs::read(f.dir.join("fake-calls")).unwrap(), calls);
 }
+
+#[test]
+fn gate_admission_errors_are_json_without_relabeling_dispatched_capture() {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    use std::time::{Duration, Instant};
+
+    let f = Fixture::new("gate-admission");
+    let script = f.dir.join("fake-devlock");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+printf '%s:%s:%s\n' "$1" "$2" "${DEVLOCK_INSTANCE_ID-}" >> "$GATE_CALLS"
+case "$GATE_CASE:$1" in
+  unavailable:acquire) echo 'fixture queue unavailable' >&2; exit 2 ;;
+  busy:acquire) echo 'fixture occupied'; exit 1 ;;
+  inherited_rejected:renew) echo 'fixture identity rejected' >&2; exit 2 ;;
+  bad_owner:acquire) printf 'owned\n' > "$GATE_OWNER"; holder=0 ;;
+  success:acquire) holder=$PPID ;;
+  success:renew|success:release) exit 0 ;;
+  *) exit 2 ;;
+esac
+printf '{"schema":"phonefarm/devlock-owner@1","instance_id":"0123456789abcdef0123456789abcdef","label":"%s","holder_pid":%s,"holder_start":"fixture","host_boot_id":"fixture","owner":"fixture"}\n' "$2" "$holder"
+"#,
+    )
+    .unwrap();
+    let transport = f.dir.join("forbidden-transport");
+    std::fs::write(
+        &transport,
+        "#!/bin/sh\nprintf 'called\\n' >> \"$GATE_DEVICE_CALLS\"\nexit 91\n",
+    )
+    .unwrap();
+    for path in [&script, &transport] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let command = |name: &str| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_phonefarm"));
+        c.env_clear()
+            .current_dir(&f.dir)
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &f.dir)
+            .env("PHONEFARM_STATE_DIR", f.dir.join("state"))
+            .env("DEVLOCK_DIR", f.dir.join("legacy"))
+            .env("PHONEFARM_LEASE_DIR", f.dir.join("leases"))
+            .env("DEVLOCK_BIN", &script)
+            .env("ADB_BIN", &transport)
+            .env("HDC_BIN", &transport)
+            .env("GATE_CALLS", f.dir.join(format!("{name}.calls")))
+            .env("GATE_OWNER", f.dir.join("invalid-owner-retained"))
+            .env("GATE_DEVICE_CALLS", f.dir.join("device.calls"))
+            // No --json: admission is always structured. A permitted command
+            // fails capture's argument validation before any device access.
+            .args([
+                "capture", "--serial", "fake-device", "--frames", "0",
+                "--lock-label", "fixture", "--lock-wait", "0s",
+            ]);
+        c
+    };
+    let run = |name: &str, mut command: Command| {
+        let mut child = command
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let owned = OwnedGroup(child.id() as i32);
+        let started = Instant::now();
+        let mut expired = false;
+        while child.try_wait().unwrap().is_none() {
+            if started.elapsed() >= Duration::from_secs(5) {
+                expired = true;
+                unsafe { libc::kill(-owned.0, libc::SIGKILL); }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        f.save(name, &output);
+        drop(owned);
+        assert!(!expired, "{name}: fixture exceeded its five-second bound");
+        output
+    };
+    let calls = |name: &str| {
+        std::fs::read_to_string(f.dir.join(format!("{name}.calls"))).unwrap_or_default()
+    };
+    let instance = "0123456789abcdef0123456789abcdef";
+    for (name, mode, code, expected_call) in [
+        ("arguments", "success", "invalid_lock_arguments", ""),
+        ("storage", "success", "lease_storage_unavailable", ""),
+        ("unavailable", "unavailable", "devlock_unavailable", "acquire"),
+        ("inherited", "inherited_rejected", "inherited_instance_unverified", "renew"),
+        ("busy", "busy", "devlock_wait_expired", "acquire"),
+        ("owner", "bad_owner", "devlock_owner_invalid", "acquire"),
+    ] {
+        let mut c = command(name);
+        c.env("GATE_CASE", mode);
+        match name {
+            "arguments" => { c.arg("--lock-wait"); }
+            "storage" => { c.env("DEVLOCK_DIR", "relative-invalid"); }
+            "inherited" => { c.env("DEVLOCK_INSTANCE_ID", instance); }
+            _ => {}
+        }
+        let output = run(name, c);
+        assert_eq!(output.status.code(), Some(2), "{name}");
+        let stdout = std::str::from_utf8(&output.stdout).unwrap();
+        assert_eq!(stdout.lines().count(), 1, "{name}: {stdout}");
+        let value: Value = serde_json::from_str(stdout).unwrap();
+        assert_eq!(value["schema"], "phonefarm/devlock-error@1");
+        assert_eq!(value["stage"], "admission");
+        assert_eq!(value["code"], code);
+        assert_eq!(value["command"], "capture");
+        assert_eq!(value["command_started"], false);
+        assert_eq!(value["exit_code"], 2);
+        assert!(value["error"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(!output.stderr.is_empty(), "{name}: retain human diagnostic");
+        let expected = match expected_call {
+            "" => String::new(),
+            "renew" => format!("renew:fixture:{instance}\n"),
+            _ => "acquire:fixture:\n".to_string(),
+        };
+        assert_eq!(calls(name), expected, "{name}: no retry or release on rejection");
+    }
+    assert_eq!(std::fs::read(f.dir.join("invalid-owner-retained")).unwrap(), b"owned\n");
+
+    for inherited in [true, false] {
+        let name = if inherited { "inherited-dispatch" } else { "child-dispatch" };
+        let mut c = command(name);
+        c.env("GATE_CASE", "success");
+        if inherited {
+            c.env("DEVLOCK_INSTANCE_ID", instance);
+        }
+        let output = run(name, c);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty(), "{name}: producer error is not admission");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--frames 必须 >= 1"));
+        let expected = if inherited {
+            format!("renew:fixture:{instance}\n")
+        } else {
+            format!("acquire:fixture:\nrenew:fixture:{instance}\nrelease:fixture:{instance}\n")
+        };
+        assert_eq!(calls(name), expected);
+    }
+    assert!(!f.dir.join("device.calls").exists());
+    assert!(!f.dir.join("legacy").exists());
+    assert!(!f.dir.join("leases").exists());
+}
