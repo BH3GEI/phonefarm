@@ -253,7 +253,11 @@ def arm_layer(a, out, name, k, note, locked):
             if up <= 0:
                 rec["error"] = f"层没在超分 (selfsr={s1})"
         if k["kind"] in ("ip", "srip"):
-            rec["interp"] = m1.get("interp")
+            ipj = m1.get("interp") or {}
+            rec["interp"] = ipj
+            lat = ipj.get("real_present_to_display_ns") or {}
+            # 真实帧 present→上屏 (整个会话累计); 插帧带来的延迟 = 与 ip:real 对照臂之差
+            rec["display_latency_p50_ms"] = round(lat["p50"] / 1e6, 3) if lat.get("p50") else None
         if not rec["layer_loaded"]:
             rec["error"] = "层没加载 (marker layer_loaded 不为真)"
     finally:
@@ -410,7 +414,8 @@ def main():
     good = [r for r in arms if not r.get("error") and r.get("in_game")
             and (not uses_layer(parse_kind(r["kind"])) or (r.get("layer_loaded") and r.get("layer_removed")))]
     pairs = sorted({r["pair"] for r in good if sum(1 for x in good if x["pair"] == r["pair"]) == 2})
-    metrics = ["display_fps", "game_fps", "game_frame_p95_ms", "gpu_active_ms", "sharp_full", "ssim_vs_native_ref", "missed_frames"]
+    metrics = ["display_fps", "game_fps", "game_frame_p95_ms", "gpu_active_ms", "sharp_full", "ssim_vs_native_ref", "missed_frames",
+               "display_latency_p50_ms"]
     res = {}
     for m in metrics:
         av = [next(x.get(m) for x in good if x["pair"] == p and x["side"] == "A") for p in pairs]
@@ -430,6 +435,7 @@ def main():
     json.dump(report, open(os.path.join(out, "report.json"), "w"), ensure_ascii=False, indent=1)
     names = {"display_fps": "上屏帧率", "game_fps": "游戏渲染帧率 (GPU 提交)", "game_frame_p95_ms": "游戏渲染 p95 帧时 (ms)",
              "gpu_active_ms": "每帧 GPU 忙碌 (ms, 均值)",
+             "display_latency_p50_ms": "真实帧 present→上屏 p50 (ms)",
              "sharp_full": "锐度 (拉普拉斯方差)", "ssim_vs_native_ref": "与第一张原生截图的 SSIM", "missed_frames": "SF 丢帧 / 窗口"}
     md = [f"# {ka} (A) vs {kb} (B): {a.pkg}", "",
           f"每臂冷启动进大世界, 有效 {len(pairs)} 对, 精确符号翻转检验 (最小可能 p = {report['min_p_possible']})。"

@@ -91,7 +91,7 @@ struct Ring {
 };
 
 enum Kind : uint8_t { K_REAL = 0, K_SYNTH = 1 };
-struct Pending { uint32_t id; uint8_t kind; uint64_t frame, desired, target; };
+struct Pending { uint32_t id; uint8_t kind; uint64_t frame, desired, target, call; };   // call = 游戏调 present 的时刻
 
 struct Swap {
     uint32_t w = 0, h = 0, fmt = 0, usage = 0, n_images = 0;
@@ -178,6 +178,7 @@ std::map<std::string, uint64_t> g_fb;  // fallback 原因
 uint64_t g_late = 0, g_early = 0, g_timing_samples = 0;
 uint64_t g_pair_rs = 0, g_pair_sr = 0, g_pair_rr = 0, g_pair_ss = 0;   // 相邻显示帧的种类组合
 Ring g_disp_int, g_disp_int_rs, g_disp_int_sr, g_call_int, g_cpu_us, g_margin;
+Ring g_lat_real;   // 真实帧: 游戏调 present → 实际上屏 (插帧带来的显示延迟看它与 real 模式之差)
 uint64_t g_last_half_ns = 0, g_last_period_ns = 0;
 uint32_t g_dup_src_cur = 0;            // dup 模式下因没有历史而拷当前帧的次数
 
@@ -321,7 +322,7 @@ void poll_timing_locked(Dev* D, VkSwapchainKHR sc, Swap& S) {
     for (uint32_t i = 0; i < n; i++) {
         const auto& e = v[i];
         if (!e.actualPresentTime) continue;
-        Pending p{e.presentID, K_REAL, 0, 0, 0};
+        Pending p{e.presentID, K_REAL, 0, 0, 0, 0};
         bool found = false;
         while (!S.pending.empty() && S.pending.front().id < e.presentID) S.pending.pop_front();   // 回读丢了的
         if (!S.pending.empty() && S.pending.front().id == e.presentID) { p = S.pending.front(); S.pending.pop_front(); found = true; }
@@ -342,6 +343,7 @@ void poll_timing_locked(Dev* D, VkSwapchainKHR sc, Swap& S) {
             else if (e.actualPresentTime + R / 4 < p.target) g_early++;
         }
         g_margin.push((uint64_t)(e.presentMargin < 0 ? 0 : e.presentMargin));
+        if (p.kind == K_REAL && p.call && e.actualPresentTime >= p.call) g_lat_real.push(e.actualPresentTime - p.call);
         csv_row("timing", e.presentID, p.kind, p.frame, 0, e.desiredPresentTime, p.target, e.actualPresentTime,
                 e.earliestPresentTime, e.presentMargin);
     }
@@ -582,6 +584,27 @@ VkResult ip_on_present(VkQueue q, const VkPresentInfoKHR* pi, PFN_vkQueuePresent
     }
     S.prev_call_t = t;
     if (!S.patched) return bail("swapchain_not_patched");
+    if (g_mode == "real") {   // 对照: 不插帧, 只给真实帧带 presentID 回读上屏时刻 (延迟口径与插帧相同)
+        poll_timing_locked(D, sc, S);
+        bool timed = g_pacing && S.timing_ok;
+        uint32_t id = S.next_id++;
+        if (timed) {
+            S.pending.push_back(Pending{id, K_REAL, frame, 0, 0, t});
+            while (S.pending.size() > 512) S.pending.pop_front();
+        }
+        g_real++; g_real_only++;
+        lk.unlock();
+        if (!timed) return next(q, pi);
+        struct Hdr { VkStructureType sType; const void* pNext; };
+        const void* chain = pi->pNext;
+        while (chain && reinterpret_cast<const Hdr*>(chain)->sType == VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE)
+            chain = reinterpret_cast<const Hdr*>(chain)->pNext;   // 游戏自己的时间戳在链头: 换成我们的 (desired=0 即尽快)
+        VkPresentTimeGOOGLE tm{id, 0};
+        VkPresentTimesInfoGOOGLE pt{VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, chain, 1, &tm};
+        VkPresentInfoKHR pn = *pi;
+        pn.pNext = &pt;
+        return next(q, &pn);
+    }
     uint32_t idxN = pi->pImageIndices[0];
     if (idxN >= S.imgs.size() || !S.sems[idxN]) return bail("image_index");
     uint32_t family = D->sole_family;
@@ -680,8 +703,8 @@ VkResult ip_on_present(VkQueue q, const VkPresentInfoKHR* pi, PFN_vkQueuePresent
         } else g_fb["no_phase_yet"]++;   // 还没回读到真实显示时刻: 这一对不设时间戳 (ASAP), 但带 presentID 以便回读
     }
     uint32_t idL = S.next_id++, idN = S.next_id++;
-    S.pending.push_back(Pending{idL, K_SYNTH, frame, desiredL, targetL});
-    S.pending.push_back(Pending{idN, K_REAL, frame, desiredN, targetN});
+    S.pending.push_back(Pending{idL, K_SYNTH, frame, desiredL, targetL, 0});
+    S.pending.push_back(Pending{idN, K_REAL, frame, desiredN, targetN, t});
     while (S.pending.size() > 512) S.pending.pop_front();
     csv_row("present", idL, K_SYNTH, frame, t, desiredL, targetL, 0, 0, 0);
     csv_row("present", idN, K_REAL, frame, t, desiredN, targetN, 0, 0, 0);
@@ -763,6 +786,7 @@ std::string ip_json() {
     j += ",\"displayed_interval_real_to_synth_ns\":" + g_disp_int_rs.json();
     j += ",\"displayed_interval_synth_to_real_ns\":" + g_disp_int_sr.json();
     j += ",\"present_margin_ns\":" + g_margin.json();
+    j += ",\"real_present_to_display_ns\":" + g_lat_real.json();
     j += ",\"present_call_interval_ns\":" + g_call_int.json();
     j += ",\"layer_cpu_us\":" + g_cpu_us.json();
     j += ",\"fallbacks\":{" + fb + "}";

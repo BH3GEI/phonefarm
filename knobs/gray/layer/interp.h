@@ -8,6 +8,8 @@
 //   interp_mode         合成帧怎么来 (缺省 dup):
 //                         dup     = 原样复制上一张真实帧 (B0 臂: 零计算, 只多一次 GPU 拷贝 + 一次送显)
 //                         dupcur  = 原样复制当前这张真实帧 (连历史图都不用, 最便宜的「双 present」)
+//                         real    = 不插帧, 只回读真实帧上屏时刻 (插帧延迟的对照)
+//                         bm      = 块匹配运动补偿中间帧 (interp_bm.cpp)
 //                         <其它>  = 查 ip_register_synth 登记的名字 (I5 的 GPU 着色器 / NPU 调用挂在这里);
 //                                   没登记就退回 dup 并在 marker 里记 fallbacks.unknown_mode
 //   interp_pacing       1 (缺省) = 用 VK_GOOGLE_display_timing 的 desiredPresentTime 定节奏;
