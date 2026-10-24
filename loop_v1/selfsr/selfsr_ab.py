@@ -7,6 +7,7 @@
   native              原生: 不挂层, Game Mode 无干预
   layer               只挂透传层 (gray-layer session --mode probe), 第 2 步用
   hwc:<F>             Android Game Mode 降分辨率 F (cmd game mode custom + cmd game set --downscale F), 放大交给 HWC
+  ip:<合成方式>         挂层并开层内插帧 (debug.knobs.interp=1, interp_mode=dup/dupcur/bm), 第 4 步用
   sr:<F>:<宽>x<高>[:<锐化>]  同上降分辨率 F, 再挂层并设 debug.knobs.selfsr=<宽>x<高>[:<锐化>]: 层在送显前把游戏的小图超分到 <宽>x<高>
 每臂: (devlock 下) 设好 Game Mode 与 selfsr 属性 → 冷启动进大世界 → 静置 --settle 秒 → --window 秒窗口并行采
   - SurfaceFlinger timestats: 上屏帧率 / 刷新率 / 丢帧
@@ -29,12 +30,15 @@ from gfrc_ab import Dev, parse_timestats, layer_src, sharpness, signflip, boot_c
 PKG_DEFAULT = "com.miHoYo.Yuanshen"
 DEV_TRACE = "/data/local/tmp/selfsr_ftrace_capture.sh"
 SR_PROP = "debug.knobs.selfsr"
+IP_PROPS = ("debug.knobs.interp", "debug.knobs.interp_mode")
 
 
 def parse_kind(s):
     p = s.split(":")
     if p[0] in ("native", "layer") and len(p) == 1:
         return {"kind": p[0], "downscale": None, "selfsr": None}
+    if p[0] == "ip" and len(p) == 2:   # ip:<合成方式>  层内插帧 (interp.cpp), 合成方式 dup/dupcur/bm
+        return {"kind": "ip", "downscale": None, "selfsr": None, "interp": p[1]}
     if p[0] == "hwc" and len(p) == 2:
         return {"kind": "hwc", "downscale": float(p[1]), "selfsr": None}
     if p[0] == "sr" and len(p) in (3, 4) and "x" in p[2]:   # sr:<F>:<宽>x<高>[:<锐化>]
@@ -43,7 +47,7 @@ def parse_kind(s):
 
 
 def uses_layer(k):
-    return k["kind"] in ("layer", "sr")
+    return k["kind"] in ("layer", "sr", "ip")
 
 
 def pf_json(pf, *args, inp=None, timeout=600):
@@ -164,7 +168,9 @@ def prepare(a, k, orig_mode):
     dev.shell(f"am force-stop {a.pkg}")
     gm = game_mode(dev, a.pkg, k["downscale"], orig_mode)
     dev.su(f"setprop {SR_PROP} {shlex.quote(k['selfsr'] or '')}")
-    return {"game_mode": gm, "selfsr_prop": dev.prop(SR_PROP)}
+    mode = k.get("interp")
+    dev.su(f"setprop {IP_PROPS[0]} {'1' if mode else shlex.quote('')}; setprop {IP_PROPS[1]} {shlex.quote(mode or '')}")
+    return {"game_mode": gm, "selfsr_prop": dev.prop(SR_PROP), "interp_props": [dev.prop(p) for p in IP_PROPS]}
 
 
 def arm_plain(a, out, name, k, orig_mode):
@@ -240,6 +246,8 @@ def arm_layer(a, out, name, k, note, locked):
             rec["selfsr_upscaled_in_window"] = up
             if up <= 0:
                 rec["error"] = f"层没在超分 (selfsr={s1})"
+        if k["kind"] == "ip":
+            rec["interp"] = m1.get("interp")
         if not rec["layer_loaded"]:
             rec["error"] = "层没加载 (marker layer_loaded 不为真)"
     finally:
@@ -297,7 +305,9 @@ def main():
             dev.shell(f"am force-stop {a.pkg}")
             gm = game_mode(dev, a.pkg, None, a.orig_mode)
             dev.su(f"setprop {SR_PROP} ''")
-            rec = {"game_mode": gm, "mode_now": current_mode(dev, a.pkg), "selfsr_prop": dev.prop(SR_PROP)}
+            dev.su("; ".join(f"setprop {p} ''" for p in IP_PROPS))
+            rec = {"game_mode": gm, "mode_now": current_mode(dev, a.pkg), "selfsr_prop": dev.prop(SR_PROP),
+                   "interp_props": [dev.prop(p) for p in IP_PROPS]}
         print("ARM_JSON " + json.dumps(rec, ensure_ascii=False))
         return 0
 
