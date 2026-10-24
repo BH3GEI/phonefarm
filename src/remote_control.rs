@@ -32,6 +32,8 @@ const RETIREMENT: &str = "phonefarm/remote-control-startup-retirement@1";
 const SCOPE: &str = "remote_control_commands_settled";
 const LIMIT: usize = 64 * 1024;
 const MAX_REQUESTS: usize = 4096;
+const INPUT_CONTRACT: &str = "frame-bound-v1";
+const FRAME_AGE_SECONDS: i64 = 30;
 const ACTIONS: &[&str] = &[
     "screenshot",
     "tap",
@@ -414,6 +416,8 @@ fn public(store: &Store, s: &Value) -> Result<Value> {
         json!({"schema":SCHEMA,"session_id":s["session_id"],"serial":s["serial"],"phase":phase,
         "live_owner":running,"capabilities":ACTIONS,"created_at":s["created_at"],"deadline":s["deadline"],
         "ttl_seconds":s["ttl_seconds"],"last_request_id":s["last_request_id"],"latest_image":s["latest_image"],
+        "input_contract":s["input_contract"],"input_frame_id":s["input_frame_id"],
+        "frame_max_age_seconds":if s["input_contract"] == INPUT_CONTRACT {json!(FRAME_AGE_SECONDS)} else {Value::Null},
         "stop_reason":s["stop_reason"],"error":s["error"],"recovery":{"required":phase=="recovery_required",
         "scope":SCOPE,"game_state_restored":false,"device_verified":false,"report":s["recovery_report"]}}),
     )
@@ -682,8 +686,8 @@ fn validate_request(r: &Value) -> Result<()> {
     let coordinate = |k| bounded(p, k, 0, 100_000).map(|_| ());
     match action {
         "screenshot" => { keys(p, &["max_side"])?; if p.get("max_side").is_some() { bounded(p, "max_side", 0, 8192)?; } }
-        "tap" => { keys(p, &["x", "y"])?; coordinate("x")?; coordinate("y")?; }
-        "swipe" => { keys(p, &["x1", "y1", "x2", "y2", "ms"])?; for k in ["x1", "y1", "x2", "y2"] { coordinate(k)?; } bounded(p, "ms", 1, 10_000)?; }
+        "tap" => { keys(p, &["x", "y", "frame_id"])?; coordinate("x")?; coordinate("y")?; }
+        "swipe" => { keys(p, &["x1", "y1", "x2", "y2", "ms", "frame_id"])?; for k in ["x1", "y1", "x2", "y2"] { coordinate(k)?; } bounded(p, "ms", 1, 10_000)?; }
         "text" => { keys(p, &["text"])?; let text = string(p, "text")?; if text.is_empty() || text.chars().count() > 1000 || text.chars().any(char::is_control) { return Err(error("invalid_request", "text requires 1..1000 visible characters")); } }
         "key" => { keys(p, &["key"])?; key_code(&p["key"])?; }
         "start_app" | "stop_app" => {
@@ -697,6 +701,9 @@ fn validate_request(r: &Value) -> Result<()> {
         }
         "renew" | "release" => keys(p, &[])?,
         _ => return Err(error("unsupported", "action is not supported by this owner; raw shell/install/files/HDC/video are unavailable")),
+    }
+    if matches!(action, "tap" | "swipe") && !id(string(p, "frame_id")?) {
+        return Err(error("invalid_request", "frame_id must identify a screenshot request"));
     }
     Ok(())
 }
@@ -716,6 +723,9 @@ fn publish(store: &Store, r: &Value) -> Result<Value> {
             ));
         }
         return receipt(store, &s, request_id);
+    }
+    if matches!(r["action"].as_str(), Some("tap" | "swipe")) && s["input_contract"] != INPUT_CONTRACT {
+        return Err(error("input_contract_unavailable", "this owner does not support frame-bound input; query original receipts or close it explicitly"));
     }
     if !live(store, &s)? {
         return Err(error(
@@ -788,50 +798,113 @@ fn shell_command(r: &Value) -> Result<(String, u64)> {
         _ => return Err(error("unsupported", "not a shell action")),
     })
 }
-fn execute(store: &Store, lease: &Lease, transport: &mut Transport, r: &Value) -> Result<Value> {
+fn rotation(lease: &Lease, transport: &mut Transport) -> Result<Option<u32>> {
+    let out = transport.shell(lease, "remote-display-rotation", "dumpsys input", 5)
+        .map_err(|e| error(if e.uncertain { "unknown" } else { "io_error" }, e.message))?;
+    Ok(if out.code == 0 { crate::gray_session::rotation_from_input(&out.stdout).ok() } else { None })
+}
+
+fn capture_image(store: &Store, lease: &Lease, transport: &mut Transport, s: &Value, r: &Value, verify: bool) -> Result<Value> {
     let request_id = string(r, "request_id")?;
+    let before = rotation(lease, transport)?;
+    let captured_at = now();
+    let out = transport
+        .raw(
+            lease,
+            "remote-screenshot",
+            vec!["exec-out".into(), "screencap -p".into()],
+            20,
+        )
+        .map_err(|e| error(if e.uncertain { "unknown" } else { "io_error" }, e.message))?;
+    if out.code != 0 {
+        return Err(error(
+            "unknown",
+            "ADB screenshot did not confirm successful completion",
+        ));
+    }
+    let bytes = fs::read(&out.stdout_path)?;
+    if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err(error("unknown", "screenshot is not a complete PNG"));
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+    let h = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+    if w == 0 || h == 0 || w > 8192 || h > 8192 || u64::from(w) * u64::from(h) > 24_000_000 {
+        return Err(error("unknown", "screenshot dimensions exceed limits"));
+    }
+    let mut img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+        .map_err(|e| error("unknown", format!("invalid PNG: {e}")))?;
+    let after = rotation(lease, transport)?;
+    let rotation = if before == after { after } else { None };
+    let max_side = r["params"]["max_side"].as_u64().unwrap_or(1280) as u32;
+    if max_side > 0 && w.max(h) > max_side {
+        img = img.resize(max_side, max_side, image::imageops::FilterType::Triangle);
+    }
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut encoded, image::ImageFormat::Png)
+        .map_err(|e| io_error(e.to_string()))?;
+    if encoded.get_ref().len() > 8 * 1024 * 1024 {
+        return Err(io_error("encoded screenshot exceeds 8 MiB"));
+    }
+    let name = if verify {format!("verification-{request_id}.png")} else {format!("artifact-{request_id}.png")};
+    store.bytes(&name, encoded.get_ref(), false)?;
+    Ok(
+        json!({"exit":0,"relative_path":name,"mime":"image/png","width":img.width(),"height":img.height(),
+        "source_width":w,"source_height":h,"original_size":[w,h],"bytes":encoded.get_ref().len(),"captured_at":captured_at,
+        "frame_id":request_id,"session_id":s["session_id"],"serial":s["serial"],"rotation":rotation}),
+    )
+}
+
+fn check_frame(s: &Value, r: &Value) -> Result<()> {
+    let image = &s["latest_image"];
+    if image.is_null() || image["frame_id"] != r["params"]["frame_id"]
+        || image["session_id"] != s["session_id"] || image["serial"] != s["serial"] {
+        return Err(error("frame_unavailable", "frame does not identify the latest screenshot in this session"));
+    }
+    let at = image["captured_at"].as_str().and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .ok_or_else(|| error("frame_stale", "frame capture time is unavailable"))?;
+    let age = chrono::Utc::now().signed_duration_since(at).num_milliseconds();
+    if !(0..=FRAME_AGE_SECONDS * 1000).contains(&age) {
+        return Err(error("frame_stale", "capture again before coordinate input"));
+    }
+    if !image["rotation"].as_u64().is_some_and(|n| n <= 3) {
+        return Err(error("frame_orientation_unknown", "capture orientation is unknown"));
+    }
+    let w = image["source_width"].as_u64().unwrap_or(0);
+    let h = image["source_height"].as_u64().unwrap_or(0);
+    let points: &[(&str, &str)] = if r["action"] == "tap" { &[("x", "y")] } else {&[("x1", "y1"), ("x2", "y2")]};
+    if points.iter().any(|(x,y)| !r["params"][*x].as_u64().is_some_and(|n| n < w)
+        || !r["params"][*y].as_u64().is_some_and(|n| n < h)) {
+        return Err(error("coordinate_out_of_bounds", "coordinates must be inside the source screenshot"));
+    }
+    Ok(())
+}
+
+fn execute(store: &Store, lease: &Lease, transport: &mut Transport, s: &Value, r: &Value) -> Result<Value> {
     if r["action"] == "screenshot" {
-        let out = transport
-            .raw(
-                lease,
-                "remote-screenshot",
-                vec!["exec-out".into(), "screencap -p".into()],
-                20,
-            )
-            .map_err(|e| error(if e.uncertain { "unknown" } else { "io_error" }, e.message))?;
-        if out.code != 0 {
-            return Err(error(
-                "unknown",
-                "ADB screenshot did not confirm successful completion",
-            ));
+        return capture_image(store, lease, transport, s, r, false);
+    }
+    let coordinate_input = matches!(r["action"].as_str(), Some("tap" | "swipe"));
+    let mut verification = Value::Null;
+    if coordinate_input {
+        let checked = (|| -> Result<()> {
+            check_frame(s, r)?;
+            verification = capture_image(store, lease, transport, s, r, true)?;
+            if verification["rotation"].is_null() {
+                return Err(error("frame_orientation_unknown", "current display orientation is unknown; input was not issued"));
+            }
+            let source = &s["latest_image"];
+            if ["rotation", "source_width", "source_height"].iter().any(|key| source[*key] != verification[*key]) {
+                return Err(error("frame_geometry_changed", "display geometry changed; capture again before input"));
+            }
+            check_frame(s, r)
+        })();
+        if let Err(e) = checked {
+            if matches!(e.code, "frame_unavailable" | "frame_stale" | "frame_orientation_unknown" | "coordinate_out_of_bounds" | "frame_geometry_changed") {
+                return Ok(json!({"exit":2,"input_issued":false,"frame_id":r["params"]["frame_id"],
+                    "code":e.code,"error":e.message,"verification":verification}));
+            }
+            return Err(e);
         }
-        let bytes = fs::read(&out.stdout_path)?;
-        if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            return Err(error("unknown", "screenshot is not a complete PNG"));
-        }
-        let w = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
-        let h = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
-        if w == 0 || h == 0 || w > 8192 || h > 8192 || u64::from(w) * u64::from(h) > 24_000_000 {
-            return Err(error("unknown", "screenshot dimensions exceed limits"));
-        }
-        let mut img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-            .map_err(|e| error("unknown", format!("invalid PNG: {e}")))?;
-        let max_side = r["params"]["max_side"].as_u64().unwrap_or(1280) as u32;
-        if max_side > 0 && w.max(h) > max_side {
-            img = img.resize(max_side, max_side, image::imageops::FilterType::Triangle);
-        }
-        let mut encoded = std::io::Cursor::new(Vec::new());
-        img.write_to(&mut encoded, image::ImageFormat::Png)
-            .map_err(|e| io_error(e.to_string()))?;
-        if encoded.get_ref().len() > 8 * 1024 * 1024 {
-            return Err(io_error("encoded screenshot exceeds 8 MiB"));
-        }
-        let name = format!("artifact-{request_id}.png");
-        store.bytes(&name, encoded.get_ref(), false)?;
-        return Ok(
-            json!({"exit":0,"relative_path":name,"mime":"image/png","width":img.width(),"height":img.height(),
-            "source_width":w,"source_height":h,"original_size":[w,h],"bytes":encoded.get_ref().len(),"captured_at":now()}),
-        );
     }
     let (command, seconds) = shell_command(r)?;
     let out = transport
@@ -842,7 +915,13 @@ fn execute(store: &Store, lease: &Lease, transport: &mut Transport, r: &Value) -
             seconds,
         )
         .map_err(|e| error(if e.uncertain { "unknown" } else { "io_error" }, e.message))?;
-    Ok(json!({"exit":out.code,"stdout":out.stdout.chars().take(8192).collect::<String>()}))
+    let mut value = json!({"exit":out.code,"stdout":out.stdout.chars().take(8192).collect::<String>()});
+    if coordinate_input {
+        value["input_issued"] = json!(true);
+        value["frame_id"] = r["params"]["frame_id"].clone();
+        value["verification"] = verification;
+    }
+    Ok(value)
 }
 fn stop_pending(store: &Store, message: &str) -> Result<()> {
     for e in store.requests()? {
@@ -938,6 +1017,7 @@ enum Claim {
     Idle,
     Deadline,
     Action(Value, Value),
+    Rejected(String),
 }
 fn claim(store: &Store, s: &mut Value, completed: &HashSet<String>, end: Instant) -> Result<Claim> {
     // Publication and claiming share this lock through durable started + state.
@@ -965,12 +1045,28 @@ fn claim(store: &Store, s: &mut Value, completed: &HashSet<String>, end: Instant
         ));
     }
     let action = string(r, "action")?;
+    if matches!(action, "tap" | "swipe") {
+        let checked = if s["input_contract"] != INPUT_CONTRACT {
+            Err(error("input_contract_unavailable", "owner lacks frame-bound input"))
+        } else if s["input_frame_id"] != r["params"]["frame_id"] {
+            Err(error("frame_unavailable", "frame is no longer eligible; capture again before input"))
+        } else { check_frame(s, r) };
+        if let Err(reason) = checked {
+            let mut rejected = initial(&e);
+            rejected["status"] = json!("not_executed");
+            rejected["error_code"] = json!(reason.code);
+            rejected["error"] = json!(reason.message);
+            rejected["finished_at"] = json!(now());
+            store.write(&record("result", request_id), &rejected, false)?;
+            return Ok(Claim::Rejected(request_id.to_owned()));
+        }
+    }
     let budget = if action == "screenshot" {
-        22
+        34
     } else if matches!(action, "renew" | "release") {
         0
     } else {
-        shell_command(r)?.1 + 2
+        shell_command(r)?.1 + if matches!(action, "tap" | "swipe") {34} else {2}
     };
     if end.saturating_duration_since(Instant::now()) < Duration::from_secs(budget) {
         return Ok(Claim::Deadline);
@@ -979,6 +1075,9 @@ fn claim(store: &Store, s: &mut Value, completed: &HashSet<String>, end: Instant
     result["status"] = json!("started");
     result["started_at"] = json!(now());
     store.write(&record("started", request_id), &result, false)?;
+    if !matches!(action, "renew" | "release") {
+        s["input_frame_id"] = Value::Null;
+    }
     s["last_request_id"] = json!(request_id);
     if action == "release" {
         s["phase"] = json!("closing");
@@ -1028,6 +1127,7 @@ fn supervise(
                 continue;
             }
             Claim::Deadline => return close(store, lease, s, "deadline", None, &lost),
+            Claim::Rejected(request_id) => { completed.insert(request_id); continue; },
             Claim::Action(e, result) => (e, result),
         };
         let r = &e["request"];
@@ -1039,7 +1139,7 @@ fn supervise(
         let outcome = if action == "renew" {
             Ok(json!({"renewed":true}))
         } else {
-            execute(store, lease, transport, r)
+            execute(store, lease, transport, s, r)
         };
         match outcome {
             Ok(value) => {
@@ -1064,6 +1164,7 @@ fn supervise(
         store.write(&record("result", request_id), &result, false)?;
         if action == "screenshot" {
             s["latest_image"] = result["result"].clone();
+            s["input_frame_id"] = if result["result"]["rotation"].is_null() { Value::Null } else {r["request_id"].clone()};
         }
         s["pending_request"] = Value::Null;
         save(store, s)?;
@@ -1227,7 +1328,8 @@ fn start(a: &Args) -> Result<()> {
     let mut s = json!({"schema":PRIVATE,"session_id":session_id,"serial":serial,"token":lease.token(),"context":store.path,
         "owner":{"pid":identity.pid,"start":identity.start,"host_boot_id":identity.host_boot_id},"phase":"starting",
         "created_at":now(),"deadline":deadline.to_rfc3339(),"ttl_seconds":a.ttl,"max_seconds":a.max,
-        "transport_uncertain":false,"pending_request":null,"last_request_id":null,"latest_image":null,"stop_reason":null,"error":null,"recovery_report":null});
+        "transport_uncertain":false,"pending_request":null,"last_request_id":null,"latest_image":null,
+        "input_contract":INPUT_CONTRACT,"input_frame_id":null,"stop_reason":null,"error":null,"recovery_report":null});
     store.write(STATE, &s, false)?;
     lease.hold_for_recovery(&store.path).map_err(io_error)?;
     let result = (|| -> Result<()> {
@@ -1348,7 +1450,8 @@ pub(crate) fn run(args: &[String]) -> i32 {
         let a = parse(args)?;
         if a.command == "capabilities" {
             return Ok(Some(
-                json!({"schema":"phonefarm/remote-control-capabilities@1","ownership":"strong-lease-v1","actions":ACTIONS,"platforms":["android"],"scope":SCOPE}),
+                json!({"schema":"phonefarm/remote-control-capabilities@1","ownership":"strong-lease-v1","actions":ACTIONS,"platforms":["android"],"scope":SCOPE,
+                    "input_contract":INPUT_CONTRACT,"frame_max_age_seconds":FRAME_AGE_SECONDS}),
             ));
         }
         if a.command == "owner" {
@@ -1421,7 +1524,7 @@ mod tests {
             let process = host_process::capture(std::process::id()).unwrap();
             let state = json!({"schema":PRIVATE,"session_id":"test-session","serial":"fake-remote","context":store.path,"token":"original-token",
                 "owner":{"pid":process.pid,"start":process.start,"host_boot_id":process.host_boot_id},"phase":"ready",
-                "transport_uncertain":false,"pending_request":null});
+                "transport_uncertain":false,"pending_request":null,"input_contract":INPUT_CONTRACT,"input_frame_id":null});
             store.write(STATE, &state, false).unwrap();
             (store, owner, state)
         }
@@ -1456,17 +1559,18 @@ mod tests {
             shell_command(&text).unwrap().0,
             "input text '中文'\\'';%secho%sx'"
         );
-        validate_request(&request("a", "tap", json!({"x":100000,"y":0}))).unwrap();
+        assert!(validate_request(&request("a", "tap", json!({"x":1,"y":0}))).is_err());
+        validate_request(&request("a", "tap", json!({"x":100000,"y":0,"frame_id":"shot"}))).unwrap();
     }
     #[test]
     fn request_identity_is_immutable_and_release_freezes_publication() {
         let scratch = Scratch::new();
         let (store, _owner, mut s) = scratch.fixture();
-        let tap = request("a", "tap", json!({"x":10,"y":20}));
+        let tap = request("a", "tap", json!({"x":10,"y":20,"frame_id":"shot"}));
         assert_eq!(publish(&store, &tap).unwrap()["status"], "accepted");
         assert_eq!(publish(&store, &tap).unwrap()["sequence"], 1);
         assert_eq!(
-            publish(&store, &request("a", "tap", json!({"x":11,"y":20})))
+            publish(&store, &request("a", "tap", json!({"x":11,"y":20,"frame_id":"shot"})))
                 .unwrap_err()
                 .code,
             "conflict"
@@ -1497,6 +1601,49 @@ mod tests {
         assert!(store.optional(&record("started", "a")).unwrap().is_none());
         stop_pending(&store, "session is closing").unwrap();
         assert_eq!(receipt(&store, &s, "a").unwrap()["status"], "not_executed");
+    }
+    #[test]
+    fn frame_claim_rejects_stale_and_consumes_only_current_eligible_image() {
+        let scratch = Scratch::new();
+        let (store, _owner, mut s) = scratch.fixture();
+        let image = json!({"frame_id":"shot","session_id":"test-session","serial":"fake-remote",
+            "captured_at":now(),"rotation":1,"source_width":256,"source_height":128,"width":128,"height":64});
+        let tap = request("tap", "tap", json!({"x":255,"y":127,"frame_id":"shot"}));
+        s["latest_image"] = image.clone();
+        s["input_frame_id"] = json!("shot");
+        check_frame(&s, &tap).unwrap();
+        let outside = request("outside", "tap", json!({"x":256,"y":127,"frame_id":"shot"}));
+        assert_eq!(check_frame(&s, &outside).unwrap_err().code, "coordinate_out_of_bounds");
+        for (field, value, code) in [
+            ("rotation", Value::Null, "frame_orientation_unknown"),
+            ("serial", json!("other-device"), "frame_unavailable"),
+            ("captured_at", json!((chrono::Utc::now()+chrono::Duration::seconds(10)).to_rfc3339()), "frame_stale"),
+        ] {
+            s["latest_image"][field] = value;
+            assert_eq!(check_frame(&s, &tap).unwrap_err().code, code);
+            s["latest_image"] = image.clone();
+        }
+        s["latest_image"]["captured_at"] = json!((chrono::Utc::now()-chrono::Duration::seconds(31)).to_rfc3339());
+        save(&store, &mut s).unwrap();
+        publish(&store, &tap).unwrap();
+        let end = Instant::now()+Duration::from_secs(100);
+        assert!(matches!(claim(&store, &mut s, &HashSet::new(), end).unwrap(), Claim::Rejected(id) if id == "tap"));
+        let rejected = receipt(&store, &s, "tap").unwrap();
+        assert_eq!(rejected["status"], "not_executed");
+        assert_eq!(rejected["error_code"], "frame_stale");
+        assert!(store.optional(&record("started", "tap")).unwrap().is_none());
+        s["latest_image"] = image;
+        save(&store, &mut s).unwrap();
+        let next = request("next", "tap", tap["params"].clone());
+        publish(&store, &next).unwrap();
+        assert!(matches!(claim(&store, &mut s, &HashSet::from(["tap".into()]), end).unwrap(), Claim::Action(..)));
+        assert!(state(&store).unwrap()["input_frame_id"].is_null());
+        assert_eq!(publish(&store, &next).unwrap()["status"], "started");
+        assert_eq!(publish(&store, &tap).unwrap(), rejected);
+        s.as_object_mut().unwrap().remove("input_contract");
+        save(&store, &mut s).unwrap();
+        assert!(public(&store, &s).unwrap()["input_contract"].is_null());
+        assert_eq!(publish(&store, &request("old", "tap", tap["params"].clone())).unwrap_err().code, "input_contract_unavailable");
     }
     #[test]
     fn startup_retirement_requires_dead_owner_and_clear_domain_preserves_unknown() {

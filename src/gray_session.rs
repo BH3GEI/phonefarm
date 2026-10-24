@@ -1053,7 +1053,7 @@ fn control_properties(mode: &str) -> Result<[&'static str; 12], String> {
     }))
 }
 
-fn rotation_from_input(text: &str) -> Result<u32, String> {
+pub(crate) fn rotation_from_input(text: &str) -> Result<u32, String> {
     let mut orientation = None;
     for value in text.lines().filter_map(|line| line.trim().strip_prefix("SurfaceOrientation:")) {
         let rotation = value.trim().parse::<u32>().ok().filter(|n| *n <= 3)
