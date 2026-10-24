@@ -3,6 +3,7 @@
 use crate::{
     devlease::Lease,
     game_deploy::{self, Request, SCOPE},
+    game_deploy_transport::{ShellStderr, Transport, TransportError},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,9 +24,7 @@ extern "C" fn interrupt(_: libc::c_int) {
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
-pub(crate) fn q(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
+pub(crate) use crate::game_deploy_transport::{parse_terminal, q, Remote};
 fn parent(request: &Request) -> String {
     format!("/sdcard/Android/data/{}/files", request.recipe.package)
 }
@@ -88,17 +87,12 @@ pub(crate) fn valid_boot(value: &str) -> bool {
             }
         })
 }
-pub(crate) struct Remote {
-    pub(crate) code: i32,
-    pub(crate) stdout: String,
-}
 pub(crate) struct Session {
     lease: Lease,
     state: State,
-    adb: PathBuf,
+    transport: Transport,
     dir: PathBuf,
     out: PathBuf,
-    sequence: u64,
 }
 impl Session {
     pub(crate) fn new(lease: Lease, request: Request, out: &Path) -> Result<Self, String> {
@@ -120,10 +114,13 @@ impl Session {
     }
     fn from_state(lease: Lease, state: State, out: &Path) -> Result<Self, String> {
         state.validate()?;
-        let adb = crate::device::locate_adb()
-            .ok_or("ADB executable unavailable")?
-            .into();
         let dir = out.join("game-deploy");
+        let transport = Transport::new(
+            &state.request.serial,
+            &state.token,
+            &dir,
+            ShellStderr::Separate,
+        )?;
         crate::shared_access::create_dir(&dir).map_err(|e| e.to_string())?;
         File::open(&dir)
             .and_then(|f| f.sync_all())
@@ -134,10 +131,9 @@ impl Session {
         let value = Self {
             lease,
             state,
-            adb,
+            transport,
             dir,
             out: out.to_owned(),
-            sequence: 0,
         };
         value.save()?;
         Ok(value)
@@ -160,64 +156,37 @@ impl Session {
             save.map(|e| format!("; state: {e}")).unwrap_or_default()
         )
     }
+    fn transport_ready(&self) -> Result<(), String> {
+        if self.state.transport_uncertain {
+            return Err(
+                "deployment transport is uncertain; no further device commands permitted".into(),
+            );
+        }
+        Ok(())
+    }
+    fn transport_error(&mut self, error: TransportError) -> String {
+        if error.uncertain {
+            self.uncertain(&error.message)
+        } else {
+            error.message
+        }
+    }
     fn raw(
         &mut self,
         operation: &str,
         args: Vec<String>,
         seconds: u64,
     ) -> Result<crate::lease_command::Output, String> {
-        if self.state.transport_uncertain {
-            return Err(
-                "deployment transport is uncertain; no further device commands permitted".into(),
-            );
-        }
-        let mut argv = vec!["-s".into(), self.state.request.serial.clone()];
-        argv.extend(args);
-        crate::confirmation_transport::journal(
-            &self.dir,
-            json!({"at":now(),"operation":operation,"event":"start"}),
-        )?;
-        match crate::lease_command::run(
-            &self.lease,
-            &self.adb,
-            &argv,
-            &self.dir,
-            operation,
-            Duration::from_secs(seconds),
-        ) {
-            Ok(output) => {
-                if let Err(e) = crate::confirmation_transport::journal(
-                    &self.dir,
-                    json!({"at":now(),"operation":operation,"event":"exit","code":output.code,"stdout":output.stdout_path.file_name()}),
-                ) {
-                    return Err(
-                        self.uncertain(&format!("command result could not be recorded: {e}"))
-                    );
-                }
-                Ok(output)
-            }
-            Err(e) => Err(self.uncertain(&e)),
-        }
+        self.transport_ready()?;
+        self.transport
+            .raw(&self.lease, operation, args, seconds)
+            .map_err(|error| self.transport_error(error))
     }
     fn shell(&mut self, operation: &str, command: &str, seconds: u64) -> Result<Remote, String> {
-        self.sequence += 1;
-        let terminal = format!(
-            "PF_GAME_DEPLOY_EXIT:{}:{}:",
-            self.state.token, self.sequence
-        );
-        let wrapper = format!(
-            "sh -c {}; rc=$?; printf '\\n{}%s\\n' \"$rc\"; exit 0",
-            q(command),
-            terminal
-        );
-        let output = self.raw(operation, vec!["shell".into(), wrapper], seconds)?;
-        if output.code != 0 {
-            return Err(self.uncertain("ADB shell did not confirm remote completion"));
-        }
-        match parse_terminal(&output.stdout, &terminal) {
-            Ok(value) => Ok(value),
-            Err(e) => Err(self.uncertain(&e)),
-        }
+        self.transport_ready()?;
+        self.transport
+            .shell(&self.lease, operation, command, seconds)
+            .map_err(|error| self.transport_error(error))
     }
     fn read(&mut self, operation: &str, command: &str) -> Result<String, String> {
         let result = self.shell(operation, command, 30)?;
@@ -794,22 +763,6 @@ pub(crate) fn package_identity(output: &str) -> Result<(u64, u64), String> {
         return Err("package identity missing or ambiguous".into());
     }
     Ok((*versions.first().unwrap(), *uids.first().unwrap()))
-}
-pub(crate) fn parse_terminal(output: &str, terminal: &str) -> Result<Remote, String> {
-    let normalized = output.replace("\r\n", "\n");
-    let value = normalized.trim_end_matches('\n');
-    let (body, last) = value
-        .rsplit_once('\n')
-        .ok_or("missing remote completion line")?;
-    let code = last
-        .strip_prefix(terminal)
-        .and_then(|v| v.parse::<i32>().ok())
-        .filter(|v| (0..=255).contains(v))
-        .ok_or("invalid remote completion line")?;
-    Ok(Remote {
-        code,
-        stdout: body.into(),
-    })
 }
 
 #[cfg(test)]

@@ -16,7 +16,11 @@ pub(crate) const INSTALL_REQUEST_SCHEMA: &str = "phonefarm/game-install-request@
 pub(crate) const INSTALL_RECIPE_SCHEMA: &str = "phonefarm/game-install-recipe@1";
 pub(crate) const INSTALL_REPORT_SCHEMA: &str = "phonefarm/game-installation@1";
 pub(crate) const INSTALL_SCOPE: &str = "owned_package_install_transaction_settled";
-const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0: matching installed-engine resources, or explicitly absent single-APK installation. No replacement, root escalation, launch, permissions or saved-game changes. Confirmed installations are retained.";
+pub(crate) const INITIALIZE_REQUEST_SCHEMA: &str = "phonefarm/game-initialize-request@1";
+pub(crate) const INITIALIZE_RECIPE_SCHEMA: &str = "phonefarm/game-initialize-recipe@1";
+pub(crate) const INITIALIZE_REPORT_SCHEMA: &str = "phonefarm/game-initialization@1";
+pub(crate) const INITIALIZE_SCOPE: &str = "owned_launcher_attempt_force_stopped";
+const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0: matching installed-engine resources, or explicitly absent single-APK installation. Explicit launcher initialization may retain new application configuration; it never grants permissions or claims scene readiness. No replacement or root escalation. Confirmed installations are retained.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -107,6 +111,49 @@ impl InstallRequest {
             return Err(
                 "installation requires exactly the selected positive-size APK cache asset".into(),
             );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InitializeRecipe {
+    pub schema: String,
+    pub package: String,
+    pub version_code: u64,
+    pub apk_sha256: String,
+    pub wait_seconds: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InitializeRequest {
+    pub schema: String,
+    pub node_id: String,
+    pub game_id: String,
+    pub version: String,
+    pub serial: String,
+    pub mode: String,
+    pub recipe: InitializeRecipe,
+    pub assets: Vec<Asset>,
+}
+impl InitializeRequest {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        serial(&self.serial)?;
+        if self.schema != INITIALIZE_REQUEST_SCHEMA
+            || self.recipe.schema != INITIALIZE_RECIPE_SCHEMA
+            || !matches!(self.mode.as_str(), "check" | "apply")
+            || self.node_id.is_empty()
+            || self.node_id.chars().any(char::is_control)
+            || !identifier(&self.game_id)
+            || !identifier(&self.version)
+            || !crate::graylayer::valid_package(&self.recipe.package)
+            || self.recipe.version_code == 0
+            || !valid_hash(&self.recipe.apk_sha256)
+            || !(1..=30).contains(&self.recipe.wait_seconds)
+            || !self.assets.is_empty()
+        {
+            return Err("invalid bounded launcher initialization request".into());
         }
         Ok(())
     }
@@ -333,6 +380,66 @@ pub(crate) fn install_report(request: &InstallRequest) -> Value {
         "login":{"status":"unknown"},"scene_ready":{"status":"unknown"},"checks":{},
         "error":null,"session_path":null,"recovery":{"status":"not_reported","scope":INSTALL_SCOPE}})
 }
+pub(crate) fn initialize_report(request: &InitializeRequest) -> Value {
+    json!({"schema":INITIALIZE_REPORT_SCHEMA,"node_id":request.node_id,"game_id":request.game_id,
+        "version":request.version,"serial":request.serial,"mode":request.mode,"phase":"preflight_failed",
+        "observed_at":chrono::Utc::now().to_rfc3339(),"installed":{"status":"unknown"},
+        "resources_deployed":{"status":"unknown"},"application_access":{"status":"unknown"},
+        "login":{"status":"unknown"},"scene_ready":{"status":"unknown"},"checks":{},
+        "storage_initialization":{"status":"unknown","path":format!("/sdcard/Android/data/{}/files",request.recipe.package),"shell_access":"unknown"},
+        "launch":{"status":"not_attempted"},"stop":{"status":"not_required","all_target_processes_gone":"unknown"},
+        "error":null,"session_path":null,"recovery":{"status":"not_reported","scope":INITIALIZE_SCOPE}})
+}
+
+/// Recovery acquisition rechecks the immutable source under the actual lease.
+/// A failure leaves the existing recovery obligation in the lease domain.
+pub(crate) fn acquire_context(
+    source: &Path,
+    serial: &str,
+    bytes: &[u8],
+) -> Result<crate::devlease::Lease, String> {
+    let storage = crate::lease_storage::resolve();
+    let (device, legacy) = storage.require_ready()?;
+    let lease = crate::devlease::Lease::acquire_recovery(
+        &device,
+        &legacy,
+        serial,
+        source,
+        std::time::Duration::from_secs(1),
+    )?;
+    if crate::confirmation_transport::bounded(&source.join("session.json"), 131072)? != bytes {
+        return Err("source recovery context changed during acquisition".into());
+    }
+    Ok(lease)
+}
+/// A failed durable handoff may already have published the next context.
+pub(crate) fn context_moved(
+    lease: &crate::devlease::Lease,
+    serial: &str,
+    source: &Path,
+    next: &Path,
+) -> Option<bool> {
+    let status = crate::devlease::storage_status(&crate::lease_storage::resolve());
+    let contexts: Vec<_> = status["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry["serial"] == serial)
+        .filter_map(|entry| entry["recovery_context"].as_str())
+        .collect();
+    if lease.check().is_ok() && contexts.len() == 1 {
+        if Path::new(contexts[0]) == next {
+            Some(true)
+        } else if Path::new(contexts[0]) == source {
+            Some(false)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
 pub(crate) fn save_report(out: &Path, report: &Value) -> Result<(), String> {
     crate::devlease::durable_replace(
         &out.join("deployment.json"),
@@ -362,7 +469,7 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
             let metadata = crate::apk_metadata::tool().is_some();
             Ok((
                 json!({"schema":"phonefarm/game-deploy-capabilities@1","resources_v1":true,
-                "fresh_single_apk_v1":true,"metadata_tool":{"available":metadata,
+                "fresh_single_apk_v1":true,"launcher_initialization_v1":true,"metadata_tool":{"available":metadata,
                 "error":if metadata {Value::Null} else {json!("fixed AAPT2_BIN or aapt2 on explicit PATH is required")}}}),
                 0,
             ))
@@ -379,6 +486,28 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
             let input: Value =
                 serde_json::from_slice(&crate::confirmation_transport::bounded(&request, 65536)?)
                     .map_err(|e| format!("invalid deployment JSON: {e}"))?;
+            if input["schema"] == INITIALIZE_REQUEST_SCHEMA {
+                let request: InitializeRequest = serde_json::from_value(input)
+                    .map_err(|e| format!("invalid initialization JSON: {e}"))?;
+                request.validate()?;
+                if request.serial != serial {
+                    return Err("request serial differs from explicit target".into());
+                }
+                let out = output(&out)?;
+                let result = crate::devlease::Lease::target(Some(&serial), "game-initialize")
+                    .and_then(|lease| {
+                        crate::game_initialize::Session::new(lease, request.clone(), &out)
+                    });
+                return match result {
+                    Ok(session) => session.execute(),
+                    Err(error) => {
+                        let mut value = initialize_report(&request);
+                        value["error"] = json!(error);
+                        save_report(&out, &value)?;
+                        Ok((value, 2))
+                    }
+                };
+            }
             if input["schema"] == INSTALL_REQUEST_SCHEMA {
                 let request: InstallRequest = serde_json::from_value(input)
                     .map_err(|e| format!("invalid installation JSON: {e}"))?;
@@ -445,7 +574,9 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
                 131072,
             )?)
             .map_err(|e| e.to_string())?;
-            if state["schema"] == crate::game_install_session::SCHEMA {
+            if state["schema"] == crate::game_initialize::SCHEMA {
+                crate::game_initialize::Session::recover(&session, &serial, &out)
+            } else if state["schema"] == crate::game_install_session::SCHEMA {
                 crate::game_install_session::Session::recover(&session, &serial, &out)
             } else {
                 Session::recover(&session, &serial, &out)

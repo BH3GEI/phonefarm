@@ -2,7 +2,8 @@
 use crate::{
     devlease::Lease,
     game_deploy::{self, InstallRequest, INSTALL_SCOPE},
-    game_deploy_session::{digest, package_identity, parse_terminal, q, valid_boot, Remote},
+    game_deploy_session::{digest, package_identity, q, valid_boot, Remote},
+    game_deploy_transport::{ShellStderr, Transport, TransportError},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -84,8 +85,7 @@ pub(crate) struct Session {
     state: State,
     dir: PathBuf,
     out: PathBuf,
-    adb: PathBuf,
-    sequence: u64,
+    transport: Transport,
     // Only this live creator may abandon a non-committed session. A recovered
     // numeric session ID alone is not proof of its present service-side owner.
     created_here: bool,
@@ -117,10 +117,13 @@ impl Session {
     }
     fn from_state(lease: Lease, state: State, out: &Path) -> Result<Self, String> {
         state.validate()?;
-        let adb = crate::device::locate_adb()
-            .ok_or("ADB executable unavailable")?
-            .into();
         let dir = out.join("game-deploy");
+        let transport = Transport::new(
+            &state.request.serial,
+            &state.token,
+            &dir,
+            ShellStderr::Merged,
+        )?;
         crate::shared_access::create_dir(&dir).map_err(|e| e.to_string())?;
         File::open(&dir)
             .and_then(|f| f.sync_all())
@@ -133,8 +136,7 @@ impl Session {
             state,
             dir,
             out: out.to_owned(),
-            adb,
-            sequence: 0,
+            transport,
             created_here: false,
         };
         session.save()?;
@@ -156,61 +158,35 @@ impl Session {
             save.map(|e| format!("; state: {e}")).unwrap_or_default()
         )
     }
+    fn transport_ready(&self) -> Result<(), String> {
+        if self.state.transport_uncertain {
+            return Err("installation transport uncertain; further device commands refused".into());
+        }
+        Ok(())
+    }
+    fn transport_error(&mut self, error: TransportError) -> String {
+        if error.uncertain {
+            self.uncertain(&error.message)
+        } else {
+            error.message
+        }
+    }
     fn raw(
         &mut self,
         operation: &str,
         args: Vec<String>,
         seconds: u64,
     ) -> Result<crate::lease_command::Output, String> {
-        if self.state.transport_uncertain {
-            return Err("installation transport uncertain; further device commands refused".into());
-        }
-        let mut argv = vec!["-s".into(), self.state.request.serial.clone()];
-        argv.extend(args);
-        crate::confirmation_transport::journal(
-            &self.dir,
-            json!({"event":"start","operation":operation,"at":now()}),
-        )?;
-        match crate::lease_command::run(
-            &self.lease,
-            &self.adb,
-            &argv,
-            &self.dir,
-            operation,
-            Duration::from_secs(seconds),
-        ) {
-            Ok(output) => {
-                if let Err(e) = crate::confirmation_transport::journal(
-                    &self.dir,
-                    json!({"event":"exit","operation":operation,"at":now(),"code":output.code,"stdout":output.stdout_path.file_name()}),
-                ) {
-                    return Err(self.uncertain(&format!(
-                        "installation command result was not recorded: {e}"
-                    )));
-                }
-                Ok(output)
-            }
-            Err(e) => Err(self.uncertain(&e)),
-        }
+        self.transport_ready()?;
+        self.transport
+            .raw(&self.lease, operation, args, seconds)
+            .map_err(|error| self.transport_error(error))
     }
     fn shell(&mut self, operation: &str, command: &str, seconds: u64) -> Result<Remote, String> {
-        self.sequence += 1;
-        let terminal = format!(
-            "PF_GAME_DEPLOY_EXIT:{}:{}:",
-            self.state.token, self.sequence
-        );
-        // PackageManager may report a partial query failure on stderr while
-        // returning zero. Merge it into the bounded result and parse strictly.
-        let wrapper = format!(
-            "sh -c {} 2>&1; rc=$?; printf '\\n{}%s\\n' \"$rc\"; exit 0",
-            q(command),
-            terminal
-        );
-        let output = self.raw(operation, vec!["shell".into(), wrapper], seconds)?;
-        if output.code != 0 {
-            return Err(self.uncertain("ADB shell did not confirm installation command completion"));
-        }
-        parse_terminal(&output.stdout, &terminal).map_err(|e| self.uncertain(&e))
+        self.transport_ready()?;
+        self.transport
+            .shell(&self.lease, operation, command, seconds)
+            .map_err(|error| self.transport_error(error))
     }
     fn read(&mut self, operation: &str, command: &str) -> Result<String, String> {
         let output = self.shell(operation, command, 30)?;

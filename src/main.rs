@@ -58,6 +58,8 @@ mod fold;
 mod gamepad;
 mod game_deploy;
 mod game_deploy_session;
+mod game_deploy_transport;
+mod game_initialize;
 mod game_install_session;
 mod apk_metadata;
 mod frameaudit;
