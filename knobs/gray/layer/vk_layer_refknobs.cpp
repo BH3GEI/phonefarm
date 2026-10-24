@@ -33,6 +33,10 @@
 #include <time.h>
 #include "npu_rt.h"
 #include "framedump.h"
+#if __has_include(<vulkan/vulkan_android.h>)
+#include <vulkan/vulkan_android.h>
+#define RK_HAVE_ANDROID_SURFACE 1
+#endif
 #include "interp.h"
 #include "selfsr.h"
 #include "artifact_stats.h"
@@ -128,6 +132,9 @@ struct InstDisp {
     VkInstance instance = VK_NULL_HANDLE;
     PFN_vkDestroyInstance DestroyInstance = nullptr;
     PFN_vkEnumerateDeviceExtensionProperties EnumDevExt = nullptr;
+#ifdef RK_HAVE_ANDROID_SURFACE
+    PFN_vkCreateAndroidSurfaceKHR CreateAndroidSurfaceKHR = nullptr;
+#endif
 };
 struct DevDisp {
     PFN_vkGetDeviceProcAddr gdpa = nullptr;
@@ -913,10 +920,26 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     d.DestroyInstance = (PFN_vkDestroyInstance)gipa(*pInst, "vkDestroyInstance");
     d.EnumDevExt = (PFN_vkEnumerateDeviceExtensionProperties)
         gipa(*pInst, "vkEnumerateDeviceExtensionProperties");
+#ifdef RK_HAVE_ANDROID_SURFACE
+    d.CreateAndroidSurfaceKHR = (PFN_vkCreateAndroidSurfaceKHR)gipa(*pInst, "vkCreateAndroidSurfaceKHR");
+#endif
     { std::lock_guard<std::mutex> lk(g_mtx); g_inst[key(*pInst)] = d; }
     write_marker();  // 挂上就落标记 → 证明问题 1
     return r;
 }
+
+#ifdef RK_HAVE_ANDROID_SURFACE
+// 插帧要屏幕跑在游戏帧率的两倍: 表面建好后按 debug.knobs.interp_fps 给游戏窗口投帧率票 (interp.cpp)
+static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateAndroidSurfaceKHR(VkInstance inst, const VkAndroidSurfaceCreateInfoKHR* ci,
+                                                               const VkAllocationCallbacks* a, VkSurfaceKHR* out) {
+    InstDisp d;
+    { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_inst.find(key(inst)); if (it == g_inst.end()) return VK_ERROR_INITIALIZATION_FAILED; d = it->second; }
+    if (!d.CreateAndroidSurfaceKHR) return VK_ERROR_EXTENSION_NOT_PRESENT;
+    VkResult r = d.CreateAndroidSurfaceKHR(inst, ci, a, out);
+    if (r == VK_SUCCESS && ci) ip_on_android_surface(ci->window);
+    return r;
+}
+#endif
 
 static VKAPI_ATTR void VKAPI_CALL rk_DestroyInstance(VkInstance inst, const VkAllocationCallbacks* a) {
     InstDisp d;
@@ -3952,6 +3975,9 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
     RK_HOOK("vkEnumerateDeviceExtensionProperties", rk_EnumerateDeviceExtensionProperties);
     RK_HOOK("vkCreateInstance", rk_CreateInstance);
     RK_HOOK("vkDestroyInstance", rk_DestroyInstance);
+#ifdef RK_HAVE_ANDROID_SURFACE
+    if (ip_wants_surface_hook()) RK_HOOK("vkCreateAndroidSurfaceKHR", rk_CreateAndroidSurfaceKHR);
+#endif
     RK_HOOK("vkCreateDevice", rk_CreateDevice);
     RK_HOOK("vkGetDeviceProcAddr", dispatch_device);
     // 设备级钩子也从 instance gipa 暴露, 供 loader 建表

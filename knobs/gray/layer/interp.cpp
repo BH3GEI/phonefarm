@@ -16,6 +16,7 @@
 #include "framedump.h"
 
 #include <android/log.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/system_properties.h>
 #include <time.h>
@@ -164,6 +165,8 @@ long g_lead_ns = -1;       // -1 = 一个刷新周期
 long g_extra_images = 2;
 long g_acquire_ms = 4;
 bool g_csv = true;
+long g_fps_vote = 0;                   // debug.knobs.interp_fps: 给游戏窗口投的帧率, 0 = 不投
+std::string g_fps_vote_result;         // 投票结果 (marker)
 std::map<void*, Dev*> g_devs;
 FILE* g_csv_f = nullptr;
 uint32_t g_csv_rows = 0;
@@ -396,6 +399,7 @@ bool ip_init_from_props() {
     g_lead_ns = prop_long("debug.knobs.interp_lead_ns", -1, -1, 200000000);
     g_extra_images = prop_long("debug.knobs.interp_extra_images", 2, 1, 4);
     g_acquire_ms = prop_long("debug.knobs.interp_acquire_ms", 4, 0, 100);
+    g_fps_vote = prop_long("debug.knobs.interp_fps", 0, 0, 240);
     std::string c = prop("debug.knobs.interp_csv");
     g_csv = c.empty() || c[0] == '1';
     if (!g_pacing) g_pacing_reason = "disabled_by_prop";
@@ -405,6 +409,24 @@ bool ip_init_from_props() {
 }
 
 bool ip_on() { return g_on; }
+
+bool ip_wants_surface_hook() { return g_on && g_fps_vote > 0; }
+
+void ip_on_android_surface(ANativeWindow* w) {
+    if (!g_on || g_fps_vote <= 0 || !w) return;
+    typedef int32_t (*SetFrameRate)(ANativeWindow*, float, int8_t);
+    static SetFrameRate fn = nullptr;
+    if (!fn) {
+        void* h = dlopen("libandroid.so", RTLD_NOW | RTLD_NOLOAD);
+        if (!h) h = dlopen("libandroid.so", RTLD_NOW);
+        if (h) fn = (SetFrameRate)dlsym(h, "ANativeWindow_setFrameRate");
+    }
+    std::lock_guard<std::mutex> lk(g_m);
+    if (!fn) { g_fps_vote_result = "no_ANativeWindow_setFrameRate"; IP_LOG("没有 ANativeWindow_setFrameRate"); return; }
+    int32_t r = fn(w, (float)g_fps_vote, 1 /* ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE */);
+    g_fps_vote_result = "setFrameRate(" + std::to_string(g_fps_vote) + ")=" + std::to_string(r);
+    IP_LOG("给游戏窗口投帧率 %ld: %d", g_fps_vote, (int)r);
+}
 
 const char* ip_wanted_device_ext(bool supported) {
     if (!g_on || !g_pacing) return nullptr;
@@ -744,6 +766,7 @@ std::string ip_json() {
     j += ",\"present_call_interval_ns\":" + g_call_int.json();
     j += ",\"layer_cpu_us\":" + g_cpu_us.json();
     j += ",\"fallbacks\":{" + fb + "}";
+    j += ",\"fps_vote\":\"" + g_fps_vote_result + "\"";
     j += ",\"swapchain\":" + swap;
     j += std::string(",\"csv\":") + (g_csv_f ? "true" : "false");
     j += "}";

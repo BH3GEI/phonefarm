@@ -67,4 +67,9 @@ void ip_on_swapchain(VkDevice dev, VkSwapchainKHR sc, const VkSwapchainCreateInf
 VkResult ip_on_present(VkQueue q, const VkPresentInfoKHR* pi, PFN_vkQueuePresentKHR next, uint64_t frame);
 // 本模块自己的钩子 (vkGetDeviceQueue / vkGetDeviceQueue2 / vkDestroySwapchainKHR); 没开或不是这几个名字返回空。
 PFN_vkVoidFunction ip_hook(const char* name);
+// debug.knobs.interp_fps>0 时挂 vkCreateAndroidSurfaceKHR: 表面建好后对游戏窗口调
+// ANativeWindow_setFrameRate(fps, FIXED_SOURCE) —— 应用请求高刷的标准接口, 插帧需要屏幕跑在游戏帧率两倍
+struct ANativeWindow;
+bool ip_wants_surface_hook();
+void ip_on_android_surface(ANativeWindow* w);
 std::string ip_json();       // 写进 knobs_layer_out.json 的 "interp" 一节
