@@ -461,7 +461,8 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
     // snapshot these later layer inputs. Keep reading them without upgrading their
     // device/deployment claims.
     for late in ["npuprobe.cpp", "npu_rt.h", "framedump.cpp", "framedump.h", "interp.cpp", "interp.h",
-                 "selfsr.cpp", "selfsr.h", "selfsr_up.comp", "selfsr_rcas.comp"] {
+                 "selfsr.cpp", "selfsr.h", "selfsr_up.comp", "selfsr_rcas.comp", "interp_bm.cpp",
+                 "interp_b_luma.comp", "interp_b_bm.comp", "interp_b_smooth.comp", "interp_b_compose.comp", "interp_common.glsl"] {
         if !manifest.descriptor.inputs.contains_key(late) {
             required_inputs.retain(|name| *name != late);
         }

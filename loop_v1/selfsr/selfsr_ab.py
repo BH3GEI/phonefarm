@@ -7,7 +7,7 @@
   native              原生: 不挂层, Game Mode 无干预
   layer               只挂透传层 (gray-layer session --mode probe), 第 2 步用
   hwc:<F>             Android Game Mode 降分辨率 F (cmd game mode custom + cmd game set --downscale F), 放大交给 HWC
-  sr:<F>:<宽>x<高>     同上降分辨率 F, 再挂层并设 debug.knobs.selfsr=<宽>x<高>: 层在送显前把游戏的小图超分到 <宽>x<高>
+  sr:<F>:<宽>x<高>[:<锐化>]  同上降分辨率 F, 再挂层并设 debug.knobs.selfsr=<宽>x<高>[:<锐化>]: 层在送显前把游戏的小图超分到 <宽>x<高>
 每臂: (devlock 下) 设好 Game Mode 与 selfsr 属性 → 冷启动进大世界 → 静置 --settle 秒 → --window 秒窗口并行采
   - SurfaceFlinger timestats: 上屏帧率 / 刷新率 / 丢帧
   - ftrace + phonefarm parse-trace: 游戏 GPU 提交 → 游戏渲染帧率 / p95 帧时
@@ -37,8 +37,8 @@ def parse_kind(s):
         return {"kind": p[0], "downscale": None, "selfsr": None}
     if p[0] == "hwc" and len(p) == 2:
         return {"kind": "hwc", "downscale": float(p[1]), "selfsr": None}
-    if p[0] == "sr" and len(p) == 3 and "x" in p[2]:
-        return {"kind": "sr", "downscale": float(p[1]), "selfsr": p[2]}
+    if p[0] == "sr" and len(p) in (3, 4) and "x" in p[2]:   # sr:<F>:<宽>x<高>[:<锐化>]
+        return {"kind": "sr", "downscale": float(p[1]), "selfsr": ":".join(p[2:])}
     raise argparse.ArgumentTypeError(f"不认识的臂: {s}")
 
 
