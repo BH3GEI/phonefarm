@@ -34,6 +34,7 @@
 #include "npu_rt.h"
 #include "framedump.h"
 #include "interp.h"
+#include "selfsr.h"
 #include "artifact_stats.h"
 #ifdef RK_DYNAMIC_UPOP_BUILD
 #include "artifact_metadata.h"
@@ -706,6 +707,7 @@ static void write_marker() {
     std::string knob = g_rewrite_loadop ? "gray_loadop_dontcare" : "";
     if (g_storeop_mode) knob += std::string(knob.empty() ? "" : "+") + (g_storeop_mode == 1 ? "gray_storeop_ds" : "gray_storeop_pick");
     if (ip_on()) knob += std::string(knob.empty() ? "" : "+") + "gray_interp";
+    if (sr_on()) knob += std::string(knob.empty() ? "" : "+") + "gray_selfsr";
     if (knob.empty()) knob = "gray_readonly_probe";
 
     std::string json =
@@ -781,6 +783,7 @@ static void write_marker() {
     }
     if (fd_on()) json += ",\"framedump\":" + fd_json();   // 逐帧读回 (framedump.cpp)
     if (ip_on()) json += ",\"interp\":" + ip_json();       // 层内多 present (interp.cpp)
+    if (sr_on()) json += ",\"selfsr\":" + sr_json();       // 送显前超分 (selfsr.cpp)
     json += "}";
 
     // 通道 1: logcat (root 可读, 不受目标应用存储沙箱影响)。
@@ -878,6 +881,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     if (g_copyprobe || g_upop || g_frameaudit) g_dump_passes = true;   // 探针/算子/步骤清单全部建立在溯源表上
     if (fd_init_from_props()) RK_LOG("framedump=1: present 处逐帧读回 (framedump.cpp)");
     if (ip_init_from_props()) RK_LOG("interp=1: 层内多 present, 两帧之间插一张合成帧 (interp.cpp)");
+    if (sr_init_from_props()) RK_LOG("selfsr: 送显前超分 (selfsr.cpp)");
     RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d upop=%d frameaudit=%d ts=%d",
            self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe, (int)g_upop,
            (int)g_frameaudit, (int)g_frameaudit_ts);
@@ -1126,6 +1130,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
                                                                                   : UINT32_MAX;
     if (fd_on()) fd_on_device(inst, phys, *pDev, gipa, gdpa, sdld, sole_family);
     if (ip_on()) ip_on_device(inst, phys, *pDev, gipa, gdpa, sdld, sole_family, ip_ext_enabled);
+    if (sr_on()) {
+        // 多个队列族时取第一个 (游戏的图形队列一般排第一); 日志里记下, 送显队列不在这个族上会提交失败并退回原样
+        uint32_t fam = sole_family != UINT32_MAX ? sole_family
+                     : (ci->queueCreateInfoCount && ci->pQueueCreateInfos ? ci->pQueueCreateInfos[0].queueFamilyIndex : UINT32_MAX);
+        if (sole_family == UINT32_MAX) RK_LOG("selfsr: %u 个队列族, 取第一个 %u", ci->queueCreateInfoCount, fam);
+        sr_on_device(inst, phys, *pDev, gipa, gdpa, sdld, fam);
+    }
     return r;
 }
 
@@ -1135,6 +1146,7 @@ static VKAPI_ATTR void VKAPI_CALL rk_DestroyDevice(VkDevice dev, const VkAllocat
     { std::lock_guard<std::mutex> lk(g_mtx); auto it = g_dev.find(key(dev)); if (it == g_dev.end()) return; d = it->second; g_dev.erase(it); }
     fd_on_destroy_device(dev);   // 先写完在途帧、收掉 framedump 自建对象 (没开时空操作)
     ip_on_destroy_device(dev);   // 收掉 interp 自建对象 (没开时空操作)
+    sr_on_destroy_device(dev);   // 收掉 selfsr 自建对象 (没开时空操作)
     write_marker();  // 收尾再落一次最终计数
     {
         std::lock_guard<std::mutex> lk(g_mtx);
@@ -1639,22 +1651,25 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateSwapchainKHR(
     // framedump: 读回要求送显图带 TRANSFER_SRC。interp: 多要几张图 + TRANSFER_SRC|DST + FIFO。
     // 改过的参数建不成就退回原参数 (画面照常, 只是不抓 / 不插)。
     VkSwapchainCreateInfoKHR mod_ci;
-    bool fd_usage = false, ip_patched = false;
+    bool fd_usage = false, ip_patched = false, sr_patched = false;
     VkResult r;
-    if ((fd_on() || ip_on()) && ci) {
+    if ((fd_on() || ip_on() || sr_on()) && ci) {
         mod_ci = *ci;
         if (fd_on()) fd_usage = fd_patch_swapchain_ci(dev, &mod_ci);
         if (ip_on()) ip_patched = ip_patch_swapchain_ci(dev, &mod_ci);
-        bool patched = fd_usage || ip_patched;
+        if (sr_on()) sr_patched = sr_patch_swapchain_ci(dev, &mod_ci);
+        bool patched = fd_usage || ip_patched || sr_patched;
         r = d.CreateSwapchainKHR(dev, patched ? &mod_ci : ci, a, out);
         if (r != VK_SUCCESS && patched) {
-            RK_LOG("改参数后建 swapchain 失败 (%d; framedump=%d interp=%d), 退回原参数", (int)r, (int)fd_usage, (int)ip_patched);
-            fd_usage = false; ip_patched = false;
+            RK_LOG("改参数后建 swapchain 失败 (%d; framedump=%d interp=%d selfsr=%d), 退回原参数", (int)r, (int)fd_usage,
+                   (int)ip_patched, (int)sr_patched);
+            fd_usage = false; ip_patched = false; sr_patched = false;
             r = d.CreateSwapchainKHR(dev, ci, a, out);
         }
         if (r == VK_SUCCESS) {
             if (fd_on()) fd_on_swapchain(dev, *out, ci, fd_usage);
             if (ip_on()) ip_on_swapchain(dev, *out, ip_patched ? &mod_ci : ci, ip_patched);
+            if (sr_on()) sr_on_swapchain(dev, *out, ci, sr_patched ? &mod_ci : ci, sr_patched);
         }
     } else {
         r = d.CreateSwapchainKHR(dev, ci, a, out);
@@ -3690,6 +3705,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
     if ((f % 300) == 0) write_marker();  // 周期落盘, 无需等退出
     VkPresentInfoKHR fd_pi;
     if (fd_on()) pi = fd_on_present(q, pi, &fd_pi, f);   // 抓帧窗口内: 先拷贝, present 改等我们的信号量
+    if (sr_on()) return sr_on_present(q, pi, d.QueuePresentKHR, f);   // 送显前超分 (selfsr.cpp)
     if (ip_on()) return ip_on_present(q, pi, d.QueuePresentKHR, f);   // 两帧之间多送一张合成帧 (interp.cpp)
     return d.QueuePresentKHR(q, pi);
 }
@@ -3926,6 +3942,7 @@ static bool lower_optional_device(VkDevice dev,const char* name) {
 
 static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* name) {
     RK_HOOK("vkGetInstanceProcAddr", dispatch_instance);
+    if (PFN_vkVoidFunction p = sr_hook(name)) return p;   // selfsr 没开时恒为空 (与 interp/framedump 不同时开)
     if (PFN_vkVoidFunction p = ip_hook(name)) return p;   // interp 没开时恒为空; 同名钩子由它往下转给 framedump
     if (PFN_vkVoidFunction p = fd_hook(name)) return p;   // framedump 没开时恒为空
     // 注意: vkEnumerateInstance{Layer,Extension}Properties 这里**不挂**。那两个导出符号
@@ -4034,6 +4051,7 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
 
 static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     RK_HOOK("vkGetDeviceProcAddr", dispatch_device);
+    if (PFN_vkVoidFunction p = sr_hook(name)) return p;   // selfsr 没开时恒为空 (与 interp/framedump 不同时开)
     if (PFN_vkVoidFunction p = ip_hook(name)) return p;   // interp 没开时恒为空; 同名钩子由它往下转给 framedump
     if (PFN_vkVoidFunction p = fd_hook(name)) return p;   // framedump 没开时恒为空
     RK_HOOK("vkDestroyDevice", rk_DestroyDevice);

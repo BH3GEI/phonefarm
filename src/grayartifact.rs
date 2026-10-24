@@ -460,7 +460,8 @@ pub fn verify(dir: &Path) -> Result<Value, String> {
     // v1 artifacts built before the NPU / frame-interpolation integration did not
     // snapshot these later layer inputs. Keep reading them without upgrading their
     // device/deployment claims.
-    for late in ["npuprobe.cpp", "npu_rt.h", "framedump.cpp", "framedump.h", "interp.cpp", "interp.h"] {
+    for late in ["npuprobe.cpp", "npu_rt.h", "framedump.cpp", "framedump.h", "interp.cpp", "interp.h",
+                 "selfsr.cpp", "selfsr.h", "selfsr_up.comp"] {
         if !manifest.descriptor.inputs.contains_key(late) {
             required_inputs.retain(|name| *name != late);
         }

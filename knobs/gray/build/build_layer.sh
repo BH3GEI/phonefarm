@@ -71,6 +71,19 @@ for n in sys.argv[2:]:
 PYEOF
 echo "interp shaders: $(for s in $INTERP_SHADERS; do printf '%s=%sB ' $s $(wc -c < "$OUT/$s.spv" | tr -d ' '); done)-> interp_spv.h"
 
+# selfsr: 送显前超分 (游戏小分辨率出图 → 送显分辨率), 内嵌成 selfsr_spv.h
+"$GLSLC" --target-env=vulkan1.1 -O "$ROOT/layer/selfsr_up.comp" -o "$OUT/selfsr_up.spv"
+python3 - "$OUT/selfsr_up.spv" > "$OUT/selfsr_spv.h" <<'PYEOF'
+import sys
+d = open(sys.argv[1], "rb").read()
+print("static const unsigned char kSelfsrUpSpv[] = {")
+for i in range(0, len(d), 16):
+    print("  " + ",".join(str(b) for b in d[i:i+16]) + ",")
+print("};")
+print(f"static const unsigned int kSelfsrUpSpvLen = {len(d)};")
+PYEOF
+echo "selfsr shader: $(wc -c < "$OUT/selfsr_up.spv" | tr -d ' ')B -> selfsr_spv.h"
+
 # gray-artifact uses this same native source/flag list for its candidate build.
 python3 - "$CXX" "$ROOT" "$OUT" <<'PYEOF'
 import json, pathlib, subprocess, sys
