@@ -56,6 +56,8 @@ mod confirmation_driver;
 mod confirmation_transport;
 mod fold;
 mod gamepad;
+mod game_deploy;
+mod game_deploy_session;
 mod frameaudit;
 mod preflight;
 mod grayab;
@@ -266,6 +268,9 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
+游戏资源: game-deploy capabilities --json
+       game-deploy --request FILE --serial S --out DIR --json
+       game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json
 灰档:  gray-layer status [--serial S] | off [pkg] [--serial S] [--json]
        gray-layer session --mode MODE --package PKG --serial S --out DIR [--max-seconds 900] [--power-policy observe|battery] [--actor-id agent] [--so 层.so] [--keep-prop]
        gray-layer session-status --out DIR [--request-id ID] --json
@@ -427,6 +432,7 @@ fn main() {
     // 碰设备的子命令先过设备锁 (src/devlock.rs): 没拿到锁不碰设备
     if let Some(sub) = args.first().cloned() {
         let gray = matches!(sub.as_str(), "gray-layer" | "gray-ab");
+        let deployment = sub == "game-deploy";
         if gray {
             match graylayer::cli_admission(&sub, &args[1..]) {
                 Ok(graylayer::GrayCliAdmission::Help) => { println!("{USAGE}"); return; }
@@ -440,7 +446,12 @@ fn main() {
         }
         // True help was handled above. A gray option's value named --help must
         // not trigger the legacy gate's token-based help exemption.
-        let queue_required = if gray {
+        let queue_required = if deployment {
+            match game_deploy::needs_queue(&args[1..]) {
+                Ok(required) => required,
+                Err(error) => { println!("{}", game_deploy::error_value(&error)); std::process::exit(2); }
+            }
+        } else if gray {
             // Use the same value-aware stripping as admission. Host-only
             // clients must work while their persistent owner holds the lease;
             // recovery enters its retained context directly.
@@ -452,7 +463,7 @@ fn main() {
             if let devlock::Gate::Exit(code) = devlock::gate(&mut args) {
                 std::process::exit(code);
             }
-        } else if gray {
+        } else if gray || deployment {
             // Admission already checked these flags; keep execution's argument
             // view identical without invoking any lock process.
             if let Err(error) = devlock::strip_lock_args(&mut args) {
@@ -868,6 +879,7 @@ fn main() {
             std::process::exit(frameaudit::run_frame_audit(&args[1..]));
         }
         Some("gray-artifact") => std::process::exit(grayartifact::run(&args[1..])),
+        Some("game-deploy") => std::process::exit(game_deploy::run(&args[1..])),
         Some("gray-layer") => {
             // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)
             std::process::exit(graylayer::run_gray_layer(&args[1..]));

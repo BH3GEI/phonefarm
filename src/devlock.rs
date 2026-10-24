@@ -76,6 +76,9 @@ pub struct LockOpts {
 /// `eval --request /nonexistent/...` 就是这么问"认不认这个参数"的, 它在读文件那一步
 /// 就退出, 碰不到设备) 都不拿 —— 否则别人持锁时连探活都要排队。
 pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
+    if sub == "game-deploy" {
+        return crate::game_deploy::needs_queue(rest).unwrap_or(false);
+    }
     if !LOCKED.contains(&sub) {
         return false;
     }
@@ -167,6 +170,7 @@ pub fn strip_lock_args(args: &mut Vec<String>) -> Result<LockOpts, String> {
                 "--out" | "--max-seconds" | "--actor-id" | "--evidence-origin" | "--power-policy" |
                 "--request-id" | "--request" | "--session" | "--frames" | "--intensity" | "--timeout-seconds"),
             "gray-ab" => matches!(a.as_str(), "--serial" | "--out" | "--pairs" | "--mode" | "--evidence-origin"),
+            "game-deploy" => matches!(a.as_str(), "--serial" | "--request" | "--session" | "--out"),
             _ => false,
         };
         if gray_value {
@@ -281,8 +285,9 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("phonefarm"));
     let mut command = Command::new(&exe);
     command.args(args.iter()).env("DEVLOCK_LABEL", &label).env("DEVLOCK_INSTANCE_ID", &instance);
-    let code = if args.first().is_some_and(|a| a == "gray-layer")
-        && args.get(1).is_some_and(|a| a == "session") {
+    let code = if (args.first().is_some_and(|a| a == "gray-layer")
+        && args.get(1).is_some_and(|a| a == "session"))
+        || args.first().is_some_and(|a| a == "game-deploy") {
         // The node cancels the entire command group. Keep this queue owner
         // alive while the control child finishes its bounded action and
         // restores the device; otherwise the node sees a premature exit and
