@@ -23,7 +23,7 @@ extern "C" fn interrupt(_: libc::c_int) {
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
-fn q(value: &str) -> String {
+pub(crate) fn q(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 fn parent(request: &Request) -> String {
@@ -78,7 +78,7 @@ impl State {
         Ok(())
     }
 }
-fn valid_boot(value: &str) -> bool {
+pub(crate) fn valid_boot(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, b)| {
             if [8, 13, 18, 23].contains(&i) {
@@ -88,9 +88,9 @@ fn valid_boot(value: &str) -> bool {
             }
         })
 }
-struct Remote {
-    code: i32,
-    stdout: String,
+pub(crate) struct Remote {
+    pub(crate) code: i32,
+    pub(crate) stdout: String,
 }
 pub(crate) struct Session {
     lease: Lease,
@@ -762,7 +762,7 @@ fn expected_paths(request: &Request, partial: bool) -> BTreeSet<String> {
     }
     paths
 }
-fn digest(output: &str) -> Result<&str, String> {
+pub(crate) fn digest(output: &str) -> Result<&str, String> {
     let value = output
         .split_whitespace()
         .next()
@@ -772,7 +772,7 @@ fn digest(output: &str) -> Result<&str, String> {
     }
     Ok(value)
 }
-fn package_identity(output: &str) -> Result<(u64, u64), String> {
+pub(crate) fn package_identity(output: &str) -> Result<(u64, u64), String> {
     let mut versions = BTreeSet::new();
     let mut uids = BTreeSet::new();
     for item in output.split_whitespace() {
@@ -795,7 +795,7 @@ fn package_identity(output: &str) -> Result<(u64, u64), String> {
     }
     Ok((*versions.first().unwrap(), *uids.first().unwrap()))
 }
-fn parse_terminal(output: &str, terminal: &str) -> Result<Remote, String> {
+pub(crate) fn parse_terminal(output: &str, terminal: &str) -> Result<Remote, String> {
     let normalized = output.replace("\r\n", "\n");
     let value = normalized.trim_end_matches('\n');
     let (body, last) = value

@@ -12,7 +12,11 @@ pub(crate) const REQUEST_SCHEMA: &str = "phonefarm/game-deploy-request@1";
 pub(crate) const RECIPE_SCHEMA: &str = "phonefarm/game-resources-recipe@1";
 pub(crate) const REPORT_SCHEMA: &str = "phonefarm/game-deployment@1";
 pub(crate) const SCOPE: &str = "owned_resource_transaction_settled";
-const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0, an already installed matching single APK, and new resource directories only. No APK installation, root, launch, permissions or saved-game replacement.";
+pub(crate) const INSTALL_REQUEST_SCHEMA: &str = "phonefarm/game-install-request@1";
+pub(crate) const INSTALL_RECIPE_SCHEMA: &str = "phonefarm/game-install-recipe@1";
+pub(crate) const INSTALL_REPORT_SCHEMA: &str = "phonefarm/game-installation@1";
+pub(crate) const INSTALL_SCOPE: &str = "owned_package_install_transaction_settled";
+const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0: matching installed-engine resources, or explicitly absent single-APK installation. No replacement, root escalation, launch, permissions or saved-game changes. Confirmed installations are retained.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +52,64 @@ pub(crate) struct Request {
     pub mode: String,
     pub recipe: Recipe,
     pub assets: Vec<Asset>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InstallRecipe {
+    pub schema: String,
+    pub package: String,
+    pub version_code: u64,
+    pub apk_sha256: String,
+    pub apk_asset_name: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InstallRequest {
+    pub schema: String,
+    pub node_id: String,
+    pub game_id: String,
+    pub version: String,
+    pub serial: String,
+    pub mode: String,
+    pub recipe: InstallRecipe,
+    pub assets: Vec<Asset>,
+}
+impl InstallRequest {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        serial(&self.serial)?;
+        if self.schema != INSTALL_REQUEST_SCHEMA
+            || self.recipe.schema != INSTALL_RECIPE_SCHEMA
+            || !matches!(self.mode.as_str(), "check" | "apply")
+            || self.node_id.is_empty()
+            || self.node_id.chars().any(char::is_control)
+            || !identifier(&self.game_id)
+            || !identifier(&self.version)
+            || !crate::graylayer::valid_package(&self.recipe.package)
+            || self.recipe.version_code == 0
+            || !valid_hash(&self.recipe.apk_sha256)
+            || self.assets.len() != 1
+        {
+            return Err("invalid fresh single-APK installation request".into());
+        }
+        let asset = &self.assets[0];
+        if asset.name.trim().is_empty()
+            || asset.name.chars().any(char::is_control)
+            || asset.name != self.recipe.apk_asset_name
+            || asset.sha256 != self.recipe.apk_sha256
+            || asset.size == 0
+            || !asset.path.is_absolute()
+            || asset
+                .path
+                .components()
+                .any(|p| matches!(p, std::path::Component::ParentDir))
+        {
+            return Err(
+                "installation requires exactly the selected positive-size APK cache asset".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn valid_hash(value: &str) -> bool {
@@ -263,6 +325,14 @@ pub(crate) fn report(request: &Request) -> Value {
         "login":{"status":"unknown"},"scene_ready":{"status":"unknown"},"checks":{},
         "error":null,"session_path":null,"recovery":{"status":"not_reported","scope":SCOPE}})
 }
+pub(crate) fn install_report(request: &InstallRequest) -> Value {
+    json!({"schema":INSTALL_REPORT_SCHEMA,"node_id":request.node_id,"game_id":request.game_id,
+        "version":request.version,"serial":request.serial,"mode":request.mode,"phase":"preflight_failed",
+        "observed_at":chrono::Utc::now().to_rfc3339(),"apk":{"status":"unknown"},"installed":{"status":"unknown"},
+        "resources_deployed":{"status":"unknown"},"application_access":{"status":"unknown"},
+        "login":{"status":"unknown"},"scene_ready":{"status":"unknown"},"checks":{},
+        "error":null,"session_path":null,"recovery":{"status":"not_reported","scope":INSTALL_SCOPE}})
+}
 pub(crate) fn save_report(out: &Path, report: &Value) -> Result<(), String> {
     crate::devlease::durable_replace(
         &out.join("deployment.json"),
@@ -288,10 +358,15 @@ fn output(out: &Path) -> Result<PathBuf, String> {
 fn execute(command: Command) -> Result<(Value, i32), String> {
     use crate::game_deploy_session::Session;
     match command {
-        Command::Capabilities => Ok((
-            json!({"schema":"phonefarm/game-deploy-capabilities@1","resources_v1":true}),
-            0,
-        )),
+        Command::Capabilities => {
+            let metadata = crate::apk_metadata::tool().is_some();
+            Ok((
+                json!({"schema":"phonefarm/game-deploy-capabilities@1","resources_v1":true,
+                "fresh_single_apk_v1":true,"metadata_tool":{"available":metadata,
+                "error":if metadata {Value::Null} else {json!("fixed AAPT2_BIN or aapt2 on explicit PATH is required")}}}),
+                0,
+            ))
+        }
         Command::Help => {
             println!("{USAGE}");
             Ok((Value::Null, 0))
@@ -301,9 +376,37 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
             serial,
             out,
         } => {
-            let request: Request =
+            let input: Value =
                 serde_json::from_slice(&crate::confirmation_transport::bounded(&request, 65536)?)
                     .map_err(|e| format!("invalid deployment JSON: {e}"))?;
+            if input["schema"] == INSTALL_REQUEST_SCHEMA {
+                let request: InstallRequest = serde_json::from_value(input)
+                    .map_err(|e| format!("invalid installation JSON: {e}"))?;
+                request.validate()?;
+                if request.serial != serial {
+                    return Err("request serial differs from explicit target".into());
+                }
+                let out = output(&out)?;
+                let result = (|| {
+                    if crate::apk_metadata::tool().is_none() {
+                        return Err("APK metadata tool unavailable; configure AAPT2_BIN".into());
+                    }
+                    source_file(&request.assets[0])?;
+                    let lease = crate::devlease::Lease::target(Some(&serial), "game-install")?;
+                    crate::game_install_session::Session::new(lease, request.clone(), &out)
+                })();
+                return match result {
+                    Ok(session) => session.execute(),
+                    Err(error) => {
+                        let mut value = install_report(&request);
+                        value["error"] = json!(error);
+                        save_report(&out, &value)?;
+                        Ok((value, 2))
+                    }
+                };
+            }
+            let request: Request = serde_json::from_value(input)
+                .map_err(|e| format!("invalid deployment JSON: {e}"))?;
             request.validate()?;
             if request.serial != serial {
                 return Err("request serial differs from explicit target".into());
@@ -337,7 +440,16 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
             out,
         } => {
             let out = output(&out)?;
-            Session::recover(&session, &serial, &out)
+            let state: Value = serde_json::from_slice(&crate::confirmation_transport::bounded(
+                &session.join("session.json"),
+                131072,
+            )?)
+            .map_err(|e| e.to_string())?;
+            if state["schema"] == crate::game_install_session::SCHEMA {
+                crate::game_install_session::Session::recover(&session, &serial, &out)
+            } else {
+                Session::recover(&session, &serial, &out)
+            }
         }
     }
 }
@@ -417,5 +529,19 @@ mod tests {
             .unwrap()
             .validate()
             .unwrap();
+        let mut install = json!({"schema":INSTALL_REQUEST_SCHEMA,"node_id":"node","game_id":"game","version":"v1","serial":"S","mode":"apply",
+            "recipe":{"schema":INSTALL_RECIPE_SCHEMA,"package":"com.example.game","version_code":1,"apk_sha256":"a".repeat(64),"apk_asset_name":"engine"},
+            "assets":[{"name":"engine","path":"/cache/blob","size":1,"sha256":"a".repeat(64)}]});
+        serde_json::from_value::<InstallRequest>(install.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        install["assets"][0]["sha256"] = json!("b".repeat(64));
+        assert!(serde_json::from_value::<InstallRequest>(install.clone())
+            .unwrap()
+            .validate()
+            .is_err());
+        install["recipe"]["files"] = json!([]);
+        assert!(serde_json::from_value::<InstallRequest>(install).is_err());
     }
 }

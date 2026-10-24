@@ -58,6 +58,8 @@ mod fold;
 mod gamepad;
 mod game_deploy;
 mod game_deploy_session;
+mod game_install_session;
+mod apk_metadata;
 mod frameaudit;
 mod preflight;
 mod grayab;
