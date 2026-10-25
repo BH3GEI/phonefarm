@@ -114,6 +114,11 @@ impl Session {
             state["control_session_id"] = json!(dir.file_name().and_then(|s| s.to_str()).ok_or("invalid control session directory")?);
             state["control_resources"] = json!({"path":"eval-session.json","schema":CONTROL_PARENT_SCHEMA});
         }
+        if let Some(binding) = lease.device_binding() {
+            if owner != CONTROL_OWNER { return Err("device binding is only supported by control sessions".into()); }
+            state["device_binding"] = json!(binding);
+            state["lease_scope"] = json!("device");
+        }
         let session = Self { lease:RefCell::new(lease), adb:adb_path()?, dir,
             state:RefCell::new(state), stopped:RefCell::new(None), known_dirs:RefCell::new(HashSet::new()) };
         session.save()?;
@@ -146,8 +151,14 @@ impl Session {
             if !matches!(completion_owner(&state)?,EVAL_OWNER|SCRIPT_OWNER) {return Err("this session requires its dedicated recovery entry point".into());}
         } else { require_owner(&state, owner)?; }
         pending_clear(&state)?;
-        let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
-        let lease = Lease::acquire_recovery(&root, &legacy, serial, &dir, Duration::from_secs(1))?;
+        let storage = crate::lease_storage::resolve();
+        let lease = if let Some(binding) = state.get("device_binding") {
+            let binding = crate::device_registry::parse_binding(&binding.to_string())?;
+            Lease::acquire_device_recovery(&storage, &binding, &dir, Duration::from_secs(1))?
+        } else {
+            let (root, legacy) = storage.require_ready()?;
+            Lease::acquire_recovery(&root, &legacy, serial, &dir, Duration::from_secs(1))?
+        };
         Ok(Self {lease:RefCell::new(lease), adb:adb_path()?, dir, state:RefCell::new(state),
             stopped:RefCell::new(None), known_dirs:RefCell::new(HashSet::new())})
     }
@@ -237,11 +248,16 @@ impl Session {
     pub fn control_identity(&self) -> Result<Value, String> {
         require_owner(&self.state.borrow(), CONTROL_OWNER)?;
         let state = self.state.borrow();
-        Ok(json!({"serial":state["serial"],"token":state["token"],"boot_id":state["boot_id"],
+        let mut identity = json!({"serial":state["serial"],"token":state["token"],"boot_id":state["boot_id"],
             "native_dir":state["native_dir"],"package":state["package"],"session":self.dir,
             "completion_owner":CONTROL_OWNER,"control_session_id":state["control_session_id"],
             "control_parent_schema":state["control_resources"]["schema"],
-            "evidence_origin":state["evidence_origin"]}))
+            "evidence_origin":state["evidence_origin"]});
+        if let Some(binding) = state.get("device_binding") {
+            identity["device_binding"] = binding.clone();
+            identity["lease_scope"] = json!("device");
+        }
+        Ok(identity)
     }
 
     pub fn control_ready(&self) -> Result<(), String> {
@@ -259,11 +275,16 @@ impl Session {
     pub fn eval_identity(&self) -> Result<Value, String> {
         self.require_eval()?;
         let state = self.state.borrow();
-        Ok(json!({"serial":state["serial"],"token":state["token"],"boot_id":state["boot_id"],
+        let mut identity = json!({"serial":state["serial"],"token":state["token"],"boot_id":state["boot_id"],
             "native_dir":state["native_dir"],"package":state["package"],"session":self.dir,
             "completion_owner":completion_owner(&state)?,
             "control_parent_schema":state["control_resources"]["schema"],
-            "evidence_origin":state["evidence_origin"],"base_recovery":state["base_recovery"]}))
+            "evidence_origin":state["evidence_origin"],"base_recovery":state["base_recovery"]});
+        if let Some(binding) = state.get("device_binding") {
+            identity["device_binding"] = binding.clone();
+            identity["lease_scope"] = json!("device");
+        }
+        Ok(identity)
     }
     pub fn eval_ready(&self) -> Result<(), String> { self.require_eval()?; self.ready() }
     pub fn eval_transport(&self, operation: &str, args: &[String], timeout_ms: u64, mutation: bool) -> Result<crate::lease_command::Output, String> {
@@ -1085,6 +1106,14 @@ fn storeop_rule(rule: &str) -> Result<String, String> {
 
 fn validate(state: &Value, dir: &Path, serial: &str) -> Result<(), String> {
     let owner = completion_owner(state)?;
+    if let Some(value) = state.get("device_binding") {
+        let binding = crate::device_registry::parse_binding(&value.to_string())?;
+        if owner != CONTROL_OWNER || binding.serial != serial || state["lease_scope"] != "device" {
+            return Err("invalid scoped control session identity".into());
+        }
+    } else if state.get("lease_scope").is_some() {
+        return Err("lease scope requires its original device binding".into());
+    }
     let token = state["token"].as_str().ok_or("missing gray session token")?;
     let package = state["package"].as_str().ok_or("missing gray session package")?;
     if state["serial"] != serial || !graylayer::valid_package(package)

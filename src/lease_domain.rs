@@ -1,5 +1,6 @@
 //! Versioned paths within one lock domain. The root bridge/mutex never move.
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -14,6 +15,8 @@ pub(crate) struct Paths {
     pub layout_version: u32,
     pub domain_id: Option<String>,
     pub device_lease_dir: Option<PathBuf>,
+    pub lanes_enabled: bool,
+    pub lanes_dir: Option<PathBuf>,
 }
 impl Paths {
     pub(crate) fn require_device_root(&self, actual: &Path) -> Result<(), String> {
@@ -25,6 +28,16 @@ impl Paths {
             }
         }
         Ok(())
+    }
+    pub(crate) fn lane_marker(&self, device_id: &str) -> Result<PathBuf, String> {
+        crate::device_registry::valid_device_id(device_id)?;
+        let root = self
+            .lanes_dir
+            .as_ref()
+            .filter(|_| self.layout_version == 2)
+            .ok_or("device lanes require layout 2")?;
+        let key = format!("{:x}", Sha256::digest(device_id.as_bytes()));
+        Ok(root.join(format!("{key}.d")))
     }
 }
 #[derive(Deserialize, Serialize)]
@@ -51,6 +64,8 @@ impl Record {
             layout_version: 2,
             domain_id: Some(self.domain_id.clone()),
             device_lease_dir: Some(self.device_lease_dir.clone()),
+            lanes_enabled: false,
+            lanes_dir: Some(self.devlock_dir.join("v2/devices")),
         }
     }
     fn fence(&self) -> Fence {
@@ -176,7 +191,17 @@ fn layout_dirs(root: &Path, partial: bool) -> Result<(), String> {
     if partial && !exists(&v2)? {
         return Ok(());
     }
-    entries(&v2, &["global"])?;
+    entries(
+        &v2,
+        if partial {
+            &["global"]
+        } else {
+            &["global", "devices"]
+        },
+    )?;
+    if !partial && exists(&v2.join("devices"))? {
+        lane_directories(&v2.join("devices"))?;
+    }
     if partial && !exists(&global)? {
         return Ok(());
     }
@@ -217,6 +242,53 @@ fn layout_dirs(root: &Path, partial: bool) -> Result<(), String> {
     }
     Ok(())
 }
+// This layer checks the namespace only. devlease interprets each marker and
+// decides whether uncertainty belongs to one device or to the whole domain.
+fn lane_directories(path: &Path) -> Result<(), String> {
+    directory(path)?;
+    for (count, entry) in fs::read_dir(path).map_err(|e| e.to_string())?.enumerate() {
+        if count >= 128 {
+            return Err("device lane namespace exceeds the registry device limit".into());
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let valid_name = name
+            .to_str()
+            .and_then(|s| s.strip_suffix(".d"))
+            .is_some_and(|key| {
+                key.len() == 64
+                    && key
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            });
+        if !valid_name || !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            return Err(format!(
+                "device lane namespace contains an unknown entry: {}",
+                entry.path().display()
+            ));
+        }
+        directory(&entry.path())?;
+    }
+    Ok(())
+}
+/// Caller holds the original bridge, queue-owner mutex and global qmutex.
+/// The permanent namespace also fences older layout-2 global-only consumers.
+pub(crate) fn ensure_lanes(paths: &Paths) -> Result<(), String> {
+    let path = paths
+        .lanes_dir
+        .as_ref()
+        .filter(|_| paths.layout_version == 2)
+        .ok_or("device lanes require layout 2")?;
+    if path.parent() != paths.queue_dir.parent()
+        || path.file_name().and_then(|s| s.to_str()) != Some("devices")
+    {
+        return Err("device lane namespace differs from its domain path".into());
+    }
+    if exists(path)? {
+        lane_directories(path)?;
+    }
+    create_directory(path)
+}
 /// Read only. Once a record exists, no error can fall back to the old layout.
 pub(crate) fn inspect(root: &Path) -> Result<Paths, String> {
     let root = crate::lease_storage::absolute(root)?;
@@ -241,6 +313,8 @@ pub(crate) fn inspect(root: &Path) -> Result<Paths, String> {
             layout_version: 1,
             domain_id: None,
             device_lease_dir: None,
+            lanes_enabled: false,
+            lanes_dir: None,
         });
     };
     if !exact_fence(&root, &record)? {
@@ -251,7 +325,9 @@ pub(crate) fn inspect(root: &Path) -> Result<Paths, String> {
     }
     legacy_quiet(&root)?;
     layout_dirs(&root, false)?;
-    Ok(record.paths())
+    let mut paths = record.paths();
+    paths.lanes_enabled = exists(paths.lanes_dir.as_ref().unwrap())?;
+    Ok(paths)
 }
 fn sync(path: &Path) -> Result<(), String> {
     File::open(path)
@@ -384,6 +460,47 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn lanes_namespace_persists_and_rejects_unknown_boundary_entries() {
+        let s = Scratch::new();
+        let legacy = inspect(&s.0).unwrap();
+        assert!(!legacy.lanes_enabled);
+        assert!(legacy.lanes_dir.is_none());
+        assert!(legacy.lane_marker("A").is_err());
+        let paths = init(&s.0, &s.0.join("devices")).unwrap();
+        assert!(!paths.lanes_enabled);
+        let lanes = paths.lanes_dir.as_ref().unwrap();
+        assert!(!lanes.exists());
+        let bridge = File::open(s.0.join("phonefarm-bridge.lock")).unwrap();
+        bridge.try_lock().unwrap();
+        let _owner = crate::queue_owner::lock(&s.0).unwrap();
+        let _queue = crate::queue_owner::QueueMutex::acquire(&paths.queue_dir).unwrap();
+        ensure_lanes(&paths).unwrap();
+        let inode = fs::metadata(lanes).unwrap().ino();
+        ensure_lanes(&paths).unwrap();
+        assert_eq!(fs::metadata(lanes).unwrap().ino(), inode);
+        let current = inspect(&s.0).unwrap();
+        assert!(current.lanes_enabled);
+        assert_eq!(current.domain_id, paths.domain_id);
+        assert_ne!(
+            paths.lane_marker("A").unwrap(),
+            paths.lane_marker("a").unwrap()
+        );
+        assert!(paths.lane_marker("../A").is_err());
+        let marker = paths.lane_marker("A").unwrap();
+        fs::create_dir(&marker).unwrap();
+        assert!(inspect(&s.0).is_ok()); // Marker semantics belong to devlease.
+        fs::remove_dir(&marker).unwrap();
+        assert!(inspect(&s.0).unwrap().lanes_enabled);
+        fs::write(lanes.join("unknown"), b"keep").unwrap();
+        assert!(inspect(&s.0).is_err());
+        assert!(ensure_lanes(&paths).is_err());
+        assert_eq!(fs::read(lanes.join("unknown")).unwrap(), b"keep");
+        fs::remove_file(lanes.join("unknown")).unwrap();
+        std::os::unix::fs::symlink(&paths.queue_dir, &marker).unwrap();
+        assert!(inspect(&s.0).is_err());
+        assert!(marker.is_symlink());
     }
     #[test]
     fn upgrade_keeps_root_inodes_identity_and_active_domain_readback() {

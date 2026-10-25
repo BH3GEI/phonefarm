@@ -106,6 +106,9 @@ acquire(){
     print -u2 -- "not your turn (queued): head=$head"
     return 1
   fi
+  # Publish global intent before the bridge attempt so new device lanes yield.
+  # A failed or timed-out caller retains its queue entry for existing management.
+  qappend "$label"
   result=$("$PF" __queue-owner create --root "$B" --queue-dir "$QROOT" --label "$label" --holder-pid "$holder")
   rc=$?
   if (( rc == 0 )); then
@@ -114,6 +117,10 @@ acquire(){
   fi
   qunlock
   # A partially published identity is retained on error, never guessed empty.
+  if (( rc == 1 )); then
+    print -ru2 -- "$result"
+    return 1
+  fi
   (( rc == 0 )) || return 2
   print -r -- "$result"
 }

@@ -1,5 +1,8 @@
 //! Host leases cover a whole experiment, including restoration. File locks are never unlinked.
 use crate::host_process::{self, Identity, InstanceState};
+use crate::device_registry::DeviceBinding;
+#[path = "lease_scopes.rs"]
+mod scopes;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -15,6 +18,7 @@ pub struct Lease {
     legacy: PathBuf,
     token: String,
     outer_instance: Option<String>,
+    device_binding: Option<DeviceBinding>,
     process_identity: Identity,
     stop: Option<mpsc::Sender<()>>,
     heartbeat: Option<JoinHandle<()>>,
@@ -25,16 +29,55 @@ pub struct Lease {
 }
 
 fn lock_file(path: &Path, deadline: Instant) -> Result<File, String> {
+    lock_file_mode(path, deadline, false)
+}
+fn lock_file_mode(path: &Path, deadline: Instant, shared: bool) -> Result<File, String> {
     let f = crate::shared_access::lock_file(path, 0o666)
         .map_err(|e| format!("lease open {}: {e}", path.display()))?;
     loop {
-        match f.try_lock() {
+        match if shared { f.try_lock_shared() } else { f.try_lock() } {
             Ok(()) => return Ok(f),
             Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(25))
             }
             Err(e) => return Err(format!("device lease busy/timeout {}: {e}", path.display())),
         }
+    }
+}
+
+fn device_lock_path(root: &Path, serial: &str, binding: Option<&DeviceBinding>) -> Result<PathBuf, String> {
+    if let Some(binding) = binding {
+        if binding.serial != serial { return Err("device binding serial mismatch".into()); }
+        let path = scopes::fd_path(root, binding);
+        crate::shared_access::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        Ok(path)
+    } else {
+        Ok(root.join(format!("{:x}.lock", Sha256::digest(serial.as_bytes()))))
+    }
+}
+
+/// Caller may already own the root mutex/bridge; never take either again here.
+pub(crate) fn lane_occupancy(root: &Path) -> Result<bool, String> {
+    let paths = crate::lease_domain::inspect(root)?;
+    Ok(!scopes::scan(root, &paths)?.is_empty())
+}
+
+fn recovery_location(root: &Path, paths: &crate::lease_domain::Paths, serial: &str,
+    binding: Option<&DeviceBinding>) -> Result<PathBuf, String> {
+    if let Some(binding) = binding {
+        if binding.serial != serial || std::env::var_os("DEVLOCK_INSTANCE_ID").is_some() {
+            return Err("device recovery cannot change serial or borrow a global owner".into());
+        }
+        crate::device_registry::validate_recorded_binding(root, binding)?;
+        scopes::global_clear(paths)?;
+        let _waiting = scopes::queue_waiting(paths)?; // Recovery ignores known FIFO intent, never malformed queue data.
+        let lanes = scopes::scan(root, paths)?;
+        let lane = lanes.iter().find(|lane| lane.binding == *binding)
+            .ok_or("original device lane binding/marker is missing or changed")?;
+        Ok(lane.path.clone())
+    } else {
+        if lane_occupancy(root)? { return Err("device lane records block global recovery".into()); }
+        recovery_dir(root)
     }
 }
 
@@ -87,13 +130,15 @@ fn marker(path: &Path) -> Option<Value> {
 }
 /// Missing extension fields support old format-1 owners; present malformed fields never do.
 fn marker_state(m: &Value) -> Result<(bool, bool), String> {
-    if !m.is_object() || m["format"] != 1 || m["producer"] != "phonefarm" {
+    if !m.is_object() || !matches!(m["format"].as_u64(), Some(1 | 2)) || m["producer"] != "phonefarm" {
         return Err("unknown lease marker format/producer".into());
     }
     // Format-1 is a closed recovery contract, not a bag of optional hints. An older
     // consumer must not clear a newer barrier that it does not understand.
     const KEYS: &[&str] = &[
         "format",
+        "scope",
+        "device_binding",
         "producer",
         "pid",
         "token",
@@ -124,6 +169,7 @@ fn marker_state(m: &Value) -> Result<(bool, bool), String> {
             "unknown lease marker field {key}; upgrade the recovery consumer"
         ));
     }
+    scopes::binding(m)?;
     let flag = |key: &str| match m.get(key) {
         None => Ok(false),
         Some(v) => v
@@ -394,6 +440,20 @@ fn observation_available(root: &Path) -> Result<(), String> {
 }
 
 impl Lease {
+    pub(crate) fn device_binding(&self) -> Option<&DeviceBinding> { self.device_binding.as_ref() }
+
+    pub(crate) fn acquire_device(storage: &crate::lease_storage::Storage, binding: &DeviceBinding,
+        label: &str, timeout: Duration) -> Result<Self, String> {
+        let (root, domain) = storage.require_ready()?;
+        Self::acquire_inner(&root, &domain, &binding.serial, label, timeout, false, Some(binding))
+    }
+
+    pub(crate) fn acquire_device_recovery(storage: &crate::lease_storage::Storage,
+        binding: &DeviceBinding, context: &Path, timeout: Duration) -> Result<Self, String> {
+        let (root, domain) = storage.require_ready()?;
+        Self::acquire_recovery_inner(&root, &domain, &binding.serial, context, timeout, None, Some(binding))
+    }
+
     pub fn acquire(
         root: &Path,
         legacy_root: &Path,
@@ -401,31 +461,35 @@ impl Lease {
         label: &str,
         timeout: Duration,
     ) -> Result<Self, String> {
-        Self::acquire_inner(root, legacy_root, serial, label, timeout, false)
+        Self::acquire_inner(root, legacy_root, serial, label, timeout, false, None)
     }
 
     /// Observation is domain-wide, never borrows a label, and yields to waiting writers.
     pub(crate) fn observe(storage: &crate::lease_storage::Storage, label: &str) -> Result<Self, String> {
         let (root, legacy) = storage.require_ready()?;
-        Self::acquire_inner(&root, &legacy, "@observation", label, Duration::ZERO, true)
+        Self::acquire_inner(&root, &legacy, "@observation", label, Duration::ZERO, true, None)
     }
 
     fn acquire_inner(
         root: &Path, legacy_root: &Path, serial: &str, label: &str,
-        timeout: Duration, observation: bool,
+        timeout: Duration, observation: bool, binding: Option<&DeviceBinding>,
     ) -> Result<Self, String> {
         if serial.trim().is_empty() {
             return Err("lease requires a resolved device serial".into());
+        }
+        if let Some(binding) = binding {
+            if observation || binding.serial != serial || std::env::var_os("DEVLOCK_INSTANCE_ID").is_some() {
+                return Err("device scope cannot change its serial or borrow a global outer instance".into());
+            }
         }
         let receipt = crate::lease_receipt::JobReceipt::from_env(serial, label, Value::Null)?;
         let process_identity = host_process::capture(std::process::id())?;
         crate::shared_access::create_dir_all(root).map_err(|e| format!("lease directory: {e}"))?;
         crate::shared_access::create_dir_all(legacy_root).map_err(|e| format!("devlock directory: {e}"))?;
         let deadline = Instant::now() + timeout;
-        let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
-        let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
-        // Legacy devlock is global. Same order for every participant, no ABBA deadlock.
-        let bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
+        let device_path = device_lock_path(root, serial, binding)?;
+        let device = lock_file(&device_path, deadline)?;
+        let bridge = lock_file_mode(&legacy_root.join("phonefarm-bridge.lock"), deadline, binding.is_some())?;
         // Resolve after acquiring the stable bridge: a waiting participant may
         // have observed the previous layout before an explicit domain upgrade.
         let paths = crate::lease_domain::inspect(legacy_root)?;
@@ -434,9 +498,20 @@ impl Lease {
         // Serialize the outer identity check and nested publication with outer
         // release/replacement. This guard is never held during device work.
         let mut queue_guard = if observation { None } else { Some(crate::queue_owner::lock(legacy_root)?) };
-        let outer = if observation { None } else { crate::queue_owner::inherited(legacy_root)? };
-        if outer.is_none() { drop(queue_guard.take()); }
-        let legacy = if observation {
+        let mut fifo = if binding.is_some() { Some(crate::queue_owner::QueueMutex::acquire(queue_root)?) } else { None };
+        let outer = if observation || binding.is_some() { None } else { crate::queue_owner::inherited(legacy_root)? };
+        if outer.is_none() && binding.is_none() { drop(queue_guard.take()); }
+        if let Some(binding) = binding {
+            crate::device_registry::validate_binding(legacy_root, binding)?;
+            scopes::global_clear(&paths)?;
+            if scopes::queue_waiting(&paths)? { return Err("global queued work takes priority over a new device lane".into()); }
+            scopes::scan(legacy_root, &paths)?;
+            crate::lease_domain::ensure_lanes(&paths)?;
+        } else if lane_occupancy(legacy_root)? {
+            return Err("device lane owner/recovery blocks global execution".into());
+        }
+        let legacy = if let Some(binding) = binding { paths.lane_marker(&binding.device_id)? }
+        else if observation {
             observation_available(queue_root)?;
             queue_root.join("devlock.d")
         } else if outer.is_some() { queue_root.join(NESTED_DIR) }
@@ -484,7 +559,7 @@ impl Lease {
                             }
                         }
                     }
-                    if outer.is_some() || Instant::now() >= deadline {
+                    if binding.is_some() || outer.is_some() || Instant::now() >= deadline {
                         return Err(format!("manual/legacy devlock busy: {}. Release the outer manual devlock; ownership cannot be inferred from its label", legacy.display()));
                     }
                     std::thread::sleep(Duration::from_millis(25));
@@ -506,6 +581,11 @@ impl Lease {
         );
         let mut info = json!({"format":1,"producer":"phonefarm","pid":std::process::id(),
                           "token":token,"serial":serial,"label":label,"owner":owner});
+        if let Some(binding) = binding {
+            info["format"] = json!(2);
+            info["scope"] = json!("device");
+            info["device_binding"] = json!(binding);
+        }
         bind_identity(&mut info, &process_identity);
         let outer_instance = outer.map(|owner| owner.instance_id);
         if let Some(instance) = &outer_instance { info["outer_instance_id"] = json!(instance); }
@@ -525,9 +605,10 @@ impl Lease {
             let _ = fs::remove_dir(&legacy);
             return Err(format!("devlock heartbeat: {e}"));
         }
-        File::open(queue_root)
+        File::open(legacy.parent().ok_or("lease parent missing")?)
             .and_then(|d| d.sync_all())
             .map_err(|e| e.to_string())?;
+        if let Some(fifo) = &mut fifo { fifo.release()?; }
         drop(queue_guard);
         let (tx, rx) = mpsc::channel();
         let hb_path = legacy.clone();
@@ -549,6 +630,7 @@ impl Lease {
             legacy,
             token,
             outer_instance,
+            device_binding: binding.cloned(),
             process_identity,
             stop: Some(tx),
             heartbeat: Some(heartbeat),
@@ -585,6 +667,9 @@ impl Lease {
         }
         let current = marker(&self.legacy).ok_or("lease marker unavailable")?;
         marker_state(&current)?;
+        if scopes::binding(&current)?.as_ref() != self.device_binding.as_ref() {
+            return Err("lease device scope changed".into());
+        }
         if current["outer_instance_id"].as_str() != self.outer_instance.as_deref() {
             return Err("lease outer instance reference changed".into());
         }
@@ -819,7 +904,7 @@ impl Lease {
         context: &Path,
         timeout: Duration,
     ) -> Result<Self, String> {
-        Self::acquire_recovery_inner(root, legacy_root, serial, context, timeout, None)
+        Self::acquire_recovery_inner(root, legacy_root, serial, context, timeout, None, None)
     }
 
     /// Remote control owns no installation rollback. Its local administrator may
@@ -831,19 +916,21 @@ impl Lease {
         note: &str, participants_stopped: bool, evidence: &Path,
     ) -> Result<Self, String> {
         Self::acquire_recovery_inner(root, legacy_root, serial, context, Duration::ZERO,
-            Some((note, participants_stopped, evidence)))
+            Some((note, participants_stopped, evidence)), None)
     }
 
     fn acquire_recovery_inner(
         root: &Path, legacy_root: &Path, serial: &str, context: &Path,
-        timeout: Duration, remote: Option<(&str, bool, &Path)>,
+        timeout: Duration, remote: Option<(&str, bool, &Path)>, binding: Option<&DeviceBinding>,
     ) -> Result<Self, String> {
         let deadline = Instant::now() + timeout;
-        let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
-        let device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
-        let bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
-        crate::lease_domain::inspect(legacy_root)?.require_device_root(root)?;
-        let legacy = recovery_dir(legacy_root)?;
+        let device = lock_file(&device_lock_path(root, serial, binding)?, deadline)?;
+        let bridge = lock_file_mode(&legacy_root.join("phonefarm-bridge.lock"), deadline, binding.is_some())?;
+        let paths = crate::lease_domain::inspect(legacy_root)?;
+        paths.require_device_root(root)?;
+        let _scope_guard = if binding.is_some() { Some(crate::queue_owner::lock(legacy_root)?) } else { None };
+        let _fifo = if binding.is_some() { Some(crate::queue_owner::QueueMutex::acquire(&paths.queue_dir)?) } else { None };
+        let legacy = recovery_location(legacy_root, &paths, serial, binding)?;
         let prior = marker(&legacy).ok_or("missing/corrupt recovery owner")?;
         let (pending, _) = marker_state(&prior)?;
         let recovery_of = if prior.get("job_id").is_some() {
@@ -859,7 +946,7 @@ impl Lease {
         let prior_token = prior["token"].as_str().ok_or("missing recovery token")?;
 
         if prior["producer"] != "phonefarm"
-            || prior["format"] != 1
+            || scopes::binding(&prior)?.as_ref() != binding
             || prior["serial"] != serial
             || (prior["recovery_required"] != true && remote.is_none())
             || prior["recovery_context"]
@@ -932,6 +1019,7 @@ impl Lease {
             legacy,
             token,
             outer_instance: next["outer_instance_id"].as_str().map(str::to_owned),
+            device_binding: binding.cloned(),
             process_identity,
             stop: Some(tx),
             heartbeat: Some(heartbeat),
@@ -949,14 +1037,17 @@ impl Lease {
         legacy_root: &Path,
         serial: &str,
         timeout: Duration,
+        binding: Option<&DeviceBinding>,
     ) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         crate::shared_access::create_dir_all(root).map_err(|e| e.to_string())?;
-        let key = format!("{:x}", Sha256::digest(serial.as_bytes()));
-        let _device = lock_file(&root.join(format!("{key}.lock")), deadline)?;
-        let _bridge = lock_file(&legacy_root.join("phonefarm-bridge.lock"), deadline)?;
-        crate::lease_domain::inspect(legacy_root)?.require_device_root(root)?;
-        let legacy = recovery_dir(legacy_root)?;
+        let _device = lock_file(&device_lock_path(root, serial, binding)?, deadline)?;
+        let _bridge = lock_file_mode(&legacy_root.join("phonefarm-bridge.lock"), deadline, binding.is_some())?;
+        let paths = crate::lease_domain::inspect(legacy_root)?;
+        paths.require_device_root(root)?;
+        let _scope_guard = if binding.is_some() { Some(crate::queue_owner::lock(legacy_root)?) } else { None };
+        let _fifo = if binding.is_some() { Some(crate::queue_owner::QueueMutex::acquire(&paths.queue_dir)?) } else { None };
+        let legacy = recovery_location(legacy_root, &paths, serial, binding)?;
         let m = marker(&legacy)
             .ok_or("no verifiable phonefarm owner; cannot recover manual/unknown lock")?;
         let (pending, recovery) = marker_state(&m)?;
@@ -971,7 +1062,7 @@ impl Lease {
 
         let token = m["token"].as_str().ok_or("missing owner token")?;
         if m["producer"] != "phonefarm"
-            || m["format"] != 1
+            || scopes::binding(&m)?.as_ref() != binding
             || m["serial"] != serial
             || !owns(&legacy, token)
         {
@@ -1019,6 +1110,8 @@ impl Drop for Lease {
             Some("marker_unknown")
         } else if m["outer_instance_id"].as_str() != self.outer_instance.as_deref() {
             Some("outer_reference_changed")
+        } else if scopes::binding(&m).ok().flatten().as_ref() != self.device_binding.as_ref() {
+            Some("device_binding_changed")
         } else if marker_identity(&m).ok().flatten().as_ref() != Some(&self.process_identity)
             || self.process_identity.pid != std::process::id() {
             Some("host_process_identity_changed")
@@ -1219,25 +1312,16 @@ fn lease_status(legacy_root: &Path) -> Value {
         }
         entries.push(entry);
     }
+    let device_scopes = (paths.layout_version == 2).then(|| scopes::snapshot(
+        legacy_root, &paths, &mut entries, &mut errors, bridge_held));
     // A known restoration obligation remains definite even if a separate
     // ordinary queue entry has no strong marker. Keep its unknown entry/error
     // for diagnosis; neither condition grants permission to start device work.
-    let status = if entries.iter().any(|e| {
-        matches!(
-            e["state"].as_str(),
-            Some("command_pending" | "recovery_required" | "abandoned")
-        )
-    }) {
-        "blocked"
-    } else if !errors.is_empty() {
-        "unknown"
-    } else if bridge_held == Some(true) || !entries.is_empty() {
-        "held"
-    } else {
-        "clear"
-    };
-    json!({"schema_version":1,"status":status,"bridge_held":bridge_held,"entries":entries,
-        "error":if errors.is_empty(){None}else{Some(errors.join("; "))}})
+    let status = scopes::status(&entries, &errors, bridge_held == Some(true));
+    let mut result = json!({"schema_version":1,"status":status,"bridge_held":bridge_held,"entries":entries,
+        "error":if errors.is_empty(){None}else{Some(errors.join("; "))}});
+    if let Some(scopes) = device_scopes { result["device_scopes"] = scopes; }
+    result
 }
 
 pub(crate) fn storage_status(storage: &crate::lease_storage::Storage) -> Value {
@@ -1266,7 +1350,7 @@ pub fn run_lease(args: &[String]) -> i32 {
             }
         };
     }
-    if matches!(args.first().map(String::as_str), Some("devices" | "devices-set")) {
+    if matches!(args.first().map(String::as_str), Some("devices" | "devices-set" | "resolve")) {
         return crate::device_registry::run_cli(args);
     }
     if args.first().map(String::as_str) == Some("init") {
@@ -1290,12 +1374,17 @@ pub fn run_lease(args: &[String]) -> i32 {
     let split = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let mut recover = false;
     let mut confirm = false;
+    let mut binding = None;
     let mut serial = None;
     let mut timeout = None;
     let mut it = args[..split].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--serial" => serial = it.next().cloned(),
+            "--device-binding" => match it.next().ok_or("--device-binding requires JSON").and_then(|raw| crate::device_registry::parse_binding(raw).map_err(|_| "invalid device binding")) {
+                Ok(value) if binding.is_none() => binding = Some(value),
+                _ => { eprintln!("invalid or repeated --device-binding"); return 2; }
+            },
             "--recover-abandoned" => recover = true,
             "--confirm-device-idle" => confirm = true,
             "--timeout-ms" => match it.next().and_then(|s| s.parse::<u64>().ok()) {
@@ -1329,6 +1418,7 @@ pub fn run_lease(args: &[String]) -> i32 {
             &legacy,
             &serial,
             Duration::from_millis(timeout.unwrap_or(600_000)),
+            binding.as_ref(),
         ) {
             Ok(()) => 0,
             Err(e) => {
@@ -1337,8 +1427,8 @@ pub fn run_lease(args: &[String]) -> i32 {
             }
         };
     }
-    if confirm {
-        eprintln!("--confirm-device-idle is only for --recover-abandoned");
+    if confirm || binding.is_some() {
+        eprintln!("--confirm-device-idle / --device-binding here are only for --recover-abandoned");
         return 2;
     }
     let Some(command) = args.get(split + 1) else {
@@ -1723,7 +1813,7 @@ mod tests {
                 state_error
             );
             assert_eq!(
-                Lease::recover_confirmed_idle(&root, &bridge, &serial, Duration::from_millis(25))
+                Lease::recover_confirmed_idle(&root, &bridge, &serial, Duration::from_millis(25), None)
                     .unwrap_err(),
                 state_error
             );
@@ -1798,7 +1888,7 @@ mod tests {
         let timeout = Duration::from_millis(25);
         durable_replace(&path, prior.to_string().as_bytes()).unwrap();
         assert!(
-            Lease::recover_confirmed_idle(&root, &bridge, "fake-spawn-cancel", timeout).is_err()
+            Lease::recover_confirmed_idle(&root, &bridge, "fake-spawn-cancel", timeout, None).is_err()
         );
         let wrong = scratch.0.join("wrong-context");
         fs::create_dir(&wrong).unwrap();

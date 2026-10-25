@@ -87,7 +87,7 @@ impl Parent {
         let id = base.eval_identity()?;
         let token = id["token"].as_str().ok_or("missing token")?;
         validate_parent_kind(&state,&id)?;
-        if ["serial","token","session","evidence_origin"].iter().any(|k|state["identity"][*k]!=id[*k])
+        if ["serial","token","session","evidence_origin","device_binding","lease_scope"].iter().any(|k|state["identity"][*k]!=id[*k])
             || state["remote"] != format!("/data/local/tmp/phonefarm-confirmation-gray-{token}")
             || state["trace"] != format!("/sys/kernel/tracing/instances/phonefarm_gray_{token}")
             || !matches!(state["deployment"].as_str(),Some("not_started"|"installing"|"ready"))

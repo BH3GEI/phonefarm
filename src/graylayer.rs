@@ -638,6 +638,7 @@ pub(crate) fn needs_queue(sub: &str, args: &[String]) -> bool {
     let mut stripped = vec![sub.to_owned()];
     stripped.extend_from_slice(args);
     if crate::devlock::strip_lock_args(&mut stripped).is_err() { return true; }
+    if sub == "gray-layer" && crate::gray_control::uses_device_binding(&stripped[1..]) { return false; }
     !matches!((sub, stripped.get(1).map(String::as_str)),
         ("gray-ab", Some("recover")) |
         ("gray-layer", Some("session-status" | "session-action" | "session-recover" | "refbench-recover")))

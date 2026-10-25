@@ -385,6 +385,13 @@ tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campa
 
 ## 外层队列实例（源码与隔离宿主已验，未部署）
 
+显式已登记设备的灰层会话可用 `lease resolve --serial S --json` 冻结绑定，再以
+`gray-layer session --device-binding JSON` 使用设备范围；同设备别名共锁，其他设备可并行。
+省略绑定的旧入口仍为全域。恢复继承原会话绑定，不能换设备；局部完成须按对应范围核查释放。
+首次使用会永久创建 v2/devices，使旧 v2 二进制持续拒绝；不能删目录来降级。
+Node、网页与 CLI 共用同一冻结请求和范围事实。仅源码与隔离宿主替身验证，未部署/真机验收；
+合同见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/DEVICE-LANES.md 。
+
 `tools/devlock` 与 PF/GOL 必须一起升级。队列owner用phonefarm/devlock-owner@1持久化实例与宿主进程/启动身份；继承ID校验失败不创建新实例。nested强lease显式关联outer_instance_id，父holder退出不阻断已有强owner有界恢复。`devlock reconcile INSTANCE --participants-stopped --confirm-device-idle`仅退休已退出且无nested的外层元数据，不能代替设备恢复。旧/坏/缺失记录不按TTL自动删除。实现与验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/LEASE-IDENTITY.md 。
 
 强lease另存宿主boot与owner/child启动身份；旧宿主boot仅证明旧本地进程结束，同boot PID复用仍须检查原进程组。pending与设备恢复屏障不因宿主身份变化释放；旧记录全缺身份时保守兼容，部分缺失拒绝。CLI/API和网页呈现host_process事实，不能据此宣称设备恢复。实现与隔离宿主验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/STRONG-LEASE-IDENTITY.md 。

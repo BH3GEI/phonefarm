@@ -4,14 +4,15 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 
 const SCHEMA: &str = "phonefarm/device-registry@1";
 const CURRENT: &str = "device-registry.json";
 const HISTORY: &str = "device-registry-history";
 const LIMIT: u64 = 64 * 1024;
 const MAX_REVISION: u64 = (1_u64 << 53) - 1;
+const BINDING_SCHEMA: &str = "phonefarm/device-binding@1";
 
 #[derive(Debug)]
 struct Error {
@@ -31,11 +32,20 @@ fn unavailable(message: impl ToString) -> Error {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct Device {
-    device_id: String,
-    label: String,
-    aliases: Vec<String>,
-    enabled: bool,
+pub(crate) struct Device {
+    pub device_id: String,
+    pub label: String,
+    pub aliases: Vec<String>,
+    pub enabled: bool,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeviceBinding {
+    pub schema: String,
+    pub domain_id: String,
+    pub registry_revision: u64,
+    pub device_id: String,
+    pub serial: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,8 +65,8 @@ struct Registry {
     execution_scope: String,
 }
 
-fn valid_device(device: &Device) -> std::result::Result<(), String> {
-    let id = device.device_id.as_bytes();
+pub(crate) fn valid_device_id(value: &str) -> std::result::Result<(), String> {
+    let id = value.as_bytes();
     if id.is_empty()
         || id.len() > 64
         || !id[0].is_ascii_alphanumeric()
@@ -66,6 +76,21 @@ fn valid_device(device: &Device) -> std::result::Result<(), String> {
     {
         return Err("device_id must be 1..64 ASCII letters/digits/underscore/hyphen, starting with a letter or digit".into());
     }
+    Ok(())
+}
+fn valid_serial(serial: &str) -> std::result::Result<(), String> {
+    if serial.is_empty()
+        || serial.len() > 256
+        || serial.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(
+            "serial must contain 1..256 bytes without whitespace or control characters".into(),
+        );
+    }
+    Ok(())
+}
+fn valid_device(device: &Device) -> std::result::Result<(), String> {
+    valid_device_id(&device.device_id)?;
     if !(1..=128).contains(&device.label.chars().count())
         || device.label.chars().any(char::is_control)
     {
@@ -76,15 +101,7 @@ fn valid_device(device: &Device) -> std::result::Result<(), String> {
     }
     let mut seen = HashSet::new();
     for alias in &device.aliases {
-        if alias.is_empty()
-            || alias.len() > 256
-            || alias.chars().any(|c| c.is_whitespace() || c.is_control())
-        {
-            return Err(
-                "each alias must contain 1..256 bytes without whitespace or control characters"
-                    .into(),
-            );
-        }
+        valid_serial(alias)?;
         if !seen.insert(alias) {
             return Err("aliases must not repeat within one device".into());
         }
@@ -227,6 +244,122 @@ fn read_current(root: &Path) -> Result<Option<(Registry, Vec<u8>)>> {
     }
     Ok(Some((registry, bytes)))
 }
+pub(crate) fn snapshot(root: &Path) -> std::result::Result<(u64, Vec<Device>), String> {
+    Ok(read_current(root).map_err(|e| e.message)?.map_or_else(
+        || (0, Vec::new()),
+        |(registry, _)| (registry.revision, registry.devices),
+    ))
+}
+fn valid_binding(binding: &DeviceBinding) -> std::result::Result<(), String> {
+    if binding.schema != BINDING_SCHEMA
+        || !crate::queue_owner::valid_instance(&binding.domain_id)
+        || !(1..=MAX_REVISION).contains(&binding.registry_revision)
+    {
+        return Err("unsupported or invalid device binding identity".into());
+    }
+    valid_device_id(&binding.device_id)?;
+    valid_serial(&binding.serial)
+}
+pub(crate) fn parse_binding(raw: &str) -> std::result::Result<DeviceBinding, String> {
+    if raw.len() > 4096 {
+        return Err("device binding exceeds 4 KiB".into());
+    }
+    let binding =
+        serde_json::from_str(raw).map_err(|e| format!("invalid device binding JSON: {e}"))?;
+    valid_binding(&binding)?;
+    Ok(binding)
+}
+pub(crate) fn resolve_binding(
+    storage: &crate::lease_storage::Storage,
+    serial: &str,
+) -> std::result::Result<DeviceBinding, String> {
+    valid_serial(serial)?;
+    let (device_root, root) = storage.require_ready()?;
+    let paths = crate::lease_domain::inspect(&root)?;
+    paths.require_device_root(&device_root)?;
+    let domain_id = paths
+        .domain_id
+        .ok_or("device binding requires layout 2; use explicit domain-init first")?;
+    let (revision, devices) = snapshot(&root)?;
+    let device = devices
+        .iter()
+        .find(|d| d.aliases.iter().any(|alias| alias == serial))
+        .ok_or("serial is not a registered device alias")?;
+    if !device.enabled {
+        return Err("registered device is disabled".into());
+    }
+    Ok(DeviceBinding {
+        schema: BINDING_SCHEMA.into(),
+        domain_id,
+        registry_revision: revision,
+        device_id: device.device_id.clone(),
+        serial: serial.into(),
+    })
+}
+/// New-start admission only. Recovery uses the original recorded binding.
+pub(crate) fn validate_binding(
+    root: &Path,
+    binding: &DeviceBinding,
+) -> std::result::Result<(), String> {
+    valid_binding(binding)?;
+    let paths = crate::lease_domain::inspect(root)?;
+    if paths.domain_id.as_ref() != Some(&binding.domain_id) {
+        return Err("device binding domain does not match the configured domain".into());
+    }
+    let (revision, devices) = snapshot(root)?;
+    if revision != binding.registry_revision {
+        return Err("device binding registry revision changed; no device work was started".into());
+    }
+    if !devices.iter().any(|d| {
+        d.device_id == binding.device_id
+            && d.enabled
+            && d.aliases.iter().any(|alias| alias == &binding.serial)
+    }) {
+        return Err(
+            "device binding is disabled or does not match the registered device/alias".into(),
+        );
+    }
+    Ok(())
+}
+/// Existing ownership is attributed using its original published registry,
+/// never today's alias assignment or enabled flag. This grants no new start.
+pub(crate) fn validate_recorded_binding(
+    root: &Path,
+    binding: &DeviceBinding,
+) -> std::result::Result<(), String> {
+    valid_binding(binding)?;
+    if crate::lease_domain::inspect(root)?.domain_id.as_ref() != Some(&binding.domain_id) {
+        return Err("recorded device binding domain does not match the configured domain".into());
+    }
+    let (current, _) = read_current(root)
+        .map_err(|e| e.message)?
+        .ok_or("recorded device binding has no registry original")?;
+    if binding.registry_revision > current.revision {
+        return Err("recorded device binding revision is newer than the registry".into());
+    }
+    let original = if binding.registry_revision == current.revision {
+        current
+    } else {
+        let bytes = read_bounded(
+            &root
+                .join(HISTORY)
+                .join(format!("{}.json", binding.registry_revision)),
+        )
+        .map_err(|e| e.message)?
+        .ok_or("recorded device binding registry original is missing")?;
+        parse_registry(&bytes).map_err(|e| e.message)?
+    };
+    if original.revision != binding.registry_revision
+        || !original.devices.iter().any(|d| {
+            d.device_id == binding.device_id
+                && d.enabled
+                && d.aliases.iter().any(|alias| alias == &binding.serial)
+        })
+    {
+        return Err("recorded device binding differs from its registry original".into());
+    }
+    Ok(())
+}
 fn empty() -> Value {
     json!({"schema":SCHEMA,"revision":0,"devices":[],"updated_at":null,
         "identity_basis":"operator_declared","physical_identity_verified":false,"execution_scope":"global"})
@@ -238,50 +371,6 @@ fn get(root: &Path) -> Result<Value> {
     }
 }
 
-// The shell's FIFO uses this directory, not queue-owner.lock. Never wait for or
-// steal it while holding bridge + queue-owner; remove only our own empty inode.
-struct QueueMutex {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-    owned: bool,
-}
-impl QueueMutex {
-    fn acquire(root: &Path) -> Result<Self> {
-        let path = root.join("devlock.qmutex");
-        crate::shared_access::create_dir(&path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                error("busy", "queue mutex exists; existing state preserved")
-            } else {
-                unavailable(e)
-            }
-        })?;
-        let metadata = fs::symlink_metadata(&path).map_err(unavailable)?;
-        Ok(Self {
-            path,
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            owned: true,
-        })
-    }
-    fn release(&mut self) -> Result<()> {
-        if !self.owned {
-            return Ok(());
-        }
-        let metadata = fs::symlink_metadata(&self.path).map_err(unavailable)?;
-        if !metadata.is_dir() || metadata.dev() != self.device || metadata.ino() != self.inode {
-            return Err(unavailable("queue mutex identity changed; preserved"));
-        }
-        fs::remove_dir(&self.path).map_err(unavailable)?;
-        self.owned = false;
-        Ok(())
-    }
-}
-impl Drop for QueueMutex {
-    fn drop(&mut self) {
-        let _ = self.release();
-    }
-}
 fn require_clear(root: &Path) -> Result<()> {
     for name in ["devlock.d", "phonefarm-lease.d"] {
         if exists(&root.join(name))? {
@@ -422,9 +511,21 @@ fn set(root: &Path, device_root: &Path, request: Request) -> Result<Value> {
     paths
         .require_device_root(device_root)
         .map_err(unavailable)?;
-    let mut queue = QueueMutex::acquire(&paths.queue_dir)?;
+    if crate::devlease::lane_occupancy(root).map_err(unavailable)? {
+        return Err(error(
+            "busy",
+            "device lane owner or recovery record exists; preserved",
+        ));
+    }
+    let mut queue = crate::queue_owner::QueueMutex::acquire(&paths.queue_dir).map_err(|e| {
+        if e == crate::queue_owner::QUEUE_MUTEX_BUSY {
+            error("busy", e)
+        } else {
+            unavailable(e)
+        }
+    })?;
     let result = update_locked(root, &paths.queue_dir, request);
-    queue.release()?;
+    queue.release().map_err(unavailable)?;
     result
 }
 fn request_bytes(path: &str) -> Result<Vec<u8>> {
@@ -442,6 +543,39 @@ fn request_bytes(path: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 fn run(args: &[String]) -> Result<Value> {
+    if args.first().map(String::as_str) == Some("resolve") {
+        let mut serial = None;
+        let mut json = false;
+        let mut it = args[1..].iter();
+        while let Some(arg) = it.next() {
+            match arg.as_str() {
+                "--serial" if serial.is_none() => {
+                    serial =
+                        Some(it.next().ok_or_else(|| {
+                            error("invalid_request", "--serial requires a value")
+                        })?);
+                }
+                "--json" if !json => json = true,
+                _ => {
+                    return Err(error(
+                        "invalid_request",
+                        "expected lease resolve --serial S --json",
+                    ))
+                }
+            }
+        }
+        let serial = serial.filter(|_| json).ok_or_else(|| {
+            error(
+                "invalid_request",
+                "expected lease resolve --serial S --json",
+            )
+        })?;
+        valid_serial(serial).map_err(|e| error("invalid_request", e))?;
+        return serde_json::to_value(
+            resolve_binding(&crate::lease_storage::resolve(), serial).map_err(unavailable)?,
+        )
+        .map_err(unavailable);
+    }
     let request = match args.first().map(String::as_str) {
         Some("devices") if args.len() == 2 && args[1] == "--json" => None,
         Some("devices-set") => {
@@ -509,6 +643,7 @@ pub(crate) fn run_cli(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     fn set(root: &Path, request: Request) -> Result<Value> {
         super::set(root, &root.join("devices"), request)
     }
@@ -537,6 +672,44 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+    #[test]
+    fn binding_resolves_aliases_and_rejects_changed_or_unavailable_identity() {
+        let s = Scratch::new();
+        set(&s.0, request(0, "A", &["usb-A", "192.0.2.1:5555"], true)).unwrap();
+        assert!(resolve_binding(&crate::lease_storage::Storage::custom(&s.0), "usb-A").is_err());
+        crate::lease_domain::init(&s.0, &s.0.join("devices")).unwrap();
+        let storage = crate::lease_storage::Storage::custom(&s.0);
+        let usb = resolve_binding(&storage, "usb-A").unwrap();
+        let wifi = resolve_binding(&storage, "192.0.2.1:5555").unwrap();
+        assert_eq!(usb.device_id, wifi.device_id);
+        assert_eq!(usb.domain_id, wifi.domain_id);
+        assert_eq!(snapshot(&s.0).unwrap().0, usb.registry_revision);
+        validate_binding(&s.0, &usb).unwrap();
+        let original = serde_json::to_string(&usb).unwrap();
+        assert_eq!(parse_binding(&original).unwrap(), usb);
+        assert!(parse_binding(&(original.clone() + &" ".repeat(4096))).is_err());
+        let mut invalid = serde_json::to_value(&usb).unwrap();
+        invalid["extra"] = json!(true);
+        assert!(parse_binding(&invalid.to_string()).is_err());
+        let mut wrong = usb.clone();
+        wrong.domain_id = "ffffffffffffffffffffffffffffffff".into();
+        assert!(validate_binding(&s.0, &wrong).is_err());
+        wrong = usb.clone();
+        wrong.serial = "not-an-alias".into();
+        assert!(validate_binding(&s.0, &wrong).is_err());
+        set(&s.0, request(1, "A", &["usb-A", "192.0.2.1:5555"], false)).unwrap();
+        assert!(validate_binding(&s.0, &usb).is_err());
+        validate_recorded_binding(&s.0, &usb).unwrap();
+        validate_recorded_binding(&s.0, &wifi).unwrap();
+        wrong = usb;
+        wrong.registry_revision = 2;
+        assert!(validate_binding(&s.0, &wrong).is_err());
+        assert!(validate_recorded_binding(&s.0, &wrong).is_err());
+        assert!(resolve_binding(&storage, "usb-A").is_err());
+        assert_eq!(get(&s.0).unwrap()["execution_scope"], "global");
+        fs::write(s.0.join(HISTORY).join("1.json"), b"{}\n").unwrap();
+        assert!(validate_recorded_binding(&s.0, &wifi).is_err());
     }
     #[test]
     fn registry_cas_preserves_originals_and_disabled_aliases() {

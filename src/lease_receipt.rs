@@ -105,6 +105,10 @@ impl JobReceipt {
         });
         self.update(|v| {
             v["state"] = json!(state);
+            if let Some(binding) = marker.get("device_binding") {
+                v["device_binding"] = binding.clone();
+                v["lease_scope"] = json!("device");
+            }
             v["recovery"]["context"] = marker["recovery_context"].clone();
             if let Some(reason) = reason {
                 v["recovery"] = json!({"status":"required", "reason":reason,

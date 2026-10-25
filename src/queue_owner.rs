@@ -4,13 +4,59 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub(crate) const SCHEMA: &str = "phonefarm/devlock-owner@1";
 const MARKER: &str = "phonefarm-lease.json";
 const LIMIT: u64 = 64 * 1024;
+pub(crate) const QUEUE_MUTEX_BUSY: &str = "queue mutex exists; existing state preserved";
+
+// The shell's FIFO uses this directory, not queue-owner.lock. Never wait for or
+// steal it while holding bridge + queue-owner; remove only our own empty inode.
+pub(crate) struct QueueMutex {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    owned: bool,
+}
+impl QueueMutex {
+    pub(crate) fn acquire(root: &Path) -> Result<Self, String> {
+        let path = root.join("devlock.qmutex");
+        crate::shared_access::create_dir(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                QUEUE_MUTEX_BUSY.to_owned()
+            } else {
+                e.to_string()
+            }
+        })?;
+        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        Ok(Self {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            owned: true,
+        })
+    }
+    pub(crate) fn release(&mut self) -> Result<(), String> {
+        if !self.owned {
+            return Ok(());
+        }
+        let metadata = fs::symlink_metadata(&self.path).map_err(|e| e.to_string())?;
+        if !metadata.is_dir() || metadata.dev() != self.device || metadata.ino() != self.inode {
+            return Err("queue mutex identity changed; preserved".into());
+        }
+        fs::remove_dir(&self.path).map_err(|e| e.to_string())?;
+        self.owned = false;
+        Ok(())
+    }
+}
+impl Drop for QueueMutex {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -222,7 +268,7 @@ fn same(root: &Path, expected: &QueueOwner) -> Result<(), String> {
         Err("queue instance changed; metadata preserved".into())
     }
 }
-fn bridge(root: &Path) -> Result<File, String> {
+fn try_bridge(root: &Path) -> Result<Option<File>, String> {
     let file = crate::shared_access::lock_file(&root.join("phonefarm-bridge.lock"), 0o600)
         .map_err(|e| e.to_string())?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
@@ -230,16 +276,21 @@ fn bridge(root: &Path) -> Result<File, String> {
     }
     // Strong acquisition takes bridge before the short metadata mutex. Never
     // wait in the reverse order: an active/unknown bridge preserves the barrier.
-    file.try_lock()
-        .map_err(|e| format!("bridge held or unknown: {e}"))?;
-    Ok(file)
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(format!("bridge unavailable: {error}")),
+    }
+}
+fn bridge(root: &Path) -> Result<File, String> {
+    try_bridge(root)?.ok_or_else(|| "bridge is held; existing ownership preserved".into())
 }
 fn create(
     root: &Path,
     expected_queue: &Path,
     label: &str,
     holder: u32,
-) -> Result<QueueOwner, String> {
+) -> Result<Option<QueueOwner>, String> {
     if !valid_label(label) || holder <= 1 || holder > i32::MAX as u32 {
         return Err("invalid queue label or holder PID".into());
     }
@@ -247,10 +298,15 @@ fn create(
         return Err("inherited instance cannot create a replacement queue owner".into());
     }
     let _lock = lock(root)?;
-    let _bridge = bridge(root)?;
+    let Some(_bridge) = try_bridge(root)? else {
+        return Ok(None);
+    };
     let queue = queue_path(root)?;
     if !expected_queue.is_absolute() || expected_queue != queue {
         return Err("queue directory changed since check; no owner was created".into());
+    }
+    if crate::devlease::lane_occupancy(root)? {
+        return Ok(None);
     }
     let dir = queue.join("devlock.d");
     if exists(&dir)? {
@@ -294,7 +350,7 @@ fn create(
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
     same(root, &owner)?;
-    Ok(owner)
+    Ok(Some(owner))
 }
 fn retire(root: &Path, owner: &QueueOwner) -> Result<(), String> {
     let queue = queue_path(root)?;
@@ -349,6 +405,11 @@ fn reconcile(root: &Path, instance: &str) -> Result<Value, String> {
         return Err("nested lease entry must be recovered first".into());
     }
     let _bridge = bridge(root)?;
+    if crate::devlease::lane_occupancy(root)? {
+        return Err(
+            "device lane entries must be recovered before global queue reconciliation".into(),
+        );
+    }
     same(root, &owner)?;
     if exists(&queue.join("phonefarm-lease.d"))? {
         return Err("nested lease appeared; reconciliation refused".into());
@@ -394,6 +455,7 @@ fn reconcile(root: &Path, instance: &str) -> Result<Value, String> {
 }
 
 pub(crate) fn run(args: &[String]) -> i32 {
+    let mut busy = false;
     let result = (|| -> Result<Value, String> {
         let operation = args.first().ok_or("queue helper requires an operation")?;
         let mut root: Option<PathBuf> = None;
@@ -426,15 +488,22 @@ pub(crate) fn run(args: &[String]) -> i32 {
             return Err("--queue-dir is only an expected path for create".into());
         }
         match operation.as_str() {
-            "create" => serde_json::to_value(create(
+            "create" => match create(
                 &root,
                 expected_queue
                     .as_deref()
                     .ok_or("create requires --queue-dir from check")?,
                 label.as_deref().ok_or("create requires --label")?,
                 holder.ok_or("create requires --holder-pid")?,
-            )?)
-            .map_err(|e| e.to_string()),
+            )? {
+                Some(owner) => serde_json::to_value(owner).map_err(|e| e.to_string()),
+                None => {
+                    busy = true;
+                    Ok(
+                        json!({"schema":"phonefarm/devlock-busy@1","reason":"global device domain is occupied; queued intent is retained"}),
+                    )
+                }
+            },
             "check" => {
                 if let Some(label) = label {
                     let instance = instance
@@ -449,11 +518,12 @@ pub(crate) fn run(args: &[String]) -> i32 {
                     }
                     let owner = read(&root)?;
                     let paths = crate::lease_domain::inspect(&root)?;
+                    let lanes_occupied = crate::devlease::lane_occupancy(&root)?;
                     let live = owner.as_ref().map(check_live);
                     Ok(
                         json!({"schema":"phonefarm/devlock-check@2","layout_version":paths.layout_version,
                         "domain_id":paths.domain_id,"queue_dir":paths.queue_dir,"status":match &live {
-                        Some(Ok(())) => "held", Some(Err(_)) => "unknown", None if exists(&paths.queue_dir.join("devlock.d"))? => "protected", None => "absent" },
+                        Some(Ok(())) => "held", Some(Err(_)) => "unknown", None if exists(&paths.queue_dir.join("devlock.d"))? || lanes_occupied => "protected", None => "absent" },
                         "owner":owner,"error":live.and_then(Result::err)}),
                     )
                 }
@@ -482,7 +552,11 @@ pub(crate) fn run(args: &[String]) -> i32 {
     match result {
         Ok(value) => {
             println!("{value}");
-            0
+            if busy {
+                1
+            } else {
+                0
+            }
         }
         Err(error) => {
             eprintln!(

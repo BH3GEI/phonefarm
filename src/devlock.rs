@@ -169,7 +169,7 @@ pub fn strip_lock_args(args: &mut Vec<String>) -> Result<LockOpts, String> {
         let gray_value = match sub.as_str() {
             "gray-layer" => matches!(a.as_str(), "--serial" | "--so" | "--mode" | "--package" |
                 "--out" | "--max-seconds" | "--actor-id" | "--evidence-origin" | "--power-policy" |
-                "--request-id" | "--request" | "--session" | "--frames" | "--intensity" | "--timeout-seconds"),
+                "--request-id" | "--request" | "--session" | "--frames" | "--intensity" | "--timeout-seconds" | "--device-binding"),
             "gray-ab" => matches!(a.as_str(), "--serial" | "--out" | "--pairs" | "--mode" | "--evidence-origin"),
             "game-deploy" => matches!(a.as_str(), "--serial" | "--request" | "--session" | "--out"),
             _ => false,

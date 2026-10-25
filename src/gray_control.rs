@@ -404,6 +404,7 @@ struct Args {
     out: Option<PathBuf>,
     session: Option<PathBuf>,
     serial: Option<String>,
+    binding: Option<crate::device_registry::DeviceBinding>,
     package: Option<String>,
     mode: String,
     so: Option<String>,
@@ -436,6 +437,7 @@ fn parse(args: &[String]) -> Result<Args> {
         seconds: 900,
         ..Args::default()
     };
+    let mut serial_count = 0;
     let mut i = 1;
     while i < args.len() {
         let key = args[i].as_str();
@@ -465,6 +467,7 @@ fn parse(args: &[String]) -> Result<Args> {
                     | "--evidence-origin"
                     | "--max-seconds"
                     | "--power-policy"
+                    | "--device-binding"
             ),
             "session-status" => matches!(key, "--out" | "--request-id"),
             "session-action" => matches!(key, "--out" | "--request"),
@@ -481,7 +484,12 @@ fn parse(args: &[String]) -> Result<Args> {
         match key {
             "--out" => a.out = Some(value.into()),
             "--session" => a.session = Some(value.into()),
-            "--serial" => a.serial = Some(value.clone()),
+            "--serial" => { a.serial = Some(value.clone()); serial_count += 1; }
+            "--device-binding" => {
+                if a.binding.is_some() { return Err(err("invalid_request", "duplicate device binding")); }
+                a.binding = Some(crate::device_registry::parse_binding(value)
+                    .map_err(|e| err("invalid_request", e))?);
+            }
             "--package" => a.package = Some(value.clone()),
             "--mode" => a.mode = value.clone(),
             "--so" => a.so = Some(value.clone()),
@@ -513,6 +521,9 @@ fn parse(args: &[String]) -> Result<Args> {
         return Err(err("invalid_request", "--out is required"));
     }
     if a.command == "session" {
+        if a.binding.as_ref().is_some_and(|b| serial_count != 1 || a.serial.as_deref() != Some(&b.serial)) {
+            return Err(err("invalid_request", "device binding requires exactly one matching explicit serial"));
+        }
         if a.serial.as_ref().is_none_or(|s| s.is_empty())
             || a.package
                 .as_ref()
@@ -557,6 +568,9 @@ fn parse(args: &[String]) -> Result<Args> {
         return Err(err("invalid_request", "invalid request ID"));
     }
     Ok(a)
+}
+pub(crate) fn uses_device_binding(args: &[String]) -> bool {
+    parse(args).is_ok_and(|a| !a.help && a.command == "session" && a.binding.is_some())
 }
 pub fn admission(args: &[String]) -> std::result::Result<GrayCliAdmission, String> {
     let a = parse(args).map_err(|e| e.message)?;
@@ -641,6 +655,8 @@ fn descriptor(store: &Store) -> Result<Value> {
         || m["control_session_id"] != sid
         || m["serial"] != d["serial"]
         || m["package"] != d["package"]
+        || m.get("device_binding") != d.get("device_binding")
+        || m.get("lease_scope") != d.get("lease_scope")
     {
         return Err(err(
             "invalid_request",
@@ -667,7 +683,7 @@ fn descriptor(store: &Store) -> Result<Value> {
         }
         let parent = store.read_limit(&format!("{rel}/eval-session.json"), 8 * 1024 * 1024)?;
         if parent["schema"] != parent_schema
-            || ["token", "serial", "completion_owner"]
+            || ["token", "serial", "completion_owner", "device_binding", "lease_scope"]
                 .iter()
                 .any(|k| parent["identity"][*k] != m[*k])
         {
@@ -1087,8 +1103,12 @@ fn start(a: &Args) -> Result<(Value, i32)> {
     create_control(&store)?;
     let _owner = store.lock("owner", Duration::ZERO)?;
     let _interrupt = Interrupt::install()?;
-    let lease = crate::devlease::Lease::target(a.serial.as_deref(), "gray-layer-control")
-        .map_err(device)?;
+    let lease = if let Some(binding) = &a.binding {
+        crate::devlease::Lease::acquire_device(&crate::lease_storage::resolve(), binding,
+            "gray-layer-control", Duration::from_secs(1))
+    } else {
+        crate::devlease::Lease::target(a.serial.as_deref(), "gray-layer-control")
+    }.map_err(device)?;
     let base = Session::new_control(lease, &store.path, a.package.as_ref().unwrap(), &a.origin)
         .map_err(device)?;
     let parent = Parent::new_control(base, &a.power_policy).map_err(device)?;
@@ -1106,6 +1126,10 @@ fn start(a: &Args) -> Result<(Value, i32)> {
         "power":parent.control_power_state().map_err(device)?,"latest_image":null,"recovery":{"status":"not_reported","session_path":sid,"reports":[],"error":null},
         "created_at":now(),"updated_at":now(),"deadline_at":(chrono::Utc::now()+chrono::Duration::seconds(a.seconds as i64)).to_rfc3339(),
         "max_seconds":a.seconds,"frame_max_age_seconds":FRAME_AGE_SECONDS,"keep_prop":a.keep,"stop_reason":null});
+    if let Some(binding) = &a.binding {
+        d["device_binding"] = json!(binding);
+        d["lease_scope"] = json!("device");
+    }
     store.write(DESCRIPTOR, &d, false)?;
     let preparation = (|| -> Result<()> {
         base.prepare().map_err(device)?;
