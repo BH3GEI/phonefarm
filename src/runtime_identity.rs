@@ -28,7 +28,11 @@ pub(crate) fn identity() -> Value {
             "target": known(option_env!("HGAMEY_RUNTIME_TARGET")),
             "profile": known(option_env!("HGAMEY_RUNTIME_PROFILE")),
         },
-        "supported_protocols": ["phonefarm/runtime-identity@1", "phonefarm/program-start@1"],
+        "supported_protocols": [
+            "phonefarm/runtime-identity@1",
+            "phonefarm/program-start@1",
+            "phonefarm/gray-control-gateway@1",
+        ],
     })
 }
 

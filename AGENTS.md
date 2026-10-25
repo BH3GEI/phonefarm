@@ -149,6 +149,11 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 
 **持续灰层控制会话**（源码与宿主替身已验，尚未部署/真机验收）
 
+`runtime-info` 的 `phonefarm/gray-control-gateway@1` 声明现有灰层会话网关支持；
+实际 owner 的 parent 格式、动作能力、租约和恢复证据仍逐项核验。
+Node 新建会话使用配置 PF 并核该声明；旧会话读取、stop 与 typed recovery 不套用新建门禁。
+合同见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/BUSINESS-COMPATIBILITY.md 。
+
 `gray-layer session --mode MODE --package PKG --serial S --out DIR` 在同一个 owner 内挂层、抓图、有限输入和恢复。
 网页、`pf-node session-status/session-action` 与本机 `gray-layer session-status/session-action` 共用有序请求及回执；
 连接已有会话不另拿设备锁。请求超时保留原 request_id 并查询，不换 ID 重放输入。
