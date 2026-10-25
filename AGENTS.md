@@ -34,6 +34,11 @@ iOS `wda`），
 鸿蒙商用机的 root 注入/系统改动不能照搬 Android；HiSmartPerf 等来源须按具体设备、
 版本和实际字段验证。工程机、官方接口或自签名应用也是待核路线，不是现成能力。
 
+Harmony SmartPerf 电池功率要求采样前后 BatteryService 均确认断电且负电流；离线 CSV
+需同轮 battery_before.txt / battery_after.txt。缺失或不符则功率 null 并给原因；两端合格
+不证明全窗口供电不变或游戏每帧能耗。合同见
+https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/HARMONY-SUPPLY.md。
+
 测试载体在 `loop_v1/carriers/`（Megacity / Vulkan-Samples / AnKi），
 白盒靶子在同级的 `refbench` 仓库。`sr_loop` 是已结项的前序实验，不在当前主线上。
 

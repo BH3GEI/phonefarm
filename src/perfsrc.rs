@@ -703,6 +703,41 @@ impl HarmonySmartPerf {
     }
 }
 
+// Battery current can look plausible while USB is charging. These are
+// endpoint observations, not proof of uninterrupted discharge over the window.
+fn battery_power_usable(report: &str) -> Result<(), String> {
+    let value = |key: &str| -> Option<i32> {
+        report.lines().find_map(|line| {
+            let (name, value) = line.trim().split_once(':')?;
+            (name == key).then(|| value.trim().parse().ok()).flatten()
+        })
+    };
+    match (value("chargingStatus"), value("pluggedType"), value("nowCurrent")) {
+        (Some(0), Some(0), Some(current)) if current < 0 => Ok(()),
+        (Some(charge), Some(plug), Some(current)) => Err(format!(
+            "设备未确认放电 (chargingStatus={charge}, pluggedType={plug}, nowCurrent={current}); 充电电流不能当整机功耗"
+        )),
+        _ => Err("BatteryService 未给出完整供电状态; 无法验证功耗口径".into()),
+    }
+}
+
+fn qualify_harmony_power(snap: &mut PerfSnapshot, supply: Result<(), String>) {
+    match supply {
+        Ok(()) => snap.meta_put("power_supply", "discharging_at_endpoints"),
+        Err(reason) => {
+            snap.power_watt = None;
+            snap.unavailable.retain(|u| u.field != "power_watt");
+            snap.miss("power_watt", reason);
+            snap.meta_put("power_supply", "unusable");
+        }
+    }
+}
+
+fn harmony_supply_endpoints(before: &str, after: &str) -> Result<(), String> {
+    battery_power_usable(before).map_err(|e| format!("采样前: {e}"))?;
+    battery_power_usable(after).map_err(|e| format!("采样后: {e}"))
+}
+
 impl PerfSource for HarmonySmartPerf {
     fn id(&self) -> &'static str {
         SRC_HARMONY_SMARTPERF
@@ -720,6 +755,7 @@ impl PerfSource for HarmonySmartPerf {
         };
         // 每个采集点约一秒, 再给 hdc 往返留 15 秒余量
         let budget_ms = (rounds as u64) * 1_000 + 15_000;
+        let supply_before = phone.shell("hidumper -s BatteryService -a -i", 8_000);
 
         // 上一轮的 data.csv 会原地留在设备上。不先删掉, 这一轮若超时或失败,
         // `cat` 读回来的就是上一轮的数据 —— 一份陈旧读数冒充本次实测, 比采不到更糟。
@@ -728,6 +764,7 @@ impl PerfSource for HarmonySmartPerf {
 
         let cmd = smartperf::collect_cmd(rounds, self.pkg.as_deref(), self.flags);
         let stdout = phone.shell(&cmd, budget_ms);
+        let supply_after = phone.shell("hidumper -s BatteryService -a -i", 8_000);
 
         // 默认口径读设备落盘的 data.csv (官方文档指定的产物, 列名有据可查);
         // 读不到再退回 stdout —— stdout 的逐行布局尚未在真机上验证过。
@@ -756,6 +793,7 @@ impl PerfSource for HarmonySmartPerf {
         let mut snap = summarize_harmony_scoped(&samples, scope);
         meta.insert("fps_scope".into(), scope.as_str().into());
         snap.meta = Some(meta);
+        qualify_harmony_power(&mut snap, harmony_supply_endpoints(&supply_before, &supply_after));
         if snap.sample_count == 0 {
             snap.miss(
                 "sample_count",
@@ -771,6 +809,7 @@ impl PerfSource for HarmonySmartPerf {
 /// 存在的意义: 采集与解析必须能分开跑 —— 数据在盘上, 任何时候重算都该逐字节一致;
 /// 也让「没有鸿蒙真机」时仍能用真实产物验证整条解析链。
 /// 同目录若有 HiSmartPerf 报告的 `general.csv`, 一并读进 `meta` 当本轮的采集元数据。
+/// 电池功率另需调用方提供同轮 battery_before.txt / battery_after.txt；仅验证端点放电状态。
 /// `scope`: 调用方声明这份 CSV 是不是 `-PKG` 采的 (`--app` 给了 = App); 不声明按 Unknown, 不进判定表。
 pub fn snapshot_from_csv_file(path: &std::path::Path, scope: FpsScope) -> Result<PerfSnapshot, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("读不了 {}: {e}", path.display()))?;
@@ -783,6 +822,15 @@ pub fn snapshot_from_csv_file(path: &std::path::Path, scope: FpsScope) -> Result
             }
         }
     }
+    let supply = path.parent().and_then(|dir| {
+        let before = std::fs::read_to_string(dir.join("battery_before.txt")).ok()?;
+        let after = std::fs::read_to_string(dir.join("battery_after.txt")).ok()?;
+        Some((before, after))
+    });
+    qualify_harmony_power(&mut snap, match supply {
+        Some((before, after)) => harmony_supply_endpoints(&before, &after),
+        None => Err("离线 CSV 缺可读 battery_before.txt / battery_after.txt，无法验证供电状态".into()),
+    });
     Ok(snap)
 }
 
@@ -1414,6 +1462,8 @@ soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
         assert_eq!(unknown.fps, snap.fps);
         assert!(unknown.frame_judge.is_none());
         assert_eq!(snap.sample_count, 3);
+        assert_eq!(snap.power_watt, None, "原 CSV 没有供电证据，不能把数值合理当作放电");
+        assert!(snap.unavailable.iter().any(|u| u.field == "power_watt" && u.reason.contains("battery_before.txt")));
         assert!((snap.fps_p95_ms.unwrap() - 33.3).abs() < 1e-9);
         // 同目录的 general.csv 被当成本轮采集元数据读了进来
         let meta = snap.meta.as_ref().expect("有 general.csv 就该有 meta");
@@ -1425,6 +1475,37 @@ soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
 
         assert!(snapshot_from_csv_file(&dir.join("nope.csv"), FpsScope::App).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn harmony_power_requires_two_discharging_endpoints() {
+        const DISCHARGING: &str = "chargingStatus: 0\npluggedType: 0\nnowCurrent: -1000000\n";
+        let charging = include_str!("testdata/tele_oh_battery.txt");
+        assert!(battery_power_usable(charging).unwrap_err().contains("充电电流"));
+        assert!(battery_power_usable("chargingStatus: 0\npluggedType: 0\n").is_err());
+        assert!(battery_power_usable(&DISCHARGING.replace("-1000000", "0")).is_err());
+
+        let dir = std::env::temp_dir().join(format!("pf-perfsrc-supply-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("data.csv");
+        std::fs::write(&csv, "currentNow,voltageNow\n1000,4000000\n").unwrap();
+        std::fs::write(dir.join("battery_before.txt"), DISCHARGING).unwrap();
+        assert_eq!(snapshot_from_csv_file(&csv, FpsScope::Unknown).unwrap().power_watt, None);
+        std::fs::write(dir.join("battery_after.txt"), DISCHARGING).unwrap();
+        let usable = snapshot_from_csv_file(&csv, FpsScope::Unknown).unwrap();
+        assert_eq!(usable.power_watt, Some(4.0));
+        assert_eq!(usable.meta.unwrap().get("power_supply").map(String::as_str), Some("discharging_at_endpoints"));
+
+        // Either endpoint invalidates the estimate; raw files remain available.
+        std::fs::write(dir.join("battery_after.txt"), charging).unwrap();
+        let invalid = snapshot_from_csv_file(&csv, FpsScope::Unknown).unwrap();
+        assert_eq!(invalid.power_watt, None);
+        assert!(invalid.unavailable.iter().any(|u| u.field == "power_watt" && u.reason.starts_with("采样后")));
+        std::fs::write(dir.join("battery_after.txt"), DISCHARGING).unwrap();
+        std::fs::remove_file(dir.join("battery_before.txt")).unwrap();
+        assert_eq!(snapshot_from_csv_file(&csv, FpsScope::Unknown).unwrap().power_watt, None);
+        assert!(harmony_supply_endpoints(charging, DISCHARGING).unwrap_err().starts_with("采样前"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
