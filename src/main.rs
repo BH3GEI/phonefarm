@@ -1143,11 +1143,25 @@ fn main() {
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--serial" => serial = it.next().cloned(),
-                    "--mode" => mode = it.next().cloned().unwrap_or_else(|| "auto".into()),
+                    "--mode" => {
+                        let Some(value) = it.next() else {
+                            eprintln!("quest --mode 缺少值，应为 auto|dialogue|interact|navigate");
+                            std::process::exit(2);
+                        };
+                        if let Err(e) = plugins::genshin::QuestMode::parse(value) {
+                            eprintln!("quest 参数错误: {e}");
+                            std::process::exit(2);
+                        }
+                        mode = value.clone();
+                    }
                     "--max-seconds" | "--sec" => max_sec = it.next().and_then(|v| v.parse().ok()).unwrap_or(1800),
                     "--no-shutdown" | "--no-lock" => auto_shutdown = false,
                     _ => {}
                 }
+            }
+            if let Err(e) = plugins::genshin::QuestMode::parse(&mode) {
+                eprintln!("quest 参数错误: {e}");
+                std::process::exit(2);
             }
             let tmp = std::env::temp_dir().join(format!("phonefarm-quest-{}", std::process::id())).to_string_lossy().to_string();
             let _ = std::fs::create_dir_all(&tmp);

@@ -78,11 +78,52 @@ pub enum GenshinState {
     LoadingOrCutscene,
 }
 
+/// 单步输入策略；普通自动 prepare 与退出清理另按生命周期配置执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuestMode {
+    Auto,
+    Navigate,
+    Dialogue,
+    Interact,
+}
+
+impl QuestMode {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "navigate" => Ok(Self::Navigate),
+            "dialogue" => Ok(Self::Dialogue),
+            "interact" => Ok(Self::Interact),
+            _ => Err(format!("无效 quest mode {value:?}，应为 auto|navigate|dialogue|interact")),
+        }
+    }
+
+    pub fn allows_step(self, state: GenshinState, auto_choice: bool) -> bool {
+        if state == GenshinState::DialogueChoice && !auto_choice {
+            return false;
+        }
+        match self {
+            Self::Auto => true,
+            Self::Navigate => matches!(state, GenshinState::OpenWorldExplore | GenshinState::Climbing),
+            Self::Dialogue => matches!(state, GenshinState::DialogueText | GenshinState::DialogueChoice),
+            Self::Interact => state == GenshinState::InteractionPrompt,
+        }
+    }
+
+    pub fn allows_blind_interaction(self) -> bool {
+        self == Self::Auto
+    }
+
+    pub fn allows_capture_back(self, state: GenshinState, auto_choice: bool) -> bool {
+        self == Self::Auto && self.allows_step(state, auto_choice)
+    }
+}
+
 /// Agent 运行参数配置
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct QuestConfig {
-    /// 运行模式: "auto" (自动大世界与任务) | "dialogue" (纯剧情快进) | "navigate" (纯跑图)
+    /// step 策略: auto | dialogue | navigate | interact；不限制普通自动 prepare。
     pub mode: String,
     /// 指定设备序列号
     pub serial: Option<String>,
@@ -455,6 +496,7 @@ impl GenshinPerception {
 impl<'a> GenshinQuestAgent<'a> {
     /// 3. 单步决策与手柄动作执行
     pub fn step(&mut self) -> Result<(), String> {
+        let mode = QuestMode::parse(&self.cfg.mode)?;
         self.device.check()?;
         let img = self.device.screen_image();
         self.device.check()?;
@@ -464,6 +506,20 @@ impl<'a> GenshinQuestAgent<'a> {
         };
 
         let (state, marker_x) = self.detect_state(&img);
+        let result = self.execute_state(mode, state, marker_x);
+        if result.is_ok() && !mode.allows_step(state, self.cfg.auto_choice) {
+            // 独立 quest 循环也要在等待人工/状态变化时避免紧循环截图。
+            sleep(Duration::from_millis(250));
+        }
+        result
+    }
+
+    fn execute_state(&mut self, mode: QuestMode, state: GenshinState, marker_x: Option<f32>) -> Result<(), String> {
+        self.device.check()?;
+        if !mode.allows_step(state, self.cfg.auto_choice) {
+            println!("  [策略等待] {:?} 不对 {:?} 发送单步输入", mode, state);
+            return self.device.check();
+        }
         match state {
             GenshinState::TitleScreen => {
                 self.consecutive_loading_ticks = 0;
@@ -536,7 +592,9 @@ impl<'a> GenshinQuestAgent<'a> {
                     // 未直接看到任务点，平稳防烧屏巡航并搜索交互
                     println!("  [大世界巡航] 保持大世界走位与环视侦测");
                     self.device.gamepad_wander(3500)?;
-                    self.device.gamepad_press("x", 120)?; // 盲交互周围掉落物/采集点
+                    if mode.allows_blind_interaction() {
+                        self.device.gamepad_press("x", 120)?; // auto 盲交互周围掉落物/采集点
+                    }
                 }
             }
             GenshinState::LoadingOrCutscene => {
@@ -586,6 +644,7 @@ impl<'a> GenshinQuestAgent<'a> {
 
     /// 5. 持续运行主循环：全流程编排执行
     pub fn run_loop(&mut self) -> Result<(), String> {
+        QuestMode::parse(&self.cfg.mode)?;
         println!("════ 启动原神剧情过关与跑图 Agent (Genshin Quest Agent) ════");
         println!("模式: {} | 最大运行时长: {}s | 退出自动锁屏: {}", self.cfg.mode, self.cfg.max_seconds, self.cfg.auto_shutdown);
         println!("特性: 全自主冷启动唤醒 + 零Token轻量视觉感知 + 宿主机原生手柄注入 + 安全退出锁屏");
@@ -726,6 +785,98 @@ impl ScenarioPlugin for GenshinPlugin {
 #[cfg(test)]
 mod plugin_tests {
     use super::*;
+
+    #[test]
+    fn quest_step_policy_controls_recorded_inputs() {
+        use std::cell::RefCell;
+
+        #[derive(Default)]
+        struct RecordingDevice(RefCell<Vec<String>>);
+        impl QuestDevice for RecordingDevice {
+            fn shell(&self, cmd: &str, _ms: u64) -> String {
+                self.0.borrow_mut().push(format!("shell:{cmd}"));
+                String::new()
+            }
+            fn screen_image(&self) -> Option<DynamicImage> {
+                self.0.borrow_mut().push("screen".into());
+                None
+            }
+            fn gamepad_press(&self, btn: &str, _ms: u64) -> Result<(), String> {
+                self.0.borrow_mut().push(format!("press:{btn}"));
+                Ok(())
+            }
+            fn gamepad_stick(&self, stick: &str, _x: f32, _y: f32, _ms: u64) -> Result<(), String> {
+                self.0.borrow_mut().push(format!("stick:{stick}"));
+                Ok(())
+            }
+            fn gamepad_wander(&self, _ms: u64) -> Result<(), String> {
+                self.0.borrow_mut().push("wander".into());
+                Ok(())
+            }
+            fn gamepad_reset(&self) -> Result<(), String> {
+                self.0.borrow_mut().push("reset".into());
+                Ok(())
+            }
+            fn gamepad_close(&self) -> Result<(), String> {
+                self.0.borrow_mut().push("close".into());
+                Ok(())
+            }
+        }
+
+        let execute = |name: &str, auto_choice: bool, state, expected: &[&str]| {
+            let mode = QuestMode::parse(name).unwrap();
+            let device = RecordingDevice::default();
+            let cfg = QuestConfig { mode: name.into(), auto_choice, ..QuestConfig::default() };
+            let mut agent = GenshinQuestAgent::new(&device, cfg);
+            agent.last_climb = Some(Instant::now() - Duration::from_secs(4));
+            agent.execute_state(mode, state, None).unwrap();
+            assert_eq!(*device.0.borrow(), expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{name} / {state:?}");
+        };
+        use GenshinState::*;
+        for (state, expected) in [
+            (TitleScreen, vec!["press:a"]),
+            (DialogueText, vec!["press:a"]),
+            (DialogueChoice, vec!["press:a"]),
+            (InteractionPrompt, vec!["press:x"]),
+            (Climbing, vec!["press:b", "stick:left"]),
+            (OpenWorldExplore, vec!["wander", "press:x"]),
+            (LoadingOrCutscene, vec!["press:a"]),
+        ] {
+            execute("auto", true, state, &expected);
+            assert!(QuestMode::Auto.allows_capture_back(state, true));
+        }
+        for state in [TitleScreen, DialogueText, DialogueChoice, InteractionPrompt, LoadingOrCutscene] {
+            execute("navigate", true, state, &[]);
+            assert!(!QuestMode::Navigate.allows_capture_back(state, true));
+        }
+        execute("navigate", true, OpenWorldExplore, &["wander"]);
+        execute("navigate", true, Climbing, &["press:b", "stick:left"]);
+        for state in [OpenWorldExplore, Climbing, InteractionPrompt, TitleScreen, LoadingOrCutscene] {
+            execute("dialogue", true, state, &[]);
+        }
+        execute("dialogue", true, DialogueText, &["press:a"]);
+        execute("dialogue", true, DialogueChoice, &["press:a"]);
+        execute("interact", true, InteractionPrompt, &["press:x"]);
+        for state in [TitleScreen, DialogueText, DialogueChoice, Climbing, OpenWorldExplore, LoadingOrCutscene] {
+            execute("interact", true, state, &[]);
+        }
+        for name in ["auto", "dialogue"] {
+            execute(name, false, DialogueChoice, &[]);
+            assert!(!QuestMode::parse(name).unwrap().allows_capture_back(DialogueChoice, false));
+        }
+        for mode in [QuestMode::Dialogue, QuestMode::Interact] {
+            assert!(!mode.allows_capture_back(DialogueChoice, true));
+        }
+        for invalid in ["", "typo", "--sec"] {
+            assert!(QuestMode::parse(invalid).is_err());
+            let device = RecordingDevice::default();
+            let cfg = QuestConfig { mode: invalid.into(), ..QuestConfig::default() };
+            let mut agent = GenshinQuestAgent::new(&device, cfg);
+            assert!(agent.step().is_err());
+            assert!(agent.run_loop().is_err());
+            assert!(device.0.borrow().is_empty(), "invalid mode must precede device access");
+        }
+    }
 
     #[test]
     fn test_plugin_only_claims_its_own_package() {

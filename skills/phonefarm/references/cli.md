@@ -78,6 +78,14 @@ phonefarm capture --serial S [--out DIR] [--frames 200] [--max-steps N]
 
 `bench` exit codes: 0/1/2 = PASS/FAIL/ERROR. Spec: `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_SR_LOOP.md`.
 
+`capture --ready-only` observes the existing screen up to eight times and saves at most one frame;
+explicit `--frames` must be 1. It does not start the game or fall back to navigation, and new requests
+do not stop the game or put the screen to sleep. A not-ready result exits 1. The normal lease and
+stayon restoration still apply, so the whole call is not read-only. Historical recovery uses its saved policy.
+For ordinary capture, `--mode` constrains the capture steps; automatic startup remains separate.
+`navigate` suppresses deliberate dialogue/interaction inputs, but movement or classification errors
+can still advance game state. Contract: https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/CAPTURE-POLICY.md .
+
 ## collect — bounded scroll & collect (free)
 
 ```bash
