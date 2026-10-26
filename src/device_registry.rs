@@ -496,10 +496,48 @@ fn set(root: &Path, device_root: &Path, request: Request) -> Result<Value> {
     check_directory(root)?;
     let bridge = crate::shared_access::lock_file(&root.join("phonefarm-bridge.lock"), 0o600)
         .map_err(unavailable)?;
-    bridge.try_lock().map_err(|e| match e {
-        std::fs::TryLockError::WouldBlock => error("busy", "device lease bridge is held"),
-        other => unavailable(other),
-    })?;
+    struct BridgeTrace(File, String);
+    impl BridgeTrace {
+        fn log(&self, event: &str) {
+            if std::env::var_os("PF_DEBUG_BRIDGE").is_none() {
+                return;
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true)
+                .open("/tmp/pf-bridge-trace.log") {
+                use std::io::Write;
+                let _ = writeln!(f, "{} {} {}", std::process::id(), event, self.1);
+            }
+        }
+    }
+    impl Drop for BridgeTrace {
+        fn drop(&mut self) {
+            self.log("release");
+        }
+    }
+    let bridge = BridgeTrace(bridge, root.display().to_string());
+    bridge.log("opened");
+    // 瞬态持有者（同进程前序 fd 的关闭延迟）用有界重试吸收；
+    // 长期持有者（如显式检查 busy 的用例）超过 2s 期限后仍如实报 busy。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match bridge.0.try_lock() {
+            Ok(()) => {
+                bridge.log("locked");
+                break;
+            }
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                bridge.log("WOULDBLOCK");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => {
+                bridge.log("WOULDBLOCK-final");
+                return Err(match e {
+                    std::fs::TryLockError::WouldBlock => error("busy", "device lease bridge is held"),
+                    other => unavailable(other),
+                });
+            }
+        }
+    }
     let _owner = crate::queue_owner::lock(root).map_err(|e| {
         if e.starts_with("queue metadata mutex unavailable:") {
             error("busy", e)
