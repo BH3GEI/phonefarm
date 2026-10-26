@@ -4,18 +4,32 @@ use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, MutexGuard,
+    },
+    time::Instant,
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static CLI_RECEIPT: AtomicU64 = AtomicU64::new(0);
+// Each fixture drives real subprocesses, durable writes and a strict heartbeat.
+// Default libtest concurrency turns protocol regression into host I/O stress.
+// Keep concurrency *inside* a fixture (including competing owners) unchanged.
+static DRIVER_SLOT: Mutex<()> = Mutex::new(());
 fn sha(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
 struct F {
     dir: PathBuf,
+    started: Instant,
+    _slot: MutexGuard<'static, ()>,
 }
 impl F {
     fn new(all: bool) -> Self {
+        let queued = Instant::now();
+        // A prior failed test must not poison admission for unrelated cases.
+        let slot = DRIVER_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        let started = Instant::now();
         let base = std::env::var_os("PHONEFARM_DRIVER_TEST_ARTIFACT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -28,6 +42,21 @@ impl F {
         // The driver canonicalizes its session. Keep independent producer inputs
         // on the same root (/var and /private/var are aliases on macOS).
         let dir = std::fs::canonicalize(dir).unwrap();
+        let f = Self {
+            dir,
+            started,
+            _slot: slot,
+        };
+        let dir = &f.dir;
+        f.write(
+            "host-fixture.json",
+            &json!({
+                "test": std::thread::current().name(),
+                "started_at": chrono::Utc::now().to_rfc3339(),
+                "admission_wait_ms": started.duration_since(queued).as_millis(),
+                "admission": "single_host_driver_fixture",
+            }),
+        );
         std::fs::write(
             dir.join("fake-adb"),
             include_str!("support/fake_confirmation_adb.py"),
@@ -139,7 +168,6 @@ impl F {
             values[id] = json!(val);
             plan.push(json!({"kind":kind,"path":path,"value":val}));
         }
-        let f = Self { dir };
         f.write(
             "candidate.json",
             &json!({"kind":"sysparam","payload":{"params":values,"plan":plan,"deny_keywords":[]}}),
@@ -168,8 +196,7 @@ impl F {
     }
     fn call(&self, args: &[&str], fail: &str) -> (i32, Value) {
         let mut command = self.command(args, fail);
-        let o = command.output().unwrap();
-        self.receipt(args[0], &command, &o);
+        let o = self.output(args[0], &mut command);
         let v = serde_json::from_slice(&o.stdout).unwrap_or_else(|_| {
             panic!(
                 "{} {}",
@@ -179,13 +206,11 @@ impl F {
         });
         (o.status.code().unwrap_or(-1), v)
     }
-    fn receipt(&self, label: &str, command: &Command, output: &std::process::Output) {
+    fn output(&self, label: &str, command: &mut Command) -> std::process::Output {
         let prefix = format!(
             "host-cli-{}-{label}",
             CLI_RECEIPT.fetch_add(1, Ordering::Relaxed)
         );
-        std::fs::write(self.dir.join(format!("{prefix}.stdout")), &output.stdout).unwrap();
-        std::fs::write(self.dir.join(format!("{prefix}.stderr")), &output.stderr).unwrap();
         let argv = std::iter::once(command.get_program())
             .chain(command.get_args())
             .map(|v| v.to_string_lossy().into_owned())
@@ -199,8 +224,25 @@ impl F {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        self.write(&format!("{prefix}.exit.json"), &json!({"argv":argv,
-            "cwd":command.get_current_dir(),"environment_overrides":environment,"exit":output.status.code()}));
+        let mut receipt = json!({"argv":argv,
+            "cwd":command.get_current_dir(),"environment_overrides":environment,
+            "started_at":chrono::Utc::now().to_rfc3339(),"state":"started"});
+        self.write(&format!("{prefix}.exit.json"), &receipt);
+        let start = Instant::now();
+        let result = command.output();
+        receipt["elapsed_ms"] = json!(start.elapsed().as_millis());
+        receipt["finished_at"] = json!(chrono::Utc::now().to_rfc3339());
+        receipt["state"] = json!("finished");
+        match &result {
+            Ok(output) => {
+                std::fs::write(self.dir.join(format!("{prefix}.stdout")), &output.stdout).unwrap();
+                std::fs::write(self.dir.join(format!("{prefix}.stderr")), &output.stderr).unwrap();
+                receipt["exit"] = json!(output.status.code());
+            }
+            Err(error) => receipt["spawn_error"] = json!(error.to_string()),
+        }
+        self.write(&format!("{prefix}.exit.json"), &receipt);
+        result.unwrap()
     }
     fn prepare(&self, fail: &str) -> (i32, Value) {
         self.call(
@@ -217,8 +259,7 @@ impl F {
                 .arg(self.dir.join("session/plan.json"))
                 .arg("--out")
                 .arg(self.dir.join("frozen.json"));
-            let o = command.output().unwrap();
-            self.receipt("gol-freeze", &command, &o);
+            let o = self.output("gol-freeze", &mut command);
             assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
             return;
         }
@@ -322,7 +363,22 @@ impl F {
 }
 impl Drop for F {
     fn drop(&mut self) {
-        if std::env::var_os("PHONEFARM_DRIVER_TEST_ARTIFACT_DIR").is_none() {
+        let failed = std::thread::panicking();
+        // Do not erase the command journal needed to diagnose a failed assertion.
+        // Avoid panicking again if the original failure was a filesystem error.
+        let receipt = json!({"test":std::thread::current().name(),
+            "failed":failed,"elapsed_ms":self.started.elapsed().as_millis(),
+            "finished_at":chrono::Utc::now().to_rfc3339()});
+        let _ = std::fs::write(
+            self.dir.join("host-fixture-finish.json"),
+            receipt.to_string(),
+        );
+        if failed {
+            eprintln!(
+                "confirmation driver failure evidence retained: {}",
+                self.dir.display()
+            );
+        } else if std::env::var_os("PHONEFARM_DRIVER_TEST_ARTIFACT_DIR").is_none() {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
@@ -1071,8 +1127,7 @@ fn loaded_cadence_driver_freeze_ten_arms_and_actual_judge_cannot_promote_synthet
             .arg(f.dir.join("session/samples.json"))
             .arg("--out")
             .arg(f.dir.join("loaded-judge.json"));
-        let out = cmd.output().unwrap();
-        f.receipt("loaded-gol-judge", &cmd, &out);
+        let out = f.output("loaded-gol-judge", &mut cmd);
         assert!(!out.status.success());
         let r = f.read("loaded-judge.json");
         assert_eq!(r["verdict"], "BLOCKED");
@@ -1361,8 +1416,7 @@ release_master() {{ :; }}
             .arg("owned-probe-check")
             .arg(&worker_dir)
             .arg(mode);
-        let out = cmd.output().unwrap();
-        f.receipt("actual-worker-thermal-gate", &cmd, &out);
+        let out = f.output("actual-worker-thermal-gate", &mut cmd);
         assert_eq!(
             worker_dir.join("applied").exists(),
             should_apply,
@@ -1438,6 +1492,7 @@ fn absolute_capability_accepts_diagnostic_fluctuation_without_any_performance_up
         .as_str()
         .unwrap()
         .contains("control-only absolute capability"));
+    drop(f); // Release admission before starting the independent refusal fixture.
     let f = F::new(false);
     let mut r = f.read("request.json");
     r["temperature_profile_id"] = json!("capability_absolute_v1");
@@ -1557,8 +1612,7 @@ fn queued_origin_actual_prepare_freeze_collect_retains_synthetic_boundary() {
             .arg(f.dir.join("session/samples.json"))
             .arg("--out")
             .arg(f.dir.join("origin-judge.json"));
-        let out = cmd.output().unwrap();
-        f.receipt("origin-gol-judge", &cmd, &out);
+        let out = f.output("origin-gol-judge", &mut cmd);
         assert!(!out.status.success());
         let j = f.read("origin-judge.json");
         assert_ne!(j["status"], "PASS");
@@ -1823,8 +1877,7 @@ fn actual_helper_closure_checker_rejects_ambiguous_groups_and_ledgers() {
                 "verify"
             },
         ]);
-        let o = cmd.output().unwrap();
-        f.receipt("actual-helper-closure", &cmd, &o);
+        let o = f.output("actual-helper-closure", &mut cmd);
         assert_eq!(
             o.status.success(),
             failure.is_empty() || failure == "remove",
@@ -1880,8 +1933,7 @@ cleanup_failure() {{
         );
         let mut cmd = Command::new("sh");
         cmd.args(["-c", &script, "owned-readonly-callback"]).arg(&d);
-        let o = cmd.output().unwrap();
-        f.receipt("actual-readonly-worker", &cmd, &o);
+        let o = f.output("actual-readonly-worker", &mut cmd);
         assert_eq!(
             o.status.success(),
             child_exit == 0 && group_known,
