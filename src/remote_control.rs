@@ -1,5 +1,6 @@
 //! Typed Android control with one durable PF owner and host-only mailbox clients.
 use crate::{
+    device_registry::DeviceBinding,
     devlease::Lease,
     game_deploy_transport::{q, Transport},
     host_process,
@@ -354,6 +355,55 @@ fn owner_identity(state: &Value) -> Result<host_process::Identity> {
         host_boot_id: string(o, "host_boot_id")?.into(),
     })
 }
+fn saved_binding(record: &Value) -> Result<Option<DeviceBinding>> {
+    match (record.get("device_binding"), record.get("lease_scope")) {
+        (None, None) => Ok(None),
+        (Some(value), Some(scope)) if scope == "device" => {
+            let binding = crate::device_registry::parse_binding(&value.to_string()).map_err(io_error)?;
+            if record["serial"] != binding.serial {
+                return Err(io_error("remote device binding differs from original serial"));
+            }
+            Ok(Some(binding))
+        }
+        _ => Err(io_error("remote device binding/scope is incomplete")),
+    }
+}
+fn attach_scope(value: &mut Value, binding: Option<&DeviceBinding>) {
+    if let Some(binding) = binding {
+        value["device_binding"] = json!(binding);
+        value["lease_scope"] = json!("device");
+    }
+}
+fn scoped_result(mut value: Value, original: &Value) -> Result<Value> {
+    attach_scope(&mut value, saved_binding(original)?.as_ref());
+    Ok(value)
+}
+/// The snapshot is PF's existing authority. Known B activity and global FIFO
+/// intent do not change A's recorded scope; unidentifiable state still blocks.
+fn scope_status<'a>(observed: &'a Value, binding: Option<&DeviceBinding>) -> Result<&'a str> {
+    if observed["storage"]["readiness"] != "ready" {
+        return Err(io_error("lease storage unavailable; remote release is unverified"));
+    }
+    let status = if let Some(binding) = binding {
+        let scopes = &observed["device_scopes"];
+        if scopes["schema"] != "phonefarm/device-scopes@1"
+            || scopes["domain_id"] != binding.domain_id || scopes["unknown"] != false
+            || scopes["global"]["status"] != "clear" {
+            return Err(io_error("remote device scope/global ownership is unavailable"));
+        }
+        let devices = scopes["devices"].as_array().ok_or_else(|| io_error("missing device scope entries"))?;
+        let mut matching = devices.iter().filter(|d| d["device_id"] == binding.device_id);
+        let target = matching.next().ok_or_else(|| io_error("original device scope is missing"))?;
+        if matching.next().is_some() { return Err(io_error("ambiguous device scope")); }
+        target["status"].as_str()
+    } else {
+        observed["status"].as_str()
+    };
+    match status {
+        Some(status @ ("clear" | "held" | "blocked")) => Ok(status),
+        _ => Err(io_error("lease scope is unknown; remote release is unverified")),
+    }
+}
 fn state(store: &Store) -> Result<Value> {
     let value = store.read(STATE)?;
     if value["schema"] != PRIVATE
@@ -369,6 +419,7 @@ fn state(store: &Store) -> Result<Value> {
         return Err(io_error("remote session identity/schema mismatch"));
     }
     owner_identity(&value)?;
+    saved_binding(&value)?;
     Ok(value)
 }
 fn live(store: &Store, state: &Value) -> Result<bool> {
@@ -401,7 +452,7 @@ fn public(store: &Store, s: &Value) -> Result<Value> {
     let phase = if s["phase"] == "closed" {
         if running {
             "closing"
-        } else if context_retained(store)? {
+        } else if context_retained(store, s)? {
             "recovery_required"
         } else {
             "closed"
@@ -420,7 +471,7 @@ fn public(store: &Store, s: &Value) -> Result<Value> {
     } else {
         string(s, "phase")?
     };
-    Ok(
+    scoped_result(
         json!({"schema":SCHEMA,"session_id":s["session_id"],"serial":s["serial"],"phase":phase,
         "live_owner":running,"capabilities":owner_actions(s),"created_at":s["created_at"],"deadline":s["deadline"],
         "ttl_seconds":s["ttl_seconds"],"last_request_id":s["last_request_id"],"latest_image":s["latest_image"],
@@ -428,20 +479,21 @@ fn public(store: &Store, s: &Value) -> Result<Value> {
         "frame_max_age_seconds":if s["input_contract"] == INPUT_CONTRACT {json!(FRAME_AGE_SECONDS)} else {Value::Null},
         "stop_reason":s["stop_reason"],"error":s["error"],"recovery":{"required":phase=="recovery_required",
         "scope":SCOPE,"game_state_restored":false,"device_verified":false,"report":s["recovery_report"]}}),
+        s,
     )
 }
-fn context_retained(store: &Store) -> Result<bool> {
+fn context_retained(store: &Store, original: &Value) -> Result<bool> {
+    let binding = saved_binding(original)?;
     let observation = crate::devlease::storage_status(&crate::lease_storage::resolve());
-    if observation["status"] == "unknown" || observation["storage"]["readiness"] != "ready" {
-        return Err(io_error(
-            "lease storage unavailable; remote release is unverified",
-        ));
+    scope_status(&observation, binding.as_ref())?;
+    let entries = observation["entries"].as_array().ok_or_else(|| io_error("missing lease status entries"))?;
+    for entry in entries.iter().filter(|e| e["recovery_context"] == json!(store.path)) {
+        if binding.as_ref().is_some_and(|b| entry["device_binding"] != json!(b)) {
+            return Err(io_error("remote context is recorded in a different device scope"));
+        }
+        return Ok(true);
     }
-    Ok(observation["entries"]
-        .as_array()
-        .ok_or_else(|| io_error("missing lease status entries"))?
-        .iter()
-        .any(|e| e["recovery_context"] == json!(store.path)))
+    Ok(false)
 }
 fn startup_status(store: &Store) -> Result<Value> {
     let mut proof = store.read("startup.json")?;
@@ -454,6 +506,7 @@ fn startup_status(store: &Store) -> Result<Value> {
     {
         return Err(io_error("invalid startup-not-started evidence"));
     }
+    saved_binding(&proof)?;
     let observed = host_process::inspect(&owner_identity(&proof)?);
     proof["live_owner"] = match observed {
         Ok(value) => json!(value == host_process::InstanceState::Alive),
@@ -475,6 +528,7 @@ fn launch(store: &Store) -> Result<Value> {
         return Err(io_error("startup launch identity/schema mismatch"));
     }
     owner_identity(&v)?;
+    saved_binding(&v)?;
     Ok(v)
 }
 fn startup_records(store: &Store, launch: &Value) -> Result<Option<Value>> {
@@ -508,6 +562,8 @@ fn startup_records(store: &Store, launch: &Value) -> Result<Option<Value>> {
             || s["session_id"] != launch["launch_id"]
             || s["serial"] != launch["serial"]
             || s["owner"] != launch["owner"]
+            || s["device_binding"] != launch["device_binding"]
+            || s["lease_scope"] != launch["lease_scope"]
             || s["transport_uncertain"] != false
             || !s["pending_request"].is_null()
             || !s["last_request_id"].is_null()
@@ -538,12 +594,13 @@ fn retired_status(store: &Store, proof: &Value) -> Result<Value> {
     {
         return Err(error("conflict", "original startup owner is still alive"));
     }
-    Ok(
+    scoped_result(
         json!({"schema":SCHEMA,"session_id":launch["launch_id"],"serial":launch["serial"],
         "phase":"closed","live_owner":false,"capabilities":[],"original_outcome":"unknown",
         "stop_reason":"operator_reconciled_startup","recovery":{"required":false,
         "scope":"remote_startup_acquisition_retired","origin":"operator_assertion","device_verified":false,
         "lease_modified":false,"game_state_restored":false,"report":"startup-retired.json"}}),
+        &launch,
     )
 }
 fn session_status(store: &Store) -> Result<Value> {
@@ -558,11 +615,12 @@ fn session_status(store: &Store) -> Result<Value> {
     }
     let launch = launch(store)?;
     let running = live(store, &launch)?;
-    Ok(
+    scoped_result(
         json!({"schema":SCHEMA,"session_id":launch["launch_id"],"serial":launch["serial"],
         "phase":if running { "starting" } else { "recovery_required" },"live_owner":running,
         "capabilities":[],"original_outcome":"unknown","recovery":{"required":!running,
         "device_verified":false,"game_state_restored":false}}),
+        &launch,
     )
 }
 // Caller holds owner.lock exclusively and publisher.lock. This only retires the
@@ -593,13 +651,12 @@ fn retire_startup(
     }
     let original = startup_records(store, &launch)?;
     let observed = observe();
-    if observed["status"] != "clear"
-        || observed["bridge_held"] != false
-        || observed["storage"]["readiness"] != "ready"
-        || !observed["error"].is_null()
-        || !observed["entries"].as_array().is_some_and(Vec::is_empty)
-    {
-        return Err(error("recovery_required", "startup retirement requires a fresh clear whole lease domain; independently verify device idle, then recover the abandoned lease with lease --recover-abandoned --confirm-device-idle before retrying; this command clears no lease"));
+    let binding = saved_binding(&launch)?;
+    if scope_status(&observed, binding.as_ref())? != "clear"
+        || (binding.is_none() && (observed["bridge_held"] != false
+            || !observed["error"].is_null()
+            || !observed["entries"].as_array().is_some_and(Vec::is_empty))) {
+        return Err(error("recovery_required", "startup retirement requires the original lease scope clear; independently verify device idle and reconcile its abandoned lease first; this command clears no lease"));
     }
     let proof = json!({"schema":RETIREMENT,"context":store.path,"serial":serial,"original_launch":launch,
         "original_state":original,"original_outcome":"unknown","origin":"operator_assertion",
@@ -1201,6 +1258,7 @@ fn supervise(
 struct Args {
     command: String,
     serial: Option<String>,
+    binding: Option<DeviceBinding>,
     out: Option<PathBuf>,
     session: Option<PathBuf>,
     request: Option<String>,
@@ -1227,6 +1285,7 @@ fn parse(args: &[String]) -> Result<Args> {
     let allowed: &[&str] = match a.command.as_str() {
         "owner" => &[
             "--serial",
+            "--device-binding",
             "--out",
             "--ttl-seconds",
             "--max-seconds",
@@ -1263,6 +1322,7 @@ fn parse(args: &[String]) -> Result<Args> {
                     .ok_or_else(|| error("invalid_request", format!("missing value for {flag}")))?;
                 match flag.as_str() {
                     "--serial" => a.serial = Some(v.clone()),
+                    "--device-binding" => a.binding = Some(crate::device_registry::parse_binding(v).map_err(|e| error("invalid_request", e))?),
                     "--out" => a.out = Some(v.into()),
                     "--session" => a.session = Some(v.into()),
                     "--request" => a.request = Some(v.clone()),
@@ -1289,6 +1349,9 @@ fn parse(args: &[String]) -> Result<Args> {
         "status" if a.session.is_none() => return Err(error("invalid_request", "status needs --session DIR")),
         "recover" if a.session.is_none() || !a.serial.as_deref().is_some_and(serial_ok) || !a.confirm || !a.note.as_ref().is_some_and(|s| !s.trim().is_empty() && s.len() <= 4096) => return Err(error("invalid_request", "recover requires --session DIR --serial S --confirm-control-stopped --note TEXT after independent verification; unbound launch also needs --participants-stopped")),
         _ => {},
+    }
+    if a.binding.as_ref().is_some_and(|b| Some(b.serial.as_str()) != a.serial.as_deref()) {
+        return Err(error("invalid_request", "device binding serial differs from owner target"));
     }
     Ok(a)
 }
@@ -1319,27 +1382,29 @@ fn start(a: &Args) -> Result<()> {
         .collect::<String>();
     // Bind the acquisition to a host instance before it can leave a lease.
     // This proves identity only; it never certifies that device I/O did not occur.
-    store.write(
-        "launch.json",
-        &json!({"schema":LAUNCH,"launch_id":session_id,
+    let mut launch = json!({"schema":LAUNCH,"launch_id":session_id,
         "serial":serial,"context":store.path,"created_at":now(),
-        "owner":{"pid":identity.pid,"start":identity.start,"host_boot_id":identity.host_boot_id}}),
-        false,
-    )?;
-    let acquisition = crate::lease_storage::resolve()
-        .require_ready()
-        .and_then(|(root, legacy)| {
+        "owner":{"pid":identity.pid,"start":identity.start,"host_boot_id":identity.host_boot_id}});
+    attach_scope(&mut launch, a.binding.as_ref());
+    store.write("launch.json", &launch, false)?;
+    let storage = crate::lease_storage::resolve();
+    let acquisition = if let Some(binding) = &a.binding {
+        Lease::acquire_device(&storage, binding, "remote-control", Duration::ZERO)
+    } else {
+        storage.require_ready().and_then(|(root, legacy)| {
             Lease::acquire(&root, &legacy, serial, "remote-control", Duration::ZERO)
-        });
+        })
+    };
     let mut lease = match acquisition {
         Ok(lease) => lease,
         Err(reason) => {
             // Only this exact pre-device-I/O failure may certify not_started.
             // A missing state file or any post-acquisition failure cannot.
-            let proof = json!({"schema":"phonefarm/remote-control-startup@1","state":"not_started",
+            let mut proof = json!({"schema":"phonefarm/remote-control-startup@1","state":"not_started",
                 "not_started":true,"serial":serial,"context":store.path,
                 "owner":{"pid":identity.pid,"start":identity.start,"host_boot_id":identity.host_boot_id},
                 "reason":reason,"device_io_started":false,"at":now()});
+            attach_scope(&mut proof, a.binding.as_ref());
             store.write("startup.json", &proof, false)?;
             return Err(Error {
                 code: "not_started",
@@ -1354,6 +1419,7 @@ fn start(a: &Args) -> Result<()> {
         "created_at":now(),"deadline":deadline.to_rfc3339(),"ttl_seconds":a.ttl,"max_seconds":a.max,
         "transport_uncertain":false,"pending_request":null,"last_request_id":null,"latest_image":null,
         "input_contract":INPUT_CONTRACT,"action_capabilities":ACTIONS,"input_frame_id":null,"stop_reason":null,"error":null,"recovery_report":null});
+    attach_scope(&mut s, a.binding.as_ref());
     store.write(STATE, &s, false)?;
     lease.hold_for_recovery(&store.path).map_err(io_error)?;
     let result = (|| -> Result<()> {
@@ -1421,11 +1487,11 @@ fn recover(a: &Args) -> Result<Value> {
     {
         return Err(error("conflict", "original owner is still alive"));
     }
-    if s["phase"] == "closed" && !context_retained(&store)? {
+    if s["phase"] == "closed" && !context_retained(&store, &s)? {
         drop(_owner);
         return public(&store, &s);
     }
-    if s["phase"] == "starting" && !context_retained(&store)? {
+    if s["phase"] == "starting" && !context_retained(&store, &s)? {
         return retire_startup(
             &store,
             a.serial.as_deref().unwrap(),
@@ -1433,24 +1499,21 @@ fn recover(a: &Args) -> Result<Value> {
             || crate::devlease::storage_status(&crate::lease_storage::resolve()),
         );
     }
-    let (root, legacy) = crate::lease_storage::resolve()
-        .require_ready()
-        .map_err(io_error)?;
+    let storage = crate::lease_storage::resolve();
+    let binding = saved_binding(&s)?;
     let stamp = chrono::Utc::now()
         .timestamp_nanos_opt()
         .ok_or_else(|| io_error("time unavailable"))?;
     let evidence_name = format!("recovery-{stamp}.json");
     let evidence = store.path.join(&evidence_name);
-    let mut lease = Lease::acquire_remote_recovery(
-        &root,
-        &legacy,
-        a.serial.as_deref().unwrap(),
-        &store.path,
-        a.note.as_deref().unwrap(),
-        a.participants,
-        &evidence,
-    )
-    .map_err(|e| error("recovery_required", e))?;
+    let mut lease = if let Some(binding) = &binding {
+        Lease::acquire_device_remote_recovery(&storage, binding, &store.path,
+            a.note.as_deref().unwrap(), a.participants, &evidence)
+    } else {
+        let (root, legacy) = storage.require_ready().map_err(io_error)?;
+        Lease::acquire_remote_recovery(&root, &legacy, a.serial.as_deref().unwrap(),
+            &store.path, a.note.as_deref().unwrap(), a.participants, &evidence)
+    }.map_err(|e| error("recovery_required", e))?;
     stop_pending(&store, "owner stopped before executing this request")?;
     lease
         .complete_recovery(SCOPE, "operator_assertion", &[&evidence])
@@ -1463,10 +1526,11 @@ fn recover(a: &Args) -> Result<Value> {
         let _ = lease.hold_for_recovery(&store.path);
         return Err(e);
     }
-    Ok(
+    scoped_result(
         json!({"schema":SCHEMA,"session_id":s["session_id"],"serial":s["serial"],"phase":"closed","live_owner":false,
         "recovery":{"required":false,"scope":SCOPE,"origin":"operator_assertion","device_verified":false,
         "game_state_restored":false,"report":evidence_name}}),
+        &s,
     )
 }
 pub(crate) fn run(args: &[String]) -> i32 {
@@ -1474,7 +1538,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
         let a = parse(args)?;
         if a.command == "capabilities" {
             return Ok(Some(
-                json!({"schema":"phonefarm/remote-control-capabilities@1","ownership":"strong-lease-v1","actions":ACTIONS,"platforms":["android"],"scope":SCOPE,
+                json!({"schema":"phonefarm/remote-control-capabilities@1","ownership":"strong-lease-v1","device_binding_v1":true,"actions":ACTIONS,"platforms":["android"],"scope":SCOPE,
                     "input_contract":INPUT_CONTRACT,"frame_max_age_seconds":FRAME_AGE_SECONDS}),
             ));
         }
@@ -1698,17 +1762,43 @@ mod tests {
     }
     #[test]
     fn startup_retirement_requires_dead_owner_and_clear_domain_preserves_unknown() {
-        for with_state in [false, true] {
+        for (with_state, scoped) in [(false, false), (true, false), (true, true)] {
             let scratch = Scratch::new();
             let (store, _owner, mut s) = scratch.fixture();
             let _publisher = store.lock("publisher.lock", Duration::ZERO).unwrap();
             s["phase"] = json!("starting");
+            let binding = crate::device_registry::parse_binding(&json!({
+                "schema":"phonefarm/device-binding@1","domain_id":"1".repeat(32),
+                "registry_revision":1,"device_id":"A","serial":"fake-remote"
+            }).to_string()).unwrap();
+            if scoped {
+                attach_scope(&mut s, Some(&binding));
+                let args = vec!["owner".into(), "--serial".into(), "fake-remote".into(),
+                    "--out".into(), store.path.to_string_lossy().into_owned(),
+                    "--device-binding".into(), serde_json::to_string(&binding).unwrap()];
+                assert_eq!(parse(&args).unwrap().binding, Some(binding.clone()));
+                let mut recover = vec!["recover".into(), "--session".into(), store.path.to_string_lossy().into_owned(),
+                    "--serial".into(), "fake-remote".into(), "--confirm-control-stopped".into(), "--note".into(), "verified".into()];
+                parse(&recover).unwrap();
+                recover.extend(["--device-binding".into(), serde_json::to_string(&binding).unwrap()]);
+                assert!(parse(&recover).is_err()); // recovery cannot replace the recorded binding
+            }
             if with_state {
                 save(&store, &mut s).unwrap();
             } else {
                 fs::remove_file(store.path.join(STATE)).unwrap();
             }
-            let clear = json!({"status":"clear","bridge_held":false,"entries":[],"error":null,"storage":{"readiness":"ready"}});
+            let mut clear = json!({"status":"clear","bridge_held":false,"entries":[],"error":null,"storage":{"readiness":"ready"}});
+            if scoped {
+                clear["status"] = json!("held");
+                clear["bridge_held"] = json!(true);
+                clear["entries"] = json!([{"scope":"device","device_id":"B","state":"active"}]);
+                clear["device_scopes"] = json!({"schema":"phonefarm/device-scopes@1",
+                    "domain_id":binding.domain_id,"registry_revision":2,"unknown":false,
+                    "queue_waiting":true,"global":{"status":"clear","error":null},
+                    "devices":[{"device_id":"A","status":"clear","error":null},
+                        {"device_id":"B","status":"held","error":null}]});
+            }
             assert!(
                 retire_startup(&store, "fake-remote", "independently verified idle", || {
                     clear.clone()
@@ -1718,6 +1808,7 @@ mod tests {
                 .contains("launch identity is missing")
             );
             let mut launch = json!({"schema":LAUNCH,"launch_id":s["session_id"],"serial":s["serial"],"context":store.path,"owner":s["owner"]});
+            if scoped { attach_scope(&mut launch, Some(&binding)); }
             store.write("launch.json", &launch, false).unwrap();
             assert_eq!(
                 retire_startup(&store, "fake-remote", "independently verified idle", || {
@@ -1738,6 +1829,7 @@ mod tests {
             let mut busy = clear.clone();
             busy["status"] = json!("held");
             busy["bridge_held"] = json!(true);
+            if scoped { busy["device_scopes"]["devices"][0]["status"] = json!("held"); }
             assert_eq!(
                 retire_startup(&store, "fake-remote", "independently verified idle", || {
                     busy
@@ -1753,6 +1845,12 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(retired["phase"], "closed");
+            if scoped {
+                assert_eq!(retired["device_binding"], json!(binding));
+                assert_eq!(retired["lease_scope"], "device");
+            } else {
+                assert!(retired.get("device_binding").is_none());
+            }
             assert_eq!(retired["original_outcome"], "unknown");
             assert_eq!(retired["recovery"]["device_verified"], false);
             let proof = store.read("startup-retired.json").unwrap();

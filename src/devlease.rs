@@ -341,6 +341,12 @@ fn remote_recovery_evidence(
         || state["context"] != json!(context) || state["token"].as_str().is_none_or(str::is_empty) {
         return Err("remote recovery schema/serial/context mismatch".into());
     }
+    let binding = scopes::binding(prior)?;
+    let scope_matches = match &binding {
+        Some(binding) => state["device_binding"] == json!(binding) && state["lease_scope"] == "device",
+        None => state.get("device_binding").is_none() && state.get("lease_scope").is_none(),
+    };
+    if !scope_matches { return Err("remote recovery scope differs from retained lease".into()); }
     let mut ancestor = prior;
     let mut bound = false;
     for _ in 0..32 {
@@ -348,7 +354,8 @@ fn remote_recovery_evidence(
             && ancestor["recovery_context"] == json!(context)
             && ancestor["pid"] == state["owner"]["pid"]
             && ancestor["pid_start"] == state["owner"]["start"]
-            && ancestor["host_boot_id"] == state["owner"]["host_boot_id"] {
+            && ancestor["host_boot_id"] == state["owner"]["host_boot_id"]
+            && scopes::binding(ancestor)? == binding {
             bound = true; break;
         }
         let Some(previous) = ancestor.get("previous_owner") else { break; };
@@ -360,11 +367,15 @@ fn remote_recovery_evidence(
         || prior.get("child_pgid").is_some() || prior.get("child_start").is_some()) {
         return Err("unbound remote launch requires --participants-stopped after independently verifying every possible launcher/transport stopped; recorded groups cannot be overridden".into());
     }
-    let proof = json!({"schema":"phonefarm/remote-control-recovery@1","session_id":session_id,
+    let mut proof = json!({"schema":"phonefarm/remote-control-recovery@1","session_id":session_id,
         "serial":serial,"context":context,"scope":"remote_control_commands_settled","origin":"operator_assertion",
         "device_verified":false,"game_state_restored":false,"app_state_rollback":false,
         "participants_stopped":participants_stopped,"unbound_pending_retired":pending,"note":note,
         "previous_owner":prior,"pending_request":state["pending_request"],"at":chrono::Utc::now().to_rfc3339()});
+    if let Some(binding) = binding {
+        proof["device_binding"] = json!(binding);
+        proof["lease_scope"] = json!("device");
+    }
     // Preserve the original marker and assertion before transferring or clearing
     // anything. A failed publication leaves the original barrier untouched.
     durable_replace(evidence, &serde_json::to_vec(&proof).map_err(|e| e.to_string())?)
@@ -917,6 +928,15 @@ impl Lease {
     ) -> Result<Self, String> {
         Self::acquire_recovery_inner(root, legacy_root, serial, context, Duration::ZERO,
             Some((note, participants_stopped, evidence)), None)
+    }
+
+    pub(crate) fn acquire_device_remote_recovery(
+        storage: &crate::lease_storage::Storage, binding: &DeviceBinding, context: &Path,
+        note: &str, participants_stopped: bool, evidence: &Path,
+    ) -> Result<Self, String> {
+        let (root, domain) = storage.require_ready()?;
+        Self::acquire_recovery_inner(&root, &domain, &binding.serial, context, Duration::ZERO,
+            Some((note, participants_stopped, evidence)), Some(binding))
     }
 
     fn acquire_recovery_inner(
