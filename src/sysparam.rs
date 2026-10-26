@@ -1083,11 +1083,17 @@ pub(crate) fn sample_window(text:&str)->SampleWindow {
 
 /// Capture metadata shares /proc/uptime with ENV; event trace_clock is not assumed.
 fn capture_window(trace: &str, expected_capture_s: u64) -> Option<(f64, f64)> {
-    let line = trace.lines().find(|l| l.starts_with("#loop_v1_meta capture_start_uptime="))?;
-    let field = |key: &str| line.split_whitespace().find_map(|t| t.strip_prefix(key))
-        .and_then(|x| x.parse::<f64>().ok()).filter(|x| x.is_finite());
+    let mut lines = trace.lines().filter(|l| l.starts_with("#loop_v1_meta ") && l.contains("capture_start_uptime="));
+    let line = lines.next()?;
+    if lines.next().is_some() { return None; }
+    let field = |key: &str| {
+        let mut values = line.split_whitespace().filter_map(|t| t.strip_prefix(key));
+        let value = values.next()?.parse::<f64>().ok().filter(|x| x.is_finite())?;
+        values.next().is_none().then_some(value)
+    };
     let (start,end,dur) = (field("capture_start_uptime=")?,field("capture_end_uptime=")?,field("duration_req=")?);
-    (dur == expected_capture_s as f64 && end-start >= dur-0.1 && end-start <= dur+5.0).then_some((start,end))
+    (start >= 0.0 && end > start && dur > 0.0 && dur == expected_capture_s as f64
+        && end-start >= dur-0.1 && end-start <= dur+5.0).then_some((start,end))
 }
 /// v2 采样器见到停止标志 (采集结束后才写出的 trace 文件) 就停, 最后一条功耗行与采集结束之间
 /// 最多差一个快循环周期加读节点的耗时, 所以末端放宽 2 × power_interval + 0.1 s。
@@ -1099,32 +1105,42 @@ pub(crate) fn trace_window_covered(window:&SampleWindow,trace:&str,expected_capt
     }
 }
 
-/// Integrate one battery V*I series over the capture window, never extrapolate
-/// endpoints or combine whole-sampler power with a different frame denominator.
-pub(crate) fn battery_energy_in_capture(env: &str, trace: &str, seconds: u64) -> Result<serde_json::Value, String> {
+/// The same qualified V*I sequence supplies both capture and group integrals.
+fn battery_samples(env: &str) -> Result<Vec<(f64, f64)>, String> {
     let stats = env_stats(env);
     if stats.get("power_window_verified") != Some(&PyVal::Bool(true))
         || stats.get("on_battery") != Some(&PyVal::Bool(true))
         || stats.get("power_source") != Some(&PyVal::Str("battery".into())) {
         return Err("whole sampling window lacks verified battery discharge".into());
     }
-    let window = sample_window(env);
-    if !trace_window_covered(&window,trace,seconds) {
-        return Err("valid battery samples do not bracket the verified capture window".into());
-    }
-    let (start,end) = capture_window(trace,seconds).ok_or("capture uptime metadata is unavailable")?;
-    if start < 0.0 || end <= start { return Err("capture window has no positive duration".into()); }
-    let samples = env.lines().filter(|l| l.starts_with("ENV ")).map(|line| {
+    let v2 = env.lines().any(|l| l.starts_with("#sample_env v2 "));
+    let samples = env.lines().filter(|l| l.starts_with("ENV ") || (v2 && l.starts_with("PWR "))).map(|line| {
         let fields = line.split_whitespace().collect::<Vec<_>>();
-        if fields.len()!=9 {return Err("invalid ENV sample".to_owned());}
+        if fields.len()!=if fields[0]=="ENV" {9} else {7} {return Err("invalid battery sample row".to_owned());}
         let number = |index: usize| fields[index].parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(||"invalid battery sample value".to_owned());
         let (time,voltage,current)=(number(1)?,number(2)?,number(3)?);
         let power=(voltage / 1e6 * current / 1e6).abs();
-        if voltage<=0.0 || current>=0.0 || !(crate::hwcond::POWER_MIN_W..=crate::hwcond::POWER_MAX_W).contains(&power) {
+        if time<0.0 || voltage<=0.0 || current>=0.0 || !(crate::hwcond::POWER_MIN_W..=crate::hwcond::POWER_MAX_W).contains(&power) {
             return Err("battery sample is outside the discharge power range".into());
         }
         Ok((time,power))
     }).collect::<Result<Vec<_>,String>>()?;
+    if samples.len()<2 || samples.windows(2).any(|w|w[1].0<=w[0].0) {
+        return Err("battery sample times must be strictly increasing".into());
+    }
+    Ok(samples)
+}
+
+const BATTERY_INTEGRATION_METHOD: &str = "battery V*I; linear boundary interpolation and trapezoidal integration";
+
+fn integrate_battery(samples: &[(f64,f64)], start: f64, end: f64) -> Result<serde_json::Value,String> {
+    if !start.is_finite() || !end.is_finite() || start<0.0 || end<=start || !(end-start).is_finite() {
+        return Err("energy window has no finite positive duration".into());
+    }
+    // Sampling's tail slack is not permission to extrapolate an integral.
+    if samples.first().is_none_or(|s|s.0>start) || samples.last().is_none_or(|s|s.0<end) {
+        return Err("valid battery samples do not bracket the energy window".into());
+    }
     let mut energy=0.0;
     for pair in samples.windows(2) {
         let ((t0,p0),(t1,p1))=(pair[0],pair[1]);
@@ -1133,10 +1149,67 @@ pub(crate) fn battery_energy_in_capture(env: &str, trace: &str, seconds: u64) ->
         let power=|time| p0+(p1-p0)*(time-t0)/(t1-t0);
         energy+=(power(left)+power(right))*0.5*(right-left);
     }
+    if !energy.is_finite() || !(energy/(end-start)).is_finite() {
+        return Err("battery energy arithmetic is not finite".into());
+    }
     Ok(serde_json::json!({"available":true,"estimated":true,"reason":null,
         "energy_j":energy,"power_w_mean":energy/(end-start),"rail":"battery",
-        "method":"battery V*I; linear boundary interpolation and trapezoidal integration",
+        "method":BATTERY_INTEGRATION_METHOD,
         "window":{"clock":"uptime","start":start,"end":end},"samples":samples.len()}))
+}
+
+pub(crate) fn battery_energy_in_capture(env: &str, trace: &str, seconds: u64) -> Result<serde_json::Value, String> {
+    let samples = battery_samples(env)?;
+    let (start,end) = capture_window(trace,seconds).ok_or("capture uptime metadata is unavailable or contradictory")?;
+    integrate_battery(&samples,start,end)
+}
+
+/// These are recorded clock/loss observations, not a target/context witness.
+fn submit_clock_and_loss(trace: &str, parsed: &crate::looptrace::Parsed) -> Result<(),String> {
+    let clocks = trace.lines().filter(|l|l.starts_with('#')).flat_map(str::split_whitespace)
+        .filter_map(|t|t.strip_prefix("trace_clock=")).collect::<Vec<_>>();
+    if clocks != ["boot"] {
+        return Err("GPU-submit energy requires one explicit boot trace clock observation".into());
+    }
+    let mut cpus = std::collections::BTreeSet::new();
+    for line in trace.lines().filter_map(|l|l.strip_prefix("# phonefarm cpu")) {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len()!=3 || fields[0].is_empty() || !fields[0].bytes().all(|b|b.is_ascii_digit())
+            || fields[1]!="overrun:" || fields[2]!="0" {
+            return Err("GPU-submit trace has missing, invalid or nonzero per-CPU overrun evidence".into());
+        }
+        let cpu=fields[0].parse::<u32>().map_err(|_|"invalid per-CPU overrun identity")?;
+        if !cpus.insert(cpu) { return Err("duplicate per-CPU overrun observation".into()); }
+    }
+    if cpus.is_empty() {
+        return Err("GPU-submit trace lacks per-CPU overrun observations".into());
+    }
+    if parsed.submit_cpus.iter().any(|cpu|!cpus.contains(cpu)) {
+        return Err("GPU-submit trace lacks overrun observations for a selected submit CPU".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn battery_energy_in_submit_groups(
+    env: &str, trace: &str, seconds: u64, parsed: &crate::looptrace::Parsed,
+) -> Result<serde_json::Value,String> {
+    submit_clock_and_loss(trace,parsed)?;
+    let capture = capture_window(trace,seconds).ok_or("capture uptime metadata is unavailable or contradictory")?;
+    let groups = parsed.complete_group_window(capture)?;
+    let samples = battery_samples(env)?;
+    let mut value = integrate_battery(&samples,groups.start,groups.end)?;
+    let per_group = value["energy_j"].as_f64().unwrap() / groups.group_count as f64 * 1000.0;
+    if !per_group.is_finite() { return Err("battery energy per GPU-submit group is not finite".into()); }
+    let fields = serde_json::json!({"scope":"whole_device_battery_over_gpu_submit_group_window",
+        "group_count":groups.group_count,"submits_per_group":groups.submits_per_group,
+        "discarded_head_groups":groups.discarded_head_groups,"discarded_tail_groups":groups.discarded_tail_groups,
+        "trailing_incomplete_intervals":groups.trailing_incomplete_intervals,
+        "energy_per_group_mj":per_group,"render_comm":parsed.render_comm,
+        "grouping":parsed.submit_grouping,"filtering_basis":parsed.submit_filtering,
+        "trace_clock":"boot","loss_observation":"per_cpu_overrun_zero",
+        "target_ownership_verified":false,"display_verified":false});
+    value.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+    Ok(value)
 }
 
 pub fn env_stats(text: &str) -> PyVal {
@@ -2319,6 +2392,17 @@ ENV 1.0 4412000 -2000 NA 4920000 806000 cpu-0-4-1 44900\n",
         assert_eq!(energy["window"]["start"],100.5);
         assert!(battery_energy_in_capture(env,&trace.replace("100.5","99.5").replace("103.5","102.5"),3).is_err());
         assert!(battery_energy_in_capture(&env.replace("-1000000","1000000"),trace,3).is_err());
+        // v2 coverage and integration must use the SAME ENV+PWR series. The
+        // last ENV is 102; the final PWR alone brackets the 103.5 endpoint.
+        let v2="#sample_env v2 dur=13 interval=2 power_interval=0.2 stop=/x\n#battery_status=Discharging\nENV 100 4000000 -1000000 NA 0 0 cpu-0 40000\nPWR 100.2 4000000 -1000000 NA 0 0\nENV 102 4000000 -1000000 NA 0 0 cpu-0 40000\nPWR 103.6 4000000 -1000000 NA 0 0\n#stop_seen\n#battery_status_after=Discharging\n#sample_env done\n";
+        let energy=battery_energy_in_capture(v2,trace,3).unwrap();
+        assert!((energy["energy_j"].as_f64().unwrap()-12.0).abs()<1e-9);
+        assert_eq!(energy["samples"],4);
+        let short=v2.replace("PWR 103.6","PWR 103.2");
+        assert!(trace_window_covered(&sample_window(&short),trace,3));
+        assert!(battery_energy_in_capture(&short,trace,3).is_err(),"coverage slack cannot extrapolate energy");
+        assert!(battery_energy_in_capture(&v2.replace("PWR 100.2","PWR 100"),trace,3).is_err());
+        assert!(battery_energy_in_capture(v2,&format!("{trace}{trace}"),3).is_err());
     }
     #[test]
     fn window_requires_done_count_span_and_bound_capture() {

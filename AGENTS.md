@@ -407,3 +407,7 @@ Node、网页与 CLI 共用同一冻结请求和范围事实。仅源码与隔�
 强lease另存宿主boot与owner/child启动身份；旧宿主boot仅证明旧本地进程结束，同boot PID复用仍须检查原进程组。pending与设备恢复屏障不因宿主身份变化释放；旧记录全缺身份时保守兼容，部分缺失拒绝。CLI/API和网页呈现host_process事实，不能据此宣称设备恢复。实现与隔离宿主验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/STRONG-LEASE-IDENTITY.md 。
 
 跨UID会话仅在管理员显式配置PHONEFARM_SHARED_GID及输出/持久state/lease根时使用共享权限；参与进程须已在该组。新目录2770、协调锁/追加日志660、原子记录/原件640，发布前设置；既有私有状态拒绝，禁止在线递归chmod代替迁移。默认CLI权限保持原样；有限正常停止链不证明任意producer、全局供电恢复或worker失联恢复，完整范围见JOB-CONTAINMENT合同。
+
+## stable 发布约定
+
+开发继续在 main；每批完成相关验收且同一 SHA 的必需 CI 通过后，才将 stable 非强制快进到该提交。phonefarm 还须等待该 SHA 的 node-build 成功。三个运行仓库记录配套 SHA；推进分支不表示远端已部署或真机已验收。用户维护 stable 自动更新脚本，不从 mutable node-build 最新资产猜测 stable 版本。详见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/STABLE-RELEASE.md 。

@@ -4132,11 +4132,10 @@ pub(crate) fn summarize_control_sample(
     if !sampler_ok { errors.push("environment sampler failed; inspect its exit code and log".to_owned()); }
     if let Err(error) = &trace { errors.push(format!("trace evidence unavailable: {error}")); }
     if let Err(error) = &env_text { errors.push(format!("environment evidence unavailable: {error}")); }
-    let summary = if trace_ok {
-        render_comm.zip(trace.as_ref().ok()).map(|(comm, text)| {
-            to_serde(&crate::looptrace::parse(text, comm).summarize())
-        })
+    let parsed = if trace_ok {
+        render_comm.zip(trace.as_ref().ok()).map(|(comm, text)| crate::looptrace::parse(text, comm))
     } else { None };
+    let summary = parsed.as_ref().map(|parsed|to_serde(&parsed.summarize()));
     if let Some(summary) = &summary {
         crate::confirmation_transport::new_file(&out.join("summary.json"), &serde_json::to_vec_pretty(summary).unwrap())?;
     }
@@ -4160,7 +4159,8 @@ pub(crate) fn summarize_control_sample(
     let mut limitations = vec![
         "GPU submit proxy; target process/context ownership and display FPS are not verified".to_owned(),
         "power covers the whole sampler window including lead/tail, not only the trace window".to_owned(),
-        "energy per frame requires the complete GPU-submit group window and verified frame semantics".to_owned(),
+        "GPU-submit group energy estimates whole-device battery use over cadence groups, not GPU rail or game/display frame energy".to_owned(),
+        "battery sampling does not resolve individual GPU-submit groups; the per-group value is a window average".to_owned(),
     ];
     if sample_request["input_kind"] == "finite" {
         limitations.push("input geometry is verified at launch only; natural completion does not restore game state".into());
@@ -4203,15 +4203,36 @@ pub(crate) fn summarize_control_sample(
     };
     let energy = energy.unwrap_or_else(|reason|json!({"available":false,"estimated":true,"reason":reason,
         "energy_j":null,"power_w_mean":null,"rail":"battery","window":null}));
+    let group_energy = if !power_ok {
+        Err(run["env"]["power_usable_reason"].as_str().unwrap_or("battery power window is not qualified").to_owned())
+    } else if let Some(parsed) = &parsed {
+        sysparam::battery_energy_in_submit_groups(env_text.as_ref().unwrap(),trace.as_ref().unwrap(),seconds,parsed)
+    } else {
+        Err(if render_comm.is_none(){"no render thread filter selected"}else{"GPU-submit trace is unavailable"}.to_owned())
+    };
+    let group_energy = group_energy.unwrap_or_else(|reason| {
+        limitations.push(format!("GPU-submit group energy unavailable: {reason}"));
+        json!({"available":false,"estimated":true,"reason":reason,"rail":"battery",
+            "scope":"whole_device_battery_over_gpu_submit_group_window",
+            "method":"battery V*I; linear boundary interpolation and trapezoidal integration",
+            "window":null,"energy_j":null,"power_w_mean":null,"energy_per_group_mj":null,
+            "group_count":null,"submits_per_group":null,"discarded_head_groups":null,"discarded_tail_groups":null,
+            "trailing_incomplete_intervals":null,"samples":null,"render_comm":render_comm,
+            "grouping":parsed.as_ref().map(|p|p.submit_grouping),"filtering_basis":parsed.as_ref().map(|p|p.submit_filtering),
+            "trace_clock":null,"loss_observation":null,"target_ownership_verified":false,"display_verified":false})
+    });
     run["metrics"] = json!({"gpu_submit_fps":run["summary"]["fps_mean"],
         "frame_p95_ms":run["summary"]["frame_p95"],"gpu_active_mean_ms":run["summary"]["gpu_active_mean"],
         "queue_p95_ms":run["summary"]["queue_p95"],"power_w_mean":run["env"]["power_w_mean"],
-        "trace_energy_j":energy["energy_j"],"trace_power_w_mean":energy["power_w_mean"],"energy_per_frame_mj":null});
+        "trace_energy_j":energy["energy_j"],"trace_power_w_mean":energy["power_w_mean"],"energy_per_frame_mj":null,
+        "gpu_submit_group_window_energy_j":group_energy["energy_j"],
+        "gpu_submit_group_window_power_w_mean":group_energy["power_w_mean"],
+        "battery_energy_per_gpu_submit_group_mj":group_energy["energy_per_group_mj"]});
     run["metric_provenance"] = json!({"frame":{"semantics":"gpu_submit_proxy","render_comm":render_comm,
         "grouping":"existing auto submits-per-frame parser","target_ownership_verified":false,"display_verified":false},
         "power":{"rail":run["env"]["power_rail"],"window_verified":power_ok,
-            "scope":"whole sampler window including lead/tail"},"trace_energy":energy,
-        "energy_per_frame":{"available":false,"reason":"complete GPU-submit group window and frame ownership are not verified"}});
+            "scope":"whole sampler window including lead/tail"},"trace_energy":energy,"submit_group_energy":group_energy,
+        "energy_per_frame":{"available":false,"reason":"game/display frame semantics and target ownership are not verified"}});
     run["collection"] = json!({"status":if errors.is_empty(){"complete"}else{"failed"},
         "error":if errors.is_empty(){Value::Null}else{json!(errors.join("; "))}});
     run["limitations"] = json!(limitations);
@@ -5444,7 +5465,9 @@ mod path_tests {
     fn control_sample_keeps_unknown_filter_and_power_separate_from_raw_collection() {
         let root = std::env::temp_dir().join(format!("control-sample-{}-{}",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap()));
         std::fs::create_dir(&root).unwrap();
-        for (name,status,current,trace_present) in [("legacy_bypass","Charging",0,true),("battery","Discharging",-1_000_000,true),("failed","Discharging",-1_000_000,false),("battery_policy_failed","Discharging",-1_000_000,true)] {
+        for (name,status,current,trace_present) in [("legacy_bypass","Charging",0,true),("battery","Discharging",-1_000_000,true),("failed","Discharging",-1_000_000,false),("battery_policy_failed","Discharging",-1_000_000,true),
+            ("groups","Discharging",-1_000_000,true),("groups_bad_clock","Discharging",-1_000_000,true),
+            ("groups_loss","Discharging",-1_000_000,true),("groups_charging","Charging",0,true)] {
             let out = root.join(name);std::fs::create_dir(&out).unwrap();
             // 放电用例是纯电池: 停充模式 battery、USB 输入电流 0。写成 bypass 或带 5 V × 1 A 输入,
             // 混合供电规则会 (正确地) 把它判成 usb_plus_battery, 电池能量积分就不成立了
@@ -5453,7 +5476,15 @@ mod path_tests {
             for t in (100..=112).step_by(2) {env.push_str(&format!("ENV {t} 3800000 {current} NA 5000000 {usb_ua} gpuss 40000\n"));}
             env.push_str(&format!("#battery_status_after={status}\n#sample_env done\n"));
             std::fs::write(out.join("env.txt"),env).unwrap();
-            if trace_present {std::fs::write(out.join("trace.txt"),"#loop_v1_meta capture_start_uptime=106 capture_end_uptime=109 duration_req=3\n").unwrap();}
+            if trace_present {
+                let mut trace = "#loop_v1_meta capture_start_uptime=106 capture_end_uptime=109 duration_req=3\n".to_owned();
+                trace.push_str(&format!("# phonefarm trace_mode=instance trace_clock={}\n# phonefarm cpu0 overrun: {}\n",
+                    if name=="groups_bad_clock"{"local"}else{"boot"},if name=="groups_loss"{1}else{0}));
+                for (i,t) in [106.25,106.875,107.5,108.125,108.75].iter().enumerate() {
+                    trace.push_str(&format!("UnityGfxDeviceW-42 [000] ..... {t:.6}: adreno_cmdbatch_submitted: ctx=1 ts={i}\n"));
+                }
+                std::fs::write(out.join("trace.txt"),trace).unwrap();
+            }
             if name=="battery_policy_failed" {
                 std::fs::write(out.join("sample-request.json"),r#"{"power_policy":"battery"}"#).unwrap();
                 std::fs::write(out.join("power.json"),r#"{"policy":"battery","before":{"on_battery":true},"after":{"on_battery":false},"error":"supply changed after collection"}"#).unwrap();
@@ -5463,18 +5494,46 @@ mod path_tests {
                 // over the earlier durable before/after snapshot.
                 json!({"power":{"policy":"battery","before":{"on_battery":true},"after":{"on_battery":false},"error":"supply changed after collection; power evidence save failed"}})
             } else {Value::Null};
-            let result = summarize_control_sample(&out,name,3,trace_present,true,input,true,"synthetic",None).unwrap();
-            assert!(result["summary"].is_null());
-            assert!(result["metrics"]["gpu_submit_fps"].is_null());
+            let comm = name.starts_with("groups").then_some("UnityGfxDeviceW");
+            let result = summarize_control_sample(&out,name,3,trace_present,true,input,true,"synthetic",comm).unwrap();
+            if comm.is_none() {
+                assert!(result["summary"].is_null());
+                assert!(result["metrics"]["gpu_submit_fps"].is_null());
+            } else { assert_eq!(result["summary"]["n_frames"],4); }
             assert!(result["metrics"]["energy_per_frame_mj"].is_null());
             assert_eq!(result["metric_provenance"]["frame"]["target_ownership_verified"],false);
-            if name=="battery" {
+            if name=="battery" || (comm.is_some() && status=="Discharging") {
                 assert_eq!(result["metrics"]["power_w_mean"],3.8);
                 assert!((result["metrics"]["trace_energy_j"].as_f64().unwrap()-11.4).abs()<1e-9);
                 assert_eq!(result["metric_provenance"]["trace_energy"]["available"],true);
             } else {
                 assert!(result["metrics"]["power_w_mean"].is_null());
                 assert!(result["metrics"]["trace_energy_j"].is_null());
+            }
+            let group=&result["metric_provenance"]["submit_group_energy"];
+            assert_eq!(group["target_ownership_verified"],false);
+            assert_eq!(group["display_verified"],false);
+            assert_eq!(group["render_comm"],json!(comm));
+            assert_eq!(group["scope"],"whole_device_battery_over_gpu_submit_group_window");
+            if name=="groups" {
+                assert_eq!(group["available"],true);
+                assert_eq!(group["window"],json!({"clock":"uptime","start":106.25,"end":108.75}));
+                assert_eq!(group["group_count"],4);
+                assert_eq!(group["submits_per_group"],1);
+                assert_eq!(group["grouping"],"existing_parser_inferred");
+                assert_eq!(group["filtering_basis"],"render_comm");
+                assert_eq!(group["trace_clock"],"boot");
+                assert_eq!(group["loss_observation"],"per_cpu_overrun_zero");
+                assert!((result["metrics"]["gpu_submit_group_window_energy_j"].as_f64().unwrap()-9.5).abs()<1e-9);
+                assert!((result["metrics"]["gpu_submit_group_window_power_w_mean"].as_f64().unwrap()-3.8).abs()<1e-9);
+                assert!((result["metrics"]["battery_energy_per_gpu_submit_group_mj"].as_f64().unwrap()-2375.0).abs()<1e-9);
+            } else {
+                assert_eq!(group["available"],false);
+                assert!(group["reason"].is_string());
+                assert!(group["window"].is_null());
+                for key in ["gpu_submit_group_window_energy_j","gpu_submit_group_window_power_w_mean","battery_energy_per_gpu_submit_group_mj"] {
+                    assert!(result["metrics"][key].is_null());
+                }
             }
             assert_eq!(result["collection"]["status"],if trace_present && name!="battery_policy_failed"{"complete"}else{"failed"});
             if name=="battery_policy_failed" {assert!(out.join("trace.txt").is_file());assert!(result["collection"]["error"].as_str().unwrap().contains("power evidence save failed"));}

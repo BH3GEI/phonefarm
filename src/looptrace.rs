@@ -216,6 +216,24 @@ pub struct Parsed {
     /// 进程归属。trace 头里有 `target_tids` (采集脚本拿 `-PKG` 记下的目标进程线程号) 时为
     /// `Some`, 只收这些线程的提交; 老 trace 没有这项, 为 `None`, 只能按线程名认, 不保证是目标应用。
     pub attribution: Option<Attribution>,
+    // Exact original grouping boundaries, deliberately absent from the legacy
+    // summary/full JSON. A cadence group is not a verified display frame.
+    submit_groups: Vec<(f64, f64)>,
+    trailing_incomplete_intervals: usize,
+    pub(crate) submit_grouping: &'static str,
+    pub(crate) submit_filtering: &'static str,
+    pub(crate) submit_cpus: Vec<u32>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct SubmitGroupWindow {
+    pub start: f64,
+    pub end: f64,
+    pub group_count: usize,
+    pub submits_per_group: usize,
+    pub discarded_head_groups: usize,
+    pub discarded_tail_groups: usize,
+    pub trailing_incomplete_intervals: usize,
 }
 
 /// 提交按进程归属的结果。只在 trace 头带了目标线程号时才有。
@@ -284,9 +302,9 @@ fn parse_grouped(
     let kv_re = Regex::new(KV_RE).expect("KV_RE");
 
     let mut meta = Meta::default();
-    // (墙钟, ctx, ts, tid)
-    let mut submits: Vec<(f64, i64, i64, u64)> = Vec::new();
-    let mut truncated: Vec<(f64, i64, i64, u64)> = Vec::new();
+    // (墙钟, ctx, ts, tid, CPU). CPU is used only for new loss provenance.
+    let mut submits: Vec<(f64, i64, i64, u64, u32)> = Vec::new();
+    let mut truncated: Vec<(f64, i64, i64, u64, u32)> = Vec::new();
     let mut retires: HashMap<(i64, i64), Retire> = HashMap::new();
     let mut buslevel = Vec::new();
     let mut pwrlevel = Vec::new();
@@ -331,13 +349,14 @@ fn parse_grouped(
                 // 给了 owned contexts 时按 ctx 归属认提交, 不看 comm。
                 let comm = m["comm"].trim();
                 let tid: u64 = m["tid"].parse().unwrap_or(0);
+                let cpu = m["cpu"].parse::<u32>().unwrap_or(u32::MAX);
                 if let (Some(&ctx), Some(&ts)) = (f.get("ctx"), f.get("ts")) {
                     // 给了 owned contexts (main 侧冻结的 ctx 归属) 时按 ctx 认; 否则按线程名。
                     // render_ctxs 在进程归属过滤之后统一收 (ruler 侧 target_tids)。
                     if contexts.map_or(comm == render_comm, |owned| owned.contains(&ctx)) {
-                        submits.push((wall, ctx, ts, tid));
+                        submits.push((wall, ctx, ts, tid, cpu));
                     } else if contexts.is_none() && comm == "<...>" {
-                        truncated.push((wall, ctx, ts, tid));
+                        truncated.push((wall, ctx, ts, tid, cpu));
                     }
                 }
             }
@@ -379,6 +398,15 @@ fn parse_grouped(
     //   - `<...>`: 线程号是目标进程里、本窗内以渲染线程名出现过的线程 (名字丢了, 线程还是那条);
     //     一条正常名字都没有时, 退一步收目标进程里任何线程的 `<...>` 提交 —— 至少还是这个进程的。
     // 没有线程号 (老 trace) 时保持原行为, attribution 为 None, 由下游当「未归属」看待。
+    let submit_filtering = if contexts.is_some() {
+        "caller_provided_contexts"
+    } else if target_tids(&meta).is_some() {
+        "render_comm_and_recorded_target_tids"
+    } else if submits.is_empty() && !truncated.is_empty() {
+        "truncated_names_fallback"
+    } else {
+        "render_comm"
+    };
     let attribution = match target_tids(&meta) {
         Some(tids) => {
             let before = submits.len() + truncated.len();
@@ -403,13 +431,16 @@ fn parse_grouped(
             None
         }
     };
-    for &(_, ctx, _, _) in &submits {
+    let mut submit_cpus = Vec::new();
+    for &(_, ctx, _, _, cpu) in &submits {
         if !render_ctxs.contains(&ctx) {
             render_ctxs.push(ctx);
         }
+        if !submit_cpus.contains(&cpu) { submit_cpus.push(cpu); }
     }
     submits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     render_ctxs.sort_unstable();
+    submit_cpus.sort_unstable();
 
     // ── 提交间隔 → 自检每帧提交数 → 按帧分组 ──
     let gaps: Vec<f64> = submits
@@ -421,15 +452,17 @@ fn parse_grouped(
 
     // 帧时长 = 每 spf 个间隔一组求和。组边界同时用来聚合该帧的 GPU 活跃时长。
     let mut frame_ms = Vec::new();
+    let mut submit_groups = Vec::new();
     let mut gpu_active_ms = Vec::new();
     let mut queue_ms = Vec::new();
     if gaps.len() >= spf {
         for i in (0..=gaps.len() - spf).step_by(spf) {
             frame_ms.push(py_sum(gaps[i..i + spf].iter().copied()));
+            submit_groups.push((submits[i].0, submits[i + spf].0));
             let mut act_sum = 0.0;
             let mut q_sum = 0.0;
             let mut matched = 0usize;
-            for &(wall, ctx, ts, _) in &submits[i..(i + spf).min(submits.len())] {
+            for &(wall, ctx, ts, _, _) in &submits[i..(i + spf).min(submits.len())] {
                 let Some(r) = retires.get(&(ctx, ts)) else {
                     continue;
                 };
@@ -472,10 +505,50 @@ fn parse_grouped(
         gpufreq,
         thermal_events,
         attribution,
+        submit_groups,
+        trailing_incomplete_intervals: gaps.len() % spf,
+        submit_grouping: if fixed_spf.is_some_and(|n| n >= 1) {
+            "existing_parser_fixed"
+        } else {
+            "existing_parser_inferred"
+        },
+        submit_filtering,
+        submit_cpus,
     }
 }
 
 impl Parsed {
+    /// Keep only whole, contiguous groups inside capture, preserving the
+    /// parser's original cadence and phase. GPU retire completion is separate.
+    pub(crate) fn complete_group_window(
+        &self,
+        capture: (f64, f64),
+    ) -> Result<SubmitGroupWindow, String> {
+        let (start, end) = capture;
+        if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
+            return Err("capture window has no finite positive duration".into());
+        }
+        if self.submit_groups.iter().any(|&(a, b)| {
+            !a.is_finite() || !b.is_finite() || a < 0.0 || b <= a
+        }) || self.submit_groups.windows(2).any(|w| w[0].1 != w[1].0)
+        {
+            return Err("GPU-submit groups lack continuous finite positive intervals".into());
+        }
+        let first = self.submit_groups.iter().position(|&(a, b)| a >= start && b <= end)
+            .ok_or("no complete GPU-submit groups inside capture window")?;
+        let count = self.submit_groups[first..].iter()
+            .take_while(|&&(a, b)| a >= start && b <= end).count();
+        Ok(SubmitGroupWindow {
+            start: self.submit_groups[first].0,
+            end: self.submit_groups[first + count - 1].1,
+            group_count: count,
+            submits_per_group: self.submits_per_frame,
+            discarded_head_groups: first,
+            discarded_tail_groups: self.submit_groups.len() - first - count,
+            trailing_incomplete_intervals: self.trailing_incomplete_intervals,
+        })
+    }
+
     /// 归属字段 (只在 trace 头带了目标线程号时追加, 老 trace 的输出逐字节不变)。
     fn with_attribution(&self, v: PyVal) -> PyVal {
         let (PyVal::Obj(mut kv), Some(a)) = (v.clone(), &self.attribution) else {
@@ -915,6 +988,32 @@ mod tests {
         assert_eq!(d.submits_per_frame, 1);
         assert_eq!(d.fps_mean, None);
         assert!(dumps(&d.summarize()).contains("\"bw_median\": null"));
+    }
+
+    #[test]
+    fn complete_group_window_preserves_phase_and_excludes_incomplete_tail() {
+        let trace = [100.0, 100.1, 100.2, 100.3, 100.4, 100.5].iter().enumerate()
+            .map(|(i,t)|format!("Render-42 [000] ..... {t:.6}: adreno_cmdbatch_submitted: ctx=1 ts={i}\n"))
+            .collect::<String>();
+        let mut parsed = parse_with_spf(&trace,"Render",Some(2));
+        let old_summary = dumps(&parsed.summarize());
+        assert_eq!(parsed.complete_group_window((99.0,101.0)).unwrap(),SubmitGroupWindow {
+            start:100.0,end:100.4,group_count:2,submits_per_group:2,
+            discarded_head_groups:0,discarded_tail_groups:0,trailing_incomplete_intervals:1,
+        });
+        let trimmed = parsed.complete_group_window((100.1,100.4)).unwrap();
+        assert_eq!((trimmed.start,trimmed.end,trimmed.group_count,trimmed.discarded_head_groups),(100.2,100.4,1,1));
+        assert_eq!(parsed.complete_group_window((100.0,100.3)).unwrap().discarded_tail_groups,1);
+        assert_eq!(old_summary,dumps(&parsed.summarize()));
+        assert_eq!(parsed.span_s,0.5); // Old denominator still includes the tail.
+        assert!(parsed.complete_group_window((100.1,100.3)).is_err());
+        assert!(parsed.complete_group_window((f64::NAN,101.0)).is_err());
+        parsed.submit_groups[1].0 += 0.01;
+        assert!(parsed.complete_group_window((99.0,101.0)).is_err());
+        let empty = parse("", "Render");
+        assert!(empty.complete_group_window((0.0,1.0)).is_err());
+        let zero = parse_with_spf(&trace.replace("100.100000","100.000000"),"Render",Some(1));
+        assert!(zero.complete_group_window((99.0,101.0)).is_err());
     }
 
     #[test]
