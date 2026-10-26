@@ -237,6 +237,18 @@ impl Adb {
     pub fn new(serial: Option<String>, tmp: String) -> Self {
         let Some(bin) = locate_adb() else {
             eprintln!("⚠ 未找到 adb: 请安装 Android platform-tools(或把 platform-tools/ 整个目录放进仓库根),或用 ADB_BIN=/path/to/adb 指定后重跑。");
+            // 测试进程不得因宿主缺 adb 集体退出：交给单个用例在使用时失败。
+            // CLI 入口不受影响（非 test 编译仍按原语义退出 2）。
+            if cfg!(test) {
+                return Adb {
+                    bin: "adb".into(),
+                    serial,
+                    tmp,
+                    frozen: AtomicBool::new(false),
+                    gamepad: std::sync::Mutex::new(None),
+                    is_root: AtomicBool::new(false),
+                };
+            }
             std::process::exit(2);
         };
         Adb {
@@ -1903,5 +1915,24 @@ mod tests {
         let v = adb_search_order(None, Some("/home/user"));
         assert!(v.iter().any(|p| p == "/home/user/Android/Sdk/platform-tools/adb"),
             "应包含 Linux/WSL 标准 Android Sdk 路径");
+    }
+}
+
+#[cfg(test)]
+mod adb_missing_host_tests {
+    use super::*;
+
+    /// 无 adb 宿主（如 rhodes1）上，构造 Adb 不得杀死整个测试进程：
+    /// 这是全量套件曾异常退出（exit 2）的根因。使用时才在单个用例内失败。
+    #[test]
+    fn missing_adb_construction_survives_and_fails_at_use() {
+        if locate_adb().is_some() {
+            // 有 adb 的宿主上本前提不成立，跳过（不伪造失败路径）。
+            return;
+        }
+        let adb = Adb::new(None, std::env::temp_dir().to_string_lossy().into_owned());
+        let out = adb.run(&["version"]);
+        assert!(out.is_empty() || !std::str::from_utf8(&out).unwrap().contains("Android"),
+                "缺失 adb 的桩不应产生 Android 版本输出");
     }
 }
