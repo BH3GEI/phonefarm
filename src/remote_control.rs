@@ -36,6 +36,7 @@ const INPUT_CONTRACT: &str = "frame-bound-v1";
 const FRAME_AGE_SECONDS: i64 = 30;
 const ACTIONS: &[&str] = &[
     "screenshot",
+    "logcat",
     "tap",
     "swipe",
     "text",
@@ -388,6 +389,13 @@ fn live(store: &Store, state: &Value) -> Result<bool> {
     }
     Ok(running && held)
 }
+fn owner_actions(s: &Value) -> Vec<&'static str> {
+    ACTIONS.iter().copied().filter(|action| {
+        s.get("action_capabilities").map_or(*action != "logcat", |declared| {
+            declared.as_array().is_some_and(|items| items.iter().any(|v| v == action))
+        })
+    }).collect()
+}
 fn public(store: &Store, s: &Value) -> Result<Value> {
     let running = live(store, s)?;
     let phase = if s["phase"] == "closed" {
@@ -414,7 +422,7 @@ fn public(store: &Store, s: &Value) -> Result<Value> {
     };
     Ok(
         json!({"schema":SCHEMA,"session_id":s["session_id"],"serial":s["serial"],"phase":phase,
-        "live_owner":running,"capabilities":ACTIONS,"created_at":s["created_at"],"deadline":s["deadline"],
+        "live_owner":running,"capabilities":owner_actions(s),"created_at":s["created_at"],"deadline":s["deadline"],
         "ttl_seconds":s["ttl_seconds"],"last_request_id":s["last_request_id"],"latest_image":s["latest_image"],
         "input_contract":s["input_contract"],"input_frame_id":s["input_frame_id"],
         "frame_max_age_seconds":if s["input_contract"] == INPUT_CONTRACT {json!(FRAME_AGE_SECONDS)} else {Value::Null},
@@ -686,6 +694,11 @@ fn validate_request(r: &Value) -> Result<()> {
     let coordinate = |k| bounded(p, k, 0, 100_000).map(|_| ());
     match action {
         "screenshot" => { keys(p, &["max_side"])?; if p.get("max_side").is_some() { bounded(p, "max_side", 0, 8192)?; } }
+        "logcat" => {
+            keys(p, &["lines", "pid"])?;
+            if p.get("lines").is_some() { bounded(p, "lines", 1, 2000)?; }
+            if p.get("pid").is_some() { bounded(p, "pid", 1, i32::MAX as u64)?; }
+        }
         "tap" => { keys(p, &["x", "y", "frame_id"])?; coordinate("x")?; coordinate("y")?; }
         "swipe" => { keys(p, &["x1", "y1", "x2", "y2", "ms", "frame_id"])?; for k in ["x1", "y1", "x2", "y2"] { coordinate(k)?; } bounded(p, "ms", 1, 10_000)?; }
         "text" => { keys(p, &["text"])?; let text = string(p, "text")?; if text.is_empty() || text.chars().count() > 1000 || text.chars().any(char::is_control) { return Err(error("invalid_request", "text requires 1..1000 visible characters")); } }
@@ -723,6 +736,9 @@ fn publish(store: &Store, r: &Value) -> Result<Value> {
             ));
         }
         return receipt(store, &s, request_id);
+    }
+    if !owner_actions(&s).contains(&string(r, "action")?) {
+        return Err(error("unsupported", "action is not supported by this owner; query the original request ID"));
     }
     if matches!(r["action"].as_str(), Some("tap" | "swipe")) && s["input_contract"] != INPUT_CONTRACT {
         return Err(error("input_contract_unavailable", "this owner does not support frame-bound input; query original receipts or close it explicitly"));
@@ -762,6 +778,11 @@ fn save(store: &Store, s: &mut Value) -> Result<()> {
 fn shell_command(r: &Value) -> Result<(String, u64)> {
     let p = &r["params"];
     Ok(match string(r, "action")? {
+        "logcat" => {
+            let mut command = format!("logcat -d -t {} -v threadtime", p["lines"].as_u64().unwrap_or(200));
+            if let Some(pid) = p["pid"].as_u64() { command.push_str(&format!(" --pid={pid}")); }
+            (command, 20)
+        }
         "tap" => (format!("input tap {} {}", p["x"], p["y"]), 10),
         "swipe" => (
             format!(
@@ -916,6 +937,9 @@ fn execute(store: &Store, lease: &Lease, transport: &mut Transport, s: &Value, r
         )
         .map_err(|e| error(if e.uncertain { "unknown" } else { "io_error" }, e.message))?;
     let mut value = json!({"exit":out.code,"stdout":out.stdout.chars().take(8192).collect::<String>()});
+    if r["action"] == "logcat" {
+        value["stdout_truncated"] = json!(out.stdout.chars().nth(8192).is_some());
+    }
     if coordinate_input {
         value["input_issued"] = json!(true);
         value["frame_id"] = r["params"]["frame_id"].clone();
@@ -1075,7 +1099,7 @@ fn claim(store: &Store, s: &mut Value, completed: &HashSet<String>, end: Instant
     result["status"] = json!("started");
     result["started_at"] = json!(now());
     store.write(&record("started", request_id), &result, false)?;
-    if !matches!(action, "renew" | "release") {
+    if !matches!(action, "renew" | "release" | "logcat") {
         s["input_frame_id"] = Value::Null;
     }
     s["last_request_id"] = json!(request_id);
@@ -1329,7 +1353,7 @@ fn start(a: &Args) -> Result<()> {
         "owner":{"pid":identity.pid,"start":identity.start,"host_boot_id":identity.host_boot_id},"phase":"starting",
         "created_at":now(),"deadline":deadline.to_rfc3339(),"ttl_seconds":a.ttl,"max_seconds":a.max,
         "transport_uncertain":false,"pending_request":null,"last_request_id":null,"latest_image":null,
-        "input_contract":INPUT_CONTRACT,"input_frame_id":null,"stop_reason":null,"error":null,"recovery_report":null});
+        "input_contract":INPUT_CONTRACT,"action_capabilities":ACTIONS,"input_frame_id":null,"stop_reason":null,"error":null,"recovery_report":null});
     store.write(STATE, &s, false)?;
     lease.hold_for_recovery(&store.path).map_err(io_error)?;
     let result = (|| -> Result<()> {
@@ -1539,6 +1563,33 @@ mod tests {
     }
     #[test]
     fn typed_boundary_rejects_raw_commands_and_unbounded_input() {
+        assert!(ACTIONS.contains(&"logcat"));
+        let scratch = Scratch::new();
+        let (store, _owner, mut legacy) = scratch.fixture();
+        assert!(!owner_actions(&legacy).contains(&"logcat"));
+        let original = request("log-owner", "logcat", json!({}));
+        assert_eq!(publish(&store, &original).unwrap_err().code, "unsupported");
+        legacy["action_capabilities"] = json!(ACTIONS);
+        save(&store, &mut legacy).unwrap();
+        assert_eq!(publish(&store, &original).unwrap()["status"], "accepted");
+        legacy.as_object_mut().unwrap().remove("action_capabilities");
+        save(&store, &mut legacy).unwrap();
+        assert_eq!(publish(&store, &original).unwrap()["status"], "accepted");
+        legacy["action_capabilities"] = json!(ACTIONS);
+        legacy["input_frame_id"] = json!("kept-frame");
+        assert!(matches!(claim(&store, &mut legacy, &HashSet::new(),
+            Instant::now() + Duration::from_secs(60)).unwrap(), Claim::Action(_, _)));
+        assert_eq!(legacy["input_frame_id"], "kept-frame");
+        let logcat = request("logs", "logcat", json!({}));
+        validate_request(&logcat).unwrap();
+        assert_eq!(shell_command(&logcat).unwrap(), ("logcat -d -t 200 -v threadtime".into(), 20));
+        let logcat = request("logs-pid", "logcat", json!({"lines":2000,"pid":1234}));
+        validate_request(&logcat).unwrap();
+        assert_eq!(shell_command(&logcat).unwrap(), ("logcat -d -t 2000 -v threadtime --pid=1234".into(), 20));
+        for params in [json!({"lines":0}), json!({"lines":2001}), json!({"pid":0}),
+            json!({"pid":"123; id"}), json!({"clear":true})] {
+            assert!(validate_request(&request("bad-logcat", "logcat", params)).is_err());
+        }
         assert_eq!(
             validate_request(&request("a", "shell", json!({"cmd":"id"})))
                 .unwrap_err()
