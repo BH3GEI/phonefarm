@@ -1,5 +1,6 @@
 //! Fresh single-APK installation. Committed packages are intentionally retained.
 use crate::{
+    device_registry::DeviceBinding,
     devlease::Lease,
     game_deploy::{self, InstallRequest, INSTALL_SCOPE},
     game_deploy_session::{digest, package_identity, q, valid_boot, Remote},
@@ -13,7 +14,6 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
 };
 
 pub(crate) const SCHEMA: &str = "phonefarm/game-install-session@1";
@@ -46,10 +46,19 @@ struct State {
     commit_confirmed: bool,
     checks: Value,
     source_session: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_binding: Option<DeviceBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_scope: Option<String>,
 }
 impl State {
     fn validate(&self) -> Result<(), String> {
         self.request.validate()?;
+        game_deploy::validate_scope(
+            self.device_binding.as_ref(),
+            self.lease_scope.as_deref(),
+            &self.request.serial,
+        )?;
         if self.schema != SCHEMA
             || self.token.is_empty()
             || self.token.len() > 128
@@ -93,6 +102,7 @@ pub(crate) struct Session {
 impl Session {
     pub(crate) fn new(lease: Lease, request: InstallRequest, out: &Path) -> Result<Self, String> {
         let token = lease.token().to_owned();
+        let binding = lease.device_binding().cloned();
         Self::from_state(
             lease,
             State {
@@ -111,12 +121,17 @@ impl Session {
                 commit_confirmed: false,
                 checks: json!({}),
                 source_session: None,
+                lease_scope: binding.as_ref().map(|_| "device".into()),
+                device_binding: binding,
             },
             out,
         )
     }
     fn from_state(lease: Lease, state: State, out: &Path) -> Result<Self, String> {
         state.validate()?;
+        if lease.device_binding() != state.device_binding.as_ref() {
+            return Err("lease device scope differs from saved transaction".into());
+        }
         let dir = out.join("game-deploy");
         let transport = Transport::new(
             &state.request.serial,
@@ -572,6 +587,7 @@ impl Session {
     }
     fn report(&self, phase: &str, error: Option<&str>, status: &str) -> Value {
         let mut value = game_deploy::install_report(&self.state.request);
+        game_deploy::report_binding(&mut value, self.state.device_binding.as_ref());
         value["phase"] = json!(phase);
         value["session_path"] = json!("game-deploy");
         value["error"] = json!(error);
@@ -667,62 +683,24 @@ impl Session {
         if state.request.serial != serial {
             return Err("installation recovery serial differs from source".into());
         }
-        let storage = crate::lease_storage::resolve();
-        let (device, legacy) = match storage.require_ready() {
-            Ok(v) => v,
-            Err(e) => return failed_recovery(&state.request, &source, out, &e, Some(false)),
-        };
-        let lease = match Lease::acquire_recovery(
-            &device,
-            &legacy,
-            serial,
+        let lease = match game_deploy::acquire_context(
             &source,
-            Duration::from_secs(1),
+            serial,
+            &bytes,
+            state.device_binding.as_ref(),
         ) {
-            Ok(v) => v,
-            Err(e) => return failed_recovery(&state.request, &source, out, &e, Some(false)),
+            Ok(lease) => lease,
+            Err(error) => return failed_recovery(&state, &source, out, &error, Some(false)),
         };
-        match crate::confirmation_transport::bounded(&source.join("session.json"), 131072) {
-            Ok(current) if current == bytes => {}
-            other => {
-                return failed_recovery(
-                    &state.request,
-                    &source,
-                    out,
-                    &other.err().unwrap_or_else(|| {
-                        "installation context changed during acquisition".into()
-                    }),
-                    Some(false),
-                )
-            }
-        }
         state.source_session = Some(source.clone());
-        let request = state.request.clone();
+        let prior = state.clone();
         let mut session = match Self::from_state(lease, state, out) {
             Ok(v) => v,
-            Err(e) => return failed_recovery(&request, &source, out, &e, Some(false)),
+            Err(e) => return failed_recovery(&prior, &source, out, &e, Some(false)),
         };
         if let Err(error) = session.lease.hold_for_recovery(&session.dir) {
-            let status = crate::devlease::storage_status(&storage);
-            let contexts: Vec<_> = status["entries"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|e| e["serial"] == serial)
-                .filter_map(|e| e["recovery_context"].as_str())
-                .collect();
-            let moved = if session.lease.check().is_ok() && contexts.len() == 1 {
-                if Path::new(contexts[0]) == session.dir {
-                    Some(true)
-                } else if Path::new(contexts[0]) == source {
-                    Some(false)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            return failed_recovery(&request, &source, out, &error, moved);
+            let moved = game_deploy::context_moved(&session.lease, serial, &source, &session.dir);
+            return failed_recovery(&prior, &source, out, &error, moved);
         }
         let result = (|| {
             session.safe_to_reconcile()?;
@@ -749,13 +727,14 @@ impl Session {
     }
 }
 fn failed_recovery(
-    request: &InstallRequest,
+    state: &State,
     source: &Path,
     out: &Path,
     error: &str,
     moved: Option<bool>,
 ) -> Result<(Value, i32), String> {
-    let mut value = game_deploy::install_report(request);
+    let mut value = game_deploy::install_report(&state.request);
+    game_deploy::report_binding(&mut value, state.device_binding.as_ref());
     value["phase"] = json!("recovery_required");
     value["error"] = json!(error);
     value["session_path"] = if moved == Some(true) {

@@ -1,4 +1,5 @@
 //! Finite resource deployment into a new application-owned namespace.
+use crate::device_registry::DeviceBinding;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -20,7 +21,7 @@ pub(crate) const INITIALIZE_REQUEST_SCHEMA: &str = "phonefarm/game-initialize-re
 pub(crate) const INITIALIZE_RECIPE_SCHEMA: &str = "phonefarm/game-initialize-recipe@1";
 pub(crate) const INITIALIZE_REPORT_SCHEMA: &str = "phonefarm/game-initialization@1";
 pub(crate) const INITIALIZE_SCOPE: &str = "owned_launcher_attempt_force_stopped";
-const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0: matching installed-engine resources, explicitly absent single-APK installation, or bounded launcher/typed Doom scene attempts. Application configuration and new scene runtime files are retained; attempts never grant permissions or certify scene readiness. No replacement or root escalation. Confirmed installations are retained.";
+const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR [--device-binding JSON] --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0: matching installed-engine resources, explicitly absent single-APK installation, or bounded launcher/typed Doom scene attempts. Application configuration and new scene runtime files are retained; attempts never grant permissions or certify scene readiness. No replacement or root escalation. Confirmed installations are retained.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -288,6 +289,7 @@ pub(crate) fn source_file(asset: &Asset) -> Result<File, String> {
 enum Command {
     Run {
         request: PathBuf,
+        binding: Option<DeviceBinding>,
         serial: String,
         out: PathBuf,
     },
@@ -306,12 +308,18 @@ fn parse(args: &[String]) -> Result<Command, String> {
     let recover = args.first().is_some_and(|s| s == "recover");
     let capabilities = args.first().is_some_and(|s| s == "capabilities");
     let (mut request, mut session, mut target, mut out) = (None, None, None, None);
+    let mut binding = None;
     let mut help = false;
     let mut it = args.iter().skip(usize::from(recover || capabilities));
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--help" | "-h" => help = true,
             "--json" => {}
+            "--device-binding" if !recover && !capabilities && binding.is_none() => {
+                binding = Some(crate::device_registry::parse_binding(
+                    it.next().ok_or("--device-binding requires JSON")?,
+                )?);
+            }
             "--request" | "--session" | "--serial" | "--out" if !capabilities => {
                 let value = it
                     .next()
@@ -335,6 +343,9 @@ fn parse(args: &[String]) -> Result<Command, String> {
     }
     let target = target.ok_or("game-deploy requires --serial")?;
     serial(&target)?;
+    if binding.as_ref().is_some_and(|b| b.serial != target) {
+        return Err("device binding serial differs from explicit target".into());
+    }
     let out = out.ok_or("game-deploy requires a separate --out directory")?;
     if recover && request.is_none() {
         Ok(Command::Recover {
@@ -345,6 +356,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
     } else if !recover && session.is_none() {
         Ok(Command::Run {
             request: request.ok_or("game-deploy requires --request")?,
+            binding,
             serial: target,
             out,
         })
@@ -358,7 +370,10 @@ pub(crate) fn needs_queue(args: &[String]) -> Result<bool, String> {
     let mut all = vec!["game-deploy".into()];
     all.extend_from_slice(args);
     crate::devlock::strip_lock_args(&mut all)?;
-    Ok(matches!(parse(&all[1..])?, Command::Run { .. }))
+    Ok(matches!(
+        parse(&all[1..])?,
+        Command::Run { binding: None, .. }
+    ))
 }
 pub(crate) fn error_value(error: &str) -> Value {
     json!({"schema":REPORT_SCHEMA,"phase":"failed","error":error,"session_path":null,
@@ -391,22 +406,71 @@ pub(crate) fn initialize_report(request: &InitializeRequest) -> Value {
         "error":null,"session_path":null,"recovery":{"status":"not_reported","scope":INITIALIZE_SCOPE}})
 }
 
+/// Saved scope is part of the transaction identity, never selected again on recovery.
+pub(crate) fn validate_scope(
+    binding: Option<&DeviceBinding>,
+    scope: Option<&str>,
+    serial: &str,
+) -> Result<(), String> {
+    match (binding, scope) {
+        (None, None) => Ok(()),
+        (Some(binding), Some("device")) if binding.serial == serial => {
+            crate::device_registry::parse_binding(
+                &serde_json::to_string(binding).map_err(|e| e.to_string())?,
+            )
+            .map(|_| ())
+        }
+        _ => Err("deployment session device scope is incomplete or differs from serial".into()),
+    }
+}
+pub(crate) fn report_binding(value: &mut Value, binding: Option<&DeviceBinding>) {
+    if let Some(binding) = binding {
+        value["device_binding"] = json!(binding);
+        value["lease_scope"] = json!("device");
+    }
+}
+pub(crate) fn acquire_target(
+    serial: &str,
+    label: &str,
+    binding: Option<&DeviceBinding>,
+) -> Result<crate::devlease::Lease, String> {
+    match binding {
+        Some(binding) => crate::devlease::Lease::acquire_device(
+            &crate::lease_storage::resolve(),
+            binding,
+            label,
+            std::time::Duration::from_secs(1),
+        ),
+        None => crate::devlease::Lease::target(Some(serial), label),
+    }
+}
+
 /// Recovery acquisition rechecks the immutable source under the actual lease.
 /// A failure leaves the existing recovery obligation in the lease domain.
 pub(crate) fn acquire_context(
     source: &Path,
     serial: &str,
     bytes: &[u8],
+    binding: Option<&DeviceBinding>,
 ) -> Result<crate::devlease::Lease, String> {
     let storage = crate::lease_storage::resolve();
-    let (device, legacy) = storage.require_ready()?;
-    let lease = crate::devlease::Lease::acquire_recovery(
-        &device,
-        &legacy,
-        serial,
-        source,
-        std::time::Duration::from_secs(1),
-    )?;
+    let lease = if let Some(binding) = binding {
+        crate::devlease::Lease::acquire_device_recovery(
+            &storage,
+            binding,
+            source,
+            std::time::Duration::from_secs(1),
+        )?
+    } else {
+        let (device, legacy) = storage.require_ready()?;
+        crate::devlease::Lease::acquire_recovery(
+            &device,
+            &legacy,
+            serial,
+            source,
+            std::time::Duration::from_secs(1),
+        )?
+    };
     if bytes.len() > 524288
         || crate::confirmation_transport::bounded(&source.join("session.json"), bytes.len() as u64)?
             != bytes
@@ -471,7 +535,7 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
         Command::Capabilities => {
             let metadata = crate::apk_metadata::tool().is_some();
             Ok((
-                json!({"schema":"phonefarm/game-deploy-capabilities@1","resources_v1":true,
+                json!({"schema":"phonefarm/game-deploy-capabilities@1","resources_v1":true,"device_binding_v1":true,
                 "fresh_single_apk_v1":true,"launcher_initialization_v1":true,"doom_render_scene_v1":true,"metadata_tool":{"available":metadata,
                 "error":if metadata {Value::Null} else {json!("fixed AAPT2_BIN or aapt2 on explicit PATH is required")}}}),
                 0,
@@ -483,6 +547,7 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
         }
         Command::Run {
             request,
+            binding,
             serial,
             out,
         } => {
@@ -499,7 +564,7 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
                 }
                 let out = output(&out)?;
                 let result = request.prepare_inputs(&request_path).and_then(|source| {
-                    crate::devlease::Lease::target(Some(&serial), "game-scene").and_then(|lease| {
+                    acquire_target(&serial, "game-scene", binding.as_ref()).and_then(|lease| {
                         crate::game_initialize::Session::new_scene(
                             lease,
                             request.clone(),
@@ -512,6 +577,7 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
                     Ok(session) => session.execute(),
                     Err(error) => {
                         let mut value = crate::game_scene::report(&request);
+                        report_binding(&mut value, binding.as_ref());
                         value["error"] = json!(error);
                         save_report(&out, &value)?;
                         Ok((value, 2))
@@ -526,14 +592,14 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
                     return Err("request serial differs from explicit target".into());
                 }
                 let out = output(&out)?;
-                let result = crate::devlease::Lease::target(Some(&serial), "game-initialize")
-                    .and_then(|lease| {
-                        crate::game_initialize::Session::new(lease, request.clone(), &out)
-                    });
+                let result = acquire_target(&serial, "game-initialize", binding.as_ref()).and_then(
+                    |lease| crate::game_initialize::Session::new(lease, request.clone(), &out),
+                );
                 return match result {
                     Ok(session) => session.execute(),
                     Err(error) => {
                         let mut value = initialize_report(&request);
+                        report_binding(&mut value, binding.as_ref());
                         value["error"] = json!(error);
                         save_report(&out, &value)?;
                         Ok((value, 2))
@@ -553,13 +619,14 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
                         return Err("APK metadata tool unavailable; configure AAPT2_BIN".into());
                     }
                     source_file(&request.assets[0])?;
-                    let lease = crate::devlease::Lease::target(Some(&serial), "game-install")?;
+                    let lease = acquire_target(&serial, "game-install", binding.as_ref())?;
                     crate::game_install_session::Session::new(lease, request.clone(), &out)
                 })();
                 return match result {
                     Ok(session) => session.execute(),
                     Err(error) => {
                         let mut value = install_report(&request);
+                        report_binding(&mut value, binding.as_ref());
                         value["error"] = json!(error);
                         save_report(&out, &value)?;
                         Ok((value, 2))
@@ -575,11 +642,12 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
             let out = output(&out)?;
             let result = request
                 .check_sources()
-                .and_then(|_| crate::devlease::Lease::target(Some(&serial), "game-deploy"));
+                .and_then(|_| acquire_target(&serial, "game-deploy", binding.as_ref()));
             let lease = match result {
                 Ok(lease) => lease,
                 Err(error) => {
                     let mut value = report(&request);
+                    report_binding(&mut value, binding.as_ref());
                     value["error"] = json!(error);
                     save_report(&out, &value)?;
                     return Ok((value, 2));
@@ -589,6 +657,7 @@ fn execute(command: Command) -> Result<(Value, i32), String> {
                 Ok(session) => session.execute(),
                 Err(error) => {
                     let mut value = report(&request);
+                    report_binding(&mut value, binding.as_ref());
                     value["error"] = json!(error);
                     save_report(&out, &value)?;
                     Ok((value, 2))

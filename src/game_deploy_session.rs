@@ -1,6 +1,7 @@
 //! A new resource subtree is the entire device-side transaction. No APK,
 //! preferences, existing saves or application lifecycle belong to this scope.
 use crate::{
+    device_registry::DeviceBinding,
     devlease::Lease,
     game_deploy::{self, Request, SCOPE},
     game_deploy_transport::{ShellStderr, Transport, TransportError},
@@ -13,7 +14,6 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
 };
 
 const SCHEMA: &str = "phonefarm/game-deploy-session@1";
@@ -49,10 +49,19 @@ struct State {
     checks: Value,
     application_access: Value,
     source_session: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_binding: Option<DeviceBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_scope: Option<String>,
 }
 impl State {
     fn validate(&self) -> Result<(), String> {
         self.request.validate()?;
+        game_deploy::validate_scope(
+            self.device_binding.as_ref(),
+            self.lease_scope.as_deref(),
+            &self.request.serial,
+        )?;
         if self.schema != SCHEMA
             || self.token.is_empty()
             || self.token.len() > 128
@@ -215,6 +224,7 @@ pub(crate) struct Session {
 impl Session {
     pub(crate) fn new(lease: Lease, request: Request, out: &Path) -> Result<Self, String> {
         let token = lease.token().to_owned();
+        let binding = lease.device_binding().cloned();
         let state = State {
             schema: SCHEMA.into(),
             remote_root: root(&request, &token),
@@ -227,11 +237,16 @@ impl Session {
             checks: json!({}),
             application_access: json!({"status":"unknown"}),
             source_session: None,
+            lease_scope: binding.as_ref().map(|_| "device".into()),
+            device_binding: binding,
         };
         Self::from_state(lease, state, out)
     }
     fn from_state(lease: Lease, state: State, out: &Path) -> Result<Self, String> {
         state.validate()?;
+        if lease.device_binding() != state.device_binding.as_ref() {
+            return Err("lease device scope differs from saved transaction".into());
+        }
         let dir = out.join("game-deploy");
         let transport = Transport::new(
             &state.request.serial,
@@ -627,6 +642,7 @@ impl Session {
     }
     fn report(&self, phase: &str, error: Option<&str>, recovery: &str) -> Value {
         let mut value = game_deploy::report(&self.state.request);
+        game_deploy::report_binding(&mut value, self.state.device_binding.as_ref());
         value["phase"] = json!(phase);
         value["error"] = json!(error);
         value["session_path"] = json!("game-deploy");
@@ -721,64 +737,27 @@ impl Session {
         if state.request.serial != serial {
             return Err("recovery serial differs from source session".into());
         }
-        let storage = crate::lease_storage::resolve();
-        let (device, legacy) = match storage.require_ready() {
-            Ok(paths) => paths,
-            Err(error) => {
-                return failed_recovery(&state.request, &source, out, &error, Some(false))
-            }
-        };
-        let lease = match Lease::acquire_recovery(
-            &device,
-            &legacy,
-            serial,
+        let lease = match game_deploy::acquire_context(
             &source,
-            Duration::from_secs(1),
+            serial,
+            &bytes,
+            state.device_binding.as_ref(),
         ) {
             Ok(lease) => lease,
-            Err(error) => {
-                return failed_recovery(&state.request, &source, out, &error, Some(false));
-            }
+            Err(error) => return failed_recovery(&state, &source, out, &error, Some(false)),
         };
-        match crate::confirmation_transport::bounded(&source.join("session.json"), 131072) {
-            Ok(current) if current == bytes => {}
-            other => {
-                let error = other
-                    .err()
-                    .unwrap_or_else(|| "source recovery context changed during acquisition".into());
-                return failed_recovery(&state.request, &source, out, &error, Some(false));
-            }
-        }
         state.source_session = Some(source.clone());
-        let request = state.request.clone();
+        let prior = state.clone();
         let mut session = match Self::from_state(lease, state, out) {
             Ok(session) => session,
-            Err(error) => return failed_recovery(&request, &source, out, &error, Some(false)),
+            Err(error) => return failed_recovery(&prior, &source, out, &error, Some(false)),
         };
         if let Err(error) = session.lease.hold_for_recovery(&session.dir) {
             // hold can publish the new marker before a receipt/fsync failure.
             // Observe the still-held lease domain instead of guessing which
             // context a later recovery must use. Never issue device commands.
-            let status = crate::devlease::storage_status(&storage);
-            let contexts: Vec<_> = status["entries"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|entry| entry["serial"] == serial)
-                .filter_map(|entry| entry["recovery_context"].as_str())
-                .collect();
-            let moved = if session.lease.check().is_ok() && contexts.len() == 1 {
-                if Path::new(contexts[0]) == session.dir {
-                    Some(true)
-                } else if Path::new(contexts[0]) == source {
-                    Some(false)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            return failed_recovery(&request, &source, out, &error, moved);
+            let moved = game_deploy::context_moved(&session.lease, serial, &source, &session.dir);
+            return failed_recovery(&prior, &source, out, &error, moved);
         }
         let result = match session.state.phase.as_str() {
             "committed" => session.verify_committed(),
@@ -802,13 +781,14 @@ impl Session {
     }
 }
 fn failed_recovery(
-    request: &Request,
+    state: &State,
     source: &Path,
     out: &Path,
     error: &str,
     moved: Option<bool>,
 ) -> Result<(Value, i32), String> {
-    let mut report = game_deploy::report(request);
+    let mut report = game_deploy::report(&state.request);
+    game_deploy::report_binding(&mut report, state.device_binding.as_ref());
     report["phase"] = json!("recovery_required");
     report["error"] = json!(error);
     report["session_path"] = if moved == Some(true) {
@@ -886,6 +866,159 @@ pub(crate) fn package_identity(output: &str) -> Result<(u64, u64), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_game_binding_keeps_other_device_available_through_recovery() {
+        use std::{fs, process::Command};
+        const NAME: &str = "game_deploy_session::tests::typed_game_binding_keeps_other_device_available_through_recovery";
+        // Separate, owned processes exercise the real dead-owner recovery rule;
+        // no environment changes leak into concurrently running unit tests.
+        if let Ok(phase) = std::env::var("PF_GAME_SCOPE_TEST_PHASE") {
+            let root = PathBuf::from(std::env::var_os("DEVLOCK_DIR").unwrap());
+            let storage = crate::lease_storage::resolve();
+            let a = crate::device_registry::resolve_binding(&storage, "scope-A").unwrap();
+            let b = crate::device_registry::resolve_binding(&storage, "scope-B").unwrap();
+            let request: Request = serde_json::from_value(json!({
+                "schema":game_deploy::REQUEST_SCHEMA,"node_id":"fixture","game_id":"game",
+                "version":"v1","serial":"scope-A","mode":"check",
+                "recipe":{"schema":game_deploy::RECIPE_SCHEMA,"package":"com.example.game",
+                    "version_code":1,"apk_sha256":"a".repeat(64),
+                    "files":[{"asset_name":"data","path":"base/data"}]},
+                "assets":[{"name":"data","path":"/never-read/cache","size":1,"sha256":"b".repeat(64)}]
+            })).unwrap();
+            if phase == "create" {
+                let mut args = vec![
+                    "--request".into(),
+                    "unused.json".into(),
+                    "--serial".into(),
+                    "scope-A".into(),
+                    "--out".into(),
+                    "unused-out".into(),
+                ];
+                assert!(game_deploy::needs_queue(&args).unwrap());
+                args.extend([
+                    "--device-binding".into(),
+                    serde_json::to_string(&a).unwrap(),
+                ]);
+                assert!(!game_deploy::needs_queue(&args).unwrap());
+                assert!(game_deploy::needs_queue(&vec![
+                    "recover".into(),
+                    "--session".into(),
+                    "old".into(),
+                    "--serial".into(),
+                    "scope-A".into(),
+                    "--out".into(),
+                    "new".into(),
+                    "--device-binding".into(),
+                    serde_json::to_string(&a).unwrap()
+                ])
+                .is_err());
+                let lease =
+                    game_deploy::acquire_target("scope-A", "game-deploy", Some(&a)).unwrap();
+                let other =
+                    game_deploy::acquire_target("scope-B", "game-install", Some(&b)).unwrap();
+                let alias =
+                    crate::device_registry::resolve_binding(&storage, "scope-A-wifi").unwrap();
+                assert!(
+                    game_deploy::acquire_target(&alias.serial, "game-scene", Some(&alias)).is_err()
+                );
+                let mut session = Session::new(lease, request, &root.join("source")).unwrap();
+                let saved = serde_json::to_value(&session.state).unwrap();
+                assert_eq!(saved["device_binding"], json!(a));
+                assert_eq!(saved["lease_scope"], "device");
+                session.lease.hold_for_recovery(&session.dir).unwrap();
+                other.check().unwrap();
+            } else {
+                assert_eq!(phase, "recover");
+                let other =
+                    game_deploy::acquire_target("scope-B", "game-initialize", Some(&b)).unwrap();
+                let (report, code) = Session::recover(
+                    &root.join("source/game-deploy"),
+                    "scope-A",
+                    &root.join("recovery"),
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{report}");
+                assert_eq!(report["device_binding"], json!(a));
+                assert_eq!(report["lease_scope"], "device");
+                assert_eq!(report["recovery"]["status"], "verified");
+                other.check().unwrap();
+                drop(other);
+                let lease = game_deploy::acquire_target("scope-A", "game-deploy", None).unwrap();
+                let legacy = Session::new(lease, request, &root.join("legacy")).unwrap();
+                let saved = serde_json::to_value(&legacy.state).unwrap();
+                assert!(saved.get("device_binding").is_none());
+                assert!(legacy
+                    .report("prepared", None, "not_reported")
+                    .get("lease_scope")
+                    .is_none());
+            }
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "pf-game-scope-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::lease_domain::init(&root, &root.join("devices")).unwrap();
+        fs::write(root.join("device-registry.json"), json!({
+            "schema":"phonefarm/device-registry@1","revision":1,"updated_at":now(),
+            "identity_basis":"operator_declared","physical_identity_verified":false,"execution_scope":"global",
+            "devices":[{"device_id":"A","label":"synthetic A","aliases":["scope-A","scope-A-wifi"],"enabled":true},
+                {"device_id":"B","label":"synthetic B","aliases":["scope-B"],"enabled":true}]
+        }).to_string()).unwrap();
+        for dir in ["source", "recovery", "legacy"] {
+            fs::create_dir(root.join(dir)).unwrap();
+        }
+        let mut source = None;
+        for phase in ["create", "recover"] {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([NAME, "--exact", "--nocapture"])
+                .env("PF_GAME_SCOPE_TEST_PHASE", phase)
+                .env("DEVLOCK_DIR", &root)
+                .env("PHONEFARM_LEASE_DIR", root.join("devices"))
+                .env("PHONEFARM_STATE_DIR", root.join("state"))
+                .env("PHONEFARM_LEASE_TIMEOUT_MS", "1000")
+                .env("ADB_BIN", "/usr/bin/false");
+            for key in [
+                "DEVLOCK_INSTANCE_ID",
+                "PHONEFARM_SHARED_GID",
+                "PF_JOB_ID",
+                "PF_JOB_LEASE_DIR",
+                "PF_JOB_OUT",
+                "PF_RECOVERY_OUT",
+                "PF_RUNTIME_REPORT",
+            ] {
+                child.env_remove(key);
+            }
+            let output = child.output().unwrap();
+            fs::write(root.join(format!("{phase}.stdout")), &output.stdout).unwrap();
+            fs::write(root.join(format!("{phase}.stderr")), &output.stderr).unwrap();
+            assert!(
+                output.status.success(),
+                "{phase} failed; retained {}: {} {}",
+                root.display(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let bytes = fs::read(root.join("source/game-deploy/session.json")).unwrap();
+            if let Some(original) = &source {
+                assert_eq!(&bytes, original);
+            } else {
+                source = Some(bytes);
+            }
+        }
+        assert_eq!(
+            crate::devlease::storage_status(&crate::lease_storage::Storage::custom(&root))
+                ["status"],
+            "clear"
+        );
+        // This is host lease/serialization evidence only: no APK, ADB or game ran.
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn remote_completion_and_engine_identity_are_explicit() {
         let terminal = "PF_GAME_DEPLOY_EXIT:token:1:";

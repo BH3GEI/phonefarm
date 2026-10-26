@@ -279,7 +279,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
 游戏资源: game-deploy capabilities --json
-       game-deploy --request FILE --serial S --out DIR --json
+       game-deploy --request FILE --serial S --out DIR [--device-binding JSON] --json
        game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json
 灰档:  gray-layer status [--serial S] | off [pkg] [--serial S] [--json]
        gray-layer session --mode MODE --package PKG --serial S --out DIR [--max-seconds 900] [--power-policy observe|battery] [--actor-id agent] [--so 层.so] [--keep-prop]

@@ -171,7 +171,7 @@ pub fn strip_lock_args(args: &mut Vec<String>) -> Result<LockOpts, String> {
                 "--out" | "--max-seconds" | "--actor-id" | "--evidence-origin" | "--power-policy" |
                 "--request-id" | "--request" | "--session" | "--frames" | "--intensity" | "--timeout-seconds" | "--device-binding"),
             "gray-ab" => matches!(a.as_str(), "--serial" | "--out" | "--pairs" | "--mode" | "--evidence-origin"),
-            "game-deploy" => matches!(a.as_str(), "--serial" | "--request" | "--session" | "--out"),
+            "game-deploy" => matches!(a.as_str(), "--serial" | "--request" | "--session" | "--out" | "--device-binding"),
             _ => false,
         };
         if gray_value {

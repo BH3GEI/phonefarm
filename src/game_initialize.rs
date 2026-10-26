@@ -1,5 +1,6 @@
 //! An explicit, bounded launcher attempt; new application configuration is retained.
 use crate::{
+    device_registry::DeviceBinding,
     devlease::Lease,
     game_deploy::{self, InitializeRequest, INITIALIZE_SCOPE},
     game_deploy_session::{digest, package_identity, valid_boot},
@@ -54,11 +55,20 @@ struct State {
     stop_observation: Value,
     source_session: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_binding: Option<DeviceBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     scene: Option<game_scene::State>,
 }
 impl State {
     fn validate(&self) -> Result<(), String> {
         self.request.validate()?;
+        game_deploy::validate_scope(
+            self.device_binding.as_ref(),
+            self.lease_scope.as_deref(),
+            &self.request.serial,
+        )?;
         if self.schema
             != if self.scene.is_some() {
                 game_scene::SESSION
@@ -143,10 +153,12 @@ impl State {
         }
     }
     fn base_report(&self) -> Value {
-        self.scene.as_ref().map_or_else(
+        let mut value = self.scene.as_ref().map_or_else(
             || game_deploy::initialize_report(&self.request),
             |s| game_scene::report(&s.request),
-        )
+        );
+        game_deploy::report_binding(&mut value, self.device_binding.as_ref());
+        value
     }
 }
 
@@ -182,6 +194,7 @@ impl Session {
         out: &Path,
     ) -> Result<Self, String> {
         let token = lease.token().to_owned();
+        let binding = lease.device_binding().cloned();
         let storage = game_deploy::initialize_report(&request)["storage_initialization"].clone();
         Self::from_state(
             lease,
@@ -212,6 +225,8 @@ impl Session {
                 application_access: json!({"status":"unknown"}),
                 stop_observation: json!({}),
                 source_session: None,
+                lease_scope: binding.as_ref().map(|_| "device".into()),
+                device_binding: binding,
                 scene,
             },
             out,
@@ -219,6 +234,9 @@ impl Session {
     }
     fn from_state(lease: Lease, state: State, out: &Path) -> Result<Self, String> {
         state.validate()?;
+        if lease.device_binding() != state.device_binding.as_ref() {
+            return Err("lease device scope differs from saved transaction".into());
+        }
         let dir = out.join("game-deploy");
         crate::shared_access::create_dir(&dir).map_err(|e| e.to_string())?;
         File::open(&dir)
@@ -928,7 +946,12 @@ impl Session {
         if state.request.serial != serial {
             return Err("initialization recovery serial differs from source".into());
         }
-        let lease = match game_deploy::acquire_context(&source, serial, &bytes) {
+        let lease = match game_deploy::acquire_context(
+            &source,
+            serial,
+            &bytes,
+            state.device_binding.as_ref(),
+        ) {
             Ok(lease) => lease,
             Err(error) => return failed_recovery(&state, &source, out, &error, Some(false)),
         };
@@ -1209,6 +1232,8 @@ mod tests {
             application_access: json!({}),
             stop_observation: json!({}),
             source_session: None,
+            device_binding: None,
+            lease_scope: None,
             scene: None,
         };
         state.validate().unwrap();
