@@ -38,6 +38,7 @@ const FRAME_AGE_SECONDS: i64 = 30;
 const ACTIONS: &[&str] = &[
     "screenshot",
     "logcat",
+    "diagnostics",
     "tap",
     "swipe",
     "text",
@@ -442,7 +443,7 @@ fn live(store: &Store, state: &Value) -> Result<bool> {
 }
 fn owner_actions(s: &Value) -> Vec<&'static str> {
     ACTIONS.iter().copied().filter(|action| {
-        s.get("action_capabilities").map_or(*action != "logcat", |declared| {
+        s.get("action_capabilities").map_or(!matches!(*action, "logcat" | "diagnostics"), |declared| {
             declared.as_array().is_some_and(|items| items.iter().any(|v| v == action))
         })
     }).collect()
@@ -735,6 +736,14 @@ fn key_code(value: &Value) -> Result<u64> {
     };
     Ok(code)
 }
+fn validate_package(p: &Value) -> Result<()> {
+    let package = string(p, "package")?;
+    if package.is_empty() || package.len() > 200
+        || !package.bytes().all(|b| b.is_ascii_alphanumeric() || b"._".contains(&b)) {
+        return Err(error("invalid_request", "invalid package"));
+    }
+    Ok(())
+}
 fn validate_request(r: &Value) -> Result<()> {
     keys(
         r,
@@ -756,14 +765,17 @@ fn validate_request(r: &Value) -> Result<()> {
             if p.get("lines").is_some() { bounded(p, "lines", 1, 2000)?; }
             if p.get("pid").is_some() { bounded(p, "pid", 1, i32::MAX as u64)?; }
         }
+        "diagnostics" => {
+            keys(p, &["package"])?;
+            if p.get("package").is_some() { validate_package(p)?; }
+        }
         "tap" => { keys(p, &["x", "y", "frame_id"])?; coordinate("x")?; coordinate("y")?; }
         "swipe" => { keys(p, &["x1", "y1", "x2", "y2", "ms", "frame_id"])?; for k in ["x1", "y1", "x2", "y2"] { coordinate(k)?; } bounded(p, "ms", 1, 10_000)?; }
         "text" => { keys(p, &["text"])?; let text = string(p, "text")?; if text.is_empty() || text.chars().count() > 1000 || text.chars().any(char::is_control) { return Err(error("invalid_request", "text requires 1..1000 visible characters")); } }
         "key" => { keys(p, &["key"])?; key_code(&p["key"])?; }
         "start_app" | "stop_app" => {
             keys(p, if action == "start_app" { &["package", "activity"] } else { &["package"] })?;
-            let package = string(p, "package")?;
-            if package.is_empty() || package.len() > 200 || !package.bytes().all(|b| b.is_ascii_alphanumeric() || b"._".contains(&b)) { return Err(error("invalid_request", "invalid package")); }
+            validate_package(p)?;
             if let Some(activity) = p.get("activity") {
                 let a = activity.as_str().ok_or_else(|| error("invalid_request", "activity must be a string"))?;
                 if a.is_empty() || a.len() > 300 || !a.bytes().all(|b| b.is_ascii_alphanumeric() || b"._$/".contains(&b)) { return Err(error("invalid_request", "invalid activity")); }
@@ -838,6 +850,26 @@ fn shell_command(r: &Value) -> Result<(String, u64)> {
         "logcat" => {
             let mut command = format!("logcat -d -t {} -v threadtime", p["lines"].as_u64().unwrap_or(200));
             if let Some(pid) = p["pid"].as_u64() { command.push_str(&format!(" --pid={pid}")); }
+            (command, 20)
+        }
+        "diagnostics" => {
+            // Selected read-only facts, not installation/root/readiness qualification.
+            // Per-section prefixes keep even verbose Android dumps bounded on-device.
+            let mut command = String::from(r#"printf '[device properties; selected fields, up to 2048 bytes]\n'
+(for p in ro.product.manufacturer ro.product.model ro.build.version.release ro.build.version.sdk ro.product.cpu.abilist ro.debuggable; do printf '%s=' "$p"; getprop "$p"; done) 2>&1 | head -c 2048
+printf '\n[ADB shell identity; up to 512 bytes; su not probed]\n'
+id 2>&1 | head -c 512
+printf '\n[display size/density; up to 1024 bytes]\n'
+(wm size; wm density) 2>&1 | head -c 1024
+printf '\n[foreground activity; selected fields, up to 2048 bytes]\n'
+dumpsys activity activities 2>&1 | grep -E 'mResumedActivity|topResumedActivity|ResumedActivity|Permission Denial|Error|not found' | head -c 2048
+"#);
+            if let Some(package) = p["package"].as_str() {
+                command.push_str(&format!(r#"printf '\n[requested package {}; selected fields, up to 2048 bytes]\n'
+(pm path --user 0 {}; dumpsys package {} | grep -E 'versionCode=|versionName=|userId=|User 0:|Permission Denial|Error|not found') 2>&1 | head -c 2048
+"#, package, q(package), q(package)));
+            }
+            command.push_str("printf '\n[scope] Selected read-only observations only; empty/failed fields are unknown. ADB command completion does not verify physical connection type, root availability, app readiness or scene state.\n'");
             (command, 20)
         }
         "tap" => (format!("input tap {} {}", p["x"], p["y"]), 10),
@@ -994,7 +1026,7 @@ fn execute(store: &Store, lease: &Lease, transport: &mut Transport, s: &Value, r
         )
         .map_err(|e| error(if e.uncertain { "unknown" } else { "io_error" }, e.message))?;
     let mut value = json!({"exit":out.code,"stdout":out.stdout.chars().take(8192).collect::<String>()});
-    if r["action"] == "logcat" {
+    if matches!(r["action"].as_str(), Some("logcat" | "diagnostics")) {
         value["stdout_truncated"] = json!(out.stdout.chars().nth(8192).is_some());
     }
     if coordinate_input {
@@ -1156,7 +1188,7 @@ fn claim(store: &Store, s: &mut Value, completed: &HashSet<String>, end: Instant
     result["status"] = json!("started");
     result["started_at"] = json!(now());
     store.write(&record("started", request_id), &result, false)?;
-    if !matches!(action, "renew" | "release" | "logcat") {
+    if !matches!(action, "renew" | "release" | "logcat" | "diagnostics") {
         s["input_frame_id"] = Value::Null;
     }
     s["last_request_id"] = json!(request_id);
@@ -1627,23 +1659,39 @@ mod tests {
     }
     #[test]
     fn typed_boundary_rejects_raw_commands_and_unbounded_input() {
-        assert!(ACTIONS.contains(&"logcat"));
-        let scratch = Scratch::new();
-        let (store, _owner, mut legacy) = scratch.fixture();
-        assert!(!owner_actions(&legacy).contains(&"logcat"));
-        let original = request("log-owner", "logcat", json!({}));
-        assert_eq!(publish(&store, &original).unwrap_err().code, "unsupported");
-        legacy["action_capabilities"] = json!(ACTIONS);
-        save(&store, &mut legacy).unwrap();
-        assert_eq!(publish(&store, &original).unwrap()["status"], "accepted");
-        legacy.as_object_mut().unwrap().remove("action_capabilities");
-        save(&store, &mut legacy).unwrap();
-        assert_eq!(publish(&store, &original).unwrap()["status"], "accepted");
-        legacy["action_capabilities"] = json!(ACTIONS);
-        legacy["input_frame_id"] = json!("kept-frame");
-        assert!(matches!(claim(&store, &mut legacy, &HashSet::new(),
-            Instant::now() + Duration::from_secs(60)).unwrap(), Claim::Action(_, _)));
-        assert_eq!(legacy["input_frame_id"], "kept-frame");
+        for action in ["logcat", "diagnostics"] {
+            assert!(ACTIONS.contains(&action));
+            let scratch = Scratch::new();
+            let (store, _owner, mut legacy) = scratch.fixture();
+            assert!(!owner_actions(&legacy).contains(&action));
+            let original = request("read-owner", action, json!({}));
+            assert_eq!(publish(&store, &original).unwrap_err().code, "unsupported");
+            legacy["action_capabilities"] = json!(ACTIONS);
+            save(&store, &mut legacy).unwrap();
+            assert_eq!(publish(&store, &original).unwrap()["status"], "accepted");
+            legacy.as_object_mut().unwrap().remove("action_capabilities");
+            save(&store, &mut legacy).unwrap();
+            assert_eq!(publish(&store, &original).unwrap()["status"], "accepted");
+            legacy["action_capabilities"] = json!(ACTIONS);
+            legacy["input_frame_id"] = json!("kept-frame");
+            assert!(matches!(claim(&store, &mut legacy, &HashSet::new(),
+                Instant::now() + Duration::from_secs(60)).unwrap(), Claim::Action(_, _)));
+            assert_eq!(legacy["input_frame_id"], "kept-frame");
+        }
+        let diagnostics = request("inspect", "diagnostics", json!({}));
+        validate_request(&diagnostics).unwrap();
+        let (command, budget) = shell_command(&diagnostics).unwrap();
+        assert_eq!(budget, 20);
+        assert!(command.contains("getprop") && command.contains("id 2>&1")
+            && command.contains("wm size; wm density") && command.contains("dumpsys activity activities"));
+        assert!(!command.contains("pm path") && !command.contains("su -c"));
+        let package = request("inspect-package", "diagnostics", json!({"package":"com.example.game"}));
+        validate_request(&package).unwrap();
+        assert!(shell_command(&package).unwrap().0.contains("pm path --user 0 'com.example.game'"));
+        for params in [json!({"package":"a; id"}), json!({"package":""}),
+            json!({"package":null}), json!({"shell":"id"})] {
+            assert!(validate_request(&request("bad-diagnostics", "diagnostics", params)).is_err());
+        }
         let logcat = request("logs", "logcat", json!({}));
         validate_request(&logcat).unwrap();
         assert_eq!(shell_command(&logcat).unwrap(), ("logcat -d -t 200 -v threadtime".into(), 20));
