@@ -105,6 +105,8 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 #   --pattern 正则  自定义断言行匹配     --max-mb N  单文件上限(缺省16)，超限与二进制跳过并如实标注
 ```
 
+CTS携带本地APK的安装目前仅支持Android默认或精确`pm install -r {apk}`模板；需要aapt/aapt2核身份、明确命令回执及实际安装字节。旧hash缓存不代表已安装。HAP/自定义安装adapter未实现，已安装OH模块和cts-fetch仍可用。未知安装仅保存证据/报错，尚无typed恢复屏障；不能把本地进程退出当远端已停止。合同见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/CTS-INSTALLATION.md 。
+
 产出 `summary.json`（逐用例判定 + 完整断言栈）与 JUnit XML，**不必再 hdc 进机器翻日志**。
 跳过/假设失败不计为通过；崩溃、看门狗超时、runner 报错都会把未交代的用例如实标成
 `NOT_RUN` / `ENV_BLOCKED` 并对账，绝不静默零记。

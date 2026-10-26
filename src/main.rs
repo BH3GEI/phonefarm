@@ -240,7 +240,7 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 插件:  plugins                                   (列出已登记的专用场景插件)
 CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/module/Runner | --dir APK目录)
        [--environment E.json] [--serial S] [--include 正则] [--exclude 正则] [--resume] [--retry N]
-       [--timeout-ms N] [--idle-timeout-ms N] [--heal-script 路径] [--install-cmd '模板{apk}'] [--out 目录]
+       [--timeout-ms N] [--idle-timeout-ms N] [--heal-script 路径] [--install-cmd 'pm install -r {apk}'] [--out 目录]
        [--detach 后台跑,轮询 <out>/summary.json]   (A2OH CTS 批量挂机执行器,Android/OH 双协议)
 取数:  cts-fetch --remote <设备侧结果路径> [--serial S] [--out 目录] [--pattern 正则] [--max-mb N]
        (设备上已有 CTS/XTS 结果 → hdc file recv/adb pull 拉回 + 断言扫描 → assertions.json)
