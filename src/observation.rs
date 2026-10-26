@@ -1,5 +1,5 @@
 //! Short device observations share the experiment lease and own a bounded worker group.
-use crate::{devlease::Lease, lease_storage::Storage};
+use crate::{device_registry::DeviceBinding, devlease::Lease, lease_storage::Storage};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -70,10 +70,25 @@ pub(crate) fn run(
     storage: &Storage,
     timeout: Duration,
 ) -> Result<Output, Failure> {
-    let mut lease = Lease::observe(storage, kind).map_err(|reason| Failure {
-        state: "deferred",
-        reason,
-    })?;
+    run_scoped(kind, args, storage, timeout, None)
+}
+
+pub(crate) fn run_scoped(
+    kind: &str,
+    args: &[String],
+    storage: &Storage,
+    timeout: Duration,
+    binding: Option<&DeviceBinding>,
+) -> Result<Output, Failure> {
+    let acquired = if let Some(binding) = binding {
+        if kind != "screen" || screen_serial(args) != Some(binding.serial.as_str()) {
+            return Err(Failure::error("device observation must name its bound screen serial"));
+        }
+        Lease::acquire_device(storage, binding, kind, Duration::ZERO)
+    } else {
+        Lease::observe(storage, kind)
+    };
+    let mut lease = acquired.map_err(|reason| Failure { state: "deferred", reason })?;
     let (out_path, out) = OutputFile::new("out")?;
     let (err_path, err) = OutputFile::new("err")?;
     let mut cmd = Command::new(std::env::current_exe().map_err(|e| Failure::error(e.to_string()))?);
@@ -180,6 +195,28 @@ fn supervise(
     })
 }
 
+fn screen_serial(args: &[String]) -> Option<&str> {
+    let mut serials = args.chunks_exact(2)
+        .filter(|pair| pair[0] == "--serial").map(|pair| pair[1].as_str());
+    let serial = serials.next()?;
+    serials.next().is_none().then_some(serial)
+}
+
+fn verify_scope(marker: &serde_json::Value, args: &[String]) -> Result<(), String> {
+    if marker.get("device_binding").is_none() && marker.get("scope").is_none()
+        && marker["serial"] == "@observation" {
+        return Ok(());
+    }
+    let binding = crate::device_registry::parse_binding(&marker["device_binding"].to_string())?;
+    if marker["format"] != 2 || marker["scope"] != "device"
+        || marker["serial"] != binding.serial
+        || args.first().map(String::as_str) != Some("screen")
+        || screen_serial(&args[1..]) != Some(binding.serial.as_str()) {
+        return Err("observation worker device binding mismatch".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn run_worker(args: &[String]) -> i32 {
     let verify = || -> Result<(), String> {
         let mut start = [0];
@@ -194,9 +231,9 @@ pub(crate) fn run_worker(args: &[String]) -> i32 {
         let marker: serde_json::Value =
             serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
+        verify_scope(&marker, args)?;
         let pid = std::process::id();
         if marker["token"] != token
-            || marker["serial"] != "@observation"
             || marker["pid"] != unsafe { libc::getppid() }
             || marker["child_pid"] != pid
             || marker["child_pgid"] != pid
