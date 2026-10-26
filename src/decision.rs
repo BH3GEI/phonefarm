@@ -337,6 +337,7 @@ pub struct SidecarDecider {
     stdin: ChildStdin,
     lines: Receiver<String>,
     stderr_tail: std::sync::Arc<std::sync::Mutex<VecDeque<u8>>>,
+    stderr_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     request_timeout: Duration,
     closed: bool,
     source: &'static str,
@@ -369,8 +370,10 @@ impl SidecarDecider {
             }
         });
         let tail = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let stderr_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let tail_w = std::sync::Arc::clone(&tail);
-        std::thread::spawn(move || {
+        let done_w = std::sync::Arc::clone(&stderr_done);
+        let stderr_thread = std::thread::spawn(move || {
             let mut r = BufReader::new(stderr);
             let mut buf = [0u8; 1024];
             loop {
@@ -387,13 +390,16 @@ impl SidecarDecider {
                     }
                 }
             }
+            done_w.store(true, std::sync::atomic::Ordering::Relaxed);
         });
+        let stderr_done_handle = stderr_done;
 
         let mut s = SidecarDecider {
             child,
             stdin,
             lines: rx,
             stderr_tail: tail,
+            stderr_done: stderr_done_handle,
             request_timeout,
             closed: false,
             source: "sidecar",
@@ -418,6 +424,16 @@ impl SidecarDecider {
         }
     }
 
+    /// 死亡/断连路径先等 stderr 读取线程排空尾部（EOF 后立即置位），消除尾部竞态。
+    fn wait_stderr_tail(&self, ms: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while !self.stderr_done.load(std::sync::atomic::Ordering::Relaxed)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn stderr_hint(&self) -> String {
         let t = self.stderr_tail.lock().unwrap();
         if t.is_empty() {
@@ -435,6 +451,7 @@ impl SidecarDecider {
             .and_then(|_| self.stdin.flush())
             .map_err(|e| {
                 self.closed = true;
+                self.wait_stderr_tail(1000);
                 format!("写入侧车失败: {e}{}", self.stderr_hint())
             })
     }
@@ -448,6 +465,7 @@ impl SidecarDecider {
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 self.closed = true;
+                self.wait_stderr_tail(1000);
                 Err(format!("侧车已退出{}", self.stderr_hint()))
             }
         }
