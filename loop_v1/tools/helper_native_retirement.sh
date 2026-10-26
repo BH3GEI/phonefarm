@@ -116,6 +116,9 @@ trap 'exit 77' HUP INT TERM
 printf '%s %s %s %s %s %s\n' "$TOKEN" "$BOOT" "$ACT" "$AST" "$ACT" "${RUN}_$MODE" > "$R/actor.tsv"
 sync
 mkfifo "$R/start.pipe"
+# 写端随脚本存活：cap 等提前退出的路径退出时关闭写端，
+# 门内读者立刻收到 EOF 退出，而不是永久阻塞（任何平台）。fd3 不用于其他用途。
+exec 3>"$R/start.pipe"
 printf 'native_reader\n' > "$R/launch.pending"; sync
 # The child is a new group and blocks before exec until its exact epoch is durable.
 setsid sh -c 'set -eu; IFS= read -r gate < "$1/start.pipe"; [ "$gate" = "$3 $4" ]; exec "$2" < "$1/requests.bin" > "$1/native.stdout" 2> "$1/native.stderr"' sh "$R" "$D/render_reader.elf" "$TOKEN" "$BOOT" > "$R/runner.stdout" 2> "$R/runner.stderr" &
