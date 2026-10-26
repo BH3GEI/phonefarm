@@ -388,9 +388,17 @@ pub(crate) fn init(root: &Path, device_root: &Path) -> Result<Paths, String> {
     directory(&root)?;
     let bridge = crate::shared_access::lock_file(&root.join("phonefarm-bridge.lock"), 0o600)
         .map_err(|e| e.to_string())?;
-    bridge
-        .try_lock()
-        .map_err(|e| format!("domain bridge is held/unavailable: {e}"))?;
+    // 瞬态持有者（同进程前序 fd 的关闭延迟）用有界重试吸收（与 queue_owner::lock 同模式）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match bridge.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => return Err(format!("domain bridge is held/unavailable: {e}")),
+        }
+    }
     let _owner = crate::queue_owner::lock(&root)?;
     // Another initializer may have finished while we acquired the stable locks.
     if let Ok(paths) = inspect(&root) {
