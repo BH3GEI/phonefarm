@@ -1,7 +1,7 @@
 # 节点（手机农场 Mac mini）不再自己编译：push 到 main 时在云端编好 phonefarm（macOS arm64）
-# 和灰档层 libVkLayer_refknobs.so（NDK arm64-v8a），覆盖上传到固定 release `node-build`。
-# 节点的 harness-ops/node/update_node.sh --git 读 build.json，sha 对得上就直接下载。
-# 资产：phonefarm、libVkLayer_refknobs.so、VkLayer_refknobs.json、build.json（最后上传）。
+# 和灰档层 libVkLayer_refknobs.so（NDK arm64-v8a），按完整 SHA 发布到 release `node-build`。
+# stable 复用已通过的 main 构建；版本资产与镜像不自动删除、不覆盖同 SHA 的不同内容。
+# SHA-build.json 最后发布；裸名/build.json 只为旧节点保留，不能代替精确版本。
 name: node-build
 
 on:
@@ -110,11 +110,12 @@ jobs:
           import hashlib, json, os, datetime
           files = {}
           for f in sorted(os.listdir("out")):
-              d = open(f"out/{f}", "rb").read()
-              # asset：带提交号的资产名，永不覆盖。--clobber 是先删后传，覆盖同名资产的那几秒
-              # （加上 GitHub 下载链接的缓存）会 404；节点按 asset 下载就不会撞上。
-              files[f] = {"sha256": hashlib.sha256(d).hexdigest(), "size": len(d),
-                          "asset": f"{os.environ['GITHUB_SHA'][:12]}-{f}"}
+              digest = hashlib.sha256()
+              with open(f"out/{f}", "rb") as stream:
+                  for chunk in iter(lambda: stream.read(1 << 20), b""):
+                      digest.update(chunk)
+              files[f] = {"sha256": digest.hexdigest(), "size": os.path.getsize(f"out/{f}"),
+                          "asset": f"{os.environ['GITHUB_SHA']}-{f}"}
           info = {
               "sha": os.environ["GITHUB_SHA"],
               "built_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -125,44 +126,141 @@ jobs:
           json.dump(info, open("build.json", "w"), indent=2)
           print(json.dumps(info, indent=2))
           PY
+          # 仅供本次发布使用：既有 manifest 与实际文件均核验，时间/run_url 不参与内容身份。
+          cat > verify_build.py <<'PY'
+          import hashlib, json, pathlib, sys
+
+          EXPECTED = json.loads(pathlib.Path("build.json").read_text())
+
+          def manifest(path, *, versioned=False):
+              raw = pathlib.Path(path).read_bytes()
+              if len(raw) > 65536:
+                  raise ValueError("existing manifest too large")
+              value = json.loads(raw)
+              if (not isinstance(value, dict) or value.get("sha") != EXPECTED["sha"]
+                      or not isinstance(value.get("files"), dict)
+                      or set(value["files"]) != set(EXPECTED["files"])):
+                  raise ValueError("immutable manifest identity mismatch")
+              for name, wanted in EXPECTED["files"].items():
+                  old = value["files"][name]
+                  if (not isinstance(old, dict) or type(old.get("size")) is not int
+                          or any(old.get(k) != wanted[k] for k in ("size", "sha256"))
+                          or (versioned and old.get("asset") != wanted["asset"])):
+                      raise ValueError("immutable manifest content mismatch: " + name)
+              return value
+
+          def file(path, wanted):
+              digest, size = hashlib.sha256(), 0
+              with pathlib.Path(path).open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1 << 20), b""):
+                      size += len(chunk)
+                      digest.update(chunk)
+              if size != wanted["size"] or digest.hexdigest() != wanted["sha256"]:
+                  raise ValueError("immutable asset content mismatch: " + pathlib.Path(path).name)
+
+          if __name__ == "__main__":
+              directory = pathlib.Path(sys.argv[1])
+              manifest(directory / "build.json")  # 旧 mirror 的 12 位 asset 名仍兼容。
+              for name, wanted in EXPECTED["files"].items():
+                  file(directory / name, wanted)
+          PY
       - name: 推 git ref 镜像 refs/node-build/sha/<提交>
         # 节点（国内网络）访问 release 资产要跳转到 release-assets.githubusercontent.com（Fastly），时好时坏；
         # 节点拉源码走的 ssh github.com 一直稳。所以产物也做成一个孤立提交推到隐藏 ref（不在 refs/heads 下，
-        # 普通 clone/fetch 不会下载它），节点用 git 按提交号取。ref 更新是原子的，没有覆盖窗口。
+        # 普通 clone/fetch 不会下载它），节点用 git 按提交号取。同 SHA 仅验证复用，不 force 更新。
         run: |
-          mkdir mirror && cp out/* build.json mirror/ && cd mirror
-          git init -q && git config user.name node-build && git config user.email node-build@users.noreply.github.com
-          git add -A && git commit -qm "node-build $GITHUB_SHA"
+          mkdir mirror
+          git -C mirror init -q
           remote="https://x-access-token:${GH_TOKEN}@github.com/$GH_REPO.git"
-          git push -q -f "$remote" "HEAD:refs/node-build/sha/$GITHUB_SHA"
-          echo "已推 refs/node-build/sha/$GITHUB_SHA -> $(git rev-parse HEAD)"
-          # 只留最近 8 个（按产物提交时间）
-          git ls-remote "$remote" 'refs/node-build/sha/*' | while read -r oid ref; do
-            echo "$(gh api "repos/$GH_REPO/git/commits/$oid" -q .committer.date) $ref"
-          done | sort -r | tail -n +9 | while read -r _ ref; do
-            echo "删旧 ref $ref"; git push -q "$remote" ":$ref"
-          done
+          ref="refs/node-build/sha/$GITHUB_SHA"
+          if git ls-remote --exit-code "$remote" "$ref" > mirror-ref.txt; then
+            git -C mirror fetch -q --depth 1 "$remote" "$ref"
+            mkdir existing-mirror
+            for f in build.json phonefarm libVkLayer_refknobs.so VkLayer_refknobs.json; do
+              git -C mirror cat-file "blob" "FETCH_HEAD:$f" > "existing-mirror/$f"
+            done
+            python3 verify_build.py existing-mirror
+            echo "复用已核验 mirror $GITHUB_SHA"
+          else
+            rc=$?
+            [ "$rc" = 2 ] || exit "$rc"
+            cp out/* build.json mirror/
+            git -C mirror config user.name node-build
+            git -C mirror config user.email node-build@users.noreply.github.com
+            git -C mirror add -A
+            git -C mirror commit -qm "node-build $GITHUB_SHA"
+            git -C mirror push -q "$remote" "HEAD:$ref"
+          fi
+          # 不按最近 N 个删除：stable promotion 与清理不共享事务。保留政策另行审查。
       - name: 上传到 release node-build
         run: |
-          # 只有比 release 现有 sha 更新（是它的后代）才覆盖，防止排队的旧提交盖掉新产物
-          if old=$(gh release download node-build -p build.json -O - 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["sha"])'); then
-            st=$(gh api "repos/$GH_REPO/compare/$old...$GITHUB_SHA" -q .status || echo unknown)
-            echo "release 现有 $old，本次 $GITHUB_SHA：$st"
-            if [ "$st" = behind ]; then echo "本次比 release 旧，不覆盖"; exit 0; fi
-          fi
-          gh release view node-build >/dev/null 2>&1 || \
-            gh release create node-build --target "$GITHUB_SHA" --prerelease --title node-build \
-              --notes "节点用的预编译产物（phonefarm macOS arm64 + 灰档层 .so），每次 push main 覆盖。以 build.json 的 sha 为准，tag 位置不代表产物版本。"
-          # 1) 带提交号的资产（新名字，不覆盖任何东西）；2) 不带提交号的同名资产（给旧版 update_node.sh，覆盖）；
-          # 3) 最后才换 build.json：节点看到新 sha 时它指向的资产都已就位（还会按 sha256 再核对）
-          short=${GITHUB_SHA:0:12}
-          mkdir vout
-          for f in out/*; do cp "$f" "vout/$short-$(basename "$f")"; done
-          gh release upload node-build vout/* --clobber
-          gh release upload node-build out/phonefarm out/libVkLayer_refknobs.so out/VkLayer_refknobs.json --clobber
-          gh release upload node-build build.json --clobber
-          # 带提交号的资产只留最近 3 次构建（正在下载上一版的节点不受影响）
-          gh api "repos/$GH_REPO/releases/tags/node-build" --jq '.assets[] | [.id, .name, .created_at] | @tsv' \
-            | awk -F'\t' 'substr($2,13,1)=="-" && $2 ~ /^[0-9a-f]+-/' | sort -t$'\t' -k3,3r \
-            | awk -F'\t' '{p=substr($2,1,12)} !(p in seen){seen[p]=1; n++} n>3 {print $1, $2}' \
-            | while read -r id name; do echo "删旧资产 $name"; gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"; done
+          python3 - <<'PY'
+          import json, os, pathlib, re, shutil, subprocess
+          from verify_build import EXPECTED, file, manifest
+
+          def gh(*args):
+              return subprocess.check_output(["gh", *args], stderr=subprocess.PIPE).decode()
+
+          try:
+              release = json.loads(gh("api", f"repos/{os.environ['GH_REPO']}/releases/tags/node-build"))
+          except subprocess.CalledProcessError as error:
+              if b"(HTTP 404)" not in error.stderr:
+                  raise
+              gh("release", "create", "node-build", "--target", EXPECTED["sha"], "--prerelease",
+                 "--title", "node-build", "--notes",
+                 "Exact full-SHA assets and manifests; build.json is a compatibility pointer, not the tag's version.")
+              release = json.loads(gh("api", f"repos/{os.environ['GH_REPO']}/releases/tags/node-build"))
+          pages = json.loads(gh("api", "--paginate", "--slurp",
+                                f"repos/{os.environ['GH_REPO']}/releases/{release['id']}/assets?per_page=100"))
+          assets = {item["name"] for page in pages for item in page}
+          versioned = pathlib.Path("vout")
+          existing = pathlib.Path("existing-release")
+          versioned.mkdir()
+          existing.mkdir()
+
+          def download(name):
+              path = existing / name
+              gh("release", "download", "node-build", "-p", name, "-O", str(path))
+              return path
+
+          # 先核全部既有内容，任何冲突都在本次上传前失败；允许中断后补齐缺失资产。
+          manifest_name = EXPECTED["sha"] + "-build.json"
+          candidate = pathlib.Path("build.json")
+          if manifest_name in assets:
+              candidate = download(manifest_name)
+              manifest(candidate, versioned=True)
+          missing = []
+          for name, wanted in EXPECTED["files"].items():
+              asset = wanted["asset"]
+              if asset in assets:
+                  file(download(asset), wanted)
+              else:
+                  target = versioned / asset
+                  shutil.copyfile(pathlib.Path("out") / name, target)
+                  missing.append(target)
+          for path in missing:
+              gh("release", "upload", "node-build", str(path))  # 无 clobber。
+          if manifest_name not in assets:
+              target = versioned / manifest_name
+              shutil.copyfile(candidate, target)
+              gh("release", "upload", "node-build", str(target))  # manifest 最后。
+
+          # 精确版本已就绪。只有确认前进时才更新旧客户端别名；未知时保留原 pointer。
+          if "build.json" in assets:
+              try:
+                  old = json.loads(download("build.json").read_text())["sha"]
+                  if not isinstance(old, str) or not re.fullmatch(r"[0-9a-f]{40}", old):
+                      raise ValueError("invalid previous SHA")
+                  relation = gh("api", f"repos/{os.environ['GH_REPO']}/compare/{old}...{EXPECTED['sha']}",
+                                "--jq", ".status").strip()
+              except (subprocess.CalledProcessError, ValueError, KeyError, TypeError):
+                  relation = "unknown"
+              if relation not in ("ahead", "identical"):
+                  print("保留旧兼容 pointer：" + relation)
+                  raise SystemExit(0)
+          gh("release", "upload", "node-build", *[str(pathlib.Path("out") / n) for n in EXPECTED["files"]], "--clobber")
+          # 同 SHA 重跑保留原 manifest 的 built_at/run_url，而非改写不可变版本记录。
+          pointer = versioned / "build.json"
+          shutil.copyfile(candidate, pointer)
+          gh("release", "upload", "node-build", str(pointer), "--clobber")
+          PY
