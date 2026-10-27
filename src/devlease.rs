@@ -26,6 +26,8 @@ pub struct Lease {
     receipt: Option<crate::lease_receipt::JobReceipt>,
     receipt_failed: AtomicBool,
     pub serial: String,
+    label: String,
+    device_path: PathBuf,
 }
 
 fn lock_file(path: &Path, deadline: Instant) -> Result<File, String> {
@@ -428,6 +430,46 @@ fn remove_owned(path: &Path, token: &str) {
     }
 }
 
+/// AGENT-04：release 后写冷却标记（30min），同 agent 可立即复用，其他 agent 需等待。
+fn write_cooldown(device_path: &Path, label: &str) {
+    let agent = match std::env::var("PF_JOB_ACTOR") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return, // 未声明 agent（原生工作流）：不写冷却
+    };
+    let label = agent.as_str();
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    let payload = serde_json::json!({
+        "schema": "phonefarm/device-cooldown@1",
+        "agent": label,
+        "at": at,
+    });
+    let _ = fs::write(device_path.with_extension("cooldown.json"), serde_json::to_string(&payload).unwrap_or_default());
+}
+
+/// AGENT-04：acquire 前检查冷却——同 agent 跳过，其他 agent 30min 内拒绝。
+fn cooldown_active(device_path: &Path, label: &str) -> Result<Option<String>, String> {
+    let agent = match std::env::var("PF_JOB_ACTOR") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return Ok(None), // 未声明 agent：不检查
+    };
+    let label = agent.as_str();
+    let path = device_path.with_extension("cooldown.json");
+    if !path.exists() { return Ok(None); }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("cooldown read: {e}"))?;
+    let value: Value = serde_json::from_str(&raw).map_err(|e| format!("cooldown parse: {e}"))?;
+    let agent = value["agent"].as_str().unwrap_or("");
+    let at = value["at"].as_u64().unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs()).unwrap_or(0);
+    if agent == label || now.saturating_sub(at) >= 1800 {
+        let _ = fs::remove_file(&path); // 过期或同 agent：清除
+        return Ok(None);
+    }
+    Ok(Some(format!("设备 {agent} 刚释放，{agent} 有 30 分钟优先权（还剩 {} 分钟）",
+        (1800 - (now - at)) / 60)))
+}
+
 fn observation_queue_empty(root: &Path) -> Result<(), String> {
     if root.join("devlock.qmutex").symlink_metadata().is_ok() {
         return Err("writer queue is being updated".into());
@@ -499,6 +541,12 @@ impl Lease {
         crate::shared_access::create_dir_all(legacy_root).map_err(|e| format!("devlock directory: {e}"))?;
         let deadline = Instant::now() + timeout;
         let device_path = device_lock_path(root, serial, binding)?;
+        // AGENT-04：冷却检查（仅设备绑定任务；同 label 跳过）
+        if binding.is_some() {
+            if let Some(reason) = cooldown_active(&device_path, label)? {
+                return Err(reason);
+            }
+        }
         let device = lock_file(&device_path, deadline)?;
         let bridge = lock_file_mode(&legacy_root.join("phonefarm-bridge.lock"), deadline, binding.is_some())?;
         // Resolve after acquiring the stable bridge: a waiting participant may
@@ -649,6 +697,8 @@ impl Lease {
             receipt,
             receipt_failed: AtomicBool::new(false),
             serial: serial.into(),
+            label: label.into(),
+            device_path,
         };
         lease.publish_receipt(&info, "active", None)?;
         // A writer may have joined between our first queue check and atomic mkdir.
@@ -1047,6 +1097,8 @@ impl Lease {
             receipt,
             receipt_failed: AtomicBool::new(false),
             serial: serial.into(),
+            label: "confirmation-reconcile".into(),
+            device_path: device_lock_path(root, serial, binding).unwrap_or_default(),
         };
         lease.publish_receipt(&next, "active", None)?;
         Ok(lease)
@@ -1156,6 +1208,10 @@ impl Drop for Lease {
         }
         if release && !self.receipt_failed.load(Ordering::Relaxed) {
             remove_owned(&self.legacy, &self.token);
+            // AGENT-04：写冷却标记（仅设备绑定任务；全局锁不影响）
+            if self.device_binding.is_some() {
+                write_cooldown(&self.device_path, &self.label);
+            }
             if self.legacy.exists() {
                 if let Err(e) = self.publish_receipt(&m, "retained", Some("marker_release_failed"))
                 {
