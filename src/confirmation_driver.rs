@@ -51,6 +51,37 @@ fn require(ok: bool, why: &str) -> Result<(), String> {
         Err(why.into())
     }
 }
+/// Safe-point pause: a flag file in the session directory or the job directory
+/// holds the next phase without killing the process; removing it resumes.
+fn pause_flag_paths(dir: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![dir.join("pause.requested")];
+    if let Some(out) = std::env::var_os("PF_JOB_OUT") {
+        if let Some(job) = Path::new(&out).parent() {
+            paths.push(job.join("pause.requested"));
+        }
+    }
+    paths
+}
+
+/// Block between phases while any pause flag exists; record both edges.
+fn maybe_pause(dir: &Path) -> Result<(), String> {
+    let paths = pause_flag_paths(dir);
+    if !paths.iter().any(|p| p.exists()) {
+        return Ok(());
+    }
+    save_json(
+        dir,
+        "paused.json",
+        &json!({"schema":"phonefarm/session-pause@1","paused_at":now(),
+                "resume":"remove pause.requested from the session or job directory"}),
+    )?;
+    while paths.iter().any(|p| p.exists()) {
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    save_json(dir, "resumed.json", &json!({"schema":"phonefarm/session-pause@1","resumed_at":now()}))?;
+    Ok(())
+}
+
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -2108,12 +2139,14 @@ fn collect(dir: &Path, frozen_path: &Path, execute: bool) -> Result<Value, Strin
     let mut reports = BTreeMap::new();
     let mut index = 0;
     for pair in &req.schedule {
+        maybe_pause(&dir)?;
         let roles = if pair.baseline_first {
             [(&pair.a_run_id, "baseline"), (&pair.b_run_id, "candidate")]
         } else {
             [(&pair.b_run_id, "candidate"), (&pair.a_run_id, "baseline")]
         };
         for (id, role) in roles {
+            maybe_pause(&dir)?;
             let r = sample(
                 &mut t,
                 &lease,
@@ -2280,5 +2313,31 @@ pub fn run_confirmation_driver(args: &[String]) -> i32 {
             );
             1
         }
+    }
+}
+
+
+#[cfg(test)]
+mod safe_pause_tests {
+    use super::*;
+
+    /// 安全点暂停：标志存在时阻塞，移除后恢复；两条边都留文件回执。
+    #[test]
+    fn pause_flag_blocks_and_resume_continues() {
+        let dir = std::env::temp_dir().join(format!("pf-safe-pause-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(maybe_pause(&dir).is_ok());
+        assert!(!dir.join("paused.json").exists());
+        std::fs::write(dir.join("pause.requested"), b"test").unwrap();
+        let d2 = dir.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            std::fs::remove_file(d2.join("pause.requested")).unwrap();
+        });
+        maybe_pause(&dir).unwrap();
+        handle.join().unwrap();
+        assert!(dir.join("paused.json").exists());
+        assert!(dir.join("resumed.json").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
