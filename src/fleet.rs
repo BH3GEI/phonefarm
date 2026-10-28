@@ -495,7 +495,7 @@ fn probe_script_android_light() -> &'static str {
 echo "-----PF:uptime-----"; cat /proc/uptime 2>/dev/null
 echo "-----PF:sysbat-----"; for f in capacity status temp current_now voltage_now; do echo "$f=$(cat /sys/class/power_supply/battery/$f 2>/dev/null)"; done
 echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done
-echo "-----PF:fan-----"; for f in /sys/kernel/fan/fan_enable /sys/kernel/fan/fan_speed_level; do echo "$f=$(cat $f 2>/dev/null || su -c "cat $f" 2>/dev/null)"; done
+echo "-----PF:fan-----"; for f in /sys/kernel/fan/fan_enable /sys/kernel/fan/fan_speed_level; do echo "$f=$(cat $f 2>/dev/null)"; done
 echo "-----PF:end-----""#
 }
 
@@ -542,6 +542,14 @@ echo "-----PF:battery-----"; hidumper -s BatteryService -a -i 2>/dev/null
 echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done
 echo "-----PF:screen-----"; hidumper -s RenderService -a screen 2>/dev/null
 echo "-----PF:focus-----"; aa dump -l 2>/dev/null
+echo "-----PF:end-----""#
+}
+
+/// Busy domains get only cheap reads: no hidumper, aa or privileged fallback.
+fn probe_script_oh_light() -> &'static str {
+    r#"echo "-----PF:props-----"; param get const.product.model 2>/dev/null; param get const.product.brand 2>/dev/null; param get const.ohos.fullname 2>/dev/null; echo ""
+echo "-----PF:uptime-----"; cat /proc/uptime 2>/dev/null
+echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done
 echo "-----PF:end-----""#
 }
 
@@ -720,7 +728,12 @@ pub fn card_from_android(serial: &str, state: &str, raw: &str, probe_ms: u64, de
 }
 
 /// OH 回包 → 卡片。字段比安卓少, 少的那些如实进 `unknown`。
+#[cfg(test)]
 pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
+    card_from_oh_depth(serial, raw, probe_ms, "full")
+}
+
+fn card_from_oh_depth(serial: &str, raw: &str, probe_ms: u64, depth: &'static str) -> Card {
     let ss = telemetry::split_sections(raw);
     let mut unknown = Vec::new();
 
@@ -745,7 +758,11 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
         battery.status = status;
         battery.plugged = plugged;
     } else {
-        unknown.push("电池: hidumper BatteryService 没回值".into());
+        unknown.push(if depth == "light" {
+            "电池: 轻量观察未运行 hidumper BatteryService".into()
+        } else {
+            "电池: hidumper BatteryService 没回值".into()
+        });
     }
 
     let mut thermal = Thermal::default();
@@ -770,7 +787,11 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
 
     let screen_on = sec(&ss, "screen").and_then(parse_hdc_power_on);
     if screen_on.is_none() {
-        unknown.push("亮屏: hidumper RenderService 没给出可识别的 powerStatus".into());
+        unknown.push(if depth == "light" {
+            "亮屏: 轻量观察未运行 hidumper RenderService".into()
+        } else {
+            "亮屏: hidumper RenderService 没给出可识别的 powerStatus".into()
+        });
     }
     // aa dump -l 里 state #FOREGROUND 的那条 ability; 熄屏或停在桌面时一条都没有。
     let foreground = sec(&ss, "focus")
@@ -778,10 +799,14 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
         .map(|(bundle, _)| bundle)
         .filter(|b| !b.is_empty());
     if foreground.is_none() {
-        unknown.push(match (sec(&ss, "focus"), screen_on) {
-            (None, _) => "前台应用: aa dump -l 没回值".into(),
-            (Some(_), Some(false)) => "前台应用: 熄屏中, 没有处于前台的应用".into(),
-            (Some(_), _) => "前台应用: 任务栈里没有前台 ability (可能停在桌面)".into(),
+        unknown.push(if depth == "light" {
+            "前台应用: 轻量观察未运行 aa dump".into()
+        } else {
+            match (sec(&ss, "focus"), screen_on) {
+                (None, _) => "前台应用: aa dump -l 没回值".into(),
+                (Some(_), Some(false)) => "前台应用: 熄屏中, 没有处于前台的应用".into(),
+                (Some(_), _) => "前台应用: 任务栈里没有前台 ability (可能停在桌面)".into(),
+            }
         });
     }
 
@@ -816,7 +841,7 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
         keepalive: Keepalive::default(),
         uptime_s: sec(&ss, "uptime").and_then(parse_uptime_s),
         screenshot: None,
-        probe_depth: "full",
+        probe_depth: depth,
         probe_ms,
         unknown,
     }
@@ -969,7 +994,7 @@ pub struct Opts {
     pub screens: Option<Screens>,
     /// 兼容旧调用方的标签；不提供所有权证明或绕过租约状态。
     pub own_label: Option<String>,
-    /// 别人持锁时也强行走完整档。会干扰对面的测量, 默认关。
+    /// 兼容旧调用方；不改变 full/light 选择，也不提供所有权证明。
     pub probe_while_locked: bool,
 }
 
@@ -989,15 +1014,16 @@ impl Default for Opts {
 pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     let storage = opts.lock_dir.as_deref().map(crate::lease_storage::Storage::custom)
         .unwrap_or_else(crate::lease_storage::resolve);
-    let lease = crate::devlease::storage_status(&storage);
     if !crate::observation::in_worker() {
-        return Err(format!("lease {}: {}; no device probes performed",
-            lease["status"].as_str().unwrap_or("unknown"),
-            lease["error"].as_str().unwrap_or("host device domain is occupied or requires recovery")));
+        return Err("fleet device probes require the bounded observation worker".into());
     }
+    let light = std::env::var("PHONEFARM_OBSERVATION_LIGHT").as_deref() == Ok("1");
     let queue_dir = storage.domain_paths()?.queue_dir;
     let adb = crate::device::locate_adb();
     let mut notes = Vec::new();
+    if light {
+        notes.push("设备域忙或状态未知: 本轮只做无锁轻量观察，不截图，不运行 full probe".to_string());
+    }
     if adb.is_none() {
         notes.push("没找到 adb, 安卓这一族整族跳过 (ADB_BIN=/path/to/adb 可指定)".to_string());
     }
@@ -1020,7 +1046,7 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     let _ = std::fs::create_dir_all(&tmp);
 
     let want = |s: &str| opts.serial.as_deref().is_none_or(|w| w == s);
-    let depth = "full";
+    let depth = if light { "light" } else { "full" };
     let mut devices = Vec::new();
 
     for (serial, state, model_hint) in android.into_iter().filter(|(s, _, _)| want(s)) {
@@ -1042,9 +1068,8 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
         if card.model.is_none() {
             card.model = model_hint;
         }
-        if let Some(screens) = &opts.screens {
-            // The worker already holds the domain lease; its own marker is not a
-            // competing owner. Screenshot rate limiting still applies.
+        if let Some(screens) = opts.screens.as_ref().filter(|_| !light) {
+            // Full observation owns the bridge; light observation never shoots.
             let (shot, why) = shoot(&phone, &serial, screens, None);
             card.screenshot = shot;
             if let Some(w) = why {
@@ -1058,8 +1083,9 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
         let serial = format!("hdc:{key}");
         let t0 = Instant::now();
         let phone = Device::new(Some(serial.clone()), tmp.clone());
-        let raw = phone.shell(probe_script_oh(), opts.timeout_ms);
-        devices.push(card_from_oh(&serial, &raw, t0.elapsed().as_millis() as u64));
+        let script = if light { probe_script_oh_light() } else { probe_script_oh() };
+        let raw = phone.shell(script, opts.timeout_ms);
+        devices.push(card_from_oh_depth(&serial, &raw, t0.elapsed().as_millis() as u64, depth));
     }
 
     Ok(Fleet {
@@ -1112,9 +1138,9 @@ fn usage() -> &'static str {
      \x20            [--lock-dir 目录] [--screenshot-dir 目录] [--screenshot-every 秒] [--lock-label 标签]\n\
      \x20            [--probe-while-locked]\n\
      \x20  只读: 一趟 shell 把每台手机的在线/型号/电量/温度/风扇/亮屏/前台应用读齐。\n\
-     \x20  租约域必须明确空闲; 持锁、恢复待处理、未知或未初始化时不探测设备。\n\
-     \x20  截图默认关闭; 开了也受租约状态与最小间隔约束。标签/强制参数不绕过租约检查。\n\
-     \x20  退出码 0=至少读到一台 / 1=一台都没有 / 2=参数错 / 3=租约域不可探测。"
+     \x20  空闲时 full probe 持 fd 互斥，进程退出自动释放；忙时只做无锁 light probe。\n\
+     \x20  截图只在 full probe 中运行并受最小间隔约束。标签/强制参数不授权 full probe。\n\
+     \x20  退出码 0=至少读到一台 / 1=一台都没有 / 2=参数错 / 3=观察失败。"
 }
 
 pub fn run_fleet(args: &[String]) -> i32 {
@@ -1467,20 +1493,9 @@ mod tests {
     }
 
     #[test]
-    fn occupied_or_unknown_domain_refuses_before_device_probes() {
-        let root = std::env::temp_dir().join(format!("fleet-domain-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir(&root).unwrap();
-        let opts = Opts { lock_dir: Some(root.clone()), own_label: Some("mine".into()),
-            probe_while_locked: true, ..Opts::default() };
-        let bridge = std::fs::File::create(root.join("phonefarm-bridge.lock")).unwrap();
-        bridge.try_lock().unwrap();
-        assert!(collect(&opts).unwrap_err().contains("lease held"));
-        drop(bridge);
-        std::fs::create_dir(root.join("phonefarm-lease.d")).unwrap();
-        std::fs::write(root.join("phonefarm-lease.d/phonefarm-lease.json"), b"invalid").unwrap();
-        assert!(collect(&opts).unwrap_err().contains("lease unknown"));
-        std::fs::remove_dir_all(root).unwrap();
+    fn collect_requires_the_bounded_observation_worker() {
+        let opts = Opts::default();
+        assert!(collect(&opts).unwrap_err().contains("observation worker"));
     }
 
     #[test]

@@ -28,7 +28,7 @@ if [ "$1" = devices ]; then
   : > "$FIXTURE/started"
   while [ -f "$FIXTURE/hold" ]; do /bin/sleep 0.02; done
   printf 'List of devices attached\n'
-  [ ! -f "$FIXTURE/slow-shell" ] || printf 'fake-observer device model:Fixture\n'
+  [ ! -f "$FIXTURE/show-device" ] || printf 'fake-observer device model:Fixture\n'
   exit 0
 fi
 if [ -f "$FIXTURE/slow-shell" ]; then exec /bin/sleep 30; fi
@@ -60,12 +60,6 @@ exit 0
                 .output()
                 .unwrap()
                 .stdout,
-        )
-        .unwrap()
-    }
-    fn marker(&self) -> Value {
-        serde_json::from_slice(
-            &fs::read(self.0.join("locks/devlock.d/phonefarm-lease.json")).unwrap(),
         )
         .unwrap()
     }
@@ -103,6 +97,7 @@ fn sampling_window_excludes_strong_and_legacy_writers_then_releases() {
         .unwrap();
     until(|| f.0.join("started").exists());
     assert_eq!(f.status()["status"], "held");
+    assert!(!f.0.join("locks/devlock.d/phonefarm-lease.json").exists());
     let competing = f
         .cmd()
         .args([
@@ -139,11 +134,13 @@ fn sampling_window_excludes_strong_and_legacy_writers_then_releases() {
     assert_eq!(result["observation"], "sampled");
     assert_eq!(result["devices"], serde_json::json!([]));
     assert_eq!(f.status()["status"], "clear");
+    assert!(!f.0.join("locks/devlock.d").exists());
 }
 
 #[test]
-fn queued_writers_unknown_records_and_same_label_never_grant_observation() {
+fn busy_domains_allow_only_unowned_light_observation() {
     let f = Fixture::new();
+    fs::write(f.0.join("show-device"), "").unwrap();
     for entry in [
         "devlock.queue",
         "devlock.qmutex",
@@ -171,11 +168,12 @@ fn queued_writers_unknown_records_and_same_label_never_grant_observation() {
             ])
             .output()
             .unwrap();
-        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.status.code(), Some(0));
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(result["observation"], "deferred");
-        assert!(result["devices"].is_null());
-        assert!(!f.0.join("started").exists());
+        assert_eq!(result["observation"], "sampled");
+        assert_eq!(result["devices"][0]["probe_depth"], "light");
+        assert!(f.0.join("started").exists());
+        fs::remove_file(f.0.join("started")).unwrap();
         if path.is_dir() {
             fs::remove_dir_all(path).unwrap();
         } else {
@@ -193,8 +191,9 @@ fn queued_writers_unknown_records_and_same_label_never_grant_observation() {
 }
 
 #[test]
-fn transport_timeout_retains_uncertain_lease_instead_of_fresh_empty_sample() {
+fn transport_timeout_leaves_no_marker_and_a_later_full_sample_can_retry() {
     let f = Fixture::new();
+    fs::write(f.0.join("show-device"), "").unwrap();
     fs::write(f.0.join("slow-shell"), "").unwrap();
     let output = f
         .cmd()
@@ -205,16 +204,19 @@ fn transport_timeout_retains_uncertain_lease_instead_of_fresh_empty_sample() {
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["observation"], "error");
     assert!(result["devices"].is_null());
-    assert!(f.marker()["child_pgid"].as_u64().is_some());
-    assert_ne!(f.status()["status"], "clear");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&f.fleet().stdout).unwrap()["observation"],
-        "deferred"
-    );
+    assert!(!f.0.join("locks/devlock.d/phonefarm-lease.json").exists());
+    assert_eq!(f.status()["status"], "clear");
+    fs::remove_file(f.0.join("slow-shell")).unwrap();
+    let output = f.fleet();
+    assert_eq!(output.status.code(), Some(0));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["observation"], "sampled");
+    assert_eq!(result["devices"][0]["probe_depth"], "full");
+    assert_eq!(f.status()["status"], "clear");
 }
 
 #[test]
-fn killed_supervisor_leaves_worker_identity_and_blocks_new_sampling() {
+fn killed_supervisor_releases_fd_after_worker_exit_without_marker() {
     let f = Fixture::new();
     fs::write(f.0.join("hold"), "").unwrap();
     let mut supervisor = f
@@ -224,23 +226,17 @@ fn killed_supervisor_leaves_worker_identity_and_blocks_new_sampling() {
         .spawn()
         .unwrap();
     until(|| f.0.join("started").exists());
-    let group = f.marker()["child_pgid"].as_i64().unwrap() as i32;
+    assert!(!f.0.join("locks/devlock.d/phonefarm-lease.json").exists());
     supervisor.kill().unwrap();
     supervisor.wait().unwrap();
-    assert_ne!(f.status()["status"], "clear");
+    until(|| f.status()["status"] == "clear");
+    assert!(!f.0.join("locks/devlock.d").exists());
+    fs::remove_file(f.0.join("hold")).unwrap();
+    let output = f.fleet();
+    assert_eq!(output.status.code(), Some(1));
     assert_eq!(
-        serde_json::from_slice::<Value>(&f.fleet().stdout).unwrap()["observation"],
-        "deferred"
-    );
-    until(|| unsafe { libc::kill(-group, 0) } < 0);
-    assert!(
-        f.0.join("hold").exists(),
-        "parent death must stop even a stuck transport"
-    );
-    assert_ne!(
-        f.status()["status"],
-        "clear",
-        "worker exit cannot acknowledge remote idle/restoration"
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["observation"],
+        "sampled"
     );
 }
 
@@ -320,8 +316,8 @@ esac
     let before = fs::read(f.0.join("calls")).unwrap();
     let alias_output = capture("screen-B-wifi", Some(&alias), "alias").output().unwrap();
     assert_eq!(serde_json::from_slice::<Value>(&alias_output.stdout).unwrap()["state"], "deferred");
-    assert_eq!(serde_json::from_slice::<Value>(&f.fleet().stdout).unwrap()["observation"], "deferred");
-    assert_eq!(fs::read(f.0.join("calls")).unwrap(), before, "refused observations must not reach ADB");
+    assert_eq!(serde_json::from_slice::<Value>(&f.fleet().stdout).unwrap()["observation"], "sampled");
+    assert_eq!(fs::read(f.0.join("calls")).unwrap(), before, "refused alias and empty light fleet must not issue device probes");
     fs::remove_file(f.0.join("hold-B")).unwrap();
     let output = held.0.take().unwrap().wait_with_output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -333,5 +329,5 @@ esac
     let legacy: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(legacy.get("device_binding").is_none() && legacy.get("lease_scope").is_none());
     assert_eq!(f.status()["status"], "clear");
-    println!("scoped screen A completed while B held; alias/fleet made no transport; worker PGID {worker} gone; legacy global capture released");
+    println!("scoped screen A completed while B held; alias stayed deferred; fleet used light observation; worker PGID {worker} gone");
 }

@@ -492,6 +492,61 @@ fn observation_available(root: &Path) -> Result<(), String> {
     observation_queue_empty(root)
 }
 
+/// A fleet-only observation owner. Its bridge is the mutual-exclusion boundary;
+/// no persistent owner, heartbeat or recovery marker is published.
+pub(crate) struct EphemeralObservation {
+    _device: File,
+    bridge: File,
+}
+
+impl EphemeralObservation {
+    pub(crate) fn acquire(storage: &crate::lease_storage::Storage) -> Result<Self, String> {
+        let (root, legacy) = storage.require_ready()?;
+        crate::shared_access::create_dir_all(&root).map_err(|e| format!("lease directory: {e}"))?;
+        crate::shared_access::create_dir_all(&legacy).map_err(|e| format!("devlock directory: {e}"))?;
+        let deadline = Instant::now();
+        let device = lock_file(&device_lock_path(&root, "@observation", None)?, deadline)?;
+        let bridge = lock_file_mode(&legacy.join("phonefarm-bridge.lock"), deadline, false)?;
+        let paths = crate::lease_domain::inspect(&legacy)?;
+        paths.require_device_root(&root)?;
+        if lane_occupancy(&legacy)? {
+            return Err("device lane owner/recovery blocks full observation".into());
+        }
+        observation_available(&paths.queue_dir)?;
+        Ok(Self { _device: device, bridge })
+    }
+
+    /// The worker inherits only the bridge. The parent and every live worker
+    /// hold the same open file description, so death releases it automatically.
+    pub(crate) fn authorize_worker(&self, cmd: &mut std::process::Command) -> Result<(), String> {
+        use std::os::unix::io::AsRawFd;
+        let fd = self.bridge.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        cmd.env("PHONEFARM_OBSERVATION_BRIDGE_FD", fd.to_string())
+            .env("PHONEFARM_OBSERVATION_PARENT_PID", std::process::id().to_string());
+        Ok(())
+    }
+
+    pub(crate) fn verify_worker() -> Result<(), String> {
+        let fd = std::env::var("PHONEFARM_OBSERVATION_BRIDGE_FD")
+            .map_err(|e| e.to_string())?.parse::<i32>().map_err(|e| e.to_string())?;
+        let parent = std::env::var("PHONEFARM_OBSERVATION_PARENT_PID")
+            .map_err(|e| e.to_string())?.parse::<u32>().map_err(|e| e.to_string())?;
+        let pid = std::process::id();
+        if unsafe { libc::getppid() } != parent as i32
+            || unsafe { libc::getpgrp() } != pid as i32
+            || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0
+            || unsafe { libc::flock(fd, libc::LOCK_EX) } != 0
+        {
+            return Err("ephemeral observation worker ownership mismatch".into());
+        }
+        Ok(())
+    }
+}
+
 impl Lease {
     pub(crate) fn device_binding(&self) -> Option<&DeviceBinding> { self.device_binding.as_ref() }
 

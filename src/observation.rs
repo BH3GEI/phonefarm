@@ -70,7 +70,28 @@ pub(crate) fn run(
     storage: &Storage,
     timeout: Duration,
 ) -> Result<Output, Failure> {
-    run_scoped(kind, args, storage, timeout, None)
+    if kind == "fleet" {
+        run_fleet(args, storage, timeout)
+    } else {
+        run_scoped(kind, args, storage, timeout, None)
+    }
+}
+
+fn run_fleet(args: &[String], storage: &Storage, timeout: Duration) -> Result<Output, Failure> {
+    match crate::devlease::EphemeralObservation::acquire(storage) {
+        Ok(owner) => {
+            let (mut cmd, out, err) = worker_command("fleet", args, storage, timeout)?;
+            owner.authorize_worker(&mut cmd).map_err(Failure::error)?;
+            supervise_ephemeral(&mut cmd, "fleet", timeout, &out.0, &err.0)
+        }
+        Err(_) => {
+            // A busy/unknown domain permits only the unowned light probe. The
+            // bounded worker still applies; screenshots and full probes do not.
+            let (mut cmd, out, err) = worker_command("fleet", args, storage, timeout)?;
+            cmd.env("PHONEFARM_OBSERVATION_LIGHT", "1");
+            supervise_ephemeral(&mut cmd, "fleet", timeout, &out.0, &err.0)
+        }
+    }
 }
 
 pub(crate) fn run_scoped(
@@ -89,6 +110,24 @@ pub(crate) fn run_scoped(
         Lease::observe(storage, kind)
     };
     let mut lease = acquired.map_err(|reason| Failure { state: "deferred", reason })?;
+    let (mut cmd, out_path, err_path) = worker_command(kind, args, storage, timeout)?;
+    lease.authorize_observation_worker(&mut cmd);
+    supervise(
+        &mut lease,
+        &mut cmd,
+        kind,
+        timeout,
+        &out_path.0,
+        &err_path.0,
+    )
+}
+
+fn worker_command(
+    kind: &str,
+    args: &[String],
+    storage: &Storage,
+    timeout: Duration,
+) -> Result<(Command, OutputFile, OutputFile), Failure> {
     let (out_path, out) = OutputFile::new("out")?;
     let (err_path, err) = OutputFile::new("err")?;
     let mut cmd = Command::new(std::env::current_exe().map_err(|e| Failure::error(e.to_string()))?);
@@ -99,26 +138,18 @@ pub(crate) fn run_scoped(
         .stdout(out)
         .stderr(err)
         .process_group(0)
-        .env(
-            "PHONEFARM_OBSERVATION_TIMEOUT_MS",
-            timeout.as_millis().to_string(),
-        )
-        .env_remove("DEVLOCK_LABEL");
+        .env("PHONEFARM_OBSERVATION_TIMEOUT_MS", timeout.as_millis().to_string())
+        .env_remove("DEVLOCK_LABEL")
+        .env_remove("PHONEFARM_OBSERVATION_LIGHT")
+        .env_remove("PHONEFARM_OBSERVATION_BRIDGE_FD")
+        .env_remove("PHONEFARM_OBSERVATION_PARENT_PID");
     if let Some(root) = &storage.devlock_dir {
         cmd.env("DEVLOCK_DIR", root);
     }
     if let Some(root) = &storage.device_lease_dir {
         cmd.env("PHONEFARM_LEASE_DIR", root);
     }
-    lease.authorize_observation_worker(&mut cmd);
-    supervise(
-        &mut lease,
-        &mut cmd,
-        kind,
-        timeout,
-        &out_path.0,
-        &err_path.0,
-    )
+    Ok((cmd, out_path, err_path))
 }
 
 fn supervise(
@@ -155,19 +186,49 @@ fn supervise(
             "observation startup uncertain; lease retained: {e}"
         )));
     }
+    let output = wait_output(&mut child, kind, timeout, out, err, true)?;
+    lease.clear_child().map_err(Failure::error)?;
+    Ok(output)
+}
+
+fn supervise_ephemeral(
+    cmd: &mut Command,
+    kind: &str,
+    timeout: Duration,
+    out: &std::path::Path,
+    err: &std::path::Path,
+) -> Result<Output, Failure> {
+    let mut child = cmd.spawn().map_err(|e| Failure::error(format!("observation worker could not start: {e}")))?;
+    let start = child.stdin.as_mut()
+        .ok_or("worker start pipe unavailable".to_string())
+        .and_then(|stdin| stdin.write_all(b"1").map_err(|e| e.to_string()));
+    if let Err(e) = start {
+        stop_group(&mut child);
+        return Err(Failure::error(format!("observation startup failed: {e}")));
+    }
+    wait_output(&mut child, kind, timeout, out, err, false)
+}
+
+fn wait_output(
+    child: &mut Child,
+    kind: &str,
+    timeout: Duration,
+    out: &std::path::Path,
+    err: &std::path::Path,
+    retained: bool,
+) -> Result<Output, Failure> {
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             result => {
-                stop_group(&mut child);
-                return Err(Failure::error(format!("observation timeout/wait failure ({result:?}); lease retained for idle verification")));
+                stop_group(child);
+                let suffix = if retained { "; lease retained for idle verification" } else { "" };
+                return Err(Failure::error(format!("observation timeout/wait failure ({result:?}){suffix}")));
             }
         }
     };
-    // A short grace only allows already-exiting descendants to be reaped. It never
-    // declares a still-live group safe or clears uncertainty after a forced kill.
     let deadline = Instant::now() + Duration::from_millis(300);
     while !group_gone(child.id()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -179,15 +240,11 @@ fn supervise(
         _ => false,
     };
     if !expected || !group_gone(child.id()) {
-        stop_group(&mut child);
-        let diagnostic = fs::read_to_string(err)
-            .unwrap_or_default()
-            .chars()
-            .take(2048)
-            .collect::<String>();
-        return Err(Failure::error(format!("observation worker/group incomplete ({status}); lease retained for idle verification. {}", diagnostic.trim())));
+        stop_group(child);
+        let diagnostic = fs::read_to_string(err).unwrap_or_default().chars().take(2048).collect::<String>();
+        let suffix = if retained { "; lease retained for idle verification" } else { "" };
+        return Err(Failure::error(format!("observation worker/group incomplete ({status}){suffix}. {}", diagnostic.trim())));
     }
-    lease.clear_child().map_err(Failure::error)?;
     Ok(Output {
         status,
         stdout: fs::read(out).map_err(|e| Failure::error(e.to_string()))?,
@@ -225,6 +282,17 @@ pub(crate) fn run_worker(args: &[String]) -> i32 {
             .map_err(|e| e.to_string())?;
         if start != *b"1" {
             return Err("invalid startup barrier".into());
+        }
+        let light = std::env::var("PHONEFARM_OBSERVATION_LIGHT").as_deref() == Ok("1");
+        let ephemeral = std::env::var_os("PHONEFARM_OBSERVATION_BRIDGE_FD").is_some();
+        if light || ephemeral {
+            if args.first().map(String::as_str) != Some("fleet") {
+                return Err("unowned observation is fleet-only".into());
+            }
+            if ephemeral {
+                crate::devlease::EphemeralObservation::verify_worker()?;
+            }
+            return Ok(());
         }
         let path = std::env::var("PHONEFARM_OBSERVATION_MARKER").map_err(|e| e.to_string())?;
         let token = std::env::var("PHONEFARM_OBSERVATION_TOKEN").map_err(|e| e.to_string())?;
