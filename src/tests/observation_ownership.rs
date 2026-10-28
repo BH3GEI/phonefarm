@@ -122,6 +122,7 @@ fn sampling_window_excludes_strong_and_legacy_writers_then_releases() {
             .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/devlock"))
             .args(["acquire", "writer"])
             .env("DEVLOCK_DIR", f.0.join("locks"))
+            .env("PHONEFARM_BIN", env!("CARGO_BIN_EXE_phonefarm"))
             .output()
             .unwrap();
         assert_eq!(legacy.status.code(), Some(1));

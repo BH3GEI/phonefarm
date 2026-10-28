@@ -31,8 +31,14 @@ fn cmd(t: &Scratch) -> Command {
     c.current_dir(&t.0)
         .env("PHONEFARM_LEASE_DIR", t.0.join("leases"))
         .env("DEVLOCK_DIR", t.0.join("legacy"))
-        // main 的外层农场锁 (devlock::gate) 视为已在本侧手里 (renew 恒成功): 这里只测租约本身
-        .env("DEVLOCK_BIN", "/usr/bin/true")
+        // Use the real typed owner/instance protocol against this test's isolated lock root.
+        .env(
+            "DEVLOCK_BIN",
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("tools/devlock"),
+        )
         .env("PHONEFARM_LEASE_TIMEOUT_MS", "150");
     c
 }
@@ -145,6 +151,10 @@ fn integrated_offline_shader_precedes_live_support_and_lease_gates() {
         .arg(evidence)
         .arg("--out")
         .arg(&out)
+        // Model a child already admitted by the typed outer gate. The foreign
+        // marker below must remain an inner-lease barrier, not an outer fixture.
+        .env("DEVLOCK_BIN", "/usr/bin/true")
+        .env("DEVLOCK_INSTANCE_ID", "0123456789abcdef0123456789abcdef")
         .env("ADB_BIN", &adb)
         .env("HDC_BIN", &adb)
         .env("QUALIFICATION_ADB_LOG", &log)
@@ -166,6 +176,8 @@ fn integrated_offline_shader_precedes_live_support_and_lease_gates() {
         .arg(req)
         .arg("--out")
         .arg(&out)
+        .env("DEVLOCK_BIN", "/usr/bin/true")
+        .env("DEVLOCK_INSTANCE_ID", "0123456789abcdef0123456789abcdef")
         .env("ADB_BIN", adb)
         .env("QUALIFICATION_ADB_LOG", &log)
         .output()
