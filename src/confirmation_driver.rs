@@ -611,6 +611,7 @@ fn prepared_names(dir: &Path) -> Result<BTreeSet<String>, String> {
         "admission.json",
         "plan.json",
         "admission-validation.json",
+        "prepare-final-restored.snapshot",
     ] {
         names.insert(name.into());
     }
