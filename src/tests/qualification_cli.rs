@@ -84,8 +84,7 @@ fn qualify_replays_same_evidence_and_blocks_display_proxy() {
     assert_eq!(a.stdout, b.stdout);
     assert_eq!(report(&a)["eligible"], true);
     let mut e = fixture();
-    e["policy"]["goal"] = json!("display_smoothness");
-    e["policy"]["required_metrics"] = json!(["frame_p95", "fps_mean"]);
+    e["candidate"][0]["frame_evidence"]["semantics"] = json!("display_frames");
     let p = t.write("display.json", &e);
     let o = cmd(&t).args(["qualify", "--from"]).arg(p).output().unwrap();
     assert_eq!(o.status.code(), Some(1));

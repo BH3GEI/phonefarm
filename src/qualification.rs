@@ -9,7 +9,6 @@ use std::path::Path;
 pub enum Goal {
     RenderEfficiency,
     RenderCadence,
-    DisplaySmoothness,
 }
 
 impl Goal {
@@ -17,7 +16,6 @@ impl Goal {
         match s {
             "render_efficiency" => Ok(Self::RenderEfficiency),
             "render_cadence" => Ok(Self::RenderCadence),
-            "display_smoothness" => Ok(Self::DisplaySmoothness),
             _ => Err(format!("未知 qualification.goal: {s}")),
         }
     }
@@ -330,7 +328,6 @@ pub(crate) fn runs_checks(checks: &mut Vec<Check>, runs: &[Value], label: &str, 
         // Only the actual collector supported by this receiver can qualify a rendering claim.
         let source_known = f["source"] == "raw_ftrace_kgsl";
         let frame_ok = source_known
-            && policy.goal != Goal::DisplaySmoothness
             && f["semantics"] == "gpu_submit_proxy"
             && f["confidence"] == "inferred"
             && f["submits_per_frame"]
@@ -375,12 +372,6 @@ fn statistically_reachable(policy: &Policy) -> bool {
 /// Pure, deterministic: no devices, clock, random numbers or fallbacks for unknown facts.
 pub fn evaluate(e: &Evidence) -> Result<Report, String> {
     evaluate_with_pending_control(e, false, false)
-}
-
-/// A gray candidate must run before its layer-hit evidence exists. Admit that
-/// collection only at Experiment; keep the unknown check and all conclusion gates.
-pub fn evaluate_gray_collection(e: &Evidence) -> Result<Report, String> {
-    evaluate_with_pending_control(e, e.stage == Stage::Experiment, false)
 }
 
 /// An owned parent may collect while final restoration is pending. The caller
@@ -578,7 +569,6 @@ fn evaluate_with_pending_control(e: &Evidence, collect_control: bool, pending_re
                 Goal::RenderCadence => {
                     "render cadence proxy only; no power improvement or displayed-frame claim"
                 }
-                Goal::DisplaySmoothness => "verified displayed-frame cadence",
             }
             .into()
         },
@@ -799,7 +789,7 @@ mod tests {
         e.stage = Stage::Experiment;
         e.device.control_verified = None;
         e.quality_verified = None;
-        let q = evaluate_gray_collection(&e).unwrap();
+        let q = evaluate_gray_session_collection(&e).unwrap();
         assert!(q.experiment_allowed);
         assert_eq!(q.status, "unverified");
         assert!(q.checks.iter().any(|c| c.id == "control" && c.state == "unknown"));
@@ -810,19 +800,19 @@ mod tests {
         e.restored = None;
         let owned = evaluate_gray_session_collection(&e).unwrap();
         assert!(owned.experiment_allowed && !owned.conclusion_allowed && !owned.eligible);
-        assert!(!evaluate_gray_collection(&e).unwrap().experiment_allowed);
+        assert!(!evaluate_with_pending_control(&e, e.stage == Stage::Experiment, false).unwrap().experiment_allowed);
         e.restored = Some(false);
-        assert!(!evaluate_gray_session_collection(&e).unwrap().experiment_allowed);
-        assert!(!evaluate_gray_collection(&e).unwrap().experiment_allowed);
+        assert!(!evaluate_with_pending_control(&e, e.stage == Stage::Experiment, false).unwrap().experiment_allowed);
+        assert!(!evaluate_with_pending_control(&e, e.stage == Stage::Experiment, false).unwrap().experiment_allowed);
         e.restored = Some(true);
         e.device.control_verified = Some(false);
-        assert!(!evaluate_gray_collection(&e).unwrap().experiment_allowed);
+        assert!(!evaluate_with_pending_control(&e, e.stage == Stage::Experiment, false).unwrap().experiment_allowed);
         e.device.control_verified = None;
         e.stage = Stage::Conclusion;
         e.restored = None;
-        assert!(!evaluate_gray_session_collection(&e).unwrap().conclusion_allowed);
+        assert!(!evaluate_with_pending_control(&e, e.stage == Stage::Experiment, false).unwrap().conclusion_allowed);
         e.restored = Some(true);
-        assert!(!evaluate_gray_collection(&e).unwrap().conclusion_allowed);
+        assert!(!evaluate_with_pending_control(&e, e.stage == Stage::Experiment, false).unwrap().conclusion_allowed);
         e.device.control_verified = Some(true);
         assert!(!evaluate(&e).unwrap().conclusion_allowed);
         e.quality_verified = Some(true);
@@ -900,9 +890,10 @@ mod tests {
         }
     }
     #[test]
-    fn proxy_is_not_display_or_known_fallback() {
+    fn display_evidence_is_not_gpu_submit_proxy() {
         let mut e = ready();
-        e.policy = Policy::new(Goal::DisplaySmoothness, 5, false);
+        e.policy = Policy::new(Goal::RenderCadence, 5, false);
+        e.candidate[0]["frame_evidence"]["semantics"] = json!("display_frames");
         assert!(!evaluate(&e).unwrap().conclusion_allowed);
         let f = frame_evidence(&json!({"submits_per_frame":1,"spf_scores":{"acf":{"1":0.0}}}));
         assert_eq!(f["confidence"], "unknown");

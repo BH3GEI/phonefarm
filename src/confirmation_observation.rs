@@ -400,7 +400,7 @@ fn conditions_valid(c: &Conditions) -> Result<(), String> {
         "temperature conditions unknown",
     )?;
     require(
-        c.policy.goal != qualification::Goal::DisplaySmoothness && !c.policy.require_quality,
+        !c.policy.require_quality,
         "v1 supports sysparam submit-proxy measurements, not display or quality-changing routes",
     )
 }

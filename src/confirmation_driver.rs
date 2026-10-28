@@ -242,10 +242,6 @@ fn request(path: &Path) -> Result<(Request, Vec<u8>, Vec<u8>, Vec<u8>), String> 
         "unknown receiver temperature profile ID",
     )?;
     require(
-        req.goal != Some(Goal::DisplaySmoothness),
-        "driver supports explicit render_efficiency/render_cadence only; display not verified",
-    )?;
-    require(
         req.render_attribution_profile_id
             .as_deref()
             .is_none_or(|id| id == crate::render_attribution::PROFILE)

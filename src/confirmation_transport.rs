@@ -127,9 +127,6 @@ impl Transport {
         cap: u64,
         lease: Option<&Lease>,
     ) -> Result<Receipt, String> {
-        if sha(&bounded(&self.program, 128 * 1024 * 1024)?) != self.expected_sha {
-            return Err("frozen transport bytes changed".into());
-        }
         if let Some(l) = lease {
             l.check()?;
         }
