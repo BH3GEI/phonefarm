@@ -37,26 +37,34 @@ pub(crate) fn bounded(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
-pub(crate) fn new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn stage_file(path: &Path, bytes: &[u8], sync_file: bool, sync_parent: bool) -> Result<(), String> {
     let mut f = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)
         .map_err(|e| e.to_string())?;
     crate::shared_access::created_file(path, &f, false).map_err(|e| e.to_string())?;
-    f.write_all(bytes)
-        .and_then(|_| f.sync_all())
-        .map_err(|e| e.to_string())?;
-    File::open(path.parent().ok_or("file parent")?)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| e.to_string())
+    f.write_all(bytes).map_err(|e| e.to_string())?;
+    if sync_file {
+        f.sync_all().map_err(|e| e.to_string())?;
+    }
+    if sync_parent {
+        File::open(path.parent().ok_or("file parent")?)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    stage_file(path, bytes, true, true)
 }
 fn publish_permit(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if path.exists() {
         return Err("transport permit already exists".into());
     }
     let tmp = path.with_extension("permit-pending");
-    new_file(&tmp, bytes)?;
+    stage_file(&tmp, bytes, true, false)?;
     fs::rename(&tmp, path).map_err(|e| e.to_string())?;
     File::open(path.parent().ok_or("permit parent")?)
         .and_then(|d| d.sync_all())
@@ -149,7 +157,7 @@ impl Transport {
         if sha(&executable_bytes) != self.expected_sha {
             return Err("actual executable snapshot hash differs".into());
         }
-        new_file(&executable_path, &executable_bytes)?;
+        stage_file(&executable_path, &executable_bytes, false, false)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -158,7 +166,7 @@ impl Transport {
         }
         let input_fd = input
             .as_ref()
-            .map(|b| owned_fd(&outputs.join(format!("{stem}.stdin")), b, false))
+            .map(|b| owned_fd(&outputs.join(format!("{stem}.stdin")), b))
             .transpose()?;
         let argv: Vec<String> = [vec!["-s".into(), self.target.clone()], args.to_vec()].concat();
         journal(
@@ -304,29 +312,21 @@ pub(crate) fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-// This fd is never reopened by its original path. Executable fd survives exec, including #! interpreters.
-fn owned_fd(path: &Path, bytes: &[u8], executable: bool) -> Result<File, String> {
+// This fd is never reopened by its original path. It is unlinked after the
+// child has the same bytes, so durability cannot depend on a directory entry.
+fn owned_fd(path: &Path, bytes: &[u8]) -> Result<File, String> {
     let mut f = OpenOptions::new()
         .create_new(true)
         .read(true)
         .write(true)
         .open(path)
         .map_err(|e| e.to_string())?;
-    f.write_all(bytes)
-        .and_then(|_| f.sync_all())
-        .map_err(|e| e.to_string())?;
+    f.write_all(bytes).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
-        use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
-        f.set_permissions(fs::Permissions::from_mode(if executable {
-            0o500
-        } else {
-            0o400
-        }))
-        .map_err(|e| e.to_string())?;
-        if executable && unsafe { libc::fcntl(f.as_raw_fd(), libc::F_SETFD, 0) } < 0 {
-            return Err("cannot retain executable descriptor".into());
-        }
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(fs::Permissions::from_mode(0o400))
+            .map_err(|e| e.to_string())?;
     }
     fs::remove_file(path).map_err(|e| e.to_string())?;
     f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
