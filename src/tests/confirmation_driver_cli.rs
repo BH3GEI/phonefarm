@@ -22,14 +22,13 @@ fn sha(b: &[u8]) -> String {
 struct F {
     dir: PathBuf,
     started: Instant,
-    _slot: MutexGuard<'static, ()>,
+    _slot: Option<MutexGuard<'static, ()>>,
 }
 impl F {
-    fn new(all: bool) -> Self {
-        let queued = Instant::now();
-        // A prior failed test must not poison admission for unrelated cases.
-        let slot = DRIVER_SLOT.lock().unwrap_or_else(|e| e.into_inner());
-        let started = Instant::now();
+    fn local() -> Self {
+        Self::bare(Instant::now(), None)
+    }
+    fn bare(started: Instant, slot: Option<MutexGuard<'static, ()>>) -> Self {
         let base = std::env::var_os("PHONEFARM_DRIVER_TEST_ARTIFACT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -42,11 +41,18 @@ impl F {
         // The driver canonicalizes its session. Keep independent producer inputs
         // on the same root (/var and /private/var are aliases on macOS).
         let dir = std::fs::canonicalize(dir).unwrap();
-        let f = Self {
+        Self {
             dir,
             started,
             _slot: slot,
-        };
+        }
+    }
+    fn new(all: bool) -> Self {
+        let queued = Instant::now();
+        // A prior failed test must not poison admission for unrelated cases.
+        let slot = DRIVER_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+        let started = Instant::now();
+        let f = Self::bare(started, Some(slot));
         let dir = &f.dir;
         f.write(
             "host-fixture.json",
@@ -1015,8 +1021,7 @@ fn loaded_whole_thermal_failure_keeps_durable_barrier_without_sampling_further_b
 }
 
 #[test]
-fn loaded_explicit_cadence_freezes_two_metrics_while_charging_does_not_silently_change_efficiency()
-{
+fn loaded_cadence_fixed_tools_prepare_freezes_metrics_and_freshly_rechecks_each_baseline() {
     let f = F::new(false);
     let mut req = f.read("request.json");
     req["temperature_profile_id"] = json!("loaded_steady_v1");
@@ -1025,6 +1030,7 @@ fn loaded_explicit_cadence_freezes_two_metrics_while_charging_does_not_silently_
     let (code, v) = f.prepare("power");
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["status"], "SIMULATED_BLOCKED");
+    assert_eq!(v["eligible"], false);
     let c = f.read("session/conditions.json");
     assert_eq!(c["policy"]["goal"], "render_cadence");
     assert_eq!(
@@ -1039,6 +1045,62 @@ fn loaded_explicit_cadence_freezes_two_metrics_while_charging_does_not_silently_
         2
     );
     assert!(!f.dir.join("legacy/devlock.d").exists());
+
+    let manifest = f.read("session/tools.manifest.json");
+    assert_eq!(manifest["count"], 14);
+    assert_eq!(manifest["files"].as_array().unwrap().len(), 14);
+    let raw =
+        std::fs::read_to_string(f.dir.join("session/prepare-commands/journal.jsonl")).unwrap();
+    let events = raw
+        .lines()
+        .map(|s| serde_json::from_str::<Value>(s).unwrap())
+        .collect::<Vec<_>>();
+    let intents = events
+        .iter()
+        .filter(|v| v["event"] == "command_intent")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        intents
+            .iter()
+            .filter(|v| v["operation"] == "install_fixed_tools")
+            .count(),
+        1
+    );
+    // One full acceptance after install; each of the three baselines independently re-verifies actual files.
+    assert_eq!(
+        intents
+            .iter()
+            .filter(|v| v["operation"] == "verify_fixed_tools")
+            .count(),
+        4
+    );
+    assert!(!intents.iter().any(|v| matches!(
+        v["operation"].as_str(),
+        Some("install_file" | "install_owner" | "verify_remote_file")
+    )));
+    let remote = f.read("fake-state.json");
+    let d = f.read("session/state.json")["remote"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for file in manifest["files"].as_array().unwrap() {
+        let name = file["name"].as_str().unwrap();
+        let bytes = remote["files"][format!("{d}/{name}")]
+            .as_str()
+            .unwrap()
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).expect("fake remote Latin-1 byte code point"))
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, std::fs::read(f.dir.join("session").join(name)).unwrap(), "{name}");
+        assert_eq!(file["sha256"], sha(&bytes));
+        assert_eq!(file["bytes"], bytes.len());
+    }
+    for i in 0..3 {
+        assert!(f
+            .dir
+            .join(format!("session/admission_{i}-run.json"))
+            .exists());
+    }
 }
 #[test]
 fn unsupported_display_goal_rejects_before_transport() {
@@ -1227,73 +1289,6 @@ fn loaded_prepare_checks_fresh_profile_after_install_before_first_control_write(
 }
 
 #[test]
-fn fixed_tools_loaded_prepare_batches_two_calls_and_freshly_rechecks_each_baseline() {
-    let f = F::new(false);
-    let mut req = f.read("request.json");
-    req["temperature_profile_id"] = json!("loaded_steady_v1");
-    req["goal"] = json!("render_cadence");
-    f.write("request.json", &req);
-    let (code, v) = f.prepare("");
-    assert_eq!(code, 0, "{v}");
-    assert_eq!(v["eligible"], false);
-    let manifest = f.read("session/tools.manifest.json");
-    assert_eq!(manifest["count"], 14);
-    assert_eq!(manifest["files"].as_array().unwrap().len(), 14);
-    let raw =
-        std::fs::read_to_string(f.dir.join("session/prepare-commands/journal.jsonl")).unwrap();
-    let events = raw
-        .lines()
-        .map(|s| serde_json::from_str::<Value>(s).unwrap())
-        .collect::<Vec<_>>();
-    let intents = events
-        .iter()
-        .filter(|v| v["event"] == "command_intent")
-        .collect::<Vec<_>>();
-    assert_eq!(
-        intents
-            .iter()
-            .filter(|v| v["operation"] == "install_fixed_tools")
-            .count(),
-        1
-    );
-    // One full acceptance after install; each of the three baselines independently re-verifies actual files.
-    assert_eq!(
-        intents
-            .iter()
-            .filter(|v| v["operation"] == "verify_fixed_tools")
-            .count(),
-        4
-    );
-    assert!(!intents.iter().any(|v| matches!(
-        v["operation"].as_str(),
-        Some("install_file" | "install_owner" | "verify_remote_file")
-    )));
-    let remote = f.read("fake-state.json");
-    let d = f.read("session/state.json")["remote"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    for file in manifest["files"].as_array().unwrap() {
-        let name = file["name"].as_str().unwrap();
-        let bytes = remote["files"][format!("{d}/{name}")]
-            .as_str()
-            .unwrap()
-            .chars()
-            .map(|c| u8::try_from(u32::from(c)).expect("fake remote Latin-1 byte code point"))
-            .collect::<Vec<_>>();
-        assert_eq!(bytes, std::fs::read(f.dir.join("session").join(name)).unwrap(), "{name}");
-        assert_eq!(file["sha256"], sha(&bytes));
-        assert_eq!(file["bytes"], bytes.len());
-    }
-    for i in 0..3 {
-        assert!(f
-            .dir
-            .join(format!("session/admission_{i}-run.json"))
-            .exists());
-    }
-}
-
-#[test]
 fn fixed_tools_partial_install_or_corruption_never_runs_probe_and_reconcile_keeps_barrier() {
     for fail in [
         "batch_partial_install",
@@ -1378,7 +1373,7 @@ fn actual_remote_prepare_probe_rechecks_thermal_before_apply_without_transport()
         ("probe", 0, true),
         ("control_probe", 82, false),
     ] {
-        let f = F::new(false);
+        let f = F::local();
         let worker_dir = f.dir.join("worker");
         std::fs::create_dir_all(worker_dir.join("probe_0")).unwrap();
         std::fs::write(
@@ -1793,7 +1788,7 @@ fn actual_helper_closure_checker_rejects_ambiguous_groups_and_ledgers() {
         "wrong_child",
         "remove",
     ] {
-        let f = F::new(false);
+        let f = F::local();
         let d = f.dir.join("phonefarm-confirmation-token-reader");
         let run = "helper_reconcile_1";
         std::fs::create_dir_all(d.join(run)).unwrap();
@@ -1906,7 +1901,7 @@ fn actual_readonly_worker_failure_never_calls_control_or_trace_restore() {
         .next()
         .unwrap();
     for (child_exit, group_known) in [(0, true), (81, true), (0, false)] {
-        let f = F::new(false);
+        let f = F::local();
         let d = f.dir.join("readonly-worker");
         std::fs::create_dir(&d).unwrap();
         std::fs::write(
@@ -1950,38 +1945,88 @@ cleanup_failure() {{
 
 #[test]
 fn helper_recovery_diagnostic_records_only_and_never_clears_barrier() {
+    let f = origin_fixture();
+    assert_eq!(f.prepare("helper_interrupt").0, 1);
     for fail in ["", "diagnostic_partial", "diagnostic_boot"] {
-        let f=origin_fixture(); assert_eq!(f.prepare("helper_interrupt").0,1);
-        let before=f.read("fake-state.json");
-        let (code,r)=f.call(&["diagnose-helper","--session","session","--execute"],fail);
-        assert_eq!(code,0,"{fail}: {r}"); assert_eq!(r["status"],"UNKNOWN");
-        assert_eq!(r["diagnostic_complete"],fail.is_empty());
-        for key in ["eligible","recovery_completed","remote_idle_verified","control_restore_claimed","promotion_allowed","real_game_optimization_proven","remote_worker_executed"] { assert_eq!(r[key],false); }
+        let before = f.read("fake-state.json");
+        let (code, r) = f.call(
+            &["diagnose-helper", "--session", "session", "--execute"],
+            fail,
+        );
+        assert_eq!(code, 0, "{fail}: {r}");
+        assert_eq!(r["status"], "UNKNOWN");
+        assert_eq!(r["diagnostic_complete"], fail.is_empty());
+        for key in [
+            "eligible",
+            "recovery_completed",
+            "remote_idle_verified",
+            "control_restore_claimed",
+            "promotion_allowed",
+            "real_game_optimization_proven",
+            "remote_worker_executed",
+        ] {
+            assert_eq!(r[key], false);
+        }
         assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
-        assert_eq!(f.read("fake-state.json"),before,"diagnostic must not mutate synthetic remote state");
-        let argv=std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
+        assert_eq!(
+            f.read("fake-state.json"),
+            before,
+            "diagnostic must not mutate synthetic remote state"
+        );
+        let argv = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
         assert!(argv.contains("# Fixed host-supplied read-only diagnostic"));
-        let issued_worker_recovery=argv.lines().any(|line| {
-            let row:Value=serde_json::from_str(line).unwrap();
-            let cmd=row["command"].as_str().unwrap();cmd.starts_with("setsid sh ") && cmd.contains("reconcile_render")
+        let issued_worker_recovery = argv.lines().any(|line| {
+            let row: Value = serde_json::from_str(line).unwrap();
+            let cmd = row["command"].as_str().unwrap();
+            cmd.starts_with("setsid sh ") && cmd.contains("reconcile_render")
         });
-        assert!(!issued_worker_recovery); assert!(!f.dir.join("session/render-helper-removed.json").exists());
-        let diagnostic=PathBuf::from(r["diagnostic_dir"].as_str().unwrap());
-        assert!(diagnostic.join("result.json").exists()); assert!(diagnostic.join("raw.stdout").exists());
+        assert!(!issued_worker_recovery);
+        assert!(!f.dir.join("session/render-helper-removed.json").exists());
+        let diagnostic = PathBuf::from(r["diagnostic_dir"].as_str().unwrap());
+        assert!(diagnostic.join("result.json").exists());
+        assert!(diagnostic.join("raw.stdout").exists());
     }
 }
 #[test]
 fn helper_recovery_diagnostic_rejects_main_or_changed_sources_before_transport() {
+    let f = origin_fixture();
+    assert_eq!(f.prepare("helper_interrupt").0, 1);
+    let original_render_args = std::fs::read(f.dir.join("session/render_args.tsv")).unwrap();
     for fail in ["main", "dangling_main", "changed", "noexecute"] {
-        let f=origin_fixture();assert_eq!(f.prepare("helper_interrupt").0,1);
-        if fail=="main" {f.write("session/main-install.intent.json",&json!({"schema":"phonefarm/main_install_intent@1"}));}
-        #[cfg(unix)] if fail=="dangling_main" {std::os::unix::fs::symlink(f.dir.join("absent-main-marker"),f.dir.join("session/main-install.intent.json")).unwrap();}
-        if fail=="changed" {std::fs::write(f.dir.join("session/render_args.tsv"),"foreign\tthread\n").unwrap();}
-        let before=std::fs::read(f.dir.join("argv.jsonl")).unwrap();
-        let args=if fail=="noexecute" {vec!["diagnose-helper","--session","session"]}else{vec!["diagnose-helper","--session","session","--execute"]};
-        let (code,r)=f.call(&args,"");assert_eq!(code,1,"{fail}: {r}");assert_eq!(r["status"],"BLOCKED");
-        assert_eq!(std::fs::read(f.dir.join("argv.jsonl")).unwrap(),before);
+        if fail == "main" {
+            f.write(
+                "session/main-install.intent.json",
+                &json!({"schema":"phonefarm/main_install_intent@1"}),
+            );
+        }
+        #[cfg(unix)]
+        if fail == "dangling_main" {
+            std::os::unix::fs::symlink(
+                f.dir.join("absent-main-marker"),
+                f.dir.join("session/main-install.intent.json"),
+            )
+            .unwrap();
+        }
+        if fail == "changed" {
+            std::fs::write(f.dir.join("session/render_args.tsv"), "foreign\tthread\n").unwrap();
+        }
+        let before = std::fs::read(f.dir.join("argv.jsonl")).unwrap();
+        let args = if fail == "noexecute" {
+            vec!["diagnose-helper", "--session", "session"]
+        } else {
+            vec!["diagnose-helper", "--session", "session", "--execute"]
+        };
+        let (code, r) = f.call(&args, "");
+        assert_eq!(code, 1, "{fail}: {r}");
+        assert_eq!(r["status"], "BLOCKED");
+        assert_eq!(std::fs::read(f.dir.join("argv.jsonl")).unwrap(), before);
         assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        if matches!(fail, "main" | "dangling_main") {
+            std::fs::remove_file(f.dir.join("session/main-install.intent.json")).unwrap();
+        }
+        if fail == "changed" {
+            std::fs::write(f.dir.join("session/render_args.tsv"), &original_render_args).unwrap();
+        }
     }
 }
 
@@ -2004,12 +2049,33 @@ fn native_dead_retirement_requires_complete_current_proofs_and_preserves_unknown
 }
 #[test]
 fn native_helper_noexecute_main_or_changed_frozen_inputs_refuse_before_transport() {
-    for kind in ["noexecute","main","source"] {
-        let f=origin_fixture();assert_eq!(f.prepare("helper_interrupt").0,1);
-        if kind=="main"{f.write("session/main-install.intent.json",&json!({"unexpected":true}));}
-        if kind=="source"{std::fs::write(f.dir.join("session/render_reader.source.c"),"changed").unwrap();}
-        let before=std::fs::read(f.dir.join("argv.jsonl")).unwrap();
-        let args=if kind=="noexecute"{vec!["retire-helper-native","--session","session"]}else{vec!["retire-helper-native","--session","session","--execute"]};
-        let (code,r)=f.call(&args,"");assert_eq!(code,1,"{kind}: {r}");assert_eq!(r["status"],"BLOCKED");assert_eq!(std::fs::read(f.dir.join("argv.jsonl")).unwrap(),before);assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    let f = origin_fixture();
+    assert_eq!(f.prepare("helper_interrupt").0, 1);
+    // These cases refuse before transport, unlike an UNKNOWN retirement outcome,
+    // so the unchanged failed session is safe to reuse.
+    for kind in ["noexecute", "main", "source"] {
+        if kind == "main" {
+            f.write(
+                "session/main-install.intent.json",
+                &json!({"unexpected":true}),
+            );
+        }
+        if kind == "source" {
+            std::fs::write(f.dir.join("session/render_reader.source.c"), "changed").unwrap();
+        }
+        let before = std::fs::read(f.dir.join("argv.jsonl")).unwrap();
+        let args = if kind == "noexecute" {
+            vec!["retire-helper-native", "--session", "session"]
+        } else {
+            vec!["retire-helper-native", "--session", "session", "--execute"]
+        };
+        let (code, r) = f.call(&args, "");
+        assert_eq!(code, 1, "{kind}: {r}");
+        assert_eq!(r["status"], "BLOCKED");
+        assert_eq!(std::fs::read(f.dir.join("argv.jsonl")).unwrap(), before);
+        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        if kind == "main" {
+            std::fs::remove_file(f.dir.join("session/main-install.intent.json")).unwrap();
+        }
     }
 }

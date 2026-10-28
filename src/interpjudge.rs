@@ -78,6 +78,8 @@ pub(crate) struct InterpConfig {
     pub exclude: Vec<(usize, usize, usize, usize)>,
 }
 
+const DEFAULT_MAX_FAIL_FRAC: f64 = 0.01;
+
 impl Default for InterpConfig {
     fn default() -> Self {
         InterpConfig {
@@ -98,7 +100,7 @@ impl Default for InterpConfig {
             envelope_tol: 6.0,
             envelope_margin_pct: 0.5,
             detail_margin: 0.15,
-            max_fail_frac: 0.01,
+            max_fail_frac: DEFAULT_MAX_FAIL_FRAC,
             max_consecutive_fail: 1,
             flicker_detail_log2: 0.10,
             flicker_luma: 0.5,
@@ -736,6 +738,7 @@ mod tests {
     const W: usize = 256;
     const H: usize = 192;
     const TILE: usize = 32;
+    const _: () = assert!(DEFAULT_MAX_FAIL_FRAC.to_bits() == 0.01f64.to_bits());
 
     /// vkop `make_reference` 的移植: 斜硬边 + 同心高频环 + 渐变。在比视口宽的「世界」上取景, 镜头横移 = 换取景起点。
     fn world_px(wx: f32, y: usize) -> f32 {
@@ -798,9 +801,17 @@ mod tests {
     }
 
     fn judge(nat: &[Vec<f32>], int: Vec<Vec<f32>>) -> (SeqVerdict, Value) {
+        judge_with_config(nat, int, &cfg())
+    }
+
+    fn judge_with_config(
+        nat: &[Vec<f32>],
+        int: Vec<Vec<f32>>,
+        config: &InterpConfig,
+    ) -> (SeqVerdict, Value) {
         let n: Vec<Shot> = nat.iter().map(|y| shot(y.clone())).collect();
         let i: Vec<Shot> = int.into_iter().map(shot).collect();
-        judge_sequence(&n, &i, &cfg())
+        judge_sequence(&n, &i, config)
     }
 
     fn perfect(nat: &[Vec<f32>]) -> Vec<Vec<f32>> {
@@ -921,20 +932,24 @@ mod tests {
         assert!(rep["worst_frames"].to_string().contains("光晕"), "{rep}");
     }
 
-    /// 偶发一帧坏: 1% 以内可以; 连续两帧坏不行。
+    /// 测试用 10 帧与专用 20% 上限缩短计算；生产默认仍为 1%。连续两帧坏仍不行。
     #[test]
     fn sporadic_vs_consecutive_failures() {
-        let nat = native_seq(401, 3.0, Some(5.0));
-        let k = 200;
+        let nat = native_seq(21, 3.0, Some(5.0));
+        let k = 10;
+        let test_cfg = InterpConfig {
+            max_fail_frac: 0.2,
+            ..cfg()
+        };
         let mut one_bad = perfect(&nat);
-        one_bad[50] = nat[100].clone();
-        one_bad[120] = nat[240].clone();
-        let (v, rep) = judge(&nat, one_bad);
-        assert_eq!(v, SeqVerdict::WithinRef, "200 帧坏 2 帧 (1%) 且不相连应在参考线内: {rep}");
+        one_bad[2] = nat[4].clone();
+        one_bad[7] = nat[14].clone();
+        let (v, rep) = judge_with_config(&nat, one_bad, &test_cfg);
+        assert_eq!(v, SeqVerdict::WithinRef, "10 帧坏 2 帧 (20%) 且不相连应在参考线内: {rep}");
         let mut two_bad = perfect(&nat);
-        two_bad[50] = nat[100].clone();
-        two_bad[51] = nat[102].clone();
-        let (v, rep) = judge(&nat, two_bad);
+        two_bad[2] = nat[4].clone();
+        two_bad[3] = nat[6].clone();
+        let (v, rep) = judge_with_config(&nat, two_bad, &test_cfg);
         match v {
             SeqVerdict::BeyondRef(r) => assert!(r.contains("连续 2 帧"), "{r}"),
             _ => panic!("{rep}"),
