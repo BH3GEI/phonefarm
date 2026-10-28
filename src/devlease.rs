@@ -1807,7 +1807,15 @@ mod tests {
         lease.cancel_unspawned_command("status-test").unwrap();
         lease.hold_for_recovery(&scratch.0).unwrap();
         drop(lease);
-        let recovery = lease_status(&root);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let recovery = loop {
+            let value = lease_status(&root);
+            if value["bridge_held"] == false {
+                break value;
+            }
+            assert!(Instant::now() < deadline, "bridge did not release within 2s");
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(recovery["status"], "blocked");
         assert_eq!(recovery["bridge_held"], false);
         assert_eq!(recovery["entries"][0]["state"], "recovery_required");
