@@ -134,7 +134,7 @@ fn normal_leader_exit_cannot_release_or_manual_recover_a_live_owned_grandchild()
     let denied = f.recover();
     f.save("manual-recover", &denied);
     assert_eq!(denied.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("group live/unknown"));
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("recovery process group is live/unknown"));
     let next = f.cmd().args(["--", "/bin/true"]).output().unwrap();
     f.save("next-admission", &next);
     assert_eq!(next.status.code(), Some(2));

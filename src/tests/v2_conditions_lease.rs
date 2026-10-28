@@ -192,7 +192,7 @@ fn crash_releases_kernel_but_abandoned_owner_blocks_live_child_and_unknown_devic
     };
     let early = recover();
     assert_eq!(early.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&early.stderr).contains("child alive/unknown"));
+    assert!(String::from_utf8_lossy(&early.stderr).contains("recovery child is alive/unknown"));
     let child = owner["child_pid"].as_u64().unwrap().to_string();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
