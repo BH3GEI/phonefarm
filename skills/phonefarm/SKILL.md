@@ -3,7 +3,7 @@ name: phonefarm
 description: Use phonefarm for device automation, bounded experiments, measurement and result inspection — deterministic scripts, CTS batches, screenshots, frame capture, typed eval requests, optional VLM UI traversal, local CLI/MCP tools, and Rust implementation work. Android, OpenHarmony and iOS support varies by command and device. External agents, people and optional game_opt_loop clients can use this foundation; game optimization does not require routing through GOL.
 license: MIT
 metadata:
-  source-repo: github.com/HGamey/phonefarm
+  source-repo: github.com/HGamey/hgamey (phonefarm/)
 ---
 
 # phonefarm

@@ -40,7 +40,7 @@ Harmony SmartPerf 电池功率要求采样前后 BatteryService 均确认断电�
 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/HARMONY-SUPPLY.md。
 
 测试载体在 `loop_v1/carriers/`（Megacity / Vulkan-Samples / AnKi），
-白盒靶子在同级的 `refbench` 仓库。`sr_loop` 是已结项的前序实验，不在当前主线上。
+白盒靶子在本仓库的 `refbench/`。`sr_loop` 是已结项的前序实验，不在当前主线上。
 
 **前期方法迁移进展，不能作为当前平台完成度**：当前产品与待办见上述平台计划；以下保留既有方法记录。`loop_v1/` 的判定口径（解析→归因→统计→判据收口→白名单→判定→
 画面判据→模型交互/本地变异器）、两通路对照、Vulkan-Samples 三道闸与两臂判读面、refbench/vks
@@ -312,8 +312,7 @@ typed off/status和历史/离线分析保留；shell off改为同一typed入口�
    先确认用的是当前源码构建并已签名的二进制。
 8. **缺陷修复规范**：记录触发条件、行为变化和验证范围；保证通用性，
    不针对特定任务或界面硬编码拦截，也不以无关真机流程代替受影响行为的回归。
-9. **版本控制与提交**：用户授权小批直接 commit/push，不新开 PR、不 force push。
-   有远端并发变更先 pull --rebase 并重验。部署与提交分开；部署时原子替换产物，防止进程踩踏。
+9. **版本控制与提交**：按根目录 AGENTS.md 直接推 main。部署与提交分开；部署用根目录 deploy.py。
 10. **汇报规范**：呈报进度或结果时给最直接的技术事实、运行指标与对局结论（成功率、耗时分位数、
     Token 支出），禁止含糊夸张的非技术词汇，严禁在文档中堆砌虚假的性能或战绩宣称。
     计划中的能力写成「计划」，不写成「已完成」；撤回过的结论不要再引用。
@@ -343,7 +342,7 @@ VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`de
 ```
 loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（Python 工具链，正在往 Rust 收）
   carriers/            测试载体：megacity / vulkan-samples / anki-sponza
-  refbench/            白盒靶子的驱动侧（靶子本身在同级 refbench 仓库）；判定链已知答案自检 phonefarm selftest 的用法也在这里
+  refbench/            白盒靶子的驱动侧（靶子本身在本仓库的 refbench/）；判定链已知答案自检 phonefarm selftest 的用法也在这里
   auto/                自动挑旋钮：白名单探测 → 冻结规则 → 大模型选参 → 逐组对照
 knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，
                        说明见 https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/README.md；原 HGamey/knobs 仓库已归档并入，shell 正在往 Rust 收）
@@ -382,16 +381,11 @@ tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campa
 
 ## 代码仓库只放代码
 
-- 不要在本仓库新增或修改说明文档、图片、PPT、PDF、实验报告。
-- 这次改了什么、为什么改：写在 commit message 正文。
-- 一个功能或修复的说明、验证与限制：写在 commit 正文；完整报告和截图归 HGamey/docs 或本机证据目录。
-- 长期文档（设计、规格、架构图、进展汇报）：提交到 https://github.com/HGamey/docs ，本仓库的旧文档在那里的 `repos/<仓库名>/` 下。
-- 允许的例外：根目录 README.md（40 行以内）、AGENTS.md、skills/、许可证、程序或测试要读的数据。CI 检查 `code-only` 会拦下其他文档类文件。
+见根目录 [AGENTS.md](../AGENTS.md)：提交、文档、测试与部署规则对全仓库统一。
 
 ## 直接提交与团队开发
 
-- 基于当前 main 分批开发，保留同事修改；先将同一提交推到 `verify/<批次>`，通过必需的 `code-only` 检查后直接推 main。
-- 不关闭必需检查、禁止强推或删除规则；rebase 改变提交后重新检查。
+- 基于当前 main 分批开发，提交与部署按根目录 AGENTS.md。
 - 主 Agent 聚焦系统结构、协议与整合；前端等独立模块可交具体 subagent，划分文件所有权。
 - 每批记录已做、未做、测试层级和恢复义务；模拟通过不等于真机或全流程已可用。
 
@@ -409,7 +403,3 @@ Node、网页与 CLI 共用同一冻结请求和范围事实。仅源码与隔�
 强lease另存宿主boot与owner/child启动身份；旧宿主boot仅证明旧本地进程结束，同boot PID复用仍须检查原进程组。pending与设备恢复屏障不因宿主身份变化释放；旧记录全缺身份时保守兼容，部分缺失拒绝。CLI/API和网页呈现host_process事实，不能据此宣称设备恢复。实现与隔离宿主验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/STRONG-LEASE-IDENTITY.md 。
 
 跨UID会话仅在管理员显式配置PHONEFARM_SHARED_GID及输出/持久state/lease根时使用共享权限；参与进程须已在该组。新目录2770、协调锁/追加日志660、原子记录/原件640，发布前设置；既有私有状态拒绝，禁止在线递归chmod代替迁移。默认CLI权限保持原样；有限正常停止链不证明任意producer、全局供电恢复或worker失联恢复，完整范围见JOB-CONTAINMENT合同。
-
-## stable 发布约定
-
-开发继续在 main；每批完成相关验收且同一 SHA 的必需 CI 通过后，才将 stable 非强制快进到该提交。phonefarm 还须等待该 SHA 的 node-build 成功。三个运行仓库记录配套 SHA；推进分支不表示远端已部署或真机已验收。用户维护 stable 自动更新脚本，不从 mutable node-build 最新资产猜测 stable 版本。详见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/STABLE-RELEASE.md 。
