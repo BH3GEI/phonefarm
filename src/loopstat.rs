@@ -1044,7 +1044,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 对照源: `loop_v1/runs/` 的 21 轮真实录制 —— 旧 Python 版在同一批 summary.json
+    /// 对照源: `loop_v1/fixtures/golden/runs/` 的 21 轮真实录制 —— 旧 Python 版在同一批 summary.json
     /// 上产出的 describe / compare, 与这里逐字节比。
     #[test]
     fn compare_no_ci_differs_only_in_the_interval() {
@@ -1070,7 +1070,7 @@ mod tests {
     fn analyze_matches_recorded_golden() {
         let dir = repo_root().join("loop_v1/fixtures");
         let want = std::fs::read_to_string(dir.join("analyze_ctrl_knob.json")).unwrap();
-        let runs = repo_root().join("loop_v1/runs");
+        let runs = repo_root().join("loop_v1/fixtures/golden/runs");
         let a = load_runs(&format!("{}/ctrl*", runs.display()));
         let b = load_runs(&format!("{}/knob*", runs.display()));
         assert_eq!(a.len(), 5);

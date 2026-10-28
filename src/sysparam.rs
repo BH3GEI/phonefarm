@@ -2607,7 +2607,7 @@ ENV 104.00 4000000 -1000000 NA 0 0 cpu-1-0 41000\nPWR 104.80 4000000 -1000000 NA
     fn whitelist_matches_recorded_golden() {
         let mut checked = 0;
         for run in ["probe3", "genshin1"] {
-            let dir = repo_root().join("loop_v1/runs_sysparam").join(run);
+            let dir = repo_root().join("loop_v1/fixtures/golden/runs_sysparam").join(run);
             let (probe, golden) = (dir.join("probe.txt"), dir.join("whitelist.json"));
             if !probe.exists() || !golden.exists() {
                 continue;
@@ -2630,7 +2630,7 @@ ENV 104.00 4000000 -1000000 NA 0 0 cpu-1-0 41000\nPWR 104.80 4000000 -1000000 NA
     /// 与正常路径的取整不一样这件事。
     #[test]
     fn decide_matches_recorded_result() {
-        let f = repo_root().join("loop_v1/runs_sysparam/genshin1/gen1/cand3/result.json");
+        let f = repo_root().join("loop_v1/fixtures/golden/runs_sysparam/genshin1/gen1/cand3/result.json");
         let v = crate::pyjson::loads(&std::fs::read_to_string(&f).unwrap()).unwrap();
         let got = decide(
             v.get("comparisons").unwrap(),

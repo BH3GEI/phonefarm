@@ -21,7 +21,8 @@ codesign --force --sign - ./phonefarm  # Apple Silicon 必须重新签名，否�
 - 完整说明、各通路用法：[HGamey/docs · repos/phonefarm](https://github.com/HGamey/docs/tree/main/repos/phonefarm)
 - 设计与各 SPEC：[repos/phonefarm/docs](https://github.com/HGamey/docs/tree/main/repos/phonefarm/docs)
 - 性能优化回路 loop_v1：[repos/phonefarm/loop_v1/README.md](https://github.com/HGamey/docs/blob/main/repos/phonefarm/loop_v1/README.md)
-- 实验脚本（selfsr、gfrc、o2_dvfs、repro）在 [HGamey/experiments](https://github.com/HGamey/experiments)，平台按提交号运行：`pf-node --experiment <分支|提交> experiment <脚本>`。
+- 实验脚本（selfsr、gfrc、o2_dvfs、repro、npu_exp）在 [HGamey/experiments](https://github.com/HGamey/experiments)，平台按提交号运行：`pf-node --experiment <分支|提交> experiment <脚本>`。
+- 历史运行数据、任务记录与旋钮证据（`loop_v1/runs*`、`tasks/`、`knobs/evidence/`）在 [HGamey/docs · repos/phonefarm](https://github.com/HGamey/docs/tree/main/repos/phonefarm)；测试用的对照录制在 `loop_v1/fixtures/golden/`。
 - 给 AI 编程助手：[AGENTS.md](AGENTS.md)、[skills/phonefarm/SKILL.md](skills/phonefarm/SKILL.md)
 
 本仓库只放代码，规则见 [AGENTS.md](AGENTS.md) 末尾。

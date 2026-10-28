@@ -6,14 +6,9 @@ secrets.env
 /ocr
 src/target/
 
-# 运行截图与原始XML dump(本地重资产账本,不入库;log.jsonl/ctx.log 保留)
-tasks/**/*.jpg
-tasks/**/*.png
-tasks/**/*.xml
-tasks/**/*.xml.gz
-tasks/genshin_*
-tasks/phonefarm_smoke
-tasks/test_*
+# 运行数据不入库: 数据根 tasks/ 与 loop_v1/runs*。历史数据在 HGamey/docs 的 repos/phonefarm/
+/tasks/
+/loop_v1/runs*/
 
 .DS_Store
 

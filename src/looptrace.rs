@@ -1,7 +1,7 @@
 //! loop_v1 的解析与归因: ftrace 文本 → 帧时序指标 → "这一帧的时间花在哪类开销上"。
 //!
 //! 由 `loop_v1/tools/parse_trace.py` 与 `loop_v1/tools/attribute.py` 逐行搬过来,
-//! 口径与输出字节完全一致 (对照测试见本文件末尾, 用的是 `loop_v1/runs/` 里的真实录制)。
+//! 口径与输出字节完全一致 (对照测试见本文件末尾, 用的是 `loop_v1/fixtures/golden/runs/` 里的真实录制)。
 //! **不碰设备**, 因此可对着归档的 trace 离线重跑, 结果逐字节可复现 (判据 5 的可回放性)。
 //!
 //! 指标口径
@@ -876,14 +876,14 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
     }
 
-    /// 归因的对照源: `loop_v1/runs/*/summary.json` → `attribution.json`,
+    /// 归因的对照源: `loop_v1/fixtures/golden/runs/*/summary.json` → `attribution.json`,
     /// 21 组全是真机录制后由旧 Python 版落盘的, 逐字节比。
     #[test]
     fn attribute_matches_recorded_golden() {
-        let runs = repo_root().join("loop_v1/runs");
+        let runs = repo_root().join("loop_v1/fixtures/golden/runs");
         let mut checked = 0;
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(&runs)
-            .expect("loop_v1/runs 不在")
+            .expect("loop_v1/fixtures/golden/runs 不在")
             .filter_map(|e| e.ok().map(|e| e.path()))
             .collect();
         dirs.sort();
