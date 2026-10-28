@@ -17,6 +17,26 @@ impl Fixture {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let fake_devlock = dir.join("fake-devlock");
+        std::fs::write(
+            &fake_devlock,
+            r#"#!/bin/sh
+case "$1" in
+  acquire)
+    printf '{"schema":"phonefarm/devlock-owner@1","instance_id":"0123456789abcdef0123456789abcdef","label":"%s","holder_pid":%s,"holder_start":"fixture","host_boot_id":"fixture","owner":"fixture"}\n' "$2" "$PPID"
+    ;;
+  renew|release) exit 0 ;;
+  *) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_devlock, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
         Self { dir }
     }
     fn cmd(&self) -> Command {
@@ -24,14 +44,70 @@ impl Fixture {
         c.current_dir(&self.dir)
             .env("PHONEFARM_LEASE_DIR", self.dir.join("leases"))
             .env("DEVLOCK_DIR", self.dir.join("legacy"))
-            // main 的外层农场锁 (devlock::gate) 视为已在本侧手里 (renew 恒成功): 这里只测租约本身
-            .env("DEVLOCK_BIN", "/usr/bin/true")
+            // The outer gate must receive a typed instance owned by its real holder process.
+            .env("DEVLOCK_BIN", self.dir.join("fake-devlock"))
             .env("PHONEFARM_LEASE_TIMEOUT_MS", "100")
             .env("ADB_BIN", self.dir.join("fake-adb"));
         c
     }
     fn legacy(&self) -> PathBuf {
         self.dir.join("legacy/devlock.d")
+    }
+    fn devlock(&self) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tools/devlock")
+    }
+    fn acquire_outer(&self, label: &str) -> Value {
+        let output = Command::new(self.devlock())
+            .current_dir(&self.dir)
+            .env("PHONEFARM_BIN", env!("CARGO_BIN_EXE_phonefarm"))
+            .env("PHONEFARM_LEASE_DIR", self.dir.join("leases"))
+            .env("DEVLOCK_DIR", self.dir.join("legacy"))
+            .args(["acquire", label])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let outer: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(outer["schema"], "phonefarm/devlock-owner@1");
+        assert_eq!(outer["holder_pid"].as_u64(), Some(std::process::id() as u64));
+        outer
+    }
+    fn cmd_with_outer(&self, outer: &Value) -> Command {
+        let mut command = self.cmd();
+        command
+            .env("DEVLOCK_BIN", self.devlock())
+            .env("DEVLOCK_LABEL", outer["label"].as_str().unwrap())
+            .env(
+                "DEVLOCK_INSTANCE_ID",
+                outer["instance_id"].as_str().unwrap(),
+            );
+        command
+    }
+    fn release_outer(&self, outer: &Value) {
+        let output = Command::new(self.devlock())
+            .current_dir(&self.dir)
+            .env("PHONEFARM_BIN", env!("CARGO_BIN_EXE_phonefarm"))
+            .env("PHONEFARM_LEASE_DIR", self.dir.join("leases"))
+            .env("DEVLOCK_DIR", self.dir.join("legacy"))
+            .env("DEVLOCK_LABEL", outer["label"].as_str().unwrap())
+            .env(
+                "DEVLOCK_INSTANCE_ID",
+                outer["instance_id"].as_str().unwrap(),
+            )
+            .args(["release", outer["label"].as_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 impl Drop for Fixture {
@@ -77,6 +153,29 @@ fn shader_request() -> Value {
     "conditions":{"cool_c":42,"require_root":true,"require_discharging":true,"charging_suspend":{"enabled":true,"node":null},"inject":false},
     "protocol":{"rounds":4,"alternating":true,"p_threshold":0.05},
     "payload":{"track":"sr","shader_path":"candidate.glsl","spirv_path":"absent.spv","budget_ms":3,"quality_baseline_db":30}})
+}
+fn minimal_compute_spirv() -> Vec<u8> {
+    // Header + one GLCompute OpEntryPoint + OpExecutionMode LocalSize. The
+    // entry-point instruction has exactly four words; an interface ID of zero
+    // would not be a legal trailing operand.
+    let words: [u32; 15] = [
+        0x07230203,
+        0x00010300,
+        0,
+        10,
+        0,
+        (4 << 16) | 15,
+        5,
+        1,
+        0x6e69616d,
+        (6 << 16) | 16,
+        1,
+        17,
+        1,
+        1,
+        1,
+    ];
+    words.iter().flat_map(|word| word.to_le_bytes()).collect()
 }
 #[test]
 fn two_real_processes_do_not_interleave_across_cwds() {
@@ -394,8 +493,11 @@ fn heartbeat_renews_and_live_or_replaced_legacy_owner_is_not_reclaimed() {
 #[test]
 fn eval_sysparam_entry_respects_existing_manual_lease_before_device_access() {
     let f = Fixture::new("sysparam-held");
-    std::fs::create_dir_all(f.legacy()).unwrap();
-    std::fs::write(f.legacy().join("owner"), "external-task\n").unwrap();
+    let outer = f.acquire_outer("phonefarm");
+    let outer_owner = std::fs::read(f.legacy().join("owner")).unwrap();
+    let held = f.dir.join("legacy/phonefarm-lease.d");
+    std::fs::create_dir_all(&held).unwrap();
+    std::fs::write(held.join("owner"), "external-task\n").unwrap();
     let mut req = shader_request();
     req["kind"] = json!("sysparam");
     req["payload"] = json!({"params":{}});
@@ -406,7 +508,7 @@ fn eval_sysparam_entry_respects_existing_manual_lease_before_device_access() {
     let path = f.dir.join("request.json");
     std::fs::write(&path, req.to_string()).unwrap();
     let r = f
-        .cmd()
+        .cmd_with_outer(&outer)
         .args(["eval", "--request"])
         .arg(path)
         .output()
@@ -414,9 +516,11 @@ fn eval_sysparam_entry_respects_existing_manual_lease_before_device_access() {
     assert_eq!(r.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&r.stderr).contains("manual/legacy devlock busy"));
     assert_eq!(
-        std::fs::read_to_string(f.legacy().join("owner")).unwrap(),
+        std::fs::read_to_string(held.join("owner")).unwrap(),
         "external-task\n"
     );
+    assert_eq!(std::fs::read(f.legacy().join("owner")).unwrap(), outer_owner);
+    f.release_outer(&outer);
 }
 
 #[test]
@@ -446,35 +550,53 @@ fn invalid_pid_marker_and_live_owner_cannot_be_recovered() {
 #[test]
 fn gpuop_adapter_and_perf_cannot_write_through_a_manual_lock() {
     let f = Fixture::new("gpu-held");
-    std::fs::create_dir_all(f.legacy()).unwrap();
-    std::fs::write(f.legacy().join("owner"), "someone-else\n").unwrap();
-    let words: [u32; 16] = [
-        0x07230203,
-        0x00010300,
-        0,
-        10,
-        0,
-        (5 << 16) | 15,
-        5,
-        1,
-        0x6e69616d,
-        0,
-        (6 << 16) | 16,
-        1,
-        17,
-        1,
-        1,
-        1,
-    ];
+    let outer = f.acquire_outer("phonefarm");
+    let outer_owner = std::fs::read(f.legacy().join("owner")).unwrap();
+    let held = f.dir.join("legacy/phonefarm-lease.d");
+    std::fs::create_dir_all(&held).unwrap();
+    std::fs::write(held.join("owner"), "someone-else\n").unwrap();
     let spv = f.dir.join("local.spv");
-    std::fs::write(
-        &spv,
-        words
-            .iter()
-            .flat_map(|x| x.to_le_bytes())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
+    std::fs::write(&spv, minimal_compute_spirv()).unwrap();
+    let mut req = shader_request();
+    req["payload"]["spirv_path"] = json!(spv);
+    let path = f.dir.join("request.json");
+    std::fs::write(&path, req.to_string()).unwrap();
+    let r = f
+        .cmd_with_outer(&outer)
+        .args(["eval", "--request"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert_eq!(r.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&r.stdout).unwrap();
+    assert_eq!(report["status"], "ABORT");
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    assert!(stderr.contains("SPIR-V 预检通过"), "{stderr}");
+    assert!(stderr.contains("manual/legacy devlock busy"), "{stderr}");
+    assert_eq!(report["conditions_observed"]["root_verified"], Value::Null);
+    let r = f
+        .cmd_with_outer(&outer)
+        .args(["perf", "--serial", "fake-device", "--suspend-charging"])
+        .output()
+        .unwrap();
+    assert_eq!(r.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("manual/legacy devlock busy"));
+    assert_eq!(
+        std::fs::read_to_string(held.join("owner")).unwrap(),
+        "someone-else\n"
+    );
+    assert_eq!(std::fs::read(f.legacy().join("owner")).unwrap(), outer_owner);
+    f.release_outer(&outer);
+}
+
+#[test]
+fn malformed_spirv_is_rejected_by_preflight_before_lease_or_device() {
+    let f = Fixture::new("malformed-spirv");
+    let mut bytes = minimal_compute_spirv();
+    // The first instruction claims wordCount=0 rather than the legal four words.
+    bytes[20..24].copy_from_slice(&15u32.to_le_bytes());
+    let spv = f.dir.join("malformed.spv");
+    std::fs::write(&spv, bytes).unwrap();
     let mut req = shader_request();
     req["payload"]["spirv_path"] = json!(spv);
     let path = f.dir.join("request.json");
@@ -488,47 +610,53 @@ fn gpuop_adapter_and_perf_cannot_write_through_a_manual_lock() {
     assert_eq!(r.status.code(), Some(2));
     let report: Value = serde_json::from_slice(&r.stdout).unwrap();
     assert_eq!(report["status"], "ABORT");
-    assert!(String::from_utf8_lossy(&r.stderr).contains("manual/legacy devlock busy"));
     assert_eq!(report["conditions_observed"]["root_verified"], Value::Null);
-    let r = f
-        .cmd()
-        .args(["perf", "--serial", "fake-device", "--suspend-charging"])
-        .output()
-        .unwrap();
-    assert_eq!(r.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&r.stderr).contains("manual/legacy devlock busy"));
-    assert_eq!(
-        std::fs::read_to_string(f.legacy().join("owner")).unwrap(),
-        "someone-else\n"
-    );
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    assert!(stderr.contains("SPIR-V 预检未通过, 拒绝下发真机"), "{stderr}");
+    assert!(stderr.contains("wordCount=0"), "{stderr}");
+    assert!(!f.dir.join("leases").exists());
+    assert!(!f.legacy().exists());
 }
 
 #[test]
 fn lease_nests_inside_outer_farm_devlock_held_by_same_label() {
-    // main 的 devlock::gate 已用 tools/devlock 拿了农场锁 (owner = "<label> since ..."), 子进程带
-    // DEVLOCK_LABEL=<label> 原地执行: 租约不能再抢 devlock.d (否则自己等自己), 改用 phonefarm-lease.d。
+    // A real typed outer owner is held by this test process. Only its verified
+    // instance inheritance lets the child publish phonefarm-lease.d; the label
+    // alone is display/queue metadata and never confers ownership.
     let f = Fixture::new("nested-outer");
-    std::fs::create_dir_all(f.legacy()).unwrap();
-    std::fs::write(f.legacy().join("owner"), "phonefarm since 2026-10-22 00:00:00\n").unwrap();
+    let outer = f.acquire_outer("phonefarm");
+    let outer_owner = std::fs::read(f.legacy().join("owner")).unwrap();
+    let outer_marker = std::fs::read(f.legacy().join("phonefarm-lease.json")).unwrap();
     let r = f
-        .cmd()
-        .env("DEVLOCK_LABEL", "phonefarm")
+        .cmd_with_outer(&outer)
         .args(["lease", "--serial", "fake-device", "--timeout-ms", "100", "--", "/usr/bin/true"])
         .output()
         .unwrap();
     assert_eq!(r.status.code(), Some(0), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(std::fs::read(f.legacy().join("owner")).unwrap(), outer_owner);
     assert_eq!(
-        std::fs::read_to_string(f.legacy().join("owner")).unwrap(),
-        "phonefarm since 2026-10-22 00:00:00\n"
+        std::fs::read(f.legacy().join("phonefarm-lease.json")).unwrap(),
+        outer_marker
     );
     assert!(!f.dir.join("legacy/phonefarm-lease.d").exists());
-    // 另一个 label 持有的外层锁仍然是忙
+
+    // The same label without DEVLOCK_INSTANCE_ID must remain busy and must not
+    // mutate or replace the typed outer owner.
     let r = f
         .cmd()
-        .env("DEVLOCK_LABEL", "someone-else")
+        .env("DEVLOCK_LABEL", "phonefarm")
+        .env_remove("DEVLOCK_INSTANCE_ID")
         .args(["lease", "--serial", "fake-device", "--timeout-ms", "100", "--", "/usr/bin/true"])
         .output()
         .unwrap();
     assert_eq!(r.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&r.stderr).contains("manual/legacy devlock busy"));
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    assert!(stderr.contains("unknown lease marker format/producer"), "{stderr}");
+    assert_eq!(std::fs::read(f.legacy().join("owner")).unwrap(), outer_owner);
+    assert_eq!(
+        std::fs::read(f.legacy().join("phonefarm-lease.json")).unwrap(),
+        outer_marker
+    );
+    assert!(!f.dir.join("legacy/phonefarm-lease.d").exists());
+    f.release_outer(&outer);
 }
