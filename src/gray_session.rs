@@ -354,7 +354,9 @@ impl Session {
         Ok(value)
     }
     fn set_property(&self, property: &str, value: &str) -> Result<(), String> {
-        self.root_write("property_write", &format!("setprop {} {}", q(property), q(value)))?;
+        // debug.* is settable by the shell domain everywhere; some root tools (Honor, su in u:r:kernel) are denied it by init.
+        let command = format!("setprop {} {}", q(property), q(value));
+        if property.starts_with("debug.") { self.write("property_write", &command)?; } else { self.root_write("property_write", &command)?; }
         if self.property(property)? != value {
             return self.stop(format!("property readback differs: {property}"));
         }
