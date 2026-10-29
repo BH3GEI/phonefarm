@@ -29,6 +29,7 @@ pub(crate) fn screencap_raw_bin(serial: &str) -> Vec<u8> {
 
 const LOADOP_PROTOCOL: &str = "gray_ab_loadop_whole_round_charge_v1";
 const LOADOP_SECONDS: u64 = 30;
+const USAGE: &str = "用法: phonefarm gray-ab [--pairs N] [--mode loadop] [--serial S] --out <目录> [--json] [--evidence-origin device|synthetic]\n       phonefarm gray-ab recover --session DIR --serial S [--json]\ncopyprobe 当前不支持执行。";
 
 fn save_json(path: &Path, value: &Value) -> Result<(), String> {
     crate::confirmation_transport::new_file(path, &serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?)
@@ -252,8 +253,9 @@ pub fn run_gray_ab(args: &[String]) -> i32 {
             "--out" => out = it.next().map(PathBuf::from).unwrap_or_default(),
             "--json" => {},
             "--evidence-origin" => origin = it.next().cloned().unwrap_or_default(),
+            "--help" | "-h" => { println!("{USAGE}"); return 0; },
             other => {
-                eprintln!("不认识的参数 {other}\n用法: phonefarm gray-ab [--pairs N] [--mode loadop] [--serial S] --out <目录>\ncopyprobe 当前不支持执行。");
+                eprintln!("不认识的参数 {other}\n{USAGE}");
                 return 2;
             }
         }

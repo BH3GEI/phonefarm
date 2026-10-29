@@ -446,7 +446,17 @@ fn main() {
         let deployment = sub == "game-deploy";
         if gray {
             match graylayer::cli_admission(&sub, &args[1..]) {
-                Ok(graylayer::GrayCliAdmission::Help) => { println!("{USAGE}"); return; }
+                Ok(graylayer::GrayCliAdmission::Help) => {
+                    // Admission has already identified true help (not an option value). Route
+                    // through the same focused usage as each executor, including lock-flag help.
+                    let help = ["--help".to_string()];
+                    let code = if sub == "gray-layer" {
+                        graylayer::run_gray_layer(&help)
+                    } else {
+                        grayab::run_gray_ab(&help)
+                    };
+                    std::process::exit(code);
+                }
                 Ok(graylayer::GrayCliAdmission::Reject(rejection)) => {
                     println!("{rejection}");
                     std::process::exit(2);
