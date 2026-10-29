@@ -125,8 +125,9 @@ impl Lease {
         let storage = crate::lease_storage::resolve();
         let (root, farm) = storage.roots()?;
         let binding = crate::device_registry::inherited_binding()?;
+        let inherited_serial = fd_lock::inherited()?.and_then(|(scope, _)| scope.serial);
         let serial = crate::device::resolve_serial(
-            requested.or(binding.as_ref().map(|b| b.serial.as_str())),
+            requested.or(binding.as_ref().map(|b| b.serial.as_str())).or(inherited_serial.as_deref()),
         )
         .ok_or("cannot resolve exactly one device; pass --serial")?;
         let scope = resolve_scope(&storage, &serial)?;
@@ -313,9 +314,11 @@ pub fn run_lease(args: &[String]) -> i32 {
         let storage = crate::lease_storage::resolve();
         let (root, farm) = storage.roots()?;
         let binding = crate::device_registry::inherited_binding()?;
+        let inherited_serial = fd_lock::inherited()?.and_then(|(scope, _)| scope.serial);
         let serial = serial
             .as_deref()
-            .or(binding.as_ref().map(|b| b.serial.as_str()));
+            .or(binding.as_ref().map(|b| b.serial.as_str()))
+            .or(inherited_serial.as_deref());
         let scope = serial
             .map(|s| resolve_scope(&storage, s))
             .transpose()?

@@ -148,6 +148,41 @@ fn first_registration_between_device_and_farm_locks_rekeys_the_waiter() {
 }
 
 #[test]
+fn unregistered_device_scope_survives_nested_tools_devlock() {
+    let f = Fixture::new();
+    let devlock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/devlock");
+    let out = f.pf().args(["lease", "--serial", "raw-device", "--"])
+        .arg(devlock).args(["run", "inner", "--", "/bin/sh", "-c", "printf '%s' \"$PF_LOCK_SCOPE\""])
+        .output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let scope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(scope["serial"], "raw-device");
+    assert_eq!(scope["key"], "raw-device");
+    let widened = f.pf().args(["lease", "--serial", "raw-device", "--"])
+        .arg(env!("CARGO_BIN_EXE_phonefarm"))
+        .args(["lease", "--serial", "fake-b", "--", "/usr/bin/true"]).output().unwrap();
+    assert!(!widened.status.success(), "inherited device scope must not widen");
+}
+
+#[test]
+fn unregistered_device_scope_reaches_nested_perf_without_discovery() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let adb = f.0.join("fake-adb");
+    fs::write(&adb, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_ADB_CALLS\"\nexit 1\n").unwrap();
+    fs::set_permissions(&adb, fs::Permissions::from_mode(0o700)).unwrap();
+    let calls = f.0.join("adb-calls");
+    let out = f.pf().env("ADB_BIN", adb).env("FAKE_ADB_CALLS", &calls)
+        .args(["lease", "--serial", "raw-device", "--"])
+        .arg(env!("CARGO_BIN_EXE_phonefarm"))
+        .args(["perf", "--rounds", "1", "--json"]).output().unwrap();
+    assert!(calls.exists(), "perf never reached fake adb: {}", String::from_utf8_lossy(&out.stderr));
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(calls.lines().all(|line| line.starts_with("-s raw-device ")), "{calls}");
+    assert!(!out.status.success(), "fake device has no heartbeat; no measurement may be invented");
+}
+
+#[test]
 fn another_actor_can_acquire_immediately_after_task_end_but_not_during_task() {
     let f = Fixture::new();
     let mut owner = Group(

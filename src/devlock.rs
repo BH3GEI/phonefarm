@@ -247,6 +247,9 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
             serials
                 .extend(crate::device_registry::inherited_binding()?.map(|binding| binding.serial));
         }
+        if serials.is_empty() {
+            serials.extend(crate::fd_lock::inherited()?.and_then(|(scope, _)| scope.serial));
+        }
         // Multiple explicit devices require farm scope. Missing explicit scope stays farm-wide.
         let scope = match serials
             .first()
