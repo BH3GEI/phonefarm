@@ -65,6 +65,10 @@ fn pause_flag_paths(dir: &Path) -> Vec<PathBuf> {
 
 /// Block between phases while any pause flag exists; record both edges.
 fn maybe_pause(dir: &Path) -> Result<(), String> {
+    maybe_pause_with_poll(dir, Duration::from_secs(2))
+}
+
+fn maybe_pause_with_poll(dir: &Path, poll: Duration) -> Result<(), String> {
     let paths = pause_flag_paths(dir);
     if !paths.iter().any(|p| p.exists()) {
         return Ok(());
@@ -76,7 +80,7 @@ fn maybe_pause(dir: &Path) -> Result<(), String> {
                 "resume":"remove pause.requested from the session or job directory"}),
     )?;
     while paths.iter().any(|p| p.exists()) {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(poll);
     }
     save_json(dir, "resumed.json", &json!({"schema":"phonefarm/session-pause@1","resumed_at":now()}))?;
     Ok(())
@@ -2322,17 +2326,28 @@ mod safe_pause_tests {
     #[test]
     fn pause_flag_blocks_and_resume_continues() {
         let dir = std::env::temp_dir().join(format!("pf-safe-pause-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(maybe_pause(&dir).is_ok());
         assert!(!dir.join("paused.json").exists());
         std::fs::write(dir.join("pause.requested"), b"test").unwrap();
         let d2 = dir.clone();
         let handle = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(120));
-            std::fs::remove_file(d2.join("pause.requested")).unwrap();
+            maybe_pause_with_poll(&d2, Duration::from_millis(5))
         });
-        maybe_pause(&dir).unwrap();
-        handle.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let paused = loop {
+            if dir.join("paused.json").exists() {
+                break true;
+            }
+            if handle.is_finished() || Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        std::fs::remove_file(dir.join("pause.requested")).unwrap();
+        handle.join().unwrap().unwrap();
+        assert!(paused, "pause did not publish paused.json");
         assert!(dir.join("paused.json").exists());
         assert!(dir.join("resumed.json").exists());
         std::fs::remove_dir_all(&dir).unwrap();

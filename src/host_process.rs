@@ -186,7 +186,6 @@ mod boot_tests {
     fn boot_identity_is_clean_and_stable_across_reads() {
         let a = super::boot_id().unwrap();
         assert!(super::clean_identity(&a), "{a}");
-        std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(super::boot_id().unwrap(), a);
     }
 }
