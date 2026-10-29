@@ -65,7 +65,7 @@ impl Session {
         let state = read_state(&dir)?;
         validate(&state, serial)?;
         let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
-        let lease = Lease::acquire_recovery(&root, &legacy, serial, &dir, Duration::from_secs(1))?;
+        let lease = Lease::acquire_recovery(&root, &legacy, serial, &dir, crate::devlease::wait_timeout()?)?;
         Ok(Self {
             lease: RefCell::new(lease),
             adb: crate::device::locate_adb()

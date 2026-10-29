@@ -7,13 +7,6 @@ pub(crate) fn valid_job_id(id: &str) -> bool {
     id.len() == 12 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-pub(crate) fn valid_lease_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
 pub(crate) struct JobReceipt {
     path: PathBuf,
     value: Mutex<Value>,
@@ -76,46 +69,18 @@ impl JobReceipt {
         })
     }
 
-    pub(crate) fn bind_marker(&self, marker: &mut Value) -> Result<(), String> {
-        let v = self
-            .value
-            .lock()
-            .map_err(|_| "job receipt mutex poisoned")?;
-        marker["job_id"] = v["job_id"].clone();
-        marker["lease_id"] = v["lease_id"].clone();
-        Ok(())
-    }
-
-    pub(crate) fn observe(
-        &self,
-        marker: &Value,
-        state: &str,
-        uncertainty: Option<&str>,
-    ) -> Result<(), String> {
-        let reason = uncertainty.or_else(|| {
-            if marker["command_pending"] == true {
-                Some("command_pending")
-            } else if marker["recovery_required"] == true {
-                Some("explicit_recovery_barrier")
-            } else if marker.get("child_pid").is_some() {
-                Some("child_unverified")
-            } else {
-                None
+    pub(crate) fn record(&self, binding: Option<&crate::device_registry::DeviceBinding>,
+        context: Option<&Path>, state: &str, required: bool) -> Result<(), String> {
+        self.update(|value| {
+            value["state"] = json!(state);
+            if let Some(binding) = binding {
+                value["device_binding"] = json!(binding);
+                value["lease_scope"] = json!("device");
             }
-        });
-        self.update(|v| {
-            v["state"] = json!(state);
-            if let Some(binding) = marker.get("device_binding") {
-                v["device_binding"] = binding.clone();
-                v["lease_scope"] = json!("device");
-            }
-            v["recovery"]["context"] = marker["recovery_context"].clone();
-            if let Some(reason) = reason {
-                v["recovery"] = json!({"status":"required", "reason":reason,
-                    "context":marker["recovery_context"], "scope":null, "evidence_origin":null, "evidence":[]});
-            } else if v["recovery"]["status"] != "reported_complete" {
-                v["recovery"]["status"] = json!("not_reported");
-                v["recovery"]["reason"] = Value::Null;
+            value["recovery"]["context"] = json!(context);
+            if required {
+                value["recovery"] = json!({"status":"required", "reason":"device_restoration_not_reported",
+                    "context":context, "scope":null, "evidence_origin":null, "evidence":[]});
             }
         })
     }

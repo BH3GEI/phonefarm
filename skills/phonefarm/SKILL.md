@@ -21,11 +21,11 @@ External agents and people can plan experiments directly. `game_opt_loop` is an 
 
 ## Ownership and recovery
 
-Use the command's existing lease/transport path in the same configured lock domain. A queue label, shared task name or copied environment value is not lease ownership; inheritance requires the actual live owner identity. Do not add a second weak lock, change the storage domain, or bypass a busy/unknown barrier with a raw transport command.
+Use the command's existing lease/transport path in the same configured lock domain. A queue label, shared task name or copied environment value is not lease ownership; inheritance requires the actual open lock fds (`pass_fds` for Python subprocesses). Do not add a second weak lock, change the storage domain, or bypass a live device lock with a raw transport command.
 
-`phonefarm lease status --json` inspects host-side lease evidence. Interpret it with the operation's own status/report, not as proof that all application state was restored. Host process exit, a successful kill, TTL expiry or an empty queue alone does not prove device recovery. Retained pending work requires the relevant typed recovery path and independent evidence; preserve its original context and receipts.
+`phonefarm lease status --json` inspects host-side lease evidence. Interpret it with the operation's own status/report, not as proof that all application state was restored. Host process exit, a successful kill, TTL expiry or an empty queue alone does not prove device recovery. Reset stops remaining task processes and releases node reservations; restore device state through adb or the operation’s recovery command, preserving original context and receipts.
 
-`screen` now obtains a short strong observation lease for each new frame. Cached-frame reads do not capture or hold a device lease. Busy, blocked or unknown ownership can prevent a fresh frame; the service must not fall back to raw screencap. A capture timeout may retain a recovery barrier. Screenshots also disturb CPU/GPU work, so do not treat live viewing as measurement-neutral.
+`screen` now obtains a short strong observation lease for each new frame. Cached-frame reads do not capture or hold a device lease. Busy, blocked or unknown ownership can prevent a fresh frame; the service must not fall back to raw screencap. The worker and finite transport proxies hold the fd until exit; no persistent recovery barrier is created. Screenshots also disturb CPU/GPU work, so do not treat live viewing as measurement-neutral.
 
 Persistent gray-control sessions and game initialization/scene operations have their own recorded lifecycle and recovery scope. A remote-control session closing settles its commands while deliberately retaining application changes; it is not a game restore. Likewise a successful recovery job can remain queue-blocked pending explicit release of its recovery chain. Follow the status and contract for the operation actually used.
 

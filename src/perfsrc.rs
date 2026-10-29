@@ -1053,7 +1053,6 @@ fn collect_under_lease(
     a: &PerfArgs,
     lease: &crate::devlease::Lease,
 ) -> Result<PerfSnapshot, String> {
-    lease.check()?;
     if a.serial.as_deref() != Some(lease.serial.as_str()) {
         return Err("nested perf target differs from lease".into());
     }
@@ -1088,7 +1087,6 @@ fn collect_under_lease(
             return Err("charging restoration readback failed".into());
         }
     }
-    lease.check()?;
     Ok(snap)
 }
 
@@ -1160,7 +1158,7 @@ mod tests {
         let error=perf_to_file_under_lease(&args,&lease,&dir.join("perf.json")).unwrap_err();
         assert!(error.contains("target differs"));
         assert!(!dir.join("perf.json").exists());
-        assert!(lease.check().is_ok()); drop(lease);
+        drop(lease);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

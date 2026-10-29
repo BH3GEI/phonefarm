@@ -20,7 +20,7 @@ const IN_WORLD_PPF: i64 = 25;
 
 /// 二进制安全的 `adb exec-out screencap` (PNG 之外的原始 RGBA)。
 pub(crate) fn screencap_raw_bin(serial: &str) -> Vec<u8> {
-    std::process::Command::new(crate::eval::adb_path())
+    crate::fd_lock::transport_command(crate::eval::adb_path())
         .args(["-s", serial, "exec-out", "screencap"])
         .output()
         .map(|o| o.stdout)

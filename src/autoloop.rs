@@ -893,11 +893,7 @@ pub fn run_autoloop(args: &[String]) -> i32 {
             "whitelist" => sysparam::whitelist_to_pyval(&wl),
             "probe_residue" => probe_sd,
         };
-        if let Err(e) = _lease.check() {
-            log(&e);
-            std::fs::write(out.join("lease_failure.json"), serde_json::json!({"status":"ABORT","eligible":false,"reason":e}).to_string()).ok();
-            return 2;
-        }
+
         std::fs::write(out.join("report.json"), dumps_indent(&report, 1)).ok();
         return 0;
     }
@@ -1378,11 +1374,7 @@ pub fn run_autoloop(args: &[String]) -> i32 {
             "curtail" => a.curtail,
         },
     };
-    if let Err(e) = _lease.check() {
-        log(&e);
-        std::fs::write(out.join("report.json"), serde_json::json!({"status":"ABORT","eligible":false,"reason":e,"kept":[]}).to_string()).ok();
-        return 2;
-    }
+
     std::fs::write(out.join("report.json"), dumps_indent(&report, 1)).ok();
     log(&format!(
         "完成。保留 {} 组 / 共 {} 组; 收尾快照一致 (我们写过的项): {}, 严格逐行一致: {}",

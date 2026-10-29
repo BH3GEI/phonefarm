@@ -713,14 +713,14 @@ mod mode_admission_tests {
         }
         assert!(needs_queue("gray-layer", &args(&["session", "--mode", "passdump", "--serial", "--help", "--out", "--no-devlock"])));
         let mut original = args(&["gray-layer", "session-action", "--request", "--no-devlock", "--out", "--help"]);
-        assert!(!crate::devlock::strip_lock_args(&mut original).unwrap().disabled);
+        crate::devlock::strip_lock_args(&mut original).unwrap();
         assert_eq!(original, args(&["gray-layer", "session-action", "--request", "--no-devlock", "--out", "--help"]));
         let mut power = args(&["gray-layer", "session", "--power-policy", "--no-devlock"]);
-        assert!(!crate::devlock::strip_lock_args(&mut power).unwrap().disabled);
+        crate::devlock::strip_lock_args(&mut power).unwrap();
         assert_eq!(power, args(&["gray-layer", "session", "--power-policy", "--no-devlock"]));
         assert!(crate::gray_control::admission(&args(&["session", "--mode", "frameaudit", "--serial", "S", "--package", "com.example.fixture", "--out", "unused", "--power-policy", "unknown"])).is_err());
         let mut refbench = args(&["gray-layer", "refbench-loadop", "--frames", "--no-devlock"]);
-        assert!(!crate::devlock::strip_lock_args(&mut refbench).unwrap().disabled);
+        crate::devlock::strip_lock_args(&mut refbench).unwrap();
         assert!(cli_admission("gray-layer", &refbench[1..]).is_err());
         assert_eq!(admission("gray-layer", &["refbench-loadop", "--serial", "S", "--out", "unused", "--frames", "60"]).unwrap(), GrayCliAdmission::Proceed);
         assert!(admission("gray-layer", &["refbench-loadop", "--serial", "S", "--out", "unused", "--frames", "1"]).is_err());

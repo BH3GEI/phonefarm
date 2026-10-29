@@ -546,33 +546,9 @@ fn set(root: &Path, device_root: &Path, request: Request) -> Result<Value> {
             }
         }
     }
-    let _owner = crate::queue_owner::lock(root).map_err(|e| {
-        if e.starts_with("queue metadata mutex unavailable:") {
-            error("busy", e)
-        } else {
-            unavailable(e)
-        }
-    })?;
     let paths = crate::lease_domain::inspect(root).map_err(unavailable)?;
-    paths
-        .require_device_root(device_root)
-        .map_err(unavailable)?;
-    if crate::devlease::lane_occupancy(root).map_err(unavailable)? {
-        return Err(error(
-            "busy",
-            "device lane owner or recovery record exists; preserved",
-        ));
-    }
-    let mut queue = crate::queue_owner::QueueMutex::acquire(&paths.queue_dir).map_err(|e| {
-        if e == crate::queue_owner::QUEUE_MUTEX_BUSY {
-            error("busy", e)
-        } else {
-            unavailable(e)
-        }
-    })?;
-    let result = update_locked(root, &paths.queue_dir, request);
-    queue.release().map_err(unavailable)?;
-    result
+    paths.require_device_root(device_root).map_err(unavailable)?;
+    update_locked(root, &paths.queue_dir, request)
 }
 fn request_bytes(path: &str) -> Result<Vec<u8>> {
     if path != "-" {
@@ -721,6 +697,7 @@ mod tests {
     }
     #[test]
     fn binding_resolves_aliases_and_rejects_changed_or_unavailable_identity() {
+        if crate::isolate_fd_test("device_registry::tests::binding_resolves_aliases_and_rejects_changed_or_unavailable_identity") { return; }
         let s = Scratch::new();
         set(&s.0, request(0, "A", &["usb-A", "192.0.2.1:5555"], true)).unwrap();
         assert!(resolve_binding(&crate::lease_storage::Storage::custom(&s.0), "usb-A").is_err());
@@ -759,6 +736,7 @@ mod tests {
     }
     #[test]
     fn registry_cas_preserves_originals_and_disabled_aliases() {
+        if crate::isolate_fd_test("device_registry::tests::registry_cas_preserves_originals_and_disabled_aliases") { return; }
         let scratch = Scratch::new();
         assert_eq!(get(&scratch.0).unwrap()["revision"], 0);
         assert!(!scratch.0.exists());
@@ -821,6 +799,7 @@ mod tests {
     }
     #[test]
     fn registry_writes_refuse_bridge_queue_and_unknown_owner_without_cleanup() {
+        if crate::isolate_fd_test("device_registry::tests::registry_writes_refuse_bridge_queue_and_unknown_owner_without_cleanup") { return; }
         let scratch = Scratch::new();
         set(&scratch.0, request(0, "A", &["usb-A"], true)).unwrap();
         let original = fs::read(scratch.0.join(CURRENT)).unwrap();
@@ -833,7 +812,7 @@ mod tests {
             "busy"
         );
         drop(bridge);
-        for name in ["devlock.d", "phonefarm-lease.d", "devlock.qmutex"] {
+        for name in ["devlock.d", "phonefarm-lease.d"] {
             fs::create_dir(scratch.0.join(name)).unwrap();
             assert_eq!(
                 set(&scratch.0, request(1, "B", &["usb-B"], true))
@@ -857,6 +836,7 @@ mod tests {
     }
     #[test]
     fn registry_rejects_invalid_input_and_preserves_interrupted_archive() {
+        if crate::isolate_fd_test("device_registry::tests::registry_rejects_invalid_input_and_preserves_interrupted_archive") { return; }
         for value in [
             json!({"expected_revision":0,"device":{"device_id":"../bad","label":"bad","aliases":["a"],"enabled":true}}),
             json!({"expected_revision":0,"device":{"device_id":"A","label":"a","aliases":["a","a"],"enabled":true}}),

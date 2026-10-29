@@ -1,5 +1,5 @@
 //! Short device observations share the experiment lease and own a bounded worker group.
-use crate::{device_registry::DeviceBinding, devlease::Lease, lease_storage::Storage};
+use crate::{device_registry::DeviceBinding, lease_storage::Storage};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -91,25 +91,10 @@ pub(crate) fn run_scoped(
     timeout: Duration,
     binding: Option<&DeviceBinding>,
 ) -> Result<Output, Failure> {
-    let acquired = if let Some(binding) = binding {
-        if kind != "screen" || screen_serial(args) != Some(binding.serial.as_str()) {
-            return Err(Failure::error("device observation must name its bound screen serial"));
-        }
-        Lease::acquire_device(storage, binding, kind, Duration::ZERO)
-    } else {
-        Lease::observe(storage, kind)
-    };
-    let mut lease = acquired.map_err(|reason| Failure { state: "deferred", reason })?;
+    let serial = binding.map(|binding| binding.serial.as_str()).or_else(|| screen_serial(args));
     let (mut cmd, out_path, err_path) = worker_command(kind, args, storage, timeout)?;
-    lease.authorize_observation_worker(&mut cmd);
-    supervise(
-        &mut lease,
-        &mut cmd,
-        kind,
-        timeout,
-        &out_path.0,
-        &err_path.0,
-    )
+    if let Some(serial) = serial { cmd.env("PHONEFARM_OBSERVATION_SERIAL", serial); }
+    supervise_ephemeral(&mut cmd, kind, timeout, &out_path.0, &err_path.0)
 }
 
 fn worker_command(
@@ -141,45 +126,6 @@ fn worker_command(
     Ok((cmd, out_path, err_path))
 }
 
-fn supervise(
-    lease: &mut Lease,
-    cmd: &mut Command,
-    kind: &str,
-    timeout: Duration,
-    out: &std::path::Path,
-    err: &std::path::Path,
-) -> Result<Output, Failure> {
-    lease.record_command_pending(kind).map_err(Failure::error)?;
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            lease
-                .cancel_unspawned_command(kind)
-                .map_err(Failure::error)?;
-            return Err(Failure::error(format!(
-                "observation worker could not start: {e}"
-            )));
-        }
-    };
-    let start = lease.record_child(child.id()).and_then(|_| {
-        child
-            .stdin
-            .as_mut()
-            .ok_or("worker start pipe unavailable".to_string())?
-            .write_all(b"1")
-            .map_err(|e| e.to_string())
-    });
-    if let Err(e) = start {
-        stop_group(&mut child);
-        return Err(Failure::error(format!(
-            "observation startup uncertain; lease retained: {e}"
-        )));
-    }
-    let output = wait_output(&mut child, kind, timeout, out, err, true)?;
-    lease.clear_child().map_err(Failure::error)?;
-    Ok(output)
-}
-
 fn supervise_ephemeral(
     cmd: &mut Command,
     kind: &str,
@@ -195,7 +141,7 @@ fn supervise_ephemeral(
         stop_group(&mut child);
         return Err(Failure::error(format!("observation startup failed: {e}")));
     }
-    wait_output(&mut child, kind, timeout, out, err, false)
+    wait_output(&mut child, kind, timeout, out, err)
 }
 
 fn wait_output(
@@ -204,7 +150,6 @@ fn wait_output(
     timeout: Duration,
     out: &std::path::Path,
     err: &std::path::Path,
-    retained: bool,
 ) -> Result<Output, Failure> {
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -213,14 +158,16 @@ fn wait_output(
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             result => {
                 stop_group(child);
-                let suffix = if retained { "; lease retained for idle verification" } else { "" };
-                return Err(Failure::error(format!("observation timeout/wait failure ({result:?}){suffix}")));
+                return Err(Failure::error(format!("observation timeout/wait failure ({result:?})")));
             }
         }
     };
     let deadline = Instant::now() + Duration::from_millis(300);
     while !group_gone(child.id()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
+    }
+    if status.code() == Some(75) {
+        return Err(Failure { state: "deferred", reason: fs::read_to_string(err).unwrap_or_default() });
     }
     let expected = match kind {
         "fleet" => matches!(status.code(), Some(0 | 1)),
@@ -231,8 +178,7 @@ fn wait_output(
     if !expected || !group_gone(child.id()) {
         stop_group(child);
         let diagnostic = fs::read_to_string(err).unwrap_or_default().chars().take(2048).collect::<String>();
-        let suffix = if retained { "; lease retained for idle verification" } else { "" };
-        return Err(Failure::error(format!("observation worker/group incomplete ({status}){suffix}. {}", diagnostic.trim())));
+        return Err(Failure::error(format!("observation worker/group incomplete ({status}). {}", diagnostic.trim())));
     }
     Ok(Output {
         status,
@@ -248,21 +194,6 @@ fn screen_serial(args: &[String]) -> Option<&str> {
     serials.next().is_none().then_some(serial)
 }
 
-fn verify_scope(marker: &serde_json::Value, args: &[String]) -> Result<(), String> {
-    if marker.get("device_binding").is_none() && marker.get("scope").is_none()
-        && marker["serial"] == "@observation" {
-        return Ok(());
-    }
-    let binding = crate::device_registry::parse_binding(&marker["device_binding"].to_string())?;
-    if marker["format"] != 2 || marker["scope"] != "device"
-        || marker["serial"] != binding.serial
-        || args.first().map(String::as_str) != Some("screen")
-        || screen_serial(&args[1..]) != Some(binding.serial.as_str()) {
-        return Err("observation worker device binding mismatch".into());
-    }
-    Ok(())
-}
-
 pub(crate) fn run_worker(args: &[String]) -> i32 {
     let verify = || -> Result<(), String> {
         let mut start = [0];
@@ -272,26 +203,6 @@ pub(crate) fn run_worker(args: &[String]) -> i32 {
         if start != *b"1" {
             return Err("invalid startup barrier".into());
         }
-        if args.first().map(String::as_str) == Some("fleet") {
-            return Ok(());
-        }
-        let path = std::env::var("PHONEFARM_OBSERVATION_MARKER").map_err(|e| e.to_string())?;
-        let token = std::env::var("PHONEFARM_OBSERVATION_TOKEN").map_err(|e| e.to_string())?;
-        let marker: serde_json::Value =
-            serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-        verify_scope(&marker, args)?;
-        let pid = std::process::id();
-        if marker["token"] != token
-            || marker["pid"] != unsafe { libc::getppid() }
-            || marker["child_pid"] != pid
-            || marker["child_pgid"] != pid
-            || unsafe { libc::getpgrp() } != pid as i32
-            || marker["command_pending"] != false
-        {
-            return Err("observation worker lease identity mismatch".into());
-        }
-        crate::devlease::verify_worker_processes(&marker, unsafe { libc::getppid() } as u32, pid)?;
         Ok(())
     };
     if let Err(e) = verify() {
@@ -321,6 +232,10 @@ pub(crate) fn run_worker(args: &[String]) -> i32 {
             libc::kill(-group, libc::SIGKILL);
         }
     });
+    let _lease = match std::env::var("PHONEFARM_OBSERVATION_SERIAL").ok().map(|serial|
+        crate::devlease::EphemeralObservation::acquire(&crate::lease_storage::resolve(), &serial)).transpose() {
+        Ok(lease) => lease, Err(error) => { eprintln!("{error}"); return 75; }
+    };
     WORKER.store(true, Ordering::Relaxed);
     match args.first().map(String::as_str) {
         Some("fleet") => crate::fleet::run_fleet(&args[1..]),

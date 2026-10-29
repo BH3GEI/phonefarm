@@ -12,7 +12,7 @@ use std::{
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static CLI_RECEIPT: AtomicU64 = AtomicU64::new(0);
-// Each fixture drives real subprocesses, durable writes and a strict heartbeat.
+// Each fixture drives real subprocesses, durable writes and device process lifetimes.
 // Default libtest concurrency turns protocol regression into host I/O stress.
 // Keep concurrency *inside* a fixture (including competing owners) unchanged.
 static DRIVER_SLOT: Mutex<()> = Mutex::new(());
@@ -37,7 +37,7 @@ impl F {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("receipts")).unwrap();
         // The driver canonicalizes its session. Keep independent producer inputs
         // on the same root (/var and /private/var are aliases on macOS).
         let dir = std::fs::canonicalize(dir).unwrap();
@@ -188,6 +188,25 @@ impl F {
     fn read(&self, n: &str) -> Value {
         serde_json::from_slice(&std::fs::read(self.dir.join(n)).unwrap()).unwrap()
     }
+    fn receipt(&self) -> Value {
+        std::fs::read_dir(self.dir.join("receipts")).unwrap()
+            .map(|p| serde_json::from_slice::<Value>(&std::fs::read(p.unwrap().path()).unwrap()).unwrap())
+            .max_by_key(|v| v["updated_at"].as_str().unwrap().to_owned()).unwrap()
+    }
+    fn assert_released(&self) {
+        let output = Command::new(env!("CARGO_BIN_EXE_phonefarm"))
+            .args(["lease", "--serial", "fake-target", "--timeout-ms", "0", "--", "/usr/bin/true"])
+            .env("PHONEFARM_LEASE_DIR", self.dir.join("lease"))
+            .env("DEVLOCK_DIR", self.dir.join("legacy"))
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    fn assert_recovery_required(&self) {
+        let receipt = self.receipt();
+        assert_eq!(receipt["state"], "released", "{receipt}");
+        assert_eq!(receipt["recovery"]["status"], "required", "{receipt}");
+        self.assert_released();
+    }
     fn command(&self, args: &[&str], fail: &str) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_phonefarm"));
         c.arg("confirmation-driver")
@@ -197,7 +216,9 @@ impl F {
             .env("PHONEFARM_LEASE_DIR", self.dir.join("lease"))
             .env("DEVLOCK_DIR", self.dir.join("legacy"))
             .env("PHONEFARM_LEASE_TIMEOUT_MS", "100")
-            .env("PHONEFARM_FAKE_FAIL", fail);
+            .env("PHONEFARM_FAKE_FAIL", fail)
+            .env("PF_JOB_ID", "0123456789ab")
+            .env("PF_JOB_LEASE_DIR", self.dir.join("receipts"));
         c
     }
     fn call(&self, args: &[&str], fail: &str) -> (i32, Value) {
@@ -545,14 +566,13 @@ fn every_failed_raw_gate_stops_and_preserves_uncertainty() {
         let f = F::new(false);
         let (c, v) = f.prepare(fail);
         assert_eq!(c, 1, "{fail}: {v}");
-        let m = f.read("legacy/devlock.d/phonefarm-lease.json");
-        assert_eq!(m["recovery_required"], true, "{fail}");
+        f.assert_recovery_required();
         assert!(!f.dir.join("session/prepared.manifest.json").exists());
         let (c, _) = f.call(
             &["prepare", "--request", "request.json", "--out", "another"],
             "",
         );
-        assert_eq!(c, 1);
+        assert_eq!(c, 0, "a failed prior run must not leave a lock barrier: {fail}");
     }
 }
 #[test]
@@ -573,7 +593,7 @@ fn explicit_reconcile_never_validates_failed_old_sample() {
     assert_eq!(std::fs::read(f.dir.join("fake-state.json")).unwrap(), state);
 }
 #[test]
-fn uncertain_session_closure_keeps_barrier_and_delayed_command_revoked() {
+fn uncertain_session_closure_keeps_failed_result_and_delayed_command_revoked() {
     let f = F::new(false);
     assert_eq!(f.prepare("probe").0, 1);
     let (c, v) = f.call(
@@ -581,10 +601,7 @@ fn uncertain_session_closure_keeps_barrier_and_delayed_command_revoked() {
         "closure_unknown",
     );
     assert_eq!(c, 1, "{v}");
-    assert_eq!(
-        f.read("legacy/devlock.d/phonefarm-lease.json")["recovery_required"],
-        true
-    );
+    f.assert_recovery_required();
     assert_eq!(f.delayed_old_worker().status.code(), Some(86));
     // A missing closure receipt cannot be filled by replaying recovery on a tombstoned session.
     assert_eq!(
@@ -592,46 +609,22 @@ fn uncertain_session_closure_keeps_barrier_and_delayed_command_revoked() {
             .0,
         1
     );
-    assert_eq!(
-        f.read("legacy/devlock.d/phonefarm-lease.json")["recovery_required"],
-        true
-    );
+    f.assert_recovery_required();
 }
 #[test]
-fn unbound_pending_transport_cannot_be_reconciled_or_asserted_idle() {
+fn retired_pending_record_does_not_block_real_reconciliation() {
     let f = F::new(false);
     assert_eq!(f.prepare("probe").0, 1);
-    let original_argv = std::fs::read(f.dir.join("argv.jsonl")).unwrap();
-    let mut m = f.read("legacy/devlock.d/phonefarm-lease.json");
-    m["command_pending"] = json!(true);
-    m["pending_operation"] = json!("unbound-before-spawn");
-    f.write("legacy/devlock.d/phonefarm-lease.json", &m);
+    let marker = f.dir.join("legacy/devlock.d/phonefarm-lease.json");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    let old = json!({"command_pending":true,"pending_operation":"unbound-before-spawn","recovery_required":true});
+    f.write("legacy/devlock.d/phonefarm-lease.json", &old);
     let (c, v) = f.call(&["reconcile", "--session", "session", "--execute"], "");
-    assert_eq!(c, 1, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("unbound pending"));
-    assert_eq!(
-        std::fs::read(f.dir.join("argv.jsonl")).unwrap(),
-        original_argv
-    );
-    let o = Command::new(env!("CARGO_BIN_EXE_phonefarm"))
-        .args([
-            "lease",
-            "--serial",
-            "fake-target",
-            "--recover-abandoned",
-            "--confirm-device-idle",
-            "--timeout-ms",
-            "100",
-        ])
-        .env("PHONEFARM_LEASE_DIR", f.dir.join("lease"))
-        .env("DEVLOCK_DIR", f.dir.join("legacy"))
-        .output()
-        .unwrap();
-    assert!(!o.status.success());
-    assert_eq!(
-        f.read("legacy/devlock.d/phonefarm-lease.json")["recovery_required"],
-        true
-    );
+    assert_eq!(c, 0, "{v}");
+    assert_eq!(v["status"], "SIMULATED_RECONCILED");
+    assert_eq!(v["old_samples_revalidated"], false);
+    assert_eq!(f.read("legacy/devlock.d/phonefarm-lease.json"), old);
+    f.assert_released();
 }
 #[test]
 fn local_parent_exit_with_lingering_closed_pipe_child_is_not_success() {
@@ -644,18 +637,15 @@ fn local_parent_exit_with_lingering_closed_pipe_child_is_not_success() {
     );
 }
 #[test]
-fn boot_changed_reconcile_preserves_barrier() {
+fn boot_changed_reconcile_preserves_recovery_requirement() {
     let f = F::new(false);
     assert_eq!(f.prepare("probe").0, 1);
     let (c, v) = f.call(&["reconcile", "--session", "session", "--execute"], "boot");
     assert_eq!(c, 1, "{v}");
-    assert_eq!(
-        f.read("legacy/devlock.d/phonefarm-lease.json")["recovery_required"],
-        true
-    );
+    f.assert_recovery_required();
 }
 #[test]
-fn per_device_lease_excludes_other_cwd_renews_and_releases_completed_command() {
+fn per_device_lease_excludes_other_cwd_and_releases_completed_command() {
     use std::time::{Duration, Instant};
     let f = F::new(false);
     let started = f.dir.join("lease-started");
@@ -686,13 +676,6 @@ fn per_device_lease_excludes_other_cwd_renews_and_releases_completed_command() {
         assert!(a.try_wait().unwrap().is_none());
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let owner = f.dir.join("legacy/devlock.d/owner");
-    let first = std::fs::metadata(&owner).unwrap().modified().unwrap();
-    let until = Instant::now() + Duration::from_secs(7);
-    while std::fs::metadata(&owner).unwrap().modified().unwrap() == first {
-        assert!(Instant::now() < until);
-        std::thread::sleep(Duration::from_millis(25));
     }
     let competing = || {
         Command::new(env!("CARGO_BIN_EXE_phonefarm"))
@@ -848,12 +831,7 @@ fn capability_root_hot_gate_precedes_install_and_failure_keeps_recovery() {
             assert!(!argv.contains("#phonefarm_fixed_tools_install v1"));
             assert!(!f.dir.join("legacy/devlock.d").exists());
         } else {
-            assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
-            let marker: Value = serde_json::from_slice(
-                &std::fs::read(f.dir.join("legacy/devlock.d/phonefarm-lease.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(marker["recovery_required"], true);
+            f.assert_recovery_required();
             if failure == "probe" {
                 let (code, v) = f.call(
                     &["reconcile", "--session", "control-session", "--execute"],
@@ -867,7 +845,7 @@ fn capability_root_hot_gate_precedes_install_and_failure_keeps_recovery() {
     }
 }
 #[test]
-fn capability_missing_frozen_tool_cannot_reconcile_or_release_barrier() {
+fn capability_missing_frozen_tool_cannot_reconcile() {
     let f = F::new(false);
     control_request(&f, "fake");
     assert_eq!(
@@ -896,7 +874,7 @@ fn capability_missing_frozen_tool_cannot_reconcile_or_release_barrier() {
         serde_json::to_vec_pretty(&manifest).unwrap(),
     )
     .unwrap();
-    let before = std::fs::read(f.dir.join("legacy/devlock.d/phonefarm-lease.json")).unwrap();
+    let before = std::fs::read(f.dir.join("control-session/state.json")).unwrap();
     let (code, v) = f.call(
         &["reconcile", "--session", "control-session", "--execute"],
         "",
@@ -904,7 +882,7 @@ fn capability_missing_frozen_tool_cannot_reconcile_or_release_barrier() {
     assert_eq!(code, 1, "{v}");
     assert!(v["error"].as_str().unwrap().contains("manifest"));
     assert_eq!(
-        std::fs::read(f.dir.join("legacy/devlock.d/phonefarm-lease.json")).unwrap(),
+        std::fs::read(f.dir.join("control-session/state.json")).unwrap(),
         before
     );
 }
@@ -1002,7 +980,7 @@ fn loaded_prepare_freezes_real_raw_contract_and_three_independent_windows_but_fi
     assert!(!f.dir.join("legacy/devlock.d").exists());
 }
 #[test]
-fn loaded_whole_thermal_failure_keeps_durable_barrier_without_sampling_further_baselines() {
+fn loaded_whole_thermal_failure_keeps_failed_result_without_sampling_further_baselines() {
     for fail in [
         "thermal_window_short",
         "thermal_window_hot",
@@ -1014,7 +992,7 @@ fn loaded_whole_thermal_failure_keeps_durable_barrier_without_sampling_further_b
         f.write("request.json", &req);
         let (code, v) = f.prepare(fail);
         assert_eq!(code, 1, "{fail}:{v}");
-        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        f.assert_recovery_required();
         assert!(!f.dir.join("session/admission_1-run.json").exists());
         assert!(!f.dir.join("session/plan.json").exists());
     }
@@ -1281,7 +1259,7 @@ fn loaded_prepare_checks_fresh_profile_after_install_before_first_control_write(
     let (code, v) = f.prepare("thermal_hot_before_probe");
     assert_eq!(code, 1, "{v}");
     assert_eq!(v["status"], "BLOCKED");
-    assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    f.assert_recovery_required();
     let argv = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
     assert!(argv.contains("mkdir "));
     assert!(!argv.contains("'probe' 'probe_0'"));
@@ -1289,7 +1267,7 @@ fn loaded_prepare_checks_fresh_profile_after_install_before_first_control_write(
 }
 
 #[test]
-fn fixed_tools_partial_install_or_corruption_never_runs_probe_and_reconcile_keeps_barrier() {
+fn fixed_tools_partial_install_or_corruption_never_runs_probe_and_reconcile_keeps_recovery_requirement() {
     for fail in [
         "batch_partial_install",
         "batch_corrupt_remote",
@@ -1299,7 +1277,7 @@ fn fixed_tools_partial_install_or_corruption_never_runs_probe_and_reconcile_keep
         let (code, v) = f.prepare(fail);
         assert_eq!(code, 1, "{fail}: {v}");
         assert_eq!(v["status"], "BLOCKED");
-        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        f.assert_recovery_required();
         assert!(!f.dir.join("session/admission_0-run.json").exists());
         let argv = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
         assert!(!argv.contains("'probe' 'probe_0'"));
@@ -1313,7 +1291,7 @@ fn fixed_tools_partial_install_or_corruption_never_runs_probe_and_reconcile_keep
         );
         assert_eq!(code, 1, "{fail}: {v}");
         assert_eq!(v["status"], "BLOCKED");
-        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        f.assert_recovery_required();
         let actual = f.read("fake-state.json");
         let remote = f.read("session/state.json")["remote"]
             .as_str()
@@ -1345,12 +1323,12 @@ fn fixed_tools_collect_and_reconcile_do_not_reuse_old_install_acceptance() {
     assert_eq!(code, 1, "{v}");
     assert_eq!(v["status"], "BLOCKED");
     assert!(!f.dir.join("session/a0-run.json").exists());
-    assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    f.assert_recovery_required();
     let before = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
     assert!(!before.contains("'sample' 'a0'"));
     let (code, v) = f.call(&["reconcile", "--session", "session"], "");
     assert_eq!(code, 1, "{v}");
-    assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    f.assert_recovery_required();
     let actual = f.read("fake-state.json");
     assert!(actual["files"]
         .get(format!("{remote}/session.closed"))
@@ -1530,10 +1508,7 @@ fn absolute_capability_bad_evidence_and_unknown_restore_still_block() {
         assert_eq!(v["eligible"], false);
         assert!(!f.dir.join("absolute/control-report.json").exists());
         if fail.starts_with("control_hold") || ["restore", "closure_unknown"].contains(&fail) {
-            assert!(
-                f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists(),
-                "{fail}"
-            );
+            f.assert_recovery_required();
         } else {
             assert!(!f.dir.join("absolute/initial.snapshot").exists(), "{fail}");
             assert!(!f.dir.join("legacy/devlock.d").exists(), "{fail}");
@@ -1727,7 +1702,7 @@ fn queued_origin_helper_failure_has_only_helper_recovery() {
     let f = origin_fixture();
     let (code, r) = f.prepare("helper_interrupt");
     assert_eq!(code, 1, "{r}");
-    assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+    f.assert_recovery_required();
     assert!(!f.dir.join("session/main-install.intent.json").exists());
     assert!(!f.dir.join("session/inputs.manifest.json").exists());
     let before = std::fs::read_to_string(f.dir.join("argv.jsonl")).unwrap();
@@ -1744,7 +1719,7 @@ fn queued_origin_helper_failure_has_only_helper_recovery() {
     assert!(!after.contains("'reconcile'"));
 }
 #[test]
-fn queued_origin_helper_unknown_or_main_intent_preserves_barrier() {
+fn queued_origin_helper_unknown_or_main_intent_preserves_recovery_requirement() {
     for fail in ["helper_group_unknown", "main_intent"] {
         let f = origin_fixture();
         assert_eq!(f.prepare("helper_read_failure").0, 1);
@@ -1759,7 +1734,7 @@ fn queued_origin_helper_unknown_or_main_intent_preserves_barrier() {
             if fail == "main_intent" { "" } else { fail },
         );
         assert_eq!(code, 1, "{fail} {r}");
-        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        f.assert_recovery_required();
         assert!(!f.dir.join("session/render-helper-removed.json").exists());
     }
 }
@@ -1944,7 +1919,7 @@ cleanup_failure() {{
 }
 
 #[test]
-fn helper_recovery_diagnostic_records_only_and_never_clears_barrier() {
+fn helper_recovery_diagnostic_records_only_and_never_claims_recovery() {
     let f = origin_fixture();
     assert_eq!(f.prepare("helper_interrupt").0, 1);
     for fail in ["", "diagnostic_partial", "diagnostic_boot"] {
@@ -1967,7 +1942,7 @@ fn helper_recovery_diagnostic_records_only_and_never_clears_barrier() {
         ] {
             assert_eq!(r[key], false);
         }
-        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        f.assert_recovery_required();
         assert_eq!(
             f.read("fake-state.json"),
             before,
@@ -2020,7 +1995,7 @@ fn helper_recovery_diagnostic_rejects_main_or_changed_sources_before_transport()
         assert_eq!(code, 1, "{fail}: {r}");
         assert_eq!(r["status"], "BLOCKED");
         assert_eq!(std::fs::read(f.dir.join("argv.jsonl")).unwrap(), before);
-        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        f.assert_recovery_required();
         if matches!(fail, "main" | "dangling_main") {
             std::fs::remove_file(f.dir.join("session/main-install.intent.json")).unwrap();
         }
@@ -2031,13 +2006,13 @@ fn helper_recovery_diagnostic_rejects_main_or_changed_sources_before_transport()
 }
 
 #[test]
-fn native_dead_retirement_requires_complete_current_proofs_and_preserves_unknown_barrier() {
+fn native_dead_retirement_requires_complete_current_proofs_and_preserves_unknown_result() {
     for fail in ["", "native_partial", "native_live", "native_epoch", "native_files", "native_post"] {
         let f=origin_fixture();assert_eq!(f.prepare("helper_interrupt").0,1);
         let (code,r)=f.call(&["retire-helper-native","--session","session","--execute"],fail);
         assert_eq!(code,0,"{fail}: {r}");
-        let success=fail.is_empty();assert_eq!(r["retirement_completed"],success);assert_eq!(r["barrier_retained"],!success);
-        assert_eq!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists(),!success);
+        let success=fail.is_empty();assert_eq!(r["retirement_completed"],success);assert_eq!(r["recovery_required"],!success);
+        f.assert_released();
         for key in ["eligible","real_game_optimization_proven","promotion_allowed","control_restore_claimed","old_samples_revalidated","live_process_stopped","old_tools_changed"] {assert_eq!(r[key],false);}
         if success {assert_eq!(r["status"],"SIMULATED_HELPER_CLOSED");assert_eq!(r["stages"].as_array().unwrap().len(),2);}
         else {assert_eq!(r["status"],"UNKNOWN");}
@@ -2073,9 +2048,40 @@ fn native_helper_noexecute_main_or_changed_frozen_inputs_refuse_before_transport
         assert_eq!(code, 1, "{kind}: {r}");
         assert_eq!(r["status"], "BLOCKED");
         assert_eq!(std::fs::read(f.dir.join("argv.jsonl")).unwrap(), before);
-        assert!(f.dir.join("legacy/devlock.d/phonefarm-lease.json").exists());
+        f.assert_recovery_required();
         if kind == "main" {
             std::fs::remove_file(f.dir.join("session/main-install.intent.json")).unwrap();
         }
     }
+}
+
+#[test]
+fn killing_task_group_reaps_separate_transport_group_and_releases_lock() {
+    use std::os::unix::process::CommandExt;
+    use std::time::Duration;
+    let f = F::new(false);
+    let mut command = f.command(&["prepare", "--request", "request.json", "--out", "session"], "host_parent_killed");
+    let mut child = command.process_group(0).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+    let ready = f.dir.join("transport-group");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let transport: i32 = std::fs::read_to_string(ready).unwrap().parse().unwrap();
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+    child.wait().unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    let released = loop {
+        let o = Command::new(env!("CARGO_BIN_EXE_phonefarm"))
+            .args(["lease", "--serial", "fake-target", "--timeout-ms", "0", "--", "/usr/bin/true"])
+            .env("DEVLOCK_DIR", f.dir.join("legacy")).env("PHONEFARM_LEASE_DIR", f.dir.join("lease")).output().unwrap();
+        if o.status.success() { break true; }
+        if Instant::now() >= until { break false; }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    unsafe { libc::kill(-transport, libc::SIGKILL); }
+    assert!(released, "killing the original task left a separate transport group holding the fd");
+    assert!(f.dir.join("transport-term").exists(), "transport cleanup must send TERM before KILL");
 }

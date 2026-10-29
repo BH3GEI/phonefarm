@@ -6,7 +6,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::{Duration, Instant},
 };
 
@@ -58,17 +58,6 @@ fn stage_file(path: &Path, bytes: &[u8], sync_file: bool, sync_parent: bool) -> 
 
 pub(crate) fn new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     stage_file(path, bytes, true, true)
-}
-fn publish_permit(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if path.exists() {
-        return Err("transport permit already exists".into());
-    }
-    let tmp = path.with_extension("permit-pending");
-    stage_file(&tmp, bytes, true, false)?;
-    fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-    File::open(path.parent().ok_or("permit parent")?)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| e.to_string())
 }
 pub(crate) fn journal(dir: &Path, event: Value) -> Result<(), String> {
     let mut f = crate::shared_access::append_file(&dir.join("journal.jsonl"))
@@ -135,9 +124,6 @@ impl Transport {
         cap: u64,
         lease: Option<&Lease>,
     ) -> Result<Receipt, String> {
-        if let Some(l) = lease {
-            l.check()?;
-        }
         self.sequence += 1;
         let stem = format!("{:04}-{op}", self.sequence);
         let outputs = self.dir.join("commands");
@@ -174,22 +160,8 @@ impl Transport {
             json!({"event":"command_intent","operation":op,"argv":argv,"program_sha256":self.expected_sha,
             "stdin_sha256":input_sha,"source":self.origin,"at":chrono::Utc::now().to_rfc3339()}),
         )?;
-        let permit = outputs.join(format!("{stem}.permit"));
-        let permit_token = lease
-            .map(|l| l.token())
-            .unwrap_or("unleased-local-only")
-            .to_owned();
-        // The shell cannot contact the device before the durable PID/group receipt and permit exist.
-        const GATE: &str = r#"program=$1; permit=$2; token=$3; shift 3; n=0; while [ ! -f "$permit" ]; do [ "$n" -lt 500 ] || exit 91; n=$((n+1)); sleep .02; done; [ "$(cat "$permit")" = "$token" ] || exit 92; exec "$program" "$@""#;
-        if let Some(l) = lease {
-            l.record_command_pending(op)?;
-        }
-        let mut c = Command::new("/bin/sh");
-        c.args(["-c", GATE, "phonefarm-transport-gate"])
-            .arg(&executable_path)
-            .arg(&permit)
-            .arg(&permit_token)
-            .args(&argv)
+        let mut c = crate::fd_lock::transport_command(&executable_path);
+        c.args(&argv)
             .stdout(Stdio::from(
                 OpenOptions::new()
                     .create_new(true)
@@ -214,7 +186,10 @@ impl Transport {
             use std::os::unix::process::CommandExt;
             c.process_group(0);
         }
+        if let Some(lease) = lease { lease.command(&mut c)?; }
+        let (_parent_pipe, child_pipe) = crate::fd_lock::transport_lifeline(&mut c)?;
         let spawned = c.spawn();
+        drop(child_pipe);
         let mut child = match spawned {
             Ok(c) => c,
             Err(e) => {
@@ -223,23 +198,8 @@ impl Transport {
             }
         };
         let pid = child.id();
-        if let Some(l) = lease {
-            if let Err(e) = l.record_child(pid) {
-                stop_and_reap(&mut child);
-                return Err(e);
-            }
-        }
-        if let Err(e) = publish_permit(&permit, format!("{permit_token}\n").as_bytes()) {
-            stop_and_reap(&mut child);
-            return Err(e);
-        }
         let until = Instant::now() + deadline;
         let result = loop {
-            if let Some(l) = lease {
-                if let Err(e) = l.check() {
-                    break Err(e);
-                }
-            }
             if [&out, &err]
                 .iter()
                 .any(|p| fs::metadata(p).map_or(true, |m| m.len() > cap))
@@ -265,14 +225,8 @@ impl Transport {
         };
         let reaped = result.is_ok() || stop_and_reap(&mut child);
         let _ = fs::remove_file(&executable_path);
-        let _ = fs::remove_file(&permit);
         // Killing local processes does not prove that remote activity stopped.
         let group_stopped = reaped && group_absent(pid);
-        if group_stopped {
-            if let Some(l) = lease {
-                l.clear_child()?;
-            }
-        }
         let code = match &result {
             Ok(n) => Some(*n),
             Err(_) => None,
@@ -405,7 +359,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn permit_reader_never_observes_partial_published_bytes() {
+    fn recovery_evidence_reader_never_observes_partial_published_bytes() {
         let dir = temp();
         let bytes = vec![b'x'; 1024 * 1024];
         for i in 0..8 {
@@ -427,7 +381,7 @@ mod tests {
                     std::thread::yield_now();
                 }
             });
-            publish_permit(&p, &bytes).unwrap();
+            crate::devlease::durable_replace(&p, &bytes).unwrap();
             reader.join().unwrap();
         }
         fs::remove_dir_all(dir).unwrap();

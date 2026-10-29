@@ -753,9 +753,8 @@ impl Session {
             Err(error) => return failed_recovery(&prior, &source, out, &error, Some(false)),
         };
         if let Err(error) = session.lease.hold_for_recovery(&session.dir) {
-            // hold can publish the new marker before a receipt/fsync failure.
-            // Observe the still-held lease domain instead of guessing which
-            // context a later recovery must use. Never issue device commands.
+            // The new session was saved before reporting its recovery context.
+            // Preserve the report failure and issue no device commands.
             let moved = game_deploy::context_moved(&session.lease, serial, &source, &session.dir);
             return failed_recovery(&prior, &source, out, &error, moved);
         }
@@ -926,7 +925,7 @@ mod tests {
                 assert_eq!(saved["device_binding"], json!(a));
                 assert_eq!(saved["lease_scope"], "device");
                 session.lease.hold_for_recovery(&session.dir).unwrap();
-                other.check().unwrap();
+                assert!(crate::devlease::Lease::acquire_device(&storage, &b, "same-device", std::time::Duration::ZERO).is_err());
             } else {
                 assert_eq!(phase, "recover");
                 let other =
@@ -941,16 +940,13 @@ mod tests {
                 assert_eq!(report["device_binding"], json!(a));
                 assert_eq!(report["lease_scope"], "device");
                 assert_eq!(report["recovery"]["status"], "verified");
-                other.check().unwrap();
+                assert!(crate::devlease::Lease::acquire_device(&storage, &b, "same-device", std::time::Duration::ZERO).is_err());
                 drop(other);
                 let lease = game_deploy::acquire_target("scope-A", "game-deploy", None).unwrap();
                 let legacy = Session::new(lease, request, &root.join("legacy")).unwrap();
                 let saved = serde_json::to_value(&legacy.state).unwrap();
-                assert!(saved.get("device_binding").is_none());
-                assert!(legacy
-                    .report("prepared", None, "not_reported")
-                    .get("lease_scope")
-                    .is_none());
+                assert_eq!(saved["device_binding"], json!(a));
+                assert_eq!(legacy.report("prepared", None, "not_reported")["lease_scope"], "device");
             }
             return;
         }

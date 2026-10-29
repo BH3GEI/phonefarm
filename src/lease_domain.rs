@@ -471,6 +471,7 @@ mod tests {
     }
     #[test]
     fn lanes_namespace_persists_and_rejects_unknown_boundary_entries() {
+        if crate::isolate_fd_test("lease_domain::tests::lanes_namespace_persists_and_rejects_unknown_boundary_entries") { return; }
         let s = Scratch::new();
         let legacy = inspect(&s.0).unwrap();
         assert!(!legacy.lanes_enabled);
@@ -512,6 +513,7 @@ mod tests {
     }
     #[test]
     fn upgrade_keeps_root_inodes_identity_and_active_domain_readback() {
+        if crate::isolate_fd_test("lease_domain::tests::upgrade_keeps_root_inodes_identity_and_active_domain_readback") { return; }
         let s = Scratch::new();
         assert_eq!(inspect(&s.0).unwrap().layout_version, 1);
         assert!(!s.0.exists());
@@ -546,6 +548,7 @@ mod tests {
     }
     #[test]
     fn record_without_fence_resumes_same_id_but_never_claims_unknown_entries() {
+        if crate::isolate_fd_test("lease_domain::tests::record_without_fence_resumes_same_id_but_never_claims_unknown_entries") { return; }
         let s = Scratch::new();
         let first = init(&s.0, &s.0.join("devices")).unwrap();
         let record = fs::read(s.0.join("domain.json")).unwrap();
@@ -567,6 +570,7 @@ mod tests {
     }
     #[test]
     fn upgrade_and_v2_inspection_refuse_old_owners_queue_and_unknown_layout() {
+        if crate::isolate_fd_test("lease_domain::tests::upgrade_and_v2_inspection_refuse_old_owners_queue_and_unknown_layout") { return; }
         let s = Scratch::new();
         fs::create_dir(&s.0).unwrap();
         for name in ["devlock.d", "phonefarm-lease.d", "devlock.qmutex", "v2"] {

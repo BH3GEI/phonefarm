@@ -17,26 +17,6 @@ impl Fixture {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let fake_devlock = dir.join("fake-devlock");
-        std::fs::write(
-            &fake_devlock,
-            r#"#!/bin/sh
-case "$1" in
-  acquire)
-    printf '{"schema":"phonefarm/devlock-owner@1","instance_id":"0123456789abcdef0123456789abcdef","label":"%s","holder_pid":%s,"holder_start":"fixture","host_boot_id":"fixture","owner":"fixture"}\n' "$2" "$PPID"
-    ;;
-  renew|release) exit 0 ;;
-  *) exit 2 ;;
-esac
-"#,
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake_devlock, std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
         Self { dir }
     }
     fn cmd(&self) -> Command {
@@ -44,8 +24,6 @@ esac
         c.current_dir(&self.dir)
             .env("PHONEFARM_LEASE_DIR", self.dir.join("leases"))
             .env("DEVLOCK_DIR", self.dir.join("legacy"))
-            // The outer gate must receive a typed instance owned by its real holder process.
-            .env("DEVLOCK_BIN", self.dir.join("fake-devlock"))
             .env("PHONEFARM_LEASE_TIMEOUT_MS", "100")
             .env("ADB_BIN", self.dir.join("fake-adb"));
         c
@@ -53,62 +31,7 @@ esac
     fn legacy(&self) -> PathBuf {
         self.dir.join("legacy/devlock.d")
     }
-    fn devlock(&self) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("tools/devlock")
-    }
-    fn acquire_outer(&self, label: &str) -> Value {
-        let output = Command::new(self.devlock())
-            .current_dir(&self.dir)
-            .env("PHONEFARM_BIN", env!("CARGO_BIN_EXE_phonefarm"))
-            .env("PHONEFARM_LEASE_DIR", self.dir.join("leases"))
-            .env("DEVLOCK_DIR", self.dir.join("legacy"))
-            .args(["acquire", label])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let outer: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(outer["schema"], "phonefarm/devlock-owner@1");
-        assert_eq!(outer["holder_pid"].as_u64(), Some(std::process::id() as u64));
-        outer
-    }
-    fn cmd_with_outer(&self, outer: &Value) -> Command {
-        let mut command = self.cmd();
-        command
-            .env("DEVLOCK_BIN", self.devlock())
-            .env("DEVLOCK_LABEL", outer["label"].as_str().unwrap())
-            .env(
-                "DEVLOCK_INSTANCE_ID",
-                outer["instance_id"].as_str().unwrap(),
-            );
-        command
-    }
-    fn release_outer(&self, outer: &Value) {
-        let output = Command::new(self.devlock())
-            .current_dir(&self.dir)
-            .env("PHONEFARM_BIN", env!("CARGO_BIN_EXE_phonefarm"))
-            .env("PHONEFARM_LEASE_DIR", self.dir.join("leases"))
-            .env("DEVLOCK_DIR", self.dir.join("legacy"))
-            .env("DEVLOCK_LABEL", outer["label"].as_str().unwrap())
-            .env(
-                "DEVLOCK_INSTANCE_ID",
-                outer["instance_id"].as_str().unwrap(),
-            )
-            .args(["release", outer["label"].as_str().unwrap()])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -196,13 +119,9 @@ fn timeout_preserves_other_owner_and_failure_releases() {
     let f = Fixture::new("timeout");
     let mut a = worker(&f, "A", "0.3", "1000");
     wait_for(&f.dir.join("A.started"));
-    let owner = std::fs::read(f.legacy().join("phonefarm-lease.json")).unwrap();
     let mut b = worker(&f, "B", "0", "20");
     assert_eq!(b.wait().unwrap().code(), Some(2));
-    assert_eq!(
-        std::fs::read(f.legacy().join("phonefarm-lease.json")).unwrap(),
-        owner
-    );
+    assert!(a.try_wait().unwrap().is_none(), "timed-out waiter must not affect the owner");
     assert!(a.wait().unwrap().success());
     let r = f
         .cmd()
@@ -218,7 +137,7 @@ fn timeout_preserves_other_owner_and_failure_releases() {
         .output()
         .unwrap();
     assert_eq!(r.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&r.stderr).contains("lease command:"));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("No such file or directory"));
     assert!(!f.legacy().exists());
     let mut c = worker(&f, "C", "0", "50");
     assert!(c.wait().unwrap().success());
@@ -226,7 +145,7 @@ fn timeout_preserves_other_owner_and_failure_releases() {
 
 #[cfg(unix)]
 #[test]
-fn executable_permission_spawn_failure_retires_only_its_pending_marker() {
+fn executable_permission_failure_releases_the_fd() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new("spawn-permission");
     let program = f.dir.join("nonexecutable");
@@ -239,109 +158,14 @@ fn executable_permission_spawn_failure_retires_only_its_pending_marker() {
         .output()
         .unwrap();
     assert_eq!(r.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&r.stderr).contains("lease command:"));
+    assert!(String::from_utf8_lossy(&r.stderr).contains("Permission denied"));
     assert!(!f.legacy().exists());
     let mut next = worker(&f, "next", "0", "100");
     assert!(next.wait().unwrap().success());
     assert!(!f.legacy().exists());
 }
-#[test]
-fn crash_releases_kernel_but_abandoned_owner_blocks_live_child_and_unknown_device() {
-    let f = Fixture::new("crash");
-    let mut a = worker(&f, "A", "1.0", "1000");
-    wait_for(&f.dir.join("A.started"));
-    let marker = f.legacy().join("phonefarm-lease.json");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let owner = loop {
-        let v: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
-        if v["child_pid"].is_u64() {
-            break v;
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    assert_eq!(owner["pid"], a.id());
-    a.kill().unwrap();
-    a.wait().unwrap();
-    // Underlying host kernel exclusion is released, while the semantic abandoned barrier stays.
-    let bridge = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open(f.dir.join("legacy/phonefarm-bridge.lock"))
-        .unwrap();
-    bridge.try_lock().unwrap();
-    drop(bridge);
-    let mut b = worker(&f, "B", "0", "20");
-    assert_eq!(b.wait().unwrap().code(), Some(2));
-    assert!(!f.dir.join("B.started").exists());
-    assert!(f.legacy().exists());
-    let recover = || {
-        f.cmd()
-            .args([
-                "lease",
-                "--serial",
-                "fake-device",
-                "--timeout-ms",
-                "20",
-                "--recover-abandoned",
-                "--confirm-device-idle",
-            ])
-            .output()
-            .unwrap()
-    };
-    let early = recover();
-    assert_eq!(early.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&early.stderr).contains("recovery child is alive/unknown"));
-    let child = owner["child_pid"].as_u64().unwrap().to_string();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let p = Command::new("ps")
-            .args(["-p", &child, "-o", "pid="])
-            .output()
-            .unwrap();
-        if p.status.code() == Some(1) && p.stdout.is_empty() && p.stderr.is_empty() {
-            break;
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let mut c = worker(&f, "C", "0", "20");
-    assert_eq!(c.wait().unwrap().code(), Some(2));
-    let unconfirmed = f
-        .cmd()
-        .args(["lease", "--serial", "fake-device", "--recover-abandoned"])
-        .output()
-        .unwrap();
-    assert_eq!(unconfirmed.status.code(), Some(2));
-    assert!(f.legacy().exists());
-    assert!(recover().status.success());
-    assert!(!f.legacy().exists());
-    let log: Value = serde_json::from_str(
-        std::fs::read_to_string(f.dir.join("legacy/phonefarm-recovery.jsonl"))
-            .unwrap()
-            .trim(),
-    )
-    .unwrap();
-    assert_eq!(log["device_verified"], false);
-    let mut d = worker(&f, "D", "0", "100");
-    assert!(d.wait().unwrap().success());
-}
-#[test]
-fn unknown_manual_lock_is_never_deleted_even_when_old() {
-    let f = Fixture::new("manual");
-    std::fs::create_dir_all(f.legacy()).unwrap();
-    std::fs::write(f.legacy().join("owner"), "someone since 2020-01-01\n").unwrap();
-    std::fs::File::open(f.legacy().join("owner"))
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
-        .unwrap();
-    let mut b = worker(&f, "B", "0", "20");
-    assert_eq!(b.wait().unwrap().code(), Some(2));
-    assert_eq!(
-        std::fs::read_to_string(f.legacy().join("owner")).unwrap(),
-        "someone since 2020-01-01\n"
-    );
-}
+
+
 #[test]
 fn actual_eval_route_writes_consumed_plan_and_honest_abort_without_phone() {
     let f = Fixture::new("v2");
@@ -454,50 +278,12 @@ fn unsupported_injection_returns_specific_abort_before_artifact_or_device() {
     assert!(!f.legacy().exists());
 }
 
-#[test]
-fn heartbeat_renews_and_live_or_replaced_legacy_owner_is_not_reclaimed() {
-    let f = Fixture::new("heartbeat");
-    let mut a = worker(&f, "A", "5.4", "1000");
-    wait_for(&f.dir.join("A.started"));
-    let initial = std::fs::metadata(f.legacy().join("owner"))
-        .unwrap()
-        .modified()
-        .unwrap();
-    let end = Instant::now() + Duration::from_millis(5250);
-    while std::fs::metadata(f.legacy().join("owner"))
-        .unwrap()
-        .modified()
-        .unwrap()
-        == initial
-        && Instant::now() < end
-    {
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    assert!(
-        std::fs::metadata(f.legacy().join("owner"))
-            .unwrap()
-            .modified()
-            .unwrap()
-            > initial
-    );
-    // Foreign owner with our old marker must survive normal Drop and subsequent dead-PID recovery.
-    std::fs::write(f.legacy().join("owner"), "new-manual-owner\n").unwrap();
-    assert_eq!(a.wait().unwrap().code(), Some(2));
-    let mut b = worker(&f, "B", "0", "20");
-    assert_eq!(b.wait().unwrap().code(), Some(2));
-    assert_eq!(
-        std::fs::read_to_string(f.legacy().join("owner")).unwrap(),
-        "new-manual-owner\n"
-    );
-}
+
 #[test]
 fn eval_sysparam_entry_respects_existing_manual_lease_before_device_access() {
     let f = Fixture::new("sysparam-held");
-    let outer = f.acquire_outer("phonefarm");
-    let outer_owner = std::fs::read(f.legacy().join("owner")).unwrap();
-    let held = f.dir.join("legacy/phonefarm-lease.d");
-    std::fs::create_dir_all(&held).unwrap();
-    std::fs::write(held.join("owner"), "external-task\n").unwrap();
+    let mut owner = worker(&f, "owner", "1", "1000");
+    wait_for(&f.dir.join("owner.started"));
     let mut req = shader_request();
     req["kind"] = json!("sysparam");
     req["payload"] = json!({"params":{}});
@@ -508,53 +294,21 @@ fn eval_sysparam_entry_respects_existing_manual_lease_before_device_access() {
     let path = f.dir.join("request.json");
     std::fs::write(&path, req.to_string()).unwrap();
     let r = f
-        .cmd_with_outer(&outer)
-        .args(["eval", "--request"])
+        .cmd()
+        .args(["eval", "--lock-wait", "0s", "--request"])
         .arg(path)
         .output()
         .unwrap();
     assert_eq!(r.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&r.stderr).contains("manual/legacy devlock busy"));
-    assert_eq!(
-        std::fs::read_to_string(held.join("owner")).unwrap(),
-        "external-task\n"
-    );
-    assert_eq!(std::fs::read(f.legacy().join("owner")).unwrap(), outer_owner);
-    f.release_outer(&outer);
-}
-
-#[test]
-fn invalid_pid_marker_and_live_owner_cannot_be_recovered() {
-    for pid in [0, std::process::id()] {
-        let f = Fixture::new("pid-unknown");
-        std::fs::create_dir_all(f.legacy()).unwrap();
-        let m = json!({"format":1,"producer":"phonefarm","pid":pid,"token":"t","serial":"fake-device","owner":"same\n"});
-        std::fs::write(f.legacy().join("phonefarm-lease.json"), m.to_string()).unwrap();
-        std::fs::write(f.legacy().join("owner"), "same\n").unwrap();
-        let r = f
-            .cmd()
-            .args([
-                "lease",
-                "--serial",
-                "fake-device",
-                "--recover-abandoned",
-                "--confirm-device-idle",
-            ])
-            .output()
-            .unwrap();
-        assert_eq!(r.status.code(), Some(2));
-        assert!(f.legacy().exists());
-    }
+    assert!(String::from_utf8_lossy(&r.stderr).contains("device lock busy"));
+    assert!(owner.wait().unwrap().success());
 }
 
 #[test]
 fn gpuop_adapter_and_perf_cannot_write_through_a_manual_lock() {
     let f = Fixture::new("gpu-held");
-    let outer = f.acquire_outer("phonefarm");
-    let outer_owner = std::fs::read(f.legacy().join("owner")).unwrap();
-    let held = f.dir.join("legacy/phonefarm-lease.d");
-    std::fs::create_dir_all(&held).unwrap();
-    std::fs::write(held.join("owner"), "someone-else\n").unwrap();
+    let mut owner = worker(&f, "owner", "1", "1000");
+    wait_for(&f.dir.join("owner.started"));
     let spv = f.dir.join("local.spv");
     std::fs::write(&spv, minimal_compute_spirv()).unwrap();
     let mut req = shader_request();
@@ -562,8 +316,8 @@ fn gpuop_adapter_and_perf_cannot_write_through_a_manual_lock() {
     let path = f.dir.join("request.json");
     std::fs::write(&path, req.to_string()).unwrap();
     let r = f
-        .cmd_with_outer(&outer)
-        .args(["eval", "--request"])
+        .cmd()
+        .args(["eval", "--lock-wait", "0s", "--request"])
         .arg(path)
         .output()
         .unwrap();
@@ -572,21 +326,16 @@ fn gpuop_adapter_and_perf_cannot_write_through_a_manual_lock() {
     assert_eq!(report["status"], "ABORT");
     let stderr = String::from_utf8_lossy(&r.stderr);
     assert!(stderr.contains("SPIR-V 预检通过"), "{stderr}");
-    assert!(stderr.contains("manual/legacy devlock busy"), "{stderr}");
+    assert!(stderr.contains("device lock busy"), "{stderr}");
     assert_eq!(report["conditions_observed"]["root_verified"], Value::Null);
     let r = f
-        .cmd_with_outer(&outer)
-        .args(["perf", "--serial", "fake-device", "--suspend-charging"])
+        .cmd()
+        .args(["perf", "--lock-wait", "0s", "--serial", "fake-device", "--suspend-charging"])
         .output()
         .unwrap();
     assert_eq!(r.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&r.stderr).contains("manual/legacy devlock busy"));
-    assert_eq!(
-        std::fs::read_to_string(held.join("owner")).unwrap(),
-        "someone-else\n"
-    );
-    assert_eq!(std::fs::read(f.legacy().join("owner")).unwrap(), outer_owner);
-    f.release_outer(&outer);
+    assert!(String::from_utf8_lossy(&r.stderr).contains("device lock busy"));
+    assert!(owner.wait().unwrap().success());
 }
 
 #[test]
@@ -616,47 +365,4 @@ fn malformed_spirv_is_rejected_by_preflight_before_lease_or_device() {
     assert!(stderr.contains("wordCount=0"), "{stderr}");
     assert!(!f.dir.join("leases").exists());
     assert!(!f.legacy().exists());
-}
-
-#[test]
-fn lease_nests_inside_outer_farm_devlock_held_by_same_label() {
-    // A real typed outer owner is held by this test process. Only its verified
-    // instance inheritance lets the child publish phonefarm-lease.d; the label
-    // alone is display/queue metadata and never confers ownership.
-    let f = Fixture::new("nested-outer");
-    let outer = f.acquire_outer("phonefarm");
-    let outer_owner = std::fs::read(f.legacy().join("owner")).unwrap();
-    let outer_marker = std::fs::read(f.legacy().join("phonefarm-lease.json")).unwrap();
-    let r = f
-        .cmd_with_outer(&outer)
-        .args(["lease", "--serial", "fake-device", "--timeout-ms", "100", "--", "/usr/bin/true"])
-        .output()
-        .unwrap();
-    assert_eq!(r.status.code(), Some(0), "{}", String::from_utf8_lossy(&r.stderr));
-    assert_eq!(std::fs::read(f.legacy().join("owner")).unwrap(), outer_owner);
-    assert_eq!(
-        std::fs::read(f.legacy().join("phonefarm-lease.json")).unwrap(),
-        outer_marker
-    );
-    assert!(!f.dir.join("legacy/phonefarm-lease.d").exists());
-
-    // The same label without DEVLOCK_INSTANCE_ID must remain busy and must not
-    // mutate or replace the typed outer owner.
-    let r = f
-        .cmd()
-        .env("DEVLOCK_LABEL", "phonefarm")
-        .env_remove("DEVLOCK_INSTANCE_ID")
-        .args(["lease", "--serial", "fake-device", "--timeout-ms", "100", "--", "/usr/bin/true"])
-        .output()
-        .unwrap();
-    assert_eq!(r.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&r.stderr);
-    assert!(stderr.contains("unknown lease marker format/producer"), "{stderr}");
-    assert_eq!(std::fs::read(f.legacy().join("owner")).unwrap(), outer_owner);
-    assert_eq!(
-        std::fs::read(f.legacy().join("phonefarm-lease.json")).unwrap(),
-        outer_marker
-    );
-    assert!(!f.dir.join("legacy/phonefarm-lease.d").exists());
-    f.release_outer(&outer);
 }

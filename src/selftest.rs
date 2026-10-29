@@ -1241,7 +1241,7 @@ fn run_arm(s: &Session, c: &Cond, label: &str, dir: &Path, load: &Load, remote_s
     std::thread::sleep(Duration::from_secs(c.warmup_s));
 
     // 4) 采集: sample_env 后台 + ftrace 前台 (同 eval::run_one)
-    let sampler = Command::new(adb_path())
+    let sampler = crate::fd_lock::transport_command(adb_path())
         .args(["-s", serial, "shell"])
         // 第三个参数: ftrace_capture.sh 采完才写 trace_raw.txt, 一出现采样就停 (审计 #3); 时长只是上限
         .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {} 1 {REMOTE_DIR}/trace_raw.txt'", c.capdur_s + 20))

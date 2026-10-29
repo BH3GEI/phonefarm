@@ -439,14 +439,14 @@ pub(crate) fn acquire_target(
             &crate::lease_storage::resolve(),
             binding,
             label,
-            std::time::Duration::from_secs(1),
+            crate::devlease::wait_timeout()?,
         ),
         None => crate::devlease::Lease::target(Some(serial), label),
     }
 }
 
 /// Recovery acquisition rechecks the immutable source under the actual lease.
-/// A failure leaves the existing recovery obligation in the lease domain.
+/// A failure preserves the source session and its recovery obligation.
 pub(crate) fn acquire_context(
     source: &Path,
     serial: &str,
@@ -459,7 +459,7 @@ pub(crate) fn acquire_context(
             &storage,
             binding,
             source,
-            std::time::Duration::from_secs(1),
+            crate::devlease::wait_timeout()?,
         )?
     } else {
         let (device, legacy) = storage.require_ready()?;
@@ -468,7 +468,7 @@ pub(crate) fn acquire_context(
             &legacy,
             serial,
             source,
-            std::time::Duration::from_secs(1),
+            crate::devlease::wait_timeout()?,
         )?
     };
     if bytes.len() > 524288
@@ -482,28 +482,14 @@ pub(crate) fn acquire_context(
 /// A failed durable handoff may already have published the next context.
 pub(crate) fn context_moved(
     lease: &crate::devlease::Lease,
-    serial: &str,
+    _serial: &str,
     source: &Path,
     next: &Path,
 ) -> Option<bool> {
-    let status = crate::devlease::storage_status(&crate::lease_storage::resolve());
-    let contexts: Vec<_> = status["entries"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|entry| entry["serial"] == serial)
-        .filter_map(|entry| entry["recovery_context"].as_str())
-        .collect();
-    if lease.check().is_ok() && contexts.len() == 1 {
-        if Path::new(contexts[0]) == next {
-            Some(true)
-        } else if Path::new(contexts[0]) == source {
-            Some(false)
-        } else {
-            None
-        }
-    } else {
-        None
+    match lease.recovery_context() {
+        Some(context) if context == next => Some(true),
+        Some(context) if context == source => Some(false),
+        _ => None,
     }
 }
 

@@ -24,11 +24,9 @@ use crate::hwcond;
 use crate::telemetry;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Instant, SystemTime};
 
 /// `devlock` 脚本认为心跳多久没动就算废弃 (它的 `STALE` 缺省值)。
-const LOCK_STALE_SECS: u64 = 600;
 
 /// 单台设备的探测超时。一趟 shell 里塞了十几个 dumpsys, 给足时间,
 /// 但必须有上限: 掉线的设备会把 adb 卡到天荒地老。
@@ -857,38 +855,20 @@ fn file_age_s(path: &Path) -> Option<u64> {
     SystemTime::now().duration_since(m).ok().map(|d| d.as_secs())
 }
 
-pub fn read_lock(dir: &Path) -> Option<Lock> {
-    if !dir.is_dir() {
-        return None;
-    }
-    let owner_path = dir.join("devlock.d/owner");
-    let owner = std::fs::read_to_string(&owner_path)
-        .ok()
-        .and_then(|t| parse_lock_owner(&t));
-    let heartbeat_age_s = owner.as_ref().and_then(|_| file_age_s(&owner_path));
-    let queue = std::fs::read_to_string(dir.join("devlock.queue"))
-        .map(|t| {
-            t.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut recent: Vec<LockEvent> = std::fs::read_to_string(dir.join("devlock.log"))
-        .map(|t| t.lines().filter_map(parse_lock_event).collect())
-        .unwrap_or_default();
-    recent.reverse();
-    recent.truncate(10);
-
+pub fn read_lock(storage: &crate::lease_storage::Storage) -> Option<Lock> {
+    let status = crate::devlease::storage_status(storage);
+    let entries = status["entries"].as_array()?;
+    let labels = entries.iter().map(|entry| entry["label"].as_str().unwrap_or("unknown holder"))
+        .collect::<Vec<_>>().join(", ");
+    let held_by = match status["status"].as_str() {
+        Some("clear") => None,
+        Some("held") if !labels.is_empty() => Some(labels),
+        _ => Some("unknown holder".into()),
+    };
     Some(Lock {
-        dir: dir.display().to_string(),
-        held_by: owner.as_ref().map(|(l, _)| l.clone()),
-        since: owner.as_ref().and_then(|(_, s)| s.clone()),
-        stale: heartbeat_age_s.is_some_and(|a| a > LOCK_STALE_SECS),
-        heartbeat_age_s,
-        queue,
-        recent,
+        dir: storage.devlock_dir.as_ref()?.display().to_string(),
+        held_by, since: entries.first().and_then(|entry| entry["since"].as_str().map(str::to_owned)),
+        heartbeat_age_s: None, stale: false, queue: vec![], recent: vec![],
     })
 }
 
@@ -985,12 +965,12 @@ type AdbEntry = (String, String, Option<String>);
 fn enumerate(adb: Option<&str>) -> (Vec<AdbEntry>, Vec<String>) {
     let mut android = Vec::new();
     if let Some(adb) = adb {
-        if let Ok(out) = Command::new(adb).args(["devices", "-l"]).output() {
+        if let Ok(out) = crate::fd_lock::transport_command(adb).args(["devices", "-l"]).output() {
             android = parse_adb_devices_l(&String::from_utf8_lossy(&out.stdout));
         }
     }
     let mut oh = Vec::new();
-    if let Ok(out) = Command::new("hdc").args(["list", "targets"]).output() {
+    if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
         oh = parse_hdc_targets(&String::from_utf8_lossy(&out.stdout));
     }
     (android, oh)
@@ -1033,7 +1013,7 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     }
     let (android, oh) = enumerate(adb.as_deref());
     let hdc_ok = !oh.is_empty()
-        || Command::new("hdc")
+        || crate::fd_lock::transport_command("hdc")
             .arg("-v")
             .output()
             .map(|o| o.status.success())
@@ -1041,7 +1021,7 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     if !hdc_ok {
         notes.push("没找到 hdc, 鸿蒙这一族整族跳过".to_string());
     }
-    let lock = storage.domain_paths().ok().and_then(|paths| read_lock(&paths.queue_dir));
+    let lock = read_lock(&storage);
 
     let tmp = std::env::temp_dir()
         .join(format!("phonefarm-fleet-{}", std::process::id()))

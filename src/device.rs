@@ -191,13 +191,13 @@ pub fn resolve_serial(requested: Option<&str>) -> Option<String> {
         }
     }
     if let Some(adb) = locate_adb() {
-        if let Ok(out) = Command::new(adb).arg("devices").output() {
+        if let Ok(out) = crate::fd_lock::transport_command(adb).arg("devices").output() {
             if let Some(s) = single_online_adb(&String::from_utf8_lossy(&out.stdout)) {
                 return Some(s);
             }
         }
     }
-    if let Ok(out) = Command::new("hdc").args(["list", "targets"]).output() {
+    if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
         if let Some(k) = single_online_hdc(&String::from_utf8_lossy(&out.stdout)) {
             return Some(format!("hdc:{k}"));
         }
@@ -212,7 +212,7 @@ pub fn locate_adb() -> Option<String> {
         let home = std::env::var("HOME").ok();
         for c in adb_search_order(bin.as_deref(), home.as_deref()) {
             if c == "PATH" {
-                let ok = Command::new("adb").arg("--version")
+                let ok = crate::fd_lock::transport_command("adb").arg("--version")
                     .stdout(Stdio::null()).stderr(Stdio::null())
                     .status().map(|st| st.success()).unwrap_or(false);
                 if ok { return Some("adb".into()); }
@@ -267,7 +267,7 @@ impl Adb {
     fn frozen(&self) -> bool { self.frozen.load(Ordering::Relaxed) }
 
     fn run(&self, args: &[&str]) -> Vec<u8> {
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = crate::fd_lock::transport_command(&self.bin);
         if let Some(s) = &self.serial {
             cmd.arg("-s").arg(s);
         }
@@ -280,7 +280,7 @@ impl Adb {
     fn run_timeout(&self, args: &[&str], ms: u64) -> Vec<u8> {
         let outfile = format!("{}/_cmd.out", self.tmp);
         let Ok(f) = std::fs::File::create(&outfile) else { return vec![] };
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = crate::fd_lock::transport_command(&self.bin);
         if let Some(s) = &self.serial {
             cmd.arg("-s").arg(s);
         }
@@ -595,7 +595,7 @@ impl Adb {
     /// 流式 shell(CTS Harness 用): 拉起长生命周期管道,stdout/stderr 双 pipe 归调用方逐行消费。
     /// 纯新增通道——既有 run/run_timeout 路径一字不动;看门狗与清理都在调用方(cts.rs)外层。
     pub fn stream_shell(&self, cmd: &str) -> std::io::Result<std::process::Child> {
-        let mut c = Command::new(&self.bin);
+        let mut c = crate::fd_lock::transport_command(&self.bin);
         if let Some(s) = &self.serial {
             c.arg("-s").arg(s);
         }
@@ -609,7 +609,7 @@ impl Adb {
     /// 不 forward 就够不着它。失败要能看见原因 (端口被占、设备掉线),
     /// 故走 stderr 判定而不是看 stdout 空不空: `adb forward` 成功时本来就不打印东西。
     pub fn forward(&self, local: u16, remote: u16) -> Result<(), String> {
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = crate::fd_lock::transport_command(&self.bin);
         if let Some(s) = &self.serial {
             cmd.arg("-s").arg(s);
         }
@@ -797,7 +797,7 @@ impl Hdc {
     fn frozen(&self) -> bool { self.frozen.load(Ordering::Relaxed) }
 
     fn base(&self) -> Command {
-        let mut cmd = Command::new("hdc");
+        let mut cmd = crate::fd_lock::transport_command("hdc");
         if let Some(k) = &self.key {
             cmd.arg("-t").arg(k);
         }

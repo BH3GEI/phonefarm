@@ -300,10 +300,7 @@ pub fn run_eval(args: &[String]) -> i32 {
     let report = report.map(|r| crate::scorecard::attach(&r, policy));
     match report {
         Ok(r) => {
-            if let Err(e) = _lease.check() {
-                eprintln!("{e}");
-                return 2;
-            }
+
             println!("{r}");
             0
         }
@@ -832,7 +829,7 @@ pub(crate) fn verify_workload(serial: &str, workload: &Path, pkg: &str, outdir: 
         .stderr(std::process::Stdio::null()).spawn() {
         Ok(c)=>c,Err(e)=>return json!({"verified":false,"reason":e.to_string()})
     };
-    let capture = || Command::new(adb_path()).args(["-s",serial,"exec-out","screencap"]).output().ok()
+    let capture = || crate::fd_lock::transport_command(adb_path()).args(["-s",serial,"exec-out","screencap"]).output().ok()
         .filter(|o|o.status.success()).map(|o|o.stdout).unwrap_or_default();
     std::thread::sleep(std::time::Duration::from_secs(3)); let a=capture();
     std::thread::sleep(std::time::Duration::from_secs(5)); let b=capture();
@@ -880,7 +877,7 @@ pub(crate) fn adb_path() -> String {
 }
 
 pub(crate) fn adb(serial: &str, args: &[&str], timeout: u64) -> String {
-    let mut cmd = Command::new(adb_path());
+    let mut cmd = crate::fd_lock::transport_command(adb_path());
     cmd.arg("-s").arg(serial).args(args);
     run_with_timeout(&mut cmd, timeout)
 }
@@ -1622,7 +1619,7 @@ pub(crate) fn run_one_launch(
     let tr = format!("{DEV_TMP}/lw_{label}.txt");
     // 第三个参数是停止标志: ftrace_capture.sh 采完才写 trace 输出文件, 一出现采样就停 (审计 #3)。
     // dur 只是上限。
-    let sampler = Command::new(adb_path())
+    let sampler = crate::fd_lock::transport_command(adb_path())
         .args(["-s", serial, "shell"])
         .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2 {tr}'"))
         .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
@@ -1769,7 +1766,7 @@ pub(crate) fn run_one_with(
     let env_path = outdir.join("env.txt");
     // 停止标志 = run_once.sh 让 ftrace_capture.sh 写的 trace 输出文件 (采完才写), 见 sample_env.sh。
     // dur 只是上限。
-    let sampler = Command::new(adb_path())
+    let sampler = crate::fd_lock::transport_command(adb_path())
         .args(["-s", serial, "shell"])
         .arg(format!("su -c 'sh {DEV_TMP}/sample_env.sh {dur} 2 {DEV_TMP}/loop_v1_{label}.txt'"))
         .stdout(std::fs::File::create(&env_path).map_err(|e| e.to_string())?)
@@ -1917,7 +1914,7 @@ pub(crate) fn verify_workload_for(
     let result = match started {
         Err(e) => json!({"verified": false, "reason": e, "launch": true}),
         Ok(_) => {
-            let capture = || Command::new(adb_path()).args(["-s",serial,"exec-out","screencap"]).output().ok()
+            let capture = || crate::fd_lock::transport_command(adb_path()).args(["-s",serial,"exec-out","screencap"]).output().ok()
                 .filter(|o|o.status.success()).map(|o|o.stdout).unwrap_or_default();
             let a = capture();
             std::thread::sleep(std::time::Duration::from_secs(5));
@@ -2825,7 +2822,7 @@ impl HwWatch {
         let path = outdir.join("hw.txt");
         let stop = hw_stop_path(label, &hw_stop_nonce());
         let child = std::fs::File::create(&path).ok().and_then(|f| {
-            Command::new(adb_path())
+            crate::fd_lock::transport_command(adb_path())
                 .args(["-s", serial, "shell"])
                 .arg(format!("su -c 'sh {DEV_TMP}/sample_hw.sh {HW_WATCH_MAX_S} {stop}'"))
                 .stdout(f)

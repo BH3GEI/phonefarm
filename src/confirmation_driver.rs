@@ -292,13 +292,9 @@ fn request(path: &Path) -> Result<(Request, Vec<u8>, Vec<u8>, Vec<u8>), String> 
     bounded(&req.transport.program, CAP)?;
     Ok((req, bytes, w, a))
 }
-fn roots() -> Result<(PathBuf, PathBuf, Duration), String> {
+fn roots() -> Result<(PathBuf, PathBuf, Option<Duration>), String> {
     let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
-    let ms = std::env::var("PHONEFARM_LEASE_TIMEOUT_MS")
-        .unwrap_or("600000".into())
-        .parse::<u64>()
-        .map_err(|_| "invalid lease timeout")?;
-    Ok((root, legacy, Duration::from_millis(ms)))
+    Ok((root, legacy, crate::devlease::wait_timeout()?))
 }
 fn snapshot_source(render: bool) -> String {
     if render { SNAPSHOT.replace("echo \"# end\"", "printf 'ftrace.trace_clock=%s\\n' \"$(cat /sys/kernel/tracing/trace_clock)\"\necho \"# end\"") }

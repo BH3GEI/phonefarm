@@ -40,6 +40,8 @@ mod device;
 mod platform;
 mod devlock;
 mod devlease;
+mod fd_lock;
+mod lock_handoff;
 mod device_registry;
 mod queue_owner;
 mod host_process;
@@ -330,7 +332,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)
 设备锁: 碰设备的子命令 (run/onboard/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
        capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest/frame-sources) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
-       通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h] [--no-devlock]
+       通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h]（缺省一直等到拿到或取消）
        锁已在同一 label 手里 (外层 devlock run / optimize) 时原地执行; 没拿到锁不碰设备, 退出 2";
 
 /// 任务数据根(tasks 目录)解析: PF_TASKS_ROOT 环境变量优先(实验臂隔离/单测注入,
@@ -437,7 +439,19 @@ fn spawn_detached_with(args: &[String], console: &str, envs: &[(&str, &str)]) ->
     Ok(cmd.spawn()?.id())
 }
 
+#[cfg(test)]
+fn isolate_fd_test(name: &str) -> bool {
+    if std::env::var("PF_FD_UNIT_TEST").as_deref() == Ok(name) { return false; }
+    // A fork in another libtest thread duplicates even CLOEXEC descriptors until
+    // exec. Immediate last-close assertions need a process with only this test.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name]).env("PF_FD_UNIT_TEST", name).output().unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    true
+}
+
 fn main() {
+    if let Some(code) = fd_lock::transport_entry() { std::process::exit(code); }
     runtime_identity::report_startup();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // 碰设备的子命令先过设备锁 (src/devlock.rs): 没拿到锁不碰设备
@@ -494,15 +508,13 @@ fn main() {
         }
     }
     match args.first().map(|s| s.as_str()) {
+        Some("__lease-handoff") => std::process::exit(fd_lock::handoff(&args[1..])),
         Some("runtime-info") => {
             if args.len() > 2 || args.get(1).is_some_and(|arg| arg != "--json") {
                 eprintln!("usage: phonefarm runtime-info --json");
                 std::process::exit(2);
             }
             println!("{}", runtime_identity::identity());
-        }
-        Some("__queue-owner") => {
-            std::process::exit(queue_owner::run(&args[1..]));
         }
         Some("__capture-worker") => {
             std::process::exit(capture::run_worker(&args[1..]));
@@ -547,13 +559,13 @@ fn main() {
             // 两族并列,各自 best-effort(某族工具不在 PATH 就跳过):
             // hdc 目标直接以 "hdc:<key>" 形态给出,拷进 --serial 即用
             if let Some(adb) = device::locate_adb() {
-                if let Ok(out) = std::process::Command::new(&adb).arg("devices").output() {
+                if let Ok(out) = crate::fd_lock::transport_command(&adb).arg("devices").output() {
                     print!("{}", String::from_utf8_lossy(&out.stdout));
                 }
             } else {
                 eprintln!("(未找到 adb,仅列 hdc;ADB_BIN=/path/to/adb 可指定)");
             }
-            if let Ok(out) = std::process::Command::new("hdc").args(["list", "targets"]).output() {
+            if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
                 for l in String::from_utf8_lossy(&out.stdout).lines() {
                     let l = l.trim();
                     if !l.is_empty() && l != "[Empty]" {

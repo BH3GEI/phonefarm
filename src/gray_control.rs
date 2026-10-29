@@ -1105,7 +1105,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
     let _interrupt = Interrupt::install()?;
     let lease = if let Some(binding) = &a.binding {
         crate::devlease::Lease::acquire_device(&crate::lease_storage::resolve(), binding,
-            "gray-layer-control", Duration::from_secs(1))
+            "gray-layer-control", crate::devlease::wait_timeout().map_err(device)?)
     } else {
         crate::devlease::Lease::target(a.serial.as_deref(), "gray-layer-control")
     }.map_err(device)?;
@@ -1966,6 +1966,7 @@ mod tests {
     }
     #[test]
     fn mailbox_is_idempotent_ordered_and_does_not_replay_started() {
+        if crate::isolate_fd_test("gray_control::tests::mailbox_is_idempotent_ordered_and_does_not_replay_started") { return; }
         let (_temp, store, d) = fixture();
         let owner = store.lock("owner", Duration::ZERO).unwrap();
         let r = request("same");

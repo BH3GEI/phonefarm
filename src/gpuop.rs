@@ -1640,7 +1640,7 @@ pub fn run_gpu_op(args: &[String]) -> i32 {
         }
     }
 
-    if let Err(e)=_lease.check() {eprintln!("{e}"); return 2;}
+
     if a.as_json {
         let mut output = serde_json::to_value(&report).unwrap_or(Value::Null);
         if let Some(context) = &req.v2_context {

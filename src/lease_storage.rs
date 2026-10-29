@@ -470,6 +470,7 @@ mod tests {
 
     #[test]
     fn paths_and_status_are_read_only_and_custom_overrides_are_explicit() {
+        if crate::isolate_fd_test("lease_storage::tests::paths_and_status_are_read_only_and_custom_overrides_are_explicit") { return; }
         let f = Fixture::new();
         let s = f.storage();
         assert_eq!(s.readiness, "migration_required");
@@ -532,6 +533,7 @@ mod tests {
 
     #[test]
     fn initialization_rejects_old_owners_queue_mutex_and_bridge_then_binds_one_target() {
+        if crate::isolate_fd_test("lease_storage::tests::initialization_rejects_old_owners_queue_mutex_and_bridge_then_binds_one_target") { return; }
         let f = Fixture::new();
         let s = f.storage();
         let old = &s.legacy;
@@ -575,7 +577,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_temporary_fence_requires_reinit_while_persistent_recovery_is_preserved() {
+    fn missing_temporary_fence_requires_reinit_but_recovery_does_not_hold_a_lock() {
+        if crate::isolate_fd_test("lease_storage::tests::missing_temporary_fence_requires_reinit_but_recovery_does_not_hold_a_lock") { return; }
         let f = Fixture::new();
         let s = f.storage().init().unwrap();
         let (devices, locks) = s.require_ready().unwrap();
@@ -589,29 +592,14 @@ mod tests {
         .unwrap();
         lease.hold_for_recovery(&f.0).unwrap();
         drop(lease);
-        let marker = locks.join("devlock.d/phonefarm-lease.json");
-        let before = fs::read(&marker).unwrap();
-        assert_eq!(crate::devlease::storage_status(&s)["status"], "blocked");
+        assert_eq!(crate::devlease::storage_status(&s)["status"], "clear");
         fs::remove_dir_all(s.legacy.join("devlock.d")).unwrap();
         let after_cleanup = f.storage();
         assert_eq!(after_cleanup.readiness, "migration_required");
         assert!(after_cleanup.require_ready().is_err());
-        assert_eq!(
-            crate::devlease::storage_status(&after_cleanup)["status"],
-            "blocked"
-        );
         let repaired = after_cleanup.init().unwrap();
         assert_eq!(repaired.readiness, "ready");
-        assert_eq!(fs::read(&marker).unwrap(), before);
-        assert!(crate::devlease::Lease::acquire(
-            &devices,
-            &locks,
-            "fake-storage-device",
-            "next",
-            Duration::from_millis(50)
-        )
-        .is_err());
+        drop(crate::devlease::Lease::acquire(&devices, &locks, "fake-storage-device", "next", Duration::ZERO).unwrap());
         assert_eq!(repaired.init().unwrap().readiness, "ready");
-        assert_eq!(fs::read(&marker).unwrap(), before);
     }
 }

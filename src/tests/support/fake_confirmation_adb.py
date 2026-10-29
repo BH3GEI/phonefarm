@@ -2,6 +2,12 @@
 """Explicit simulation only. Implements transport receipt protocol, never real-device data."""
 import base64, hashlib, json, os, pathlib, re, shlex, sys
 root=pathlib.Path(os.environ['PHONEFARM_FAKE_DEVICE_DIR']); root.mkdir(parents=True,exist_ok=True)
+if os.environ.get('PHONEFARM_FAKE_FAIL') == 'host_parent_killed':
+    import signal,time
+    signal.signal(signal.SIGTERM, lambda *_:(root/'transport-term').touch())
+    signal.alarm(15)
+    (root/'transport-group').write_text(str(os.getpgrp()))
+    while True: time.sleep(.01)
 statepath=root/'fake-state.json'
 if statepath.exists(): state=json.loads(statepath.read_text())
 else:

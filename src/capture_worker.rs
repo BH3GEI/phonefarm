@@ -12,7 +12,7 @@ use std::os::unix::{
     process::{CommandExt, ExitStatusExt},
 };
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 const OUTPUT_LIMIT: u64 = 32 * 1024 * 1024;
@@ -93,7 +93,7 @@ fn output_within_limit(file: &File) -> Result<(), String> {
 impl Worker {
     /// The entry point must install lease_command::worker_guard before this call.
     pub fn open(dir: &Path) -> Result<Self, String> {
-        crate::devlease::Lease::verify_worker_authority()?;
+        crate::lease_command::worker_remaining()?;
         let mut bytes = Vec::new();
         File::open(dir.join("session.json"))
             .map_err(|e| e.to_string())?
@@ -206,7 +206,7 @@ impl Worker {
             let deadline = Instant::now()
                 .checked_add(Duration::from_millis(ms))
                 .ok_or("capture command timeout too large")?;
-            let mut command = Command::new(&self.adb);
+            let mut command = crate::fd_lock::transport_command(&self.adb);
             command
                 .args(["-s", &self.serial])
                 .args(args)

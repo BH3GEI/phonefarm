@@ -154,10 +154,10 @@ impl Session {
         let storage = crate::lease_storage::resolve();
         let lease = if let Some(binding) = state.get("device_binding") {
             let binding = crate::device_registry::parse_binding(&binding.to_string())?;
-            Lease::acquire_device_recovery(&storage, &binding, &dir, Duration::from_secs(1))?
+            Lease::acquire_device_recovery(&storage, &binding, &dir, crate::devlease::wait_timeout()?)?
         } else {
             let (root, legacy) = storage.require_ready()?;
-            Lease::acquire_recovery(&root, &legacy, serial, &dir, Duration::from_secs(1))?
+            Lease::acquire_recovery(&root, &legacy, serial, &dir, crate::devlease::wait_timeout()?)?
         };
         Ok(Self {lease:RefCell::new(lease), adb:adb_path()?, dir, state:RefCell::new(state),
             stopped:RefCell::new(None), known_dirs:RefCell::new(HashSet::new())})
@@ -262,9 +262,7 @@ impl Session {
 
     pub fn control_ready(&self) -> Result<(), String> {
         require_owner(&self.state.borrow(), CONTROL_OWNER)?;
-        self.ready()?;
-        let result = self.lease.borrow().check();
-        result.or_else(|error| self.stop(error))
+        self.ready()
     }
 
     pub fn control_has_resources(&self) -> Result<bool, String> {

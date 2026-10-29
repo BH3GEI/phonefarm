@@ -10,7 +10,7 @@
 
 use serde_json::json;
 use std::io::Write;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -96,7 +96,7 @@ impl Gamepad {
 
     /// Use a session-specific input name when the caller verifies device removal.
     pub fn new_named(adb_bin: &str, serial: Option<&str>, name: &str) -> Result<Self, String> {
-        let mut cmd = Command::new(adb_bin);
+        let mut cmd = crate::fd_lock::transport_command(adb_bin);
         if let Some(s) = serial {
             cmd.arg("-s").arg(s);
         }

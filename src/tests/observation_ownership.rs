@@ -20,6 +20,9 @@ impl Fixture {
         ));
         fs::create_dir_all(root.join("bin")).unwrap();
         fs::create_dir(root.join("locks")).unwrap();
+        // Keep real adb/hdc out of PATH while allowing the finite fd-owning transport proxy.
+        let python = Command::new("python3").args(["-c", "import sys;print(sys.executable)"]).output().unwrap();
+        std::os::unix::fs::symlink(String::from_utf8(python.stdout).unwrap().trim(), root.join("bin/python3")).unwrap();
         script(&root.join("bin/hdc"), "exit 0");
         script(
             &root.join("bin/adb"),
@@ -242,7 +245,7 @@ fn enumeration_does_not_take_a_global_lock() {
 }
 
 #[test]
-fn busy_domains_allow_only_unowned_light_observation() {
+fn retired_records_do_not_block_full_observation() {
     let f = Fixture::new();
     fs::write(f.0.join("show-device"), "").unwrap();
     for entry in [
@@ -275,7 +278,7 @@ fn busy_domains_allow_only_unowned_light_observation() {
         assert_eq!(output.status.code(), Some(0));
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["observation"], "sampled");
-        assert_eq!(result["devices"][0]["probe_depth"], "light");
+        assert_eq!(result["devices"][0]["probe_depth"], "full");
         assert!(f.0.join("started").exists());
         fs::remove_file(f.0.join("started")).unwrap();
         if path.is_dir() {
@@ -341,7 +344,7 @@ fn killed_supervisor_releases_fd_after_worker_exit_without_marker() {
     supervisor.kill().unwrap();
     supervisor.wait().unwrap();
     until(|| f.status()["status"] == "clear");
-    assert!(fs::read_dir(f.0.join("locks/v2/devices")).unwrap().next().is_none());
+    assert!(f.status()["entries"].as_array().unwrap().is_empty());
     fs::remove_file(f.0.join("hold-shell")).unwrap();
     let output = f.fleet();
     assert_eq!(output.status.code(), Some(0));
@@ -429,12 +432,11 @@ esac
     until(|| f.0.join("started-B").exists());
     let status = f.status();
     let entry = status["entries"].as_array().unwrap().iter().find(|entry| entry["serial"] == "screen-B").unwrap();
-    let marker: Value = serde_json::from_slice(&fs::read(entry["marker_path"].as_str().unwrap()).unwrap()).unwrap();
-    assert_eq!(marker["device_binding"], b);
-    assert_eq!(marker["serial"], "screen-B");
-    assert_eq!(marker["pid"], held.0.as_ref().unwrap().id());
-    assert_eq!(marker["child_pid"], marker["child_pgid"]);
-    let worker = marker["child_pid"].as_i64().unwrap() as i32;
+    assert_eq!(entry["device_binding"], b);
+    assert_eq!(entry["serial"], "screen-B");
+    assert_eq!(entry["device_lock_held"], true);
+    let worker = entry["holder_pid"].as_i64().unwrap() as i32;
+    assert_ne!(worker as u32, held.0.as_ref().unwrap().id(), "the sampling worker itself must hold the fd");
     let output = capture("screen-A", Some(&a), "A").output().unwrap();
     assert!(output.status.success(), "{} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();

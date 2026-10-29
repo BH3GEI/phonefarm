@@ -2,7 +2,7 @@
 //! Local process completion never certifies that activity on the device stopped.
 use crate::devlease::Lease;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::{
     fs::OpenOptionsExt,
     process::{CommandExt, ExitStatusExt},
@@ -15,13 +15,6 @@ use std::time::{Duration, Instant};
 const OUTPUT_LIMIT: u64 = 8 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(20);
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-// A single newline is the permit. EOF, a failed read, or any other line refuses
-// execution. Positional arguments keep the program and argv out of shell syntax.
-const GATE: &str =
-    "IFS= read -r permit || exit 91; [ -z \"$permit\" ] || exit 92; exec \"$@\" </dev/null";
-const WORKER_GATE: &str =
-    "IFS= read -r permit || exit 91; [ -z \"$permit\" ] || exit 92; exec \"$@\"";
 
 #[derive(Debug)]
 pub(crate) struct Output {
@@ -148,7 +141,7 @@ pub(crate) fn transport_worker(args: &[String]) -> i32 {
     }
     let Some(program) = args.first() else { return 90; };
     // No new session/group: the verified worker's watchdog owns this process too.
-    match Command::new(program).args(&args[1..]).stdin(Stdio::null()).status() {
+    match crate::fd_lock::transport_command(program).args(&args[1..]).stdin(Stdio::null()).status() {
         Ok(status) => status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
         Err(e) => { eprintln!("transport could not start: {e}"); 90 }
     }
@@ -163,7 +156,6 @@ fn supervise(
     timeout: Duration,
     worker: bool,
 ) -> Result<Output, String> {
-    lease.check()?;
     crate::shared_access::create_dir_all(dir).map_err(|e| format!("command output directory: {e}"))?;
     let stem = format!(
         "{}-{:06}",
@@ -172,65 +164,23 @@ fn supervise(
     );
     let out = output_file(&dir.join(format!("{stem}.stdout")))?;
     let err = output_file(&dir.join(format!("{stem}.stderr")))?;
-    let mut command = Command::new("/bin/sh");
-    command
-        .args([
-            "-c",
-            if worker { WORKER_GATE } else { GATE },
-            "phonefarm-command-gate",
-        ])
-        .arg(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(out.try_clone().map_err(|e| e.to_string())?)
-        .stderr(err.try_clone().map_err(|e| e.to_string())?)
-        .process_group(0);
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or("command timeout is too large")?;
+    let mut command = if worker { Command::new(program) } else { crate::fd_lock::transport_command(program) };
+    command.args(args).stdout(out.try_clone().map_err(|e| e.to_string())?)
+        .stderr(err.try_clone().map_err(|e| e.to_string())?).process_group(0);
+    let deadline = Instant::now().checked_add(timeout).ok_or("command timeout is too large")?;
+    lease.command(&mut command)?;
     if worker {
-        lease.authorize_worker(&mut command, timeout)?;
-    }
-    lease.record_command_pending(operation)?;
-    let mut child = command.spawn().map_err(|e| {
-        format!("{operation}: command could not spawn; pending lease retained: {e}")
-    })?;
-    let start = lease
-        .record_child(child.id())
-        .and_then(|_| lease.check())
-        .and_then(|_| {
-            if Instant::now() >= deadline {
-                return Err("command deadline exceeded before gate".into());
-            }
-            child
-                .stdin
-                .as_mut()
-                .ok_or("command gate pipe unavailable".to_string())?
-                .write_all(b"\n")
-                .map_err(|e| format!("command gate: {e}"))
-        });
-    // Worker stdin remains open until the child exits. Ordinary commands retain
-    // the old EOF/null-input behavior immediately after the startup permit.
-    if !worker {
-        drop(child.stdin.take());
-    }
-    if let Err(e) = start {
-        // A failed marker publication may have reached disk. Never clear this
-        // uncertain launch even when the unopened gate has now been killed.
-        let gone = stop_and_reap(&mut child);
-        return Err(format!(
-            "{operation}: startup failed: {e}; local_group_gone={gone}; lease retained"
-        ));
-    }
+        let deadline_ms = std::time::SystemTime::now().checked_add(timeout)
+            .ok_or("worker deadline is too large")?.duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_millis();
+        command.stdin(Stdio::piped()).env("PHONEFARM_WORKER_SERIAL", &lease.serial)
+            .env("PHONEFARM_WORKER_DEADLINE_MS", deadline_ms.to_string());
+    } else { command.stdin(Stdio::null()); }
+    let lifeline = if worker { None } else { Some(crate::fd_lock::transport_lifeline(&mut command)?) };
+    let mut child = command.spawn().map_err(|e| format!("{operation}: command could not spawn: {e}"))?;
 
+    let _parent_pipe = lifeline.map(|(parent, child)| { drop(child); parent });
     let result: Result<ExitStatus, String> = loop {
-        if let Err(e) = lease
-            .check()
-            .and_then(|_| within_limit(&out))
-            .and_then(|_| within_limit(&err))
-        {
-            break Err(e);
-        }
+        if let Err(error) = within_limit(&out).and_then(|_| within_limit(&err)) { break Err(error); }
         if Instant::now() >= deadline {
             break Err("command deadline exceeded".into());
         }
@@ -250,11 +200,6 @@ fn supervise(
         }
     };
     let gone = result.is_ok() || stop_and_reap(&mut child);
-    if gone {
-        lease.clear_child().map_err(|e| {
-            format!("{operation}: local group gone but child receipt not cleared: {e}")
-        })?;
-    }
     let status = result.map_err(|e| {
         format!("{operation}: {e}; local_group_gone={gone}; remote activity not verified stopped")
     })?;
@@ -268,10 +213,18 @@ fn supervise(
     })
 }
 
+pub(crate) fn worker_remaining() -> Result<Duration, String> {
+    crate::fd_lock::inherited()?.ok_or("worker requires inherited task lock")?;
+    let ms: u64 = std::env::var("PHONEFARM_WORKER_DEADLINE_MS").map_err(|e| e.to_string())?
+        .parse().map_err(|e| format!("worker deadline: {e}"))?;
+    std::time::UNIX_EPOCH.checked_add(Duration::from_millis(ms)).ok_or("worker deadline is too large")?
+        .duration_since(std::time::SystemTime::now()).map_err(|_| "worker deadline elapsed".into())
+}
+
 /// Called once by the internal worker entry point, before opening transports.
 /// A dead or suspended parent cannot leave the verified worker group unbounded.
 pub(crate) fn worker_guard() -> Result<(), String> {
-    let remaining = Lease::verify_worker_authority()?;
+    let remaining = worker_remaining()?;
     let group = std::process::id() as i32;
     let stop = move || unsafe {
         libc::kill(-group, libc::SIGKILL);
@@ -298,7 +251,6 @@ pub(crate) fn worker_guard() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
     use std::fs;
 
     struct Scratch(std::path::PathBuf);
@@ -322,12 +274,7 @@ mod tests {
             )
             .unwrap()
         }
-        fn marker(&self) -> Value {
-            serde_json::from_slice(
-                &fs::read(self.0.join("legacy/devlock.d/phonefarm-lease.json")).unwrap(),
-            )
-            .unwrap()
-        }
+
     }
     impl Drop for Scratch {
         fn drop(&mut self) {
@@ -336,24 +283,8 @@ mod tests {
     }
 
     #[test]
-    fn gate_refuses_eof_and_invalid_permission_then_command_preserves_output() {
+    fn command_preserves_output() {
         let scratch = Scratch::new();
-        let sentinel = scratch.0.join("executed");
-        for (gate, permission) in [GATE, WORKER_GATE].into_iter().flat_map(|gate| {
-            [b"".as_slice(), b"invalid\n".as_slice()]
-                .into_iter()
-                .map(move |permission| (gate, permission))
-        }) {
-            let mut child = Command::new("/bin/sh")
-                .args(["-c", gate, "test-gate", "/usr/bin/touch"])
-                .arg(&sentinel)
-                .stdin(Stdio::piped())
-                .spawn()
-                .unwrap();
-            child.stdin.take().unwrap().write_all(permission).unwrap();
-            assert!(!child.wait().unwrap().success());
-            assert!(!sentinel.exists());
-        }
         let lease = scratch.lease();
         let result = run(
             &lease,
@@ -371,8 +302,6 @@ mod tests {
             (result.code, result.stdout.as_str(), result.stderr.as_str()),
             (7, "output", "diagnostic")
         );
-        assert!(scratch.marker().get("child_pid").is_none());
-        assert_eq!(scratch.marker()["command_pending"], false);
     }
 
     #[test]
@@ -393,7 +322,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("deadline exceeded"), "{error}");
-        assert!(scratch.marker().get("child_pid").is_none(), "{error}");
     }
 
     #[test]
@@ -413,8 +341,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("deadline exceeded"), "{error}");
-        assert!(scratch.marker().get("child_pid").is_none(), "{error}");
-        assert_eq!(scratch.marker()["recovery_required"], true);
         let error = run(
             &lease,
             Path::new("/bin/sh"),
@@ -425,12 +351,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("process group remains"), "{error}");
-        assert_eq!(scratch.marker()["recovery_required"], true);
-        // Some hosts retain an orphan zombie briefly. Judge the cleanup result
-        // recorded at return, not a second racy lookup of a process now exiting.
-        assert_eq!(
-            scratch.marker().get("child_pid").is_none(),
-            error.contains("local_group_gone=true")
-        );
+        assert_eq!(lease.recovery_context(), Some(context.as_path()));
+        drop(lease);
+        drop(scratch.lease());
     }
 }

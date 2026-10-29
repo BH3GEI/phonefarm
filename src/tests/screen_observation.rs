@@ -15,6 +15,8 @@ impl Fixture {
         let root = std::env::temp_dir().join(format!("screen-observe-{}-{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         fs::create_dir_all(root.join("bin")).unwrap();
+        let python = Command::new("python3").args(["-c", "import sys;print(sys.executable)"]).output().unwrap();
+        std::os::unix::fs::symlink(String::from_utf8(python.stdout).unwrap().trim(), root.join("bin/python3")).unwrap();
         let hdc = root.join("bin/hdc");
         fs::write(&hdc, r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FIXTURE/calls"
@@ -87,8 +89,10 @@ fn screen_frame_owns_transport_window_then_pause_stops_new_work() {
     let viewer = server.watch();
     until(|| f.calls().contains("snapshot_display"));
     assert_eq!(f.status()["status"], "held");
-    let competing = f.cmd().args(["lease", "--serial", "fake-writer", "--timeout-ms", "0", "--", "/usr/bin/true"]).output().unwrap();
+    let competing = f.cmd().args(["lease", "--serial", "hdc:fake-screen", "--timeout-ms", "0", "--", "/usr/bin/true"]).output().unwrap();
     assert!(!competing.status.success());
+    let other = f.cmd().args(["lease", "--serial", "fake-writer", "--timeout-ms", "0", "--", "/usr/bin/true"]).output().unwrap();
+    assert!(other.status.success(), "another phone must remain available during the frame");
     fs::remove_file(f.0.join("hold")).unwrap();
     until(|| server.get("/state.json").is_some_and(|s| s["frames"].as_u64().unwrap_or(0) > 0));
     server.stop(&viewer);

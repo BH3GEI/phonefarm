@@ -55,7 +55,7 @@ impl Session {
             || !state["control_command_pending"].is_boolean()
         { return Err("invalid or mismatched bench session identity".into()); }
         let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
-        let lease = Lease::acquire_recovery(&root, &legacy, serial, &dir, Duration::from_secs(1))?;
+        let lease = Lease::acquire_recovery(&root, &legacy, serial, &dir, crate::devlease::wait_timeout()?)?;
         Ok(Self {lease:RefCell::new(lease), program:crate::device::locate_adb().ok_or("ADB not available")?.into(),
             dir, state:RefCell::new(state), shell_error:RefCell::new(None)})
     }

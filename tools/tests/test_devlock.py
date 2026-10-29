@@ -22,10 +22,12 @@ class DevlockBridgeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="devlock-bridge-test-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.env = dict(os.environ, DEVLOCK_DIR=str(self.root), DEVLOCK_STALE="1", DEVLOCK_WAIT_SECONDS="0",
+        self.env = dict(os.environ, DEVLOCK_DIR=str(self.root), DEVLOCK_WAIT_SECONDS="0",
                         PHONEFARM_LEASE_DIR=str(self.root / "devices"), PHONEFARM_BIN=str(BINARY))
         self.env.pop("DEVLOCK_INSTANCE_ID", None)
         self.env.pop("DEVLOCK_LABEL", None)
+        self.env.pop("PF_LOCK_FDS", None)
+        self.env.pop("PF_LOCK_SCOPE", None)
 
     def call(self, *args):
         return subprocess.run(["zsh", str(DEVLOCK), *args], env=self.env,
@@ -207,112 +209,22 @@ class DevlockBridgeTests(unittest.TestCase):
                 self.assertFalse(any(android["properties"].values()))
                 self.assertEqual(json.loads(pf("lease", "status", "--json").stdout)["status"], "clear")
 
-    def test_default_follows_selected_resolver_without_read_side_creation_or_fallback(self):
+    def test_status_follows_selected_phonefarm_without_creating_storage(self):
         self.env.pop("DEVLOCK_DIR")
         target = self.root / "selected persistent locks"
-        response = self.root / "storage.json"
         resolver = self.root / "selected-phonefarm"
-        resolver.write_text("#!/bin/sh\n"
-                            f'[ "$1" != __queue-owner ] || exec {shlex.quote(str(BINARY))} "$@"\n'
-                            '[ "$*" = \'lease status --json\' ] || exit 2\n'
-                            'cat "$(dirname "$0")/storage.json"\n')
+        resolver.write_text("#!/bin/sh\nexport DEVLOCK_DIR=" + shlex.quote(str(target)) + "\nexec " + shlex.quote(str(BINARY)) + ' "$@"\n')
         resolver.chmod(0o755)
         self.env["PHONEFARM_BIN"] = str(resolver)
-        response.write_text(json.dumps({"storage": {"schema_version": 1, "readiness": "migration_required",
-                                                    "devlock_dir": str(target), "error": "stop old participants"}}))
-        refused = self.call("acquire", "outer")
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn("stop old participants", refused.stderr)
-        self.assertFalse(target.exists())
-        response.write_text(json.dumps({"storage": {"schema_version": 1, "readiness": "ready", "devlock_dir": str(target)}}))
-        self.assertEqual(self.call("status").stdout.strip(), "free")
+        value = json.loads(self.call("status").stdout)
+        self.assertEqual(value["storage"]["devlock_dir"], str(target))
         self.assertFalse(target.exists())
         self.assertEqual(self.call("run", "outer", "--", "/usr/bin/true").returncode, 0)
-        self.assertTrue((target / "devlock.log").exists())
-        self.assertFalse((self.root / "devlock.log").exists())
-        response.write_text('{"status":"clear"}')
-        self.assertEqual(self.call("acquire", "outer").returncode, 2)
+        self.assertTrue((target / "phonefarm-bridge.lock").exists())
+        self.assertFalse((self.root / "phonefarm-bridge.lock").exists())
 
-    def test_strong_records_block_missing_owner_stale_take_and_same_label_bypass(self):
-        for variant in ("corrupt", "unknown", "missing-owner", "dangling-marker", "token-owner"):
-            with self.subTest(variant=variant):
-                directory = self.root / "devlock.d"
-                shutil.rmtree(directory, ignore_errors=True)
-                owner = self.stale_owner("outer since fixture token=lease-token\n" if variant == "token-owner"
-                                         else "outer since fixture\n")
-                marker = directory / "phonefarm-lease.json"
-                if variant == "dangling-marker":
-                    marker.symlink_to(directory / "missing")
-                elif variant != "token-owner":
-                    marker.write_text("{" if variant == "corrupt" else '{"format":999}')
-                if variant == "missing-owner":
-                    owner.unlink()
-                before_owner = owner.read_bytes() if owner.exists() else None
-                before_marker = marker.read_bytes() if marker.exists() else None
-                for args in (("acquire", "other"), ("renew", "outer"), ("release", "outer")):
-                    result = self.call(*args)
-                    self.assertNotEqual(result.returncode, 0, (args, result.stdout, result.stderr))
-                    self.assertEqual(owner.read_bytes() if owner.exists() else None, before_owner)
-                    self.assertEqual(marker.read_bytes() if marker.exists() else None, before_marker)
-                if owner.exists():
-                    self.assertEqual(owner.stat().st_mtime, 1)
-                if variant == "dangling-marker":
-                    self.assertTrue(marker.is_symlink())
 
-    def test_nested_residue_blocks_reuse_but_outer_release_preserves_recovery(self):
-        acquired = self.call("acquire", "outer")
-        self.assertEqual(acquired.returncode, 0, acquired.stdout + acquired.stderr)
-        identity = json.loads(acquired.stdout)
-        self.assertEqual(identity["schema"], "phonefarm/devlock-owner@1")
-        self.assertEqual(identity["holder_pid"], os.getpid())
-        owner = self.root / "devlock.d/owner"
-        before_owner = owner.read_bytes()
-        # A matching label, even from this holder's child, grants no authority.
-        self.assertEqual(self.call("renew", "outer").returncode, 2)
-        self.assertEqual(self.call("release", "outer").returncode, 2)
-        self.env.update(DEVLOCK_LABEL="outer", DEVLOCK_INSTANCE_ID="0" * 32)
-        self.assertEqual(self.call("renew", "outer").returncode, 2)
-        self.assertEqual(owner.read_bytes(), before_owner)
-        self.env["DEVLOCK_INSTANCE_ID"] = identity["instance_id"]
-        nested = self.root / "phonefarm-lease.d"
-        nested.mkdir()
-        marker = nested / "phonefarm-lease.json"
-        marker.write_text('{"format":1,"recovery_required":true}')
-        before = marker.read_bytes()
-        self.assertNotEqual(self.call("acquire", "other").returncode, 0)
-        # Outer identity can renew/release itself without weakening any nested record.
-        self.assertEqual(self.call("renew", "outer").returncode, 0)
-        self.assertEqual(self.call("release", "outer").returncode, 0)
-        self.assertFalse(owner.parent.exists())
-        self.assertEqual(marker.read_bytes(), before)
-        self.env.pop("DEVLOCK_INSTANCE_ID")
-        self.env.pop("DEVLOCK_LABEL")
-        self.assertIn("lease protected", self.call("status").stdout)
-        self.assertNotEqual(self.call("acquire", "other").returncode, 0)
-        marker.unlink()  # Even an empty leftover directory still blocks acquisition.
-        self.assertNotEqual(self.call("acquire", "other").returncode, 0)
-        nested.rmdir()
-        acquired = self.call("acquire", "other")
-        self.assertEqual(acquired.returncode, 0, acquired.stdout + acquired.stderr)
-        self.env.update(DEVLOCK_LABEL="other", DEVLOCK_INSTANCE_ID=json.loads(acquired.stdout)["instance_id"])
-        self.assertEqual(self.call("renew", "other").returncode, 0)
-        self.assertEqual(self.call("release", "other").returncode, 0)
-
-    def test_unpublished_owner_is_not_stolen(self):
-        directory = self.root / "devlock.d"
-        directory.mkdir()
-        result = self.call("acquire", "writer")
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("queue identity unavailable", result.stderr)
-        self.assertFalse((directory / "owner").exists())
-
-    def assert_processes_gone(self, pids):
-        self.assertTrue(pids, "fixture did not observe its heartbeat sibling")
-        for pid in pids:
-            found = subprocess.run(["ps", "-p", str(pid), "-o", "pid="], capture_output=True, text=True)
-            self.assertEqual(found.returncode, 1, f"heartbeat {pid} still exists: {found.stdout}")
-
-    def test_quick_command_closes_pipes_and_reaps_heartbeat(self):
+    def test_quick_command_preserves_output_exit_and_has_no_heartbeat(self):
         command = """
 import json, os, subprocess, sys
 rows = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True).splitlines()
@@ -325,90 +237,42 @@ sys.exit(7)
         result = self.call("run", "outer", "--", sys.executable, "-c", command)
         self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
         self.assertIn("host stderr", result.stderr)
-        self.assert_processes_gone(json.loads(result.stdout))
+        self.assertEqual(json.loads(result.stdout), [])
         self.assertFalse((self.root / "devlock.d").exists())
 
-    def test_cancellation_reaps_heartbeat_without_clearing_lock_records(self):
-        command = """
-import json, os, pathlib, signal, subprocess, sys
-for sig in (signal.SIGINT, signal.SIGTERM):
-    signal.signal(sig, lambda sig, _: sys.exit(128 + sig))
-rows = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True).splitlines()
-siblings = [int(p) for row in rows for p,parent in [row.split()]
-            if int(parent) == os.getppid() and int(p) != os.getpid()]
-pathlib.Path(sys.argv[1]).write_text(json.dumps(siblings))
-while True:
-    signal.pause()
-"""
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            with self.subTest(signal=sig.name):
-                ready = self.root / f"ready-{sig.name}.json"
-                process = subprocess.Popen(
-                    ["zsh", str(DEVLOCK), "run", "outer", "--", sys.executable, "-c", command, str(ready)],
-                    env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
-                try:
-                    deadline = time.monotonic() + 5
-                    while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
-                        time.sleep(0.02)
-                    self.assertTrue(ready.exists(), "isolated command did not become ready")
-                    heartbeat_pids = json.loads(ready.read_text())
-                    os.killpg(process.pid, sig)  # Only the isolated session this fixture just created.
-                    stdout, stderr = process.communicate(timeout=5)
-                    self.assertEqual(process.returncode, 128 + sig, stdout + stderr)
-                    self.assert_processes_gone(heartbeat_pids)
-                    self.assertTrue((self.root / "devlock.d/owner").exists())
-                finally:
-                    if process.poll() is None:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.communicate(timeout=5)
-                identity = json.loads((self.root / "devlock.d/phonefarm-lease.json").read_text())
-                self.assertNotEqual(self.call("release", "outer").returncode, 0)
-                reconciled = self.call("reconcile", identity["instance_id"], "--participants-stopped", "--confirm-device-idle")
-                self.assertEqual(reconciled.returncode, 0, reconciled.stdout + reconciled.stderr)
-                self.assertFalse(json.loads(reconciled.stdout)["device_recovery_verified"])
-                self.assertTrue((self.root / "devlock-reconciliations" / (identity["instance_id"] + ".json")).is_file())
+    def test_cancellation_releases_the_task_fd(self):
+        ready = self.root / "cancel-ready"
+        program = "import signal,sys,time;from pathlib import Path;signal.signal(signal.SIGINT,lambda *_:sys.exit(130));Path(sys.argv[1]).touch();time.sleep(20)"
+        process = subprocess.Popen(["zsh", str(DEVLOCK), "run", "cancel", "--", sys.executable, "-c", program, str(ready)],
+                                   env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline: time.sleep(.01)
+            self.assertTrue(ready.exists())
+            os.killpg(process.pid, signal.SIGINT)
+            process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 130)
+            self.assertEqual(json.loads(self.call("status").stdout)["status"], "clear")
+            self.assertEqual(self.call("run", "next", "--", "/usr/bin/true").returncode, 0)
+        finally:
+            if process.poll() is None: os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=5)
 
-    def test_busy_bridge_waits_then_acquires_and_timeout_cleans_queue(self):
-        script = """import fcntl, pathlib, time
-root = pathlib.Path(__import__('sys').argv[1])
-(root / 'ready').write_text('held')
-with open(root / 'phonefarm-bridge.lock', 'w') as stream:
-    fcntl.flock(stream, fcntl.LOCK_EX)
-    time.sleep(float(__import__('sys').argv[2]))
-"""
-        for seconds, expected in ((2, 0), (4, 1)):
-            with self.subTest(seconds=seconds):
-                holder = subprocess.Popen([sys.executable, "-c", script, str(self.root), str(seconds)],
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                try:
-                    deadline = time.monotonic() + 5
-                    while not (self.root / "ready").exists() and time.monotonic() < deadline:
-                        time.sleep(.02)
-                    self.assertTrue((self.root / "ready").exists(), "bridge was not held")
-                    self.env["DEVLOCK_WAIT_SECONDS"] = "5" if expected == 0 else "1"
-                    result = self.call("run", "outer", "--", "/usr/bin/true")
-                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                    if expected == 0:
-                        self.assertIn("acquire outer", (self.root / "devlock.log").read_text())
-                    else:
-                        self.assertIn("wait expired", result.stderr)
-                        self.assertIn("sampling/ownership transition", result.stderr)
-                        queue = self.root / "devlock.queue"
-                        self.assertFalse(queue.exists() and "outer" in queue.read_text().splitlines())
-                        self.assertIn("busy outer (bridge held (sampling/ownership transition))", (self.root / "devlock.log").read_text())
-                finally:
-                    (self.root / "ready").unlink(missing_ok=True)
-                    if holder.poll() is None:
-                        holder.kill()
-                    holder.communicate(timeout=5)
-                self.env["DEVLOCK_WAIT_SECONDS"] = "0"
-
-    def test_legacy_lease_warns_about_global_domain(self):
-        result = subprocess.run([str(BINARY), "lease", "--serial", "fixture-device", "--timeout-ms", "1000",
-                                 "--", "/usr/bin/true"], env=self.env, capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("还没有设备 lane", result.stderr)
-        self.assertIn("全农场", result.stderr)
+    def test_busy_bridge_waits_and_explicit_timeout_returns_without_running(self):
+        script = "import fcntl,pathlib,sys,time;root=pathlib.Path(sys.argv[1]);f=open(root/'phonefarm-bridge.lock','a');fcntl.flock(f,fcntl.LOCK_EX);(root/'ready').touch();time.sleep(.4)"
+        for wait, expected in (("2", 0), ("0", 2)):
+            holder = subprocess.Popen([sys.executable, "-c", script, str(self.root)])
+            try:
+                deadline = time.monotonic() + 5
+                while not (self.root / "ready").exists() and time.monotonic() < deadline: time.sleep(.01)
+                self.assertTrue((self.root / "ready").exists())
+                self.env["DEVLOCK_WAIT_SECONDS"] = wait
+                result = self.call("run", "outer", "--", "/usr/bin/true")
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+            finally:
+                holder.wait(timeout=5)
+                (self.root / "ready").unlink(missing_ok=True)
+        self.env.pop("DEVLOCK_WAIT_SECONDS", None)
 
     def test_registered_serial_leases_overlap(self):
         initialized = subprocess.run([str(BINARY), "lease", "domain-init", "--participants-stopped", "--json"],
@@ -433,18 +297,17 @@ with open(root / 'phonefarm-bridge.lock', 'w') as stream:
         alias = subprocess.run([str(BINARY), "lease", "--serial", "serial-a", "--timeout-ms", "0",
                                 "--", "/usr/bin/true"], env=self.env, capture_output=True, text=True, timeout=5)
         self.assertNotEqual(alias.returncode, 0, alias.stdout + alias.stderr)
-        markers = [json.loads(path.read_text()) for path in self.root.rglob("phonefarm-lease.json")]
-        self.assertTrue(any(marker.get("format") == 2 and marker.get("scope") == "device" and marker.get("device_binding")
-                            for marker in markers), markers)
+        status = json.loads(self.call("status").stdout)
+        self.assertTrue(any(entry.get("scope") == "device" and entry.get("device_binding")
+                            for entry in status["entries"]), status)
         first_out, first_err = first.communicate(timeout=5)
         self.assertEqual(first.returncode, 0, first_out + first_err)
         self.assertNotIn("还没有设备 lane", first_err + second_err)
         unregistered = subprocess.run([str(BINARY), "lease", "--serial", "serial-c", "--timeout-ms", "1",
                                        "--", "/usr/bin/true"], env=self.env, capture_output=True, text=True, timeout=5)
-        self.assertNotEqual(unregistered.returncode, 0)
-        self.assertIn("not a registered device alias", unregistered.stderr)
+        self.assertEqual(unregistered.returncode, 0, unregistered.stderr)
 
-    def test_typed_devlock_overlap_same_device_and_global_priority(self):
+    def test_typed_devlock_overlap_same_device_and_global_exclusion(self):
         initialized = subprocess.run([str(BINARY), "lease", "domain-init", "--participants-stopped", "--json"],
                                      env=self.env, capture_output=True, text=True, timeout=5)
         self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
@@ -502,65 +365,46 @@ with open(root / 'phonefarm-bridge.lock', 'w') as stream:
 
         global_owner = spawn(None, "global-owner", .8)
         deadline = time.monotonic() + 5
-        while not (self.root / "v2/global/devlock.d").exists() and time.monotonic() < deadline:
+        while not (self.root / "global-owner.started").exists() and time.monotonic() < deadline:
             time.sleep(.02)
-        self.assertTrue((self.root / "v2/global/devlock.d").exists(), "global owner did not start")
+        self.assertTrue((self.root / "global-owner.started").exists(), "global owner did not start")
         typed = spawn("serial-a", "typed-after-global", .1)
         typed_out, typed_err = typed.communicate(timeout=10)
         self.assertEqual(typed.returncode, 0, typed_out + typed_err)
         self.assertIsNotNone(global_owner.poll(), "typed lane bypassed the global owner")
         global_owner.communicate(timeout=10)
 
-        (self.root / "devlock.queue").write_text("global-wait\n")
-        (self.root / "devlock.seen").write_text(f"global-wait {int(time.time())}\n")
-        blocked = subprocess.run(["zsh", str(DEVLOCK), "run", "typed-blocked", "--", "/usr/bin/true"],
-                                 env=environment("serial-a", "0"), capture_output=True, text=True, timeout=5)
-        self.assertNotEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
-        self.assertEqual((self.root / "devlock.queue").read_text(), "global-wait\n")
+        (self.root / "v2/global/devlock.queue").write_text("old-global-wait\n")
+        result = subprocess.run(["zsh", str(DEVLOCK), "run", "typed", "--", "/usr/bin/true"],
+                                env=environment("serial-a", "0"), capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / "v2/global/devlock.queue").read_text(), "old-global-wait\n")
 
-    @unittest.skipUnless(BINARY.is_file(), "set PHONEFARM_TEST_BINARY to an existing signed test build")
-    def test_real_nested_lease_allows_inherited_child_but_not_outside_caller(self):
+    def test_nested_task_borrows_fd_while_independent_same_label_waits(self):
         ready, finish = self.root / "ready.json", self.root / "finish"
-        command = """
-import json, pathlib, subprocess, sys, time
-devlock, ready, finish = sys.argv[1:]
-r = subprocess.run(['zsh', devlock, 'renew', 'outer'], capture_output=True, text=True)
-pathlib.Path(ready).write_text(json.dumps({'code':r.returncode,'out':r.stdout,'err':r.stderr}))
-while not pathlib.Path(finish).exists():
-    time.sleep(0.02)
+        program = """
+import json,os,pathlib,subprocess,sys,time
+devlock,ready,finish=sys.argv[1:]
+fds=[int(fd) for fd in os.environ['PF_LOCK_FDS'].split(',')]
+r=subprocess.run(['zsh',devlock,'run','outer','--','/usr/bin/true'],pass_fds=fds,capture_output=True,text=True)
+pathlib.Path(ready).write_text(json.dumps({'code':r.returncode,'err':r.stderr}))
+while not pathlib.Path(finish).exists(): time.sleep(.01)
 """
-        process = subprocess.Popen(
-            ["zsh", str(DEVLOCK), "run", "outer", "--", str(BINARY), "lease", "--serial", "fixture-device",
-             "--timeout-ms", "500", "--", sys.executable, "-c", command, str(DEVLOCK), str(ready), str(finish)],
+        process = subprocess.Popen(["zsh", str(DEVLOCK), "run", "outer", "--", str(BINARY), "lease",
+            "--serial", "fixture-device", "--", sys.executable, "-c", program, str(DEVLOCK), str(ready), str(finish)],
             env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 5
-            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.02)
-            self.assertTrue(ready.exists(), "isolated lease did not start its local child")
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline: time.sleep(.01)
+            self.assertTrue(ready.exists())
             self.assertEqual(json.loads(ready.read_text())["code"], 0, ready.read_text())
-            marker = self.root / "phonefarm-lease.d/phonefarm-lease.json"
-            before = marker.read_bytes()
-            identity = json.loads((self.root / "devlock.d/phonefarm-lease.json").read_text())
-            self.assertEqual(json.loads(before)["outer_instance_id"], identity["instance_id"])
-            # Being an ancestor of the holder is not borrowing it. Even knowing
-            # its public ID does not authorize this unrelated caller subtree.
-            self.assertNotEqual(self.call("renew", "outer").returncode, 0)
-            self.env.update(DEVLOCK_LABEL="outer", DEVLOCK_INSTANCE_ID=identity["instance_id"])
-            renewed = self.call("renew", "outer")
-            self.assertNotEqual(renewed.returncode, 0, renewed.stdout + renewed.stderr)
-            unrelated = subprocess.run(
-                [sys.executable, "-c", "import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))",
-                 "zsh", str(DEVLOCK), "renew", "outer"], env=self.env, capture_output=True, text=True, timeout=5)
-            self.assertNotEqual(unrelated.returncode, 0, unrelated.stdout + unrelated.stderr)
-            self.assertEqual(marker.read_bytes(), before)
-            self.assertNotEqual(self.call("acquire", "other").returncode, 0)
+            contender = self.call("run", "outer", "--", "/usr/bin/true")
+            self.assertEqual(contender.returncode, 2, contender.stdout + contender.stderr)
         finally:
             finish.touch()
             stdout, stderr = process.communicate(timeout=5)
         self.assertEqual(process.returncode, 0, stdout + stderr)
-        self.assertFalse((self.root / "phonefarm-lease.d").exists())
-        self.assertFalse((self.root / "devlock.d").exists())
+        self.assertEqual(self.call("run", "next", "--", "/usr/bin/true").returncode, 0)
 
 
 if __name__ == "__main__":

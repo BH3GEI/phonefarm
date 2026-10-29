@@ -453,8 +453,6 @@ fn public(store: &Store, s: &Value) -> Result<Value> {
     let phase = if s["phase"] == "closed" {
         if running {
             "closing"
-        } else if context_retained(store, s)? {
-            "recovery_required"
         } else {
             "closed"
         }
@@ -482,19 +480,6 @@ fn public(store: &Store, s: &Value) -> Result<Value> {
         "scope":SCOPE,"game_state_restored":false,"device_verified":false,"report":s["recovery_report"]}}),
         s,
     )
-}
-fn context_retained(store: &Store, original: &Value) -> Result<bool> {
-    let binding = saved_binding(original)?;
-    let observation = crate::devlease::storage_status(&crate::lease_storage::resolve());
-    scope_status(&observation, binding.as_ref())?;
-    let entries = observation["entries"].as_array().ok_or_else(|| io_error("missing lease status entries"))?;
-    for entry in entries.iter().filter(|e| e["recovery_context"] == json!(store.path)) {
-        if binding.as_ref().is_some_and(|b| entry["device_binding"] != json!(b)) {
-            return Err(io_error("remote context is recorded in a different device scope"));
-        }
-        return Ok(true);
-    }
-    Ok(false)
 }
 fn startup_status(store: &Store) -> Result<Value> {
     let mut proof = store.read("startup.json")?;
@@ -1219,7 +1204,6 @@ fn supervise(
                 "node lifeline lost or owner interrupted; explicit recovery required",
             ));
         }
-        lease.check().map_err(io_error)?;
         if Instant::now() >= end || heartbeat.elapsed() >= Duration::from_secs(ttl) {
             return close(
                 store,
@@ -1420,11 +1404,12 @@ fn start(a: &Args) -> Result<()> {
     attach_scope(&mut launch, a.binding.as_ref());
     store.write("launch.json", &launch, false)?;
     let storage = crate::lease_storage::resolve();
+    let timeout = crate::devlease::wait_timeout().map_err(io_error)?;
     let acquisition = if let Some(binding) = &a.binding {
-        Lease::acquire_device(&storage, binding, "remote-control", Duration::ZERO)
+        Lease::acquire_device(&storage, binding, "remote-control", timeout)
     } else {
         storage.require_ready().and_then(|(root, legacy)| {
-            Lease::acquire(&root, &legacy, serial, "remote-control", Duration::ZERO)
+            Lease::acquire(&root, &legacy, serial, "remote-control", timeout)
         })
     };
     let mut lease = match acquisition {
@@ -1519,11 +1504,11 @@ fn recover(a: &Args) -> Result<Value> {
     {
         return Err(error("conflict", "original owner is still alive"));
     }
-    if s["phase"] == "closed" && !context_retained(&store, &s)? {
+    if s["phase"] == "closed" {
         drop(_owner);
         return public(&store, &s);
     }
-    if s["phase"] == "starting" && !context_retained(&store, &s)? {
+    if s["phase"] == "starting" {
         return retire_startup(
             &store,
             a.serial.as_deref().unwrap(),
@@ -1539,13 +1524,17 @@ fn recover(a: &Args) -> Result<Value> {
     let evidence_name = format!("recovery-{stamp}.json");
     let evidence = store.path.join(&evidence_name);
     let mut lease = if let Some(binding) = &binding {
-        Lease::acquire_device_remote_recovery(&storage, binding, &store.path,
-            a.note.as_deref().unwrap(), a.participants, &evidence)
+        Lease::acquire_device_recovery(&storage, binding, &store.path, crate::devlease::wait_timeout().map_err(io_error)?)
     } else {
         let (root, legacy) = storage.require_ready().map_err(io_error)?;
-        Lease::acquire_remote_recovery(&root, &legacy, a.serial.as_deref().unwrap(),
-            &store.path, a.note.as_deref().unwrap(), a.participants, &evidence)
+        Lease::acquire_recovery(&root, &legacy, a.serial.as_deref().unwrap(), &store.path, crate::devlease::wait_timeout().map_err(io_error)?)
     }.map_err(|e| error("recovery_required", e))?;
+    let proof = json!({"schema":"phonefarm/remote-control-recovery@1", "session_id":s["session_id"],
+        "serial":s["serial"],"context":store.path,"scope":"remote_control_commands_settled",
+        "origin":"operator_assertion","device_verified":false,"game_state_restored":false,
+        "app_state_rollback":false,"note":a.note,"participants_stopped":a.participants,
+        "pending_request":s["pending_request"],"device_binding":binding,"at":chrono::Utc::now().to_rfc3339()});
+    crate::devlease::durable_replace(&evidence, proof.to_string().as_bytes()).map_err(io_error)?;
     stop_pending(&store, "owner stopped before executing this request")?;
     lease
         .complete_recovery(SCOPE, "operator_assertion", &[&evidence])
@@ -1659,6 +1648,7 @@ mod tests {
     }
     #[test]
     fn typed_boundary_rejects_raw_commands_and_unbounded_input() {
+        if crate::isolate_fd_test("remote_control::tests::typed_boundary_rejects_raw_commands_and_unbounded_input") { return; }
         for action in ["logcat", "diagnostics"] {
             assert!(ACTIONS.contains(&action));
             let scratch = Scratch::new();
@@ -1727,6 +1717,7 @@ mod tests {
     }
     #[test]
     fn request_identity_is_immutable_and_release_freezes_publication() {
+        if crate::isolate_fd_test("remote_control::tests::request_identity_is_immutable_and_release_freezes_publication") { return; }
         let scratch = Scratch::new();
         let (store, _owner, mut s) = scratch.fixture();
         let tap = request("a", "tap", json!({"x":10,"y":20,"frame_id":"shot"}));
@@ -1767,6 +1758,7 @@ mod tests {
     }
     #[test]
     fn frame_claim_rejects_stale_and_consumes_only_current_eligible_image() {
+        if crate::isolate_fd_test("remote_control::tests::frame_claim_rejects_stale_and_consumes_only_current_eligible_image") { return; }
         let scratch = Scratch::new();
         let (store, _owner, mut s) = scratch.fixture();
         let image = json!({"frame_id":"shot","session_id":"test-session","serial":"fake-remote",
@@ -1810,6 +1802,7 @@ mod tests {
     }
     #[test]
     fn startup_retirement_requires_dead_owner_and_clear_domain_preserves_unknown() {
+        if crate::isolate_fd_test("remote_control::tests::startup_retirement_requires_dead_owner_and_clear_domain_preserves_unknown") { return; }
         for (with_state, scoped) in [(false, false), (true, false), (true, true)] {
             let scratch = Scratch::new();
             let (store, _owner, mut s) = scratch.fixture();
@@ -1912,6 +1905,7 @@ mod tests {
     }
     #[test]
     fn missing_owner_preserves_started_unknown_and_completed_result() {
+        if crate::isolate_fd_test("remote_control::tests::missing_owner_preserves_started_unknown_and_completed_result") { return; }
         let scratch = Scratch::new();
         let (store, owner, mut s) = scratch.fixture();
         for name in ["started", "queued", "completed"] {
@@ -1952,7 +1946,8 @@ mod tests {
         );
     }
     #[test]
-    fn unknown_close_cannot_disarm_the_persistent_lease() {
+    fn unknown_close_preserves_recovery_fact_but_does_not_persist_a_lock() {
+        if crate::isolate_fd_test("remote_control::tests::unknown_close_preserves_recovery_fact_but_does_not_persist_a_lock") { return; }
         let scratch = Scratch::new();
         let (store, _owner, mut s) = scratch.fixture();
         let root = scratch.0.join("leases");
@@ -1971,11 +1966,7 @@ mod tests {
         )
         .is_err());
         drop(lease);
-        let marker: Value = serde_json::from_slice(
-            &fs::read(legacy.join("devlock.d/phonefarm-lease.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(marker["recovery_required"], true);
-        assert!(Lease::acquire(&root, &legacy, "fake-remote", "later", Duration::ZERO).is_err());
+        assert_eq!(s["transport_uncertain"], true);
+        drop(Lease::acquire(&root, &legacy, "fake-remote", "later", Duration::ZERO).unwrap());
     }
 }

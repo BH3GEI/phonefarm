@@ -653,7 +653,7 @@ impl Dev {
         out.rsplit_once("#adb_exit=").map(|(a, _)| a.to_string()).unwrap_or(out)
     }
     fn cap(&self) -> Vec<u8> {
-        Command::new(adb_path())
+        crate::fd_lock::transport_command(adb_path())
             .args(["-s", &self.serial, "exec-out", "screencap"])
             .output()
             .map(|o| o.stdout)
@@ -666,7 +666,7 @@ impl Dev {
         self.sh(&format!("input swipe {x0} {y0} {x1} {y1} {ms}"), ms / 1000 + 10);
     }
     fn swipe_bg(&self, x0: i32, y0: i32, x1: i32, y1: i32, ms: u64) -> Option<std::process::Child> {
-        Command::new(adb_path())
+        crate::fd_lock::transport_command(adb_path())
             .args(["-s", &self.serial, "shell", &format!("input swipe {x0} {y0} {x1} {y1} {ms}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -225,7 +225,6 @@ pub(super) fn diagnose(dir: &Path, execute: bool) -> Result<Value, String> {
         Err(e) => (false, None, Some(e), None),
     };
     // Recovery lease Drop preserves its durable marker. Never complete_recovery.
-    lease.check()?;
     let result = json!({"schema":"phonefarm/helper_recovery_diagnostic@1","status":"UNKNOWN",
         "diagnostic_complete":complete,"exit_code":code,"error":error,"session":dir,"diagnostic_dir":out,
         "evidence_origin":if req.transport.kind=="fake"{"synthetic"}else{"receiver_read_only"},"raw":raw,

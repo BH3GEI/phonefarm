@@ -9,7 +9,6 @@
 //!   - OH override 不跨重启/锁屏恢复存活, 每轮巡检必须重放。
 use serde_json::{json, Value};
 use std::io::Write;
-use std::process::Command;
 use std::time::Duration;
 use crate::fleet::parse_hdc_power_on;
 
@@ -120,11 +119,11 @@ fn unlock_swipe(w: i32, h: i32) -> (i32, i32, i32, i32) {
 fn enumerate_devices() -> Vec<String> {
     let mut v = Vec::new();
     if let Some(adb) = crate::device::locate_adb() {
-        if let Ok(out) = Command::new(adb).arg("devices").output() {
+        if let Ok(out) = crate::fd_lock::transport_command(adb).arg("devices").output() {
             v.extend(parse_adb_devices(&String::from_utf8_lossy(&out.stdout)));
         }
     }
-    if let Ok(out) = Command::new("hdc").args(["list", "targets"]).output() {
+    if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
         v.extend(parse_hdc_targets(&String::from_utf8_lossy(&out.stdout))
             .into_iter().map(|k| format!("hdc:{k}")));
     }
