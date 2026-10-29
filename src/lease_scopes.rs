@@ -125,7 +125,7 @@ pub(super) fn status(entries: &[Value], errors: &[String], held: bool) -> &'stat
 }
 
 pub(super) fn snapshot(root: &Path, paths: &Paths, entries: &mut Vec<Value>,
-    errors: &mut Vec<String>, bridge_held: Option<bool>) -> Value {
+    errors: &mut Vec<String>) -> Value {
     let exclusive = probe_lock(&root.join("phonefarm-bridge.lock"), true);
     if let Err(error) = &exclusive { errors.push(error.clone()); }
     let global_status = status(entries, errors, exclusive.as_ref().is_ok_and(|held| *held));
@@ -144,10 +144,6 @@ pub(super) fn snapshot(root: &Path, paths: &Paths, entries: &mut Vec<Value>,
     }
     let mut devices = Vec::new();
     if let (Ok((_, registered)), Ok(lanes)) = (&registry, &lanes) {
-        if bridge_held == Some(true) && exclusive == Ok(false) && lanes.is_empty() {
-            errors.push("shared bridge owner has no attributable device record".into());
-            unknown = true;
-        }
         for device in registered {
             let lane = lanes.iter().find(|lane| lane.binding.device_id == device.device_id);
             let (state, error) = if let Some(lane) = lane {

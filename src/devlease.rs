@@ -65,6 +65,10 @@ pub(crate) fn prepare_device_lane(root: &Path, binding: &DeviceBinding) -> Resul
     if scopes::global_clear(&paths).is_err() || scopes::queue_waiting(&paths)? {
         return Ok(None);
     }
+    let device_root = paths.device_lease_dir.as_ref().expect("registered device root");
+    if scopes::probe_lock(&scopes::fd_path(device_root, binding), false)? {
+        return Ok(None);
+    }
     scopes::scan(root, &paths)?;
     crate::lease_domain::ensure_lanes(&paths)?;
     Ok(Some(paths.lane_marker(&binding.device_id)?))
@@ -507,54 +511,23 @@ fn observation_available(root: &Path) -> Result<(), String> {
 /// no persistent owner, heartbeat or recovery marker is published.
 pub(crate) struct EphemeralObservation {
     _device: File,
-    bridge: File,
+    _bridge: File,
 }
 
 impl EphemeralObservation {
-    pub(crate) fn acquire(storage: &crate::lease_storage::Storage) -> Result<Self, String> {
+    pub(crate) fn acquire(storage: &crate::lease_storage::Storage, serial: &str) -> Result<Self, String> {
+        let binding = crate::device_registry::resolve_binding(storage, serial)?;
         let (root, legacy) = storage.require_ready()?;
-        crate::shared_access::create_dir_all(&root).map_err(|e| format!("lease directory: {e}"))?;
-        crate::shared_access::create_dir_all(&legacy).map_err(|e| format!("devlock directory: {e}"))?;
+        let _queue = crate::queue_owner::lock(&legacy)?;
+        let lane = prepare_device_lane(&legacy, &binding)?
+            .ok_or("device observation is waiting behind a writer")?;
+        if lane.exists() {
+            return Err("device owner/recovery blocks full observation".into());
+        }
         let deadline = Instant::now();
-        let device = lock_file(&device_lock_path(&root, "@observation", None)?, deadline)?;
-        let bridge = lock_file_mode(&legacy.join("phonefarm-bridge.lock"), deadline, false)?;
-        let paths = crate::lease_domain::inspect(&legacy)?;
-        paths.require_device_root(&root)?;
-        if lane_occupancy(&legacy)? {
-            return Err("device lane owner/recovery blocks full observation".into());
-        }
-        observation_available(&paths.queue_dir)?;
-        Ok(Self { _device: device, bridge })
-    }
-
-    /// The worker inherits only the bridge. The parent and every live worker
-    /// hold the same open file description, so death releases it automatically.
-    pub(crate) fn authorize_worker(&self, cmd: &mut std::process::Command) -> Result<(), String> {
-        use std::os::unix::io::AsRawFd;
-        let fd = self.bridge.as_raw_fd();
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        cmd.env("PHONEFARM_OBSERVATION_BRIDGE_FD", fd.to_string())
-            .env("PHONEFARM_OBSERVATION_PARENT_PID", std::process::id().to_string());
-        Ok(())
-    }
-
-    pub(crate) fn verify_worker() -> Result<(), String> {
-        let fd = std::env::var("PHONEFARM_OBSERVATION_BRIDGE_FD")
-            .map_err(|e| e.to_string())?.parse::<i32>().map_err(|e| e.to_string())?;
-        let parent = std::env::var("PHONEFARM_OBSERVATION_PARENT_PID")
-            .map_err(|e| e.to_string())?.parse::<u32>().map_err(|e| e.to_string())?;
-        let pid = std::process::id();
-        if unsafe { libc::getppid() } != parent as i32
-            || unsafe { libc::getpgrp() } != pid as i32
-            || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0
-            || unsafe { libc::flock(fd, libc::LOCK_EX) } != 0
-        {
-            return Err("ephemeral observation worker ownership mismatch".into());
-        }
-        Ok(())
+        let device = lock_file(&device_lock_path(&root, serial, Some(&binding))?, deadline)?;
+        let bridge = lock_file_mode(&legacy.join("phonefarm-bridge.lock"), deadline, true)?;
+        Ok(Self { _device: device, _bridge: bridge })
     }
 }
 
@@ -1475,7 +1448,7 @@ fn lease_status(legacy_root: &Path) -> Value {
         entries.push(entry);
     }
     let device_scopes = (paths.layout_version == 2).then(|| scopes::snapshot(
-        legacy_root, &paths, &mut entries, &mut errors, bridge_held));
+        legacy_root, &paths, &mut entries, &mut errors));
     // A known restoration obligation remains definite even if a separate
     // ordinary queue entry has no strong marker. Keep its unknown entry/error
     // for diagnosis; neither condition grants permission to start device work.

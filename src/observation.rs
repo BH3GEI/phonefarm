@@ -78,20 +78,10 @@ pub(crate) fn run(
 }
 
 fn run_fleet(args: &[String], storage: &Storage, timeout: Duration) -> Result<Output, Failure> {
-    match crate::devlease::EphemeralObservation::acquire(storage) {
-        Ok(owner) => {
-            let (mut cmd, out, err) = worker_command("fleet", args, storage, timeout)?;
-            owner.authorize_worker(&mut cmd).map_err(Failure::error)?;
-            supervise_ephemeral(&mut cmd, "fleet", timeout, &out.0, &err.0)
-        }
-        Err(_) => {
-            // A busy/unknown domain permits only the unowned light probe. The
-            // bounded worker still applies; screenshots and full probes do not.
-            let (mut cmd, out, err) = worker_command("fleet", args, storage, timeout)?;
-            cmd.env("PHONEFARM_OBSERVATION_LIGHT", "1");
-            supervise_ephemeral(&mut cmd, "fleet", timeout, &out.0, &err.0)
-        }
-    }
+    // The worker chooses each phone's scope after enumeration. Enumeration and
+    // lightweight telemetry never acquire a device or global lock.
+    let (mut cmd, out, err) = worker_command("fleet", args, storage, timeout)?;
+    supervise_ephemeral(&mut cmd, "fleet", timeout, &out.0, &err.0)
 }
 
 pub(crate) fn run_scoped(
@@ -140,9 +130,8 @@ fn worker_command(
         .process_group(0)
         .env("PHONEFARM_OBSERVATION_TIMEOUT_MS", timeout.as_millis().to_string())
         .env_remove("DEVLOCK_LABEL")
-        .env_remove("PHONEFARM_OBSERVATION_LIGHT")
-        .env_remove("PHONEFARM_OBSERVATION_BRIDGE_FD")
-        .env_remove("PHONEFARM_OBSERVATION_PARENT_PID");
+        .env_remove("PF_JOB_DEVICE_BINDING")
+        .env_remove("PF_JOB_ACTOR");
     if let Some(root) = &storage.devlock_dir {
         cmd.env("DEVLOCK_DIR", root);
     }
@@ -283,15 +272,7 @@ pub(crate) fn run_worker(args: &[String]) -> i32 {
         if start != *b"1" {
             return Err("invalid startup barrier".into());
         }
-        let light = std::env::var("PHONEFARM_OBSERVATION_LIGHT").as_deref() == Ok("1");
-        let ephemeral = std::env::var_os("PHONEFARM_OBSERVATION_BRIDGE_FD").is_some();
-        if light || ephemeral {
-            if args.first().map(String::as_str) != Some("fleet") {
-                return Err("unowned observation is fleet-only".into());
-            }
-            if ephemeral {
-                crate::devlease::EphemeralObservation::verify_worker()?;
-            }
+        if args.first().map(String::as_str) == Some("fleet") {
             return Ok(());
         }
         let path = std::env::var("PHONEFARM_OBSERVATION_MARKER").map_err(|e| e.to_string())?;

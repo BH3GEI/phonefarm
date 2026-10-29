@@ -473,7 +473,9 @@ with open(root / 'phonefarm-bridge.lock', 'w') as stream:
 
         def spawn(serial, label, seconds, wait="5"):
             return subprocess.Popen(["zsh", str(DEVLOCK), "run", label, "--", sys.executable, "-c",
-                                     f"import time; time.sleep({seconds})"], env=environment(serial, wait),
+                                     "from pathlib import Path; import sys,time; Path(sys.argv[1]).touch(); "
+                                     "time.sleep(float(sys.argv[2]))", str(self.root / (label + ".started")), str(seconds)],
+                                    env=environment(serial, wait),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         first = spawn("serial-a", "lane-a", 1)
@@ -488,6 +490,10 @@ with open(root / 'phonefarm-bridge.lock', 'w') as stream:
         self.assertFalse(global_owner.exists(), global_owner.read_text() if global_owner.is_file() else global_owner.exists())
 
         first = spawn("serial-a", "same-a-1", .8)
+        deadline = time.monotonic() + 5
+        while not (self.root / "same-a-1.started").exists() and first.poll() is None and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue((self.root / "same-a-1.started").exists(), "first same-device command never acquired")
         second = spawn("serial-a", "same-a-2", .1)
         second_out, second_err = second.communicate(timeout=10)
         self.assertEqual(second.returncode, 0, second_out + second_err)

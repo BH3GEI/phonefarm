@@ -549,6 +549,7 @@ echo "-----PF:end-----""#
 fn probe_script_oh_light() -> &'static str {
     r#"echo "-----PF:props-----"; param get const.product.model 2>/dev/null; param get const.product.brand 2>/dev/null; param get const.ohos.fullname 2>/dev/null; echo ""
 echo "-----PF:uptime-----"; cat /proc/uptime 2>/dev/null
+echo "-----PF:sysbat-----"; for f in capacity status temp current_now voltage_now; do echo "$f=$(cat /sys/class/power_supply/battery/$f 2>/dev/null)"; done
 echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done
 echo "-----PF:end-----""#
 }
@@ -743,7 +744,9 @@ fn card_from_oh_depth(serial: &str, raw: &str, probe_ms: u64, depth: &'static st
     let os = prop(props, 2);
 
     let mut battery = Battery::default();
-    if let Some(b) = sec(&ss, "battery") {
+    if let Some(b) = sec(&ss, "sysbat") {
+        battery = parse_sysfs_battery(b);
+    } else if let Some(b) = sec(&ss, "battery") {
         let (level, mv, temp, _cur) = telemetry::parse_battery_oh(b);
         let (status, plugged) = parse_battery_status_oh(b);
         battery.level_pct = level;
@@ -759,7 +762,7 @@ fn card_from_oh_depth(serial: &str, raw: &str, probe_ms: u64, depth: &'static st
         battery.plugged = plugged;
     } else {
         unknown.push(if depth == "light" {
-            "电池: 轻量观察未运行 hidumper BatteryService".into()
+            "电池: sysfs 没回值".into()
         } else {
             "电池: hidumper BatteryService 没回值".into()
         });
@@ -942,16 +945,11 @@ fn shoot(phone: &Device, serial: &str, screens: &Screens, lock: Option<&Lock>) -
     let existing_age = file_age_s(&out);
     if let Err(why) = screens.may_shoot(lock, existing_age) {
         // 沿用上一张 (如果有) 并说明为什么没有新的 —— 比直接没有图有用。
-        let shot = existing_age.map(|age| Screenshot {
-            path: out.display().to_string(),
-            at: now_rfc3339(),
-            age_s: age,
-            fresh: false,
-        });
+        let shot = cached_shot(serial, screens);
         return (shot, Some(format!("截图: {why}")));
     }
     if std::fs::create_dir_all(&screens.dir).is_err() {
-        return (None, Some(format!("截图: 建不了目录 {}", screens.dir.display())));
+        return (cached_shot(serial, screens), Some(format!("截图: 建不了目录 {}", screens.dir.display())));
     }
     match phone.screen(&out.display().to_string()) {
         Some(_) => (
@@ -963,8 +961,19 @@ fn shoot(phone: &Device, serial: &str, screens: &Screens, lock: Option<&Lock>) -
             }),
             None,
         ),
-        None => (None, Some("截图: screencap 没回图".into())),
+        None => (cached_shot(serial, screens), Some("截图: screencap 没回图".into())),
     }
+}
+
+fn cached_shot(serial: &str, screens: &Screens) -> Option<Screenshot> {
+    let path = screens.dir.join(format!("{}.jpg", safe_name(serial)));
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    Some(Screenshot {
+        path: path.display().to_string(),
+        at: chrono::DateTime::<chrono::Local>::from(modified).to_rfc3339(),
+        age_s: modified.elapsed().ok()?.as_secs(),
+        fresh: false,
+    })
 }
 
 // ══════════════ 采集 ══════════════
@@ -1017,13 +1026,8 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     if !crate::observation::in_worker() {
         return Err("fleet device probes require the bounded observation worker".into());
     }
-    let light = std::env::var("PHONEFARM_OBSERVATION_LIGHT").as_deref() == Ok("1");
-    let queue_dir = storage.domain_paths()?.queue_dir;
     let adb = crate::device::locate_adb();
     let mut notes = Vec::new();
-    if light {
-        notes.push("设备域忙或状态未知: 本轮只做无锁轻量观察，不截图，不运行 full probe".to_string());
-    }
     if adb.is_none() {
         notes.push("没找到 adb, 安卓这一族整族跳过 (ADB_BIN=/path/to/adb 可指定)".to_string());
     }
@@ -1037,7 +1041,7 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     if !hdc_ok {
         notes.push("没找到 hdc, 鸿蒙这一族整族跳过".to_string());
     }
-    let lock = read_lock(&queue_dir);
+    let lock = storage.domain_paths().ok().and_then(|paths| read_lock(&paths.queue_dir));
 
     let tmp = std::env::temp_dir()
         .join(format!("phonefarm-fleet-{}", std::process::id()))
@@ -1046,7 +1050,6 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     let _ = std::fs::create_dir_all(&tmp);
 
     let want = |s: &str| opts.serial.as_deref().is_none_or(|w| w == s);
-    let depth = if light { "light" } else { "full" };
     let mut devices = Vec::new();
 
     for (serial, state, model_hint) in android.into_iter().filter(|(s, _, _)| want(s)) {
@@ -1056,6 +1059,8 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
             devices.push(offline_card(&serial, "adb", &state, model_hint));
             continue;
         }
+        let lease = crate::devlease::EphemeralObservation::acquire(&storage, &serial).ok();
+        let depth = if lease.is_some() { "full" } else { "light" };
         let phone = Device::new(Some(serial.clone()), tmp.clone());
         let script = if depth == "light" {
             probe_script_android_light()
@@ -1068,9 +1073,12 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
         if card.model.is_none() {
             card.model = model_hint;
         }
-        if let Some(screens) = opts.screens.as_ref().filter(|_| !light) {
-            // Full observation owns the bridge; light observation never shoots.
-            let (shot, why) = shoot(&phone, &serial, screens, None);
+        if let Some(screens) = &opts.screens {
+            let (shot, why) = if lease.is_some() {
+                shoot(&phone, &serial, screens, None)
+            } else {
+                (cached_shot(&serial, screens), Some("设备忙，本轮不截图".into()))
+            };
             card.screenshot = shot;
             if let Some(w) = why {
                 card.unknown.push(w);
@@ -1082,10 +1090,22 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
     for key in oh.into_iter().filter(|k| want(&format!("hdc:{k}"))) {
         let serial = format!("hdc:{key}");
         let t0 = Instant::now();
+        let lease = crate::devlease::EphemeralObservation::acquire(&storage, &serial).ok();
+        let depth = if lease.is_some() { "full" } else { "light" };
         let phone = Device::new(Some(serial.clone()), tmp.clone());
-        let script = if light { probe_script_oh_light() } else { probe_script_oh() };
+        let script = if lease.is_some() { probe_script_oh() } else { probe_script_oh_light() };
         let raw = phone.shell(script, opts.timeout_ms);
-        devices.push(card_from_oh_depth(&serial, &raw, t0.elapsed().as_millis() as u64, depth));
+        let mut card = card_from_oh_depth(&serial, &raw, t0.elapsed().as_millis() as u64, depth);
+        if let Some(screens) = &opts.screens {
+            let (shot, why) = if lease.is_some() {
+                shoot(&phone, &serial, screens, None)
+            } else {
+                (cached_shot(&serial, screens), Some("设备忙，本轮不截图".into()))
+            };
+            card.screenshot = shot;
+            if let Some(why) = why { card.unknown.push(why); }
+        }
+        devices.push(card);
     }
 
     Ok(Fleet {
@@ -1496,6 +1516,21 @@ mod tests {
     fn collect_requires_the_bounded_observation_worker() {
         let opts = Opts::default();
         assert!(collect(&opts).unwrap_err().contains("observation worker"));
+    }
+
+    #[test]
+    fn busy_oh_reads_battery_and_temperature_without_hidumper_or_screenshot() {
+        let script = probe_script_oh_light();
+        assert!(script.contains("/sys/class/power_supply/battery"));
+        assert!(!script.contains("hidumper"));
+        assert!(!script.contains("snapshot_display"));
+        let raw = "-----PF:props-----\nFixture\nFixture\nOpenHarmony\n\
+-----PF:sysbat-----\ncapacity=73\nstatus=Discharging\ntemp=390\ncurrent_now=-325000\n\
+-----PF:thermal-----\ngpu 43000\n-----PF:end-----\n";
+        let card = card_from_oh_depth("hdc:fixture", raw, 1, "light");
+        assert_eq!(card.battery.level_pct, Some(73));
+        assert_eq!(card.battery.temp_c, Some(39.0));
+        assert_eq!(card.thermal.gpu_c, Some(43.0));
     }
 
     #[test]
