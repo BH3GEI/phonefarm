@@ -59,10 +59,16 @@ pub(crate) fn device_path(root: &Path, key: &str) -> PathBuf {
         .join(format!("{:x}.lock", Sha256::digest(key.as_bytes())))
 }
 
-fn acquire_file(path: &Path, shared: bool, deadline: Option<Instant>) -> Result<File, String> {
+fn acquire_file(
+    path: &Path,
+    shared: bool,
+    deadline: Option<Instant>,
+    poll_cancel: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<File, String> {
     let file = crate::fd_lock::open_file(path, 0o666)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     loop {
+        poll_cancel()?;
         match if shared {
             file.try_lock_shared()
         } else {
@@ -112,10 +118,21 @@ impl Guard {
     pub fn acquire(
         device_root: &Path,
         farm_root: &Path,
-        mut requested: Scope,
+        requested: Scope,
         label: &str,
         timeout: Option<Duration>,
     ) -> Result<Self, String> {
+        Self::acquire_interruptible(device_root, farm_root, requested, label, timeout, &mut || Ok(()))
+    }
+    pub fn acquire_interruptible(
+        device_root: &Path,
+        farm_root: &Path,
+        mut requested: Scope,
+        label: &str,
+        timeout: Option<Duration>,
+        poll_cancel: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        poll_cancel()?;
         if let Some((scope, fds)) = inherited()? {
             if !scope.contains(&requested) {
                 return Err("task lock does not cover the requested device/global scope; submit a global task for multiple devices".into());
@@ -140,9 +157,9 @@ impl Guard {
             if let Some(key) = &requested.key {
                 let path = device_path(device_root, key);
                 std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-                files.push(acquire_file(&path, false, deadline)?);
+                files.push(acquire_file(&path, false, deadline, poll_cancel)?);
             }
-            files.push(acquire_file(&farm, requested.key.is_some(), deadline)?);
+            files.push(acquire_file(&farm, requested.key.is_some(), deadline, poll_cancel)?);
             if requested.resolve_alias {
                 let current = crate::devlease::resolve_scope_at(farm_root, requested.serial.as_deref().unwrap())?;
                 let changed = current.key != requested.key;

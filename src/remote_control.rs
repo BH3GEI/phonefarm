@@ -390,7 +390,6 @@ fn state(store: &Store) -> Result<Value> {
         || !id(string(&value, "session_id")?)
         || !serial_ok(string(&value, "serial")?)
         || value["context"] != json!(store.path)
-        || string(&value, "token")?.is_empty()
         || !matches!(
             value["phase"].as_str(),
             Some("starting" | "ready" | "closing" | "closed" | "recovery_required")
@@ -572,11 +571,11 @@ fn session_status(store: &Store) -> Result<Value> {
     if let Some(proof) = store.optional("startup-retired.json")? {
         return retired_status(store, &proof);
     }
-    if store.optional(STATE)?.is_some() {
-        return public(store, &state(store)?);
-    }
     if store.optional("startup.json")?.is_some() {
         return startup_status(store);
+    }
+    if store.optional(STATE)?.is_some() {
+        return public(store, &state(store)?);
     }
     let launch = launch(store)?;
     let running = live(store, &launch)?;
@@ -782,7 +781,7 @@ fn publish(store: &Store, r: &Value) -> Result<Value> {
             "owner is not running; inspect recovery",
         ));
     }
-    if s["phase"] != "ready" {
+    if s["phase"] != "ready" && !(s["phase"] == "starting" && r["action"] == "release") {
         return Err(error("session_closed", "owner is not accepting actions"));
     }
     let requests = store.requests()?;
@@ -1382,15 +1381,47 @@ fn start(a: &Args) -> Result<()> {
         "owner":{"pid":identity.pid,"start":identity.start,"host_boot_id":identity.host_boot_id}});
     attach_scope(&mut launch, a.binding.as_ref());
     store.write("launch.json", &launch, false)?;
+    // The existing mailbox is available while waiting for the fd, so release
+    // can cancel an acquisition without ever touching the device.
+    let mut s = json!({"schema":PRIVATE,"session_id":session_id,"serial":serial,"token":null,"context":store.path,
+        "owner":{"pid":identity.pid,"start":identity.start,"host_boot_id":identity.host_boot_id},"phase":"starting",
+        "created_at":now(),"deadline":null,"ttl_seconds":a.ttl,"max_seconds":a.max,
+        "transport_uncertain":false,"pending_request":null,"last_request_id":null,"latest_image":null,
+        "input_contract":INPUT_CONTRACT,"action_capabilities":ACTIONS,"input_frame_id":null,"stop_reason":null,"error":null,"recovery_report":null});
+    attach_scope(&mut s, a.binding.as_ref());
+    store.write(STATE, &s, false)?;
     let storage = crate::lease_storage::resolve();
     let timeout = crate::devlease::wait_timeout().map_err(io_error)?;
-    let acquisition = if let Some(binding) = &a.binding {
-        Lease::acquire_device(&storage, binding, "remote-control", timeout)
-    } else {
-        storage.roots().and_then(|(root, legacy)| {
-            Lease::acquire(&root, &legacy, serial, "remote-control", timeout)
-        })
-    };
+    let mut release = None;
+    let acquisition = (|| {
+        let (root, farm) = storage.roots()?;
+        let scope = match &a.binding {
+            Some(binding) => crate::fd_lock::Scope::device(serial, Some(binding.clone())),
+            None => crate::devlease::resolve_scope(&storage, serial)?,
+        };
+        let guard = crate::fd_lock::Guard::acquire_interruptible(
+            &root, &farm, scope, "remote-control", timeout, &mut || {
+                release = store.requests().map_err(|e| e.message)?.into_iter()
+                    .find(|e| e["request"]["action"] == "release");
+                if release.is_some() { Err("remote release requested".into()) } else { Ok(()) }
+            },
+        )?;
+        Lease::from_guard(guard, serial, "remote-control")
+    })();
+    if let Some(e) = release {
+        // Returning from acquisition has already dropped any partially held fd.
+        // No transport was created; the original holder is unaffected.
+        let mut result = initial(&e);
+        result["status"] = json!("completed");
+        result["finished_at"] = json!(now());
+        result["result"] = json!({"closing":true,"scope":SCOPE,"game_state_restored":false});
+        s["phase"] = json!("closed");
+        s["stop_reason"] = json!("release");
+        s["last_request_id"] = e["request"]["request_id"].clone();
+        save(&store, &mut s)?;
+        store.write(&record("result", string(&e["request"], "request_id")?), &result, false)?;
+        return Ok(());
+    }
     let mut lease = match acquisition {
         Ok(lease) => lease,
         Err(reason) => {
@@ -1409,14 +1440,9 @@ fn start(a: &Args) -> Result<()> {
             });
         }
     };
-    let deadline = chrono::Utc::now() + chrono::Duration::seconds(a.max as i64);
-    let mut s = json!({"schema":PRIVATE,"session_id":session_id,"serial":serial,"token":lease.token(),"context":store.path,
-        "owner":{"pid":identity.pid,"start":identity.start,"host_boot_id":identity.host_boot_id},"phase":"starting",
-        "created_at":now(),"deadline":deadline.to_rfc3339(),"ttl_seconds":a.ttl,"max_seconds":a.max,
-        "transport_uncertain":false,"pending_request":null,"last_request_id":null,"latest_image":null,
-        "input_contract":INPUT_CONTRACT,"action_capabilities":ACTIONS,"input_frame_id":null,"stop_reason":null,"error":null,"recovery_report":null});
-    attach_scope(&mut s, a.binding.as_ref());
-    store.write(STATE, &s, false)?;
+    s["token"] = json!(lease.token());
+    s["deadline"] = json!((chrono::Utc::now() + chrono::Duration::seconds(a.max as i64)).to_rfc3339());
+    save(&store, &mut s)?;
     lease.hold_for_recovery(&store.path).map_err(io_error)?;
     let result = (|| -> Result<()> {
         let mut transport =

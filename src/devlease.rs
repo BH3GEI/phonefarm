@@ -59,6 +59,9 @@ impl Lease {
         timeout: Option<Duration>,
     ) -> Result<Self, String> {
         let guard = Guard::acquire(root, farm, scope, label, timeout)?;
+        Self::from_guard(guard, serial, label)
+    }
+    pub(crate) fn from_guard(guard: Guard, serial: &str, label: &str) -> Result<Self, String> {
         let receipt = crate::lease_receipt::JobReceipt::from_env(serial, label, Value::Null)?;
         let lease = Self {
             guard,
