@@ -810,13 +810,6 @@ impl PowerPairs {
         a >= 2 && b >= 2
     }
 
-    /// 截断时用: 已保留的加上还没跑的, 两臂都还可能凑够 2 个。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn possible(&self, left_ctrl: usize, left_knob: usize) -> bool {
-        let (a, b) = self.kept();
-        a + left_ctrl >= 2 && b + left_knob >= 2
-    }
-
     /// 人能读的说明: 剔了哪几对、为什么; 进不了判定时为什么。都没有时 None。
     pub fn note(&self) -> Option<String> {
         let mut parts: Vec<String> = Vec::new();
@@ -2842,7 +2835,6 @@ ENV 3.0 4000000 -800000 NA 5000000 490000 cpu-1-0 41000\n",
         let pp = power_pairs(&ctrl.iter().collect::<Vec<_>>(), &knob.iter().collect::<Vec<_>>());
         assert!(!pp.usable());
         assert!(pp.note().unwrap().contains("功耗不进判定"));
-        assert!(pp.possible(1, 1) && !pp.possible(0, 0));
     }
 
     #[test]

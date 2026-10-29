@@ -1998,14 +1998,6 @@ pub(crate) fn run_soc_temp_max(m: &Value) -> Option<f64> {
         .or_else(|| m["summary"]["soc_temp_max_c"].as_f64())
 }
 
-/// 判定视图下的一臂 (标签 + [`run_view`])。
-#[allow(dead_code)]
-fn eval_runs(runs: &[Value]) -> Vec<Run> {
-    runs.iter()
-        .filter_map(|r| Some((r["label"].as_str()?.to_string(), run_view(r))))
-        .collect()
-}
-
 /// 按对取舍后的功耗 (审计 #5): 一臂不合格只剔除那一对, 不再整组作废。
 ///
 /// 每臂都带 `round` (sysparam / gray / whitebox 都写) 时按轮对齐, 不按下标:
@@ -2060,14 +2052,8 @@ pub(crate) fn power_pairs_of(knob_runs: &[Value], ctrl_runs: &[Value]) -> syspar
     pp
 }
 
-/// 功耗能不能进判定: 按对剔除不合格的之后, 两臂各至少 2 个同口径的可信值。
-#[allow(dead_code)]
-pub(crate) fn all_on_battery(knob_runs: &[Value], ctrl_runs: &[Value]) -> bool {
-    power_pairs_of(knob_runs, ctrl_runs).usable()
-}
-
 /// 判定视图, 但 `power_w_mean` 换成按对取舍后的值 (被剔除的臂不带这个键, 口径统一时换成
-/// 两轨相加的值)。帧时等其余指标与 [`eval_runs`] 相同。
+/// 两轨相加的值)。帧时等其余指标与 [`run_view`] 相同。
 fn eval_runs_power(runs: &[Value], power: &[Option<f64>]) -> Vec<Run> {
     runs.iter()
         .enumerate()
@@ -2098,25 +2084,6 @@ fn policy_win_tests(required: &[String], alpha: f64, fps_lock_possible: bool) ->
             curtail::WinTest::new(m, m != "fps_mean", alpha / k as f64)
         })
         .collect()
-}
-
-/// 跑满时**可能**进入判定的「显著改善」检验, 各取最宽的 alpha_win:
-/// 帧时/帧率至少在 2 指标表里 (alpha/2); 功耗只有在已跑的轮全在放电态时才可能进表,
-/// 进表时是 3 指标 (alpha/3)。覆盖所有可能的指标表, 截断只会更保守。
-///
-/// `fps_lock_possible` (已跑的轮全钉在同一个帧率上限, 见 [`fps_lock_cap`]): 跑满后 fps_mean
-/// 可能只守退化、不占预算, 帧时最宽到 alpha/1, 功耗最宽到 alpha/2。
-#[cfg_attr(not(test), allow(dead_code))]
-fn sysparam_win_tests(alpha: f64, power_possible: bool, fps_lock_possible: bool) -> Vec<curtail::WinTest> {
-    let k_min = if fps_lock_possible { 1.0 } else { 2.0 };
-    let mut t = vec![
-        curtail::WinTest::new("frame_p95", true, alpha / k_min),
-        curtail::WinTest::new("fps_mean", false, alpha / 2.0),
-    ];
-    if power_possible {
-        t.push(curtail::WinTest::new("power_w_mean", true, alpha / (k_min + 1.0)));
-    }
-    t
 }
 
 /// 截断记录, 原样进回包 `verdict.curtailed`。
@@ -2889,16 +2856,6 @@ impl HwWatch {
             }
         }
         std::fs::read_to_string(&self.path).unwrap_or_default()
-    }
-}
-
-/// 只推 sample_hw.sh。推不上不致命: 采不到就跳过这一项核对, 报告里看得到 n=0。
-/// (gray 自审查 R1 #1 起改走 push_tools 推全套; 这个函数留给只需要 sample_hw.sh 的调用方。)
-#[allow(dead_code)]
-pub(crate) fn push_hw_script(serial: &str) {
-    let p = repo_root().join("loop_v1/auto/sample_hw.sh");
-    if p.exists() {
-        let _ = adb(serial, &["push", &p.to_string_lossy(), DEV_TMP], 60);
     }
 }
 
@@ -4022,13 +3979,6 @@ pub(crate) fn gray_image_policy(req: &Value, knobs: &GrayKnobs) -> Result<crate:
     crate::scorecard::ImagePolicy::from_request(req)
 }
 
-/// marker 的 npuop 段里「用上 NPU 结果」的帧数 (`counts.unpack`); 没有 npuop 段回 None。
-/// (旧 gray_eval 用它核对 NPU 臂; 受控会话接入 npuop 之前只有单测在用)
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn npuop_frames(marker: &Value) -> Option<u64> {
-    marker.get("npuop").filter(|v| v.is_object()).map(|np| np["counts"]["unpack"].as_u64().unwrap_or(0))
-}
-
 enum OwnedGrayWorkload { Launch(LaunchSpec), Script(crate::gray_script::Plan) }
 impl OwnedGrayWorkload {
     fn plan(&self)->Option<&crate::gray_script::Plan> {match self {Self::Script(p)=>Some(p),_=>None}}
@@ -4491,13 +4441,16 @@ mod tests {
         assert_eq!(remaining_arms(5, 5, 3, 2, 0), (0, 0));
         assert_eq!(remaining_arms(5, 9, 9, 9, 9), (0, 0));
 
-        let tests = sysparam_win_tests(0.05, false, false); // 最宽 alpha_win = 0.025
+        let two_metrics = vec!["frame_p95".to_string(), "fps_mean".to_string()];
+        let three_metrics = vec!["frame_p95".to_string(), "fps_mean".to_string(), "power_w_mean".to_string()];
+        let tests = policy_win_tests(&two_metrics, 0.05, false); // 最宽 alpha_win = 0.025
         // 5v5 够 (2/C(10,5) = 0.0079); 3v3 不够 (0.1); 3v5 不等量 1/C(8,3) = 0.0179 够, 3v6 够
         assert!(keep_reachable(5, 5, &tests));
         assert!(!keep_reachable(3, 3, &tests));
         assert!(keep_reachable(5, 3, &tests));
-        // alpha/3 (功耗可能进表) 下 3v5 (0.0179 > 0.0167) 就不够了
-        let t3 = sysparam_win_tests(0.05, true, false);
+        // 功耗可能进表时仍取两指标表的 frame/fps 与三指标表的 power，保持最宽口径。
+        let mut t3 = policy_win_tests(&two_metrics, 0.05, false);
+        t3.extend(policy_win_tests(&three_metrics, 0.05, false).into_iter().filter(|t| t.metric == "power_w_mean"));
         assert_eq!(t3.iter().map(|t| t.alpha_win).reduce(f64::max), Some(0.025), "取的是最宽的");
         let strict = vec![curtail::WinTest::new("power_w_mean", true, 0.05 / 3.0)];
         assert!(!keep_reachable(5, 3, &strict));
@@ -4922,10 +4875,6 @@ mod tests {
         let k = parse_gray_rewrites(&json!({"rewrites": [{"knob": "npuop"}, {"knob": "storeop_dont_care", "scope": "15a51a879df99c32:2"}]})).unwrap();
         assert!(k.npuop.is_some());
         assert_eq!(k.storeop, "15a51a879df99c32:2");
-        // marker 里的 NPU 帧数
-        assert_eq!(npuop_frames(&json!({"npuop": {"counts": {"unpack": 1234}}})), Some(1234));
-        assert_eq!(npuop_frames(&json!({"npuop": {"phase": "wait_init", "counts": {}}})), Some(0));
-        assert_eq!(npuop_frames(&json!({"effective": []})), None);
     }
 
     /// 校验用的名单和施加用的解析不能再各说各话: 名单里每个开关都要被解析认, 解析不认的不能在名单里。
@@ -5404,9 +5353,17 @@ junk\n\
     #[test]
     fn curtail_tests_widen_when_fps_may_be_locked() {
         let get = |t: &[curtail::WinTest], m: &str| t.iter().find(|x| x.metric == m).map(|x| x.alpha_win);
-        let t = sysparam_win_tests(0.05, true, false);
+        let two_metrics = vec!["frame_p95".to_string(), "fps_mean".to_string()];
+        let three_metrics = vec!["frame_p95".to_string(), "fps_mean".to_string(), "power_w_mean".to_string()];
+        let widest_with_power = |fps_lock_possible| {
+            let mut tests = policy_win_tests(&two_metrics, 0.05, fps_lock_possible);
+            tests.extend(policy_win_tests(&three_metrics, 0.05, fps_lock_possible)
+                .into_iter().filter(|t| t.metric == "power_w_mean"));
+            tests
+        };
+        let t = widest_with_power(false);
         assert_eq!((get(&t, "frame_p95"), get(&t, "power_w_mean")), (Some(0.025), Some(0.05 / 3.0)));
-        let t = sysparam_win_tests(0.05, true, true);
+        let t = widest_with_power(true);
         assert_eq!((get(&t, "frame_p95"), get(&t, "fps_mean"), get(&t, "power_w_mean")), (Some(0.05), Some(0.025), Some(0.025)));
     }
 

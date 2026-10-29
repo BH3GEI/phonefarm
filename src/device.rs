@@ -1166,16 +1166,6 @@ impl Device {
     pub fn new(serial: Option<String>, tmp: String) -> Self {
         Self { b: crate::platform::open(serial, tmp) }
     }
-    /// 直接拿一个后端构造 (新平台 / 测试替身)。
-    #[allow(dead_code)]
-    pub fn from_backend(b: Box<dyn crate::platform::Backend>) -> Self {
-        Self { b }
-    }
-    /// 这台设备的后端 (平台名、三层可行性声明等)。
-    #[allow(dead_code)]
-    pub fn backend(&self) -> &dyn crate::platform::Backend {
-        self.b.as_ref()
-    }
     /// --freeze-on-done 置位:分发到具体后端。done 定局后调用。
     pub fn set_frozen(&self) { self.b.set_frozen() }
     pub fn health_check(&self, ms: u64) -> bool { self.b.health_check(ms) }

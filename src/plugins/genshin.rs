@@ -121,12 +121,9 @@ impl QuestMode {
 
 /// Agent 运行参数配置
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct QuestConfig {
     /// step 策略: auto | dialogue | navigate | interact；不限制普通自动 prepare。
     pub mode: String,
-    /// 指定设备序列号
-    pub serial: Option<String>,
     /// 最大运行时长 (秒)
     pub max_seconds: u64,
     /// 遇到分支选项是否自动按 A 确认选择
@@ -139,7 +136,6 @@ impl Default for QuestConfig {
     fn default() -> Self {
         Self {
             mode: "auto".to_string(),
-            serial: None,
             max_seconds: 1800,
             auto_choice: true,
             auto_shutdown: true,

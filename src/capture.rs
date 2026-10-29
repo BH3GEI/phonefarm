@@ -363,7 +363,6 @@ fn capture(
     let mode = QuestMode::parse(&a.mode)?;
     let cfg = QuestConfig {
         mode: a.mode.clone(),
-        serial: Some(serial.clone()),
         max_seconds: u64::MAX,
         auto_choice: true,
         auto_shutdown: false,

@@ -1168,7 +1168,6 @@ fn main() {
             let phone = device::Device::new(serial.clone(), tmp);
             let cfg = plugins::genshin::QuestConfig {
                 mode,
-                serial,
                 max_seconds: max_sec,
                 auto_choice: true,
                 auto_shutdown,
