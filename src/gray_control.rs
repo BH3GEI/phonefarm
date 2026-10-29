@@ -1109,6 +1109,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
     } else {
         crate::devlease::Lease::target(a.serial.as_deref(), "gray-layer-control")
     }.map_err(device)?;
+    let binding = lease.device_binding().cloned();
     let base = Session::new_control(lease, &store.path, a.package.as_ref().unwrap(), &a.origin)
         .map_err(device)?;
     let parent = Parent::new_control(base, &a.power_policy).map_err(device)?;
@@ -1126,7 +1127,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
         "power":parent.control_power_state().map_err(device)?,"latest_image":null,"recovery":{"status":"not_reported","session_path":sid,"reports":[],"error":null},
         "created_at":now(),"updated_at":now(),"deadline_at":(chrono::Utc::now()+chrono::Duration::seconds(a.seconds as i64)).to_rfc3339(),
         "max_seconds":a.seconds,"frame_max_age_seconds":FRAME_AGE_SECONDS,"keep_prop":a.keep,"stop_reason":null});
-    if let Some(binding) = &a.binding {
+    if let Some(binding) = &binding {
         d["device_binding"] = json!(binding);
         d["lease_scope"] = json!("device");
     }

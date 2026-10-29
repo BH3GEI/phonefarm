@@ -107,6 +107,106 @@ class DevlockBridgeTests(unittest.TestCase):
             stdout, stderr = holder.communicate(timeout=5)
         self.assertEqual(holder.returncode, 0, stdout + stderr)
 
+    def test_gray_control_inherits_job_lane_through_attach_and_status(self):
+        self.env.update(DEVLOCK_BIN=str(DEVLOCK), PHONEFARM_LEASE_TIMEOUT_MS="100",
+                        DEVLOCK_WAIT_SECONDS="1")
+
+        def pf(*args, env=None):
+            return subprocess.run([str(BINARY), *args], env=env or self.env, cwd=self.root,
+                                  capture_output=True, text=True, timeout=10)
+
+        initialized = pf("lease", "domain-init", "--participants-stopped", "--json")
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        for revision, device in enumerate(("a", "b")):
+            request = self.root / (device + ".json")
+            request.write_text(json.dumps({"expected_revision": revision, "device": {
+                "device_id": device, "label": device, "aliases": ["fake-" + device], "enabled": True}}))
+            result = pf("lease", "devices-set", "--request", str(request), "--json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+        binding = json.loads(pf("lease", "resolve", "--serial", "fake-a", "--json").stdout)
+        adb = self.root / "fake-adb"
+        shutil.copyfile(Path(__file__).with_name("fake_gray_control_adb.py"), adb)
+        adb.chmod(0o755)
+        so = self.root / "fixture.so"
+        so.write_text("host fixture layer; never loaded by a real device")
+        for busy in (False, True):
+            with self.subTest(other_device_busy=busy):
+                case = self.root / ("busy" if busy else "alone")
+                out = case / "out"
+                receipts = out / "lease-receipts"
+                receipts.mkdir(parents=True)
+                directories = {"/"}
+                for leaf in ("/data/local/tmp", "/data/app/fixture/lib/arm64",
+                             "/sdcard/Android/data/com.example.fixture/files"):
+                    directory = Path(leaf)
+                    directories.update(str(p) for p in [directory, *directory.parents])
+                (case / "android.json").write_text(json.dumps({"files": {}, "directories": sorted(directories),
+                                                              "properties": {}, "running": False}))
+                jid = "111111111111" if not busy else "222222222222"
+                env = dict(self.env, ADB_BIN=str(adb), FAKE_GRAY_ROOT=str(case), PF_JOB_ID=jid,
+                           PF_JOB_OUT=str(out), PF_JOB_LEASE_DIR=str(receipts),
+                           PF_JOB_DEVICE_BINDING=json.dumps(binding))
+                ready, finish = case / "b-ready", case / "b-finish"
+                holder = None
+                if busy:
+                    holder = subprocess.Popen([str(BINARY), "lease", "--serial", "fake-b", "--", sys.executable,
+                        "-c", "from pathlib import Path; import sys,time\nPath(sys.argv[1]).touch()\n"
+                        "while not Path(sys.argv[2]).exists(): time.sleep(.01)", str(ready), str(finish)],
+                        env=self.env, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and holder.poll() is None and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(ready.exists(), "B never acquired its lease")
+                process = subprocess.Popen(["zsh", str(DEVLOCK), "run", "job-" + jid, "--", str(BINARY),
+                    "gray-layer", "session", "--serial", "fake-a", "--package", "com.example.fixture",
+                    "--mode", "probe", "--so", str(so), "--out", str(out), "--keep-prop",
+                    "--max-seconds", "30", "--evidence-origin", "synthetic", "--json"],
+                    env=env, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 15
+                    descriptor = out / "session-control.json"
+                    while time.monotonic() < deadline and process.poll() is None:
+                        if descriptor.exists() and json.loads(descriptor.read_text()).get("phase") == "ready":
+                            break
+                        time.sleep(.02)
+                    actual = json.loads(descriptor.read_text()) if descriptor.exists() else {}
+                    status = pf("gray-layer", "session-status", "--out", str(out), "--json", env=env)
+                    self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+                    request = case / "stop.json"
+                    request.write_text(json.dumps({"schema": "phonefarm/gray-control-action@1",
+                        "request_id": "stop", "session_id": actual["session_id"], "actor_id": "agent",
+                        "control_epoch": 1, "action": "stop", "params": {}}))
+                    stop = pf("gray-layer", "session-action", "--out", str(out),
+                              "--request", str(request), "--json", env=env)
+                    self.assertEqual(stop.returncode, 0, stop.stdout + stop.stderr)
+                    stdout, stderr = process.communicate(timeout=20)
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGINT)
+                    stdout, stderr = process.communicate(timeout=20)
+                    if holder:
+                        overlapped = holder.poll() is None
+                        finish.touch()
+                        b_stdout, b_stderr = holder.communicate(timeout=5)
+                        self.assertEqual(holder.returncode, 0, b_stdout + b_stderr)
+                        self.assertTrue(overlapped)
+                self.assertTrue((case / "attached").exists(), stdout + stderr)
+                self.assertEqual(actual.get("phase"), "ready", stdout + stderr)
+                recovery = [path.read_text() for path in out.rglob("*recovery-*.json")]
+                self.assertEqual(process.returncode, 0, stdout + stderr + "\n".join(recovery))
+                self.assertEqual(actual.get("device_binding"), binding)
+                self.assertEqual(json.loads(status.stdout)["device_binding"], binding)
+                self.assertEqual(actual["job_id"], jid)
+                final = json.loads(descriptor.read_text())
+                self.assertEqual(final["phase"], "closed", final)
+                self.assertEqual(final["recovery"]["status"], "reported_complete", final)
+                android = json.loads((case / "android.json").read_text())
+                self.assertFalse(android["running"])
+                self.assertFalse(android["files"])
+                self.assertFalse(any(android["properties"].values()))
+                self.assertEqual(json.loads(pf("lease", "status", "--json").stdout)["status"], "clear")
+
     def test_default_follows_selected_resolver_without_read_side_creation_or_fallback(self):
         self.env.pop("DEVLOCK_DIR")
         target = self.root / "selected persistent locks"
