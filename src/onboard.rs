@@ -1591,6 +1591,10 @@ fn parse_args(a: &[String]) -> Result<Args, String> {
     Ok(r)
 }
 
+fn onboard_hdc_guidance(pkg: &str) -> String {
+    format!("onboard 目前只支持 Android；鸿蒙请用 aa start -b {pkg} -a <mainAbility> 启动，mainAbility 从 bm dump -n {pkg} 读")
+}
+
 pub fn run_onboard(args: &[String]) -> i32 {
     let a = match parse_args(args) {
         Ok(a) => a,
@@ -1603,6 +1607,10 @@ pub fn run_onboard(args: &[String]) -> i32 {
         eprintln!("没有唯一在线的设备, 用 --serial 指定");
         return 2;
     };
+    if serial.starts_with("hdc:") {
+        eprintln!("{}", onboard_hdc_guidance(&a.pkg));
+        return 2;
+    }
     let dev = Dev { serial: serial.clone() };
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let out = a.out.clone().unwrap_or_else(|| {
@@ -2201,5 +2209,19 @@ CHARGE_STATE status=Charging current_now=-632000 capacity=100 on_battery=no";
         let c = cv(&[1.0, 2.0, 3.0]).unwrap();
         assert!((c - 0.5).abs() < 1e-12);
         assert_eq!(cv(&[1.0]), None);
+    }
+
+    #[test]
+    fn onboard_hdc_gets_android_only_guidance_without_not_installed_error() {
+        let message = onboard_hdc_guidance("com.miHoYo.Yuanshen");
+        assert!(message.contains("onboard 目前只支持 Android"));
+        assert!(message.contains("aa start -b com.miHoYo.Yuanshen -a <mainAbility>"));
+        assert!(message.contains("bm dump -n com.miHoYo.Yuanshen"));
+        assert!(!message.contains("没装"));
+        let out = std::env::temp_dir().join(format!("onboard-hdc-reject-{}", std::process::id()));
+        let code = run_onboard(&["--package".into(), "com.miHoYo.Yuanshen".into(),
+                                "--serial".into(), "hdc:fake-device".into(), "--out".into(), out.to_string_lossy().into()]);
+        assert_eq!(code, 2);
+        assert!(!out.exists());
     }
 }
