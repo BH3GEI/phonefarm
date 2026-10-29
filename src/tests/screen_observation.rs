@@ -97,7 +97,7 @@ fn screen_frame_owns_transport_window_then_pause_stops_new_work() {
     assert_eq!((state["width"].as_u64(), state["height"].as_u64()), (Some(20), Some(40)));
     assert_eq!(state["serial"], "hdc:fake-screen");
     let calls = f.calls();
-    std::thread::sleep(Duration::from_millis(500));
+    until(|| server.get("/state.json").is_some_and(|s| s["capture"]["state"] == "idle"));
     assert_eq!(f.calls(), calls);
 }
 
