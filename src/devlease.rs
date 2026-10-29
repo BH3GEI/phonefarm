@@ -110,7 +110,6 @@ impl Lease {
         timeout: impl Into<Option<Duration>>,
     ) -> Result<Self, String> {
         let (root, farm) = storage.roots()?;
-        crate::device_registry::validate_binding(&farm, binding)?;
         Self::new(
             &root,
             &farm,

@@ -2,14 +2,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 const SCHEMA: &str = "phonefarm/device-registry@1";
 const CURRENT: &str = "device-registry.json";
-const HISTORY: &str = "device-registry-history";
 const LIMIT: u64 = 64 * 1024;
 const MAX_REVISION: u64 = (1_u64 << 53) - 1;
 const BINDING_SCHEMA: &str = "phonefarm/device-binding@1";
@@ -200,57 +199,22 @@ fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>> {
     }
     Ok(Some(bytes))
 }
-fn read_current(root: &Path) -> Result<Option<(Registry, Vec<u8>)>> {
+fn read_current(root: &Path) -> Result<Option<Registry>> {
     if exists(root)? {
         check_directory(root)?;
     }
-    let bytes = read_bounded(&root.join(CURRENT))?;
-    let history = root.join(HISTORY);
-    if exists(&history)? {
-        check_directory(&history)?;
-    }
-    let Some(bytes) = bytes else {
-        if exists(&history)?
-            && fs::read_dir(&history)
-                .map_err(unavailable)?
-                .next()
-                .is_some()
-        {
-            return Err(unavailable(
-                "current registry is missing but historical records exist; preserved",
-            ));
-        }
-        return Ok(None);
-    };
-    let registry = parse_registry(&bytes)?;
-    // A crash after archiving and before publication may leave this exact copy.
-    if let Some(archived) = read_bounded(&history.join(format!("{}.json", registry.revision)))? {
-        if archived != bytes {
-            return Err(unavailable(
-                "current registry differs from its immutable archived original",
-            ));
-        }
-    }
-    if registry.revision > 1 {
-        let previous = read_bounded(&history.join(format!("{}.json", registry.revision - 1)))?
-            .ok_or_else(|| unavailable("previous registry original is missing"))?;
-        if parse_registry(&previous)?.revision != registry.revision - 1 {
-            return Err(unavailable(
-                "previous registry original has an inconsistent revision",
-            ));
-        }
-    }
-    Ok(Some((registry, bytes)))
+    read_bounded(&root.join(CURRENT))?
+        .map(|bytes| parse_registry(&bytes))
+        .transpose()
 }
 pub(crate) fn snapshot(root: &Path) -> std::result::Result<(u64, Vec<Device>), String> {
     Ok(read_current(root).map_err(|e| e.message)?.map_or_else(
         || (0, Vec::new()),
-        |(registry, _)| (registry.revision, registry.devices),
+        |registry| (registry.revision, registry.devices),
     ))
 }
 fn valid_binding(binding: &DeviceBinding) -> std::result::Result<(), String> {
-    if binding.schema != BINDING_SCHEMA
-        || !(1..=MAX_REVISION).contains(&binding.registry_revision)
+    if binding.schema != BINDING_SCHEMA || !(1..=MAX_REVISION).contains(&binding.registry_revision)
     {
         return Err("unsupported or invalid device binding identity".into());
     }
@@ -295,157 +259,29 @@ pub(crate) fn resolve_binding(
         serial: serial.into(),
     })
 }
-/// New-start admission only. Recovery uses the original recorded binding.
-pub(crate) fn validate_binding(
-    root: &Path,
-    binding: &DeviceBinding,
-) -> std::result::Result<(), String> {
-    valid_binding(binding)?;
-    let (revision, devices) = snapshot(root)?;
-    if revision != binding.registry_revision {
-        return Err("device binding registry revision changed; no device work was started".into());
-    }
-    if !devices.iter().any(|d| {
-        d.device_id == binding.device_id
-            && d.enabled
-            && d.aliases.iter().any(|alias| alias == &binding.serial)
-    }) {
-        return Err(
-            "device binding is disabled or does not match the registered device/alias".into(),
-        );
-    }
-    Ok(())
-}
-/// Existing ownership is attributed using its original published registry,
-/// never today's alias assignment or enabled flag. This grants no new start.
-pub(crate) fn validate_recorded_binding(
-    root: &Path,
-    binding: &DeviceBinding,
-) -> std::result::Result<(), String> {
-    valid_binding(binding)?;
-    let (current, _) = read_current(root)
-        .map_err(|e| e.message)?
-        .ok_or("recorded device binding has no registry original")?;
-    if binding.registry_revision > current.revision {
-        return Err("recorded device binding revision is newer than the registry".into());
-    }
-    let original = if binding.registry_revision == current.revision {
-        current
-    } else {
-        let bytes = read_bounded(
-            &root
-                .join(HISTORY)
-                .join(format!("{}.json", binding.registry_revision)),
-        )
-        .map_err(|e| e.message)?
-        .ok_or("recorded device binding registry original is missing")?;
-        parse_registry(&bytes).map_err(|e| e.message)?
-    };
-    if original.revision != binding.registry_revision
-        || !original.devices.iter().any(|d| {
-            d.device_id == binding.device_id
-                && d.enabled
-                && d.aliases.iter().any(|alias| alias == &binding.serial)
-        })
-    {
-        return Err("recorded device binding differs from its registry original".into());
-    }
-    Ok(())
-}
 fn empty() -> Value {
     json!({"schema":SCHEMA,"revision":0,"devices":[],"updated_at":null,
         "identity_basis":"operator_declared","physical_identity_verified":false,"execution_scope":"global"})
 }
 fn get(root: &Path) -> Result<Value> {
     match read_current(root)? {
-        Some((registry, _)) => serde_json::to_value(registry).map_err(unavailable),
+        Some(registry) => serde_json::to_value(registry).map_err(unavailable),
         None => Ok(empty()),
     }
 }
 
-fn require_clear(root: &Path) -> Result<()> {
-    for name in ["devlock.d", "phonefarm-lease.d"] {
-        if exists(&root.join(name))? {
-            return Err(error(
-                "busy",
-                "lease/queue owner or recovery record exists; preserved",
-            ));
-        }
-    }
-    if let Some(queue) = read_bounded(&root.join("devlock.queue"))? {
-        let queue = std::str::from_utf8(&queue).map_err(unavailable)?;
-        if !queue.trim().is_empty() {
-            return Err(error("busy", "device work is queued"));
-        }
-    }
-    Ok(())
-}
-fn archive(root: &Path, revision: u64, bytes: &[u8]) -> Result<()> {
-    let dir = root.join(HISTORY);
-    if exists(&dir)? {
-        check_directory(&dir)?;
-    } else {
-        std::fs::create_dir(&dir).map_err(unavailable)?;
-    }
-    let path = dir.join(format!("{revision}.json"));
-    if let Some(old) = read_bounded(&path)? {
-        if old != bytes {
-            return Err(unavailable(
-                "immutable registry original differs; preserved",
-            ));
-        }
-        // A previous attempt may have stopped after the hard link but before
-        // its directory sync. Re-establish durability before replacing current.
-        File::open(&dir)
-            .and_then(|f| f.sync_all())
-            .map_err(unavailable)?;
-        return File::open(root)
-            .and_then(|f| f.sync_all())
-            .map_err(unavailable);
-    }
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(unavailable)?
-        .as_nanos();
-    let temp = dir.join(format!(".registry-{}-{stamp}", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&temp)
-        .map_err(unavailable)?;
-    let result = (|| {
-
-        file.write_all(bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(unavailable)?;
-        // Publish a complete original create-once; never expose a partial archive.
-        fs::hard_link(&temp, &path).map_err(unavailable)?;
-        File::open(&dir)
-            .and_then(|f| f.sync_all())
-            .map_err(unavailable)
-    })();
-    let removed = fs::remove_file(&temp).map_err(unavailable);
-    result?;
-    removed?;
-    File::open(root)
-        .and_then(|f| f.sync_all())
-        .map_err(unavailable)
-}
-fn update_locked(root: &Path, queue_dir: &Path, request: Request) -> Result<Value> {
-    require_clear(queue_dir)?;
+fn update_locked(root: &Path, request: Request) -> Result<Value> {
     let current = read_current(root)?;
-    let revision = current.as_ref().map_or(0, |(r, _)| r.revision);
+    let revision = current.as_ref().map_or(0, |r| r.revision);
     if request.expected_revision != revision {
         return Err(error("conflict", format!("expected_revision does not match current revision {revision}; read the registry before any new submission")));
     }
     let mut devices = current
         .as_ref()
-        .map_or_else(Vec::new, |(r, _)| r.devices.clone());
+        .map_or_else(Vec::new, |r| r.devices.clone());
     match devices.binary_search_by(|d| d.device_id.cmp(&request.device.device_id)) {
         Ok(index) if devices[index] == request.device => {
-            return serde_json::to_value(&current.as_ref().unwrap().0).map_err(unavailable)
+            return serde_json::to_value(current.as_ref().unwrap()).map_err(unavailable)
         }
         Ok(index) => devices[index] = request.device,
         Err(index) if devices.len() < 128 => devices.insert(index, request.device),
@@ -477,60 +313,19 @@ fn update_locked(root: &Path, queue_dir: &Path, request: Request) -> Result<Valu
             "resulting registry exceeds 64 KiB",
         ));
     }
-    if let Some((old, original)) = current {
-        archive(root, old.revision, &original)?;
-    }
     crate::devlease::durable_replace(&root.join(CURRENT), &bytes).map_err(unavailable)?;
     serde_json::to_value(next).map_err(unavailable)
 }
-fn set(root: &Path, _device_root: &Path, request: Request) -> Result<Value> {
-    std::fs::create_dir_all(root).map_err(unavailable)?;
-    check_directory(root)?;
-    let bridge = crate::fd_lock::open_file(&root.join("phonefarm-bridge.lock"), 0o600)
-        .map_err(unavailable)?;
-    struct BridgeTrace(File, String);
-    impl BridgeTrace {
-        fn log(&self, event: &str) {
-            if std::env::var_os("PF_DEBUG_BRIDGE").is_none() {
-                return;
-            }
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true)
-                .open("/tmp/pf-bridge-trace.log") {
-                use std::io::Write;
-                let _ = writeln!(f, "{} {} {}", std::process::id(), event, self.1);
-            }
-        }
-    }
-    impl Drop for BridgeTrace {
-        fn drop(&mut self) {
-            self.log("release");
-        }
-    }
-    let bridge = BridgeTrace(bridge, root.display().to_string());
-    bridge.log("opened");
-    // 瞬态持有者（同进程前序 fd 的关闭延迟）用有界重试吸收；
-    // 长期持有者（如显式检查 busy 的用例）超过 2s 期限后仍如实报 busy。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        match bridge.0.try_lock() {
-            Ok(()) => {
-                bridge.log("locked");
-                break;
-            }
-            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                bridge.log("WOULDBLOCK");
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(e) => {
-                bridge.log("WOULDBLOCK-final");
-                return Err(match e {
-                    std::fs::TryLockError::WouldBlock => error("busy", "device lease bridge is held"),
-                    other => unavailable(other),
-                });
-            }
-        }
-    }
-    update_locked(root, root, request)
+fn set(root: &Path, device_root: &Path, request: Request) -> Result<Value> {
+    let _guard = crate::fd_lock::Guard::acquire(
+        device_root,
+        root,
+        crate::fd_lock::Scope::global(),
+        "device registry",
+        None,
+    )
+    .map_err(unavailable)?;
+    update_locked(root, request)
 }
 fn request_bytes(path: &str) -> Result<Vec<u8>> {
     if path != "-" {
@@ -678,42 +473,90 @@ mod tests {
         .unwrap()
     }
     #[test]
-    fn binding_resolves_aliases_and_rejects_changed_or_unavailable_identity() {
-        if crate::isolate_fd_test("device_registry::tests::binding_resolves_aliases_and_rejects_changed_or_unavailable_identity") { return; }
+    fn original_binding_acquires_after_unrelated_update_and_recovers_without_history() {
+        if crate::isolate_fd_test("device_registry::tests::original_binding_acquires_after_unrelated_update_and_recovers_without_history") { return; }
+        let s = Scratch::new();
+        set(&s.0, request(0, "A", &["usb-A", "wifi-A"], true)).unwrap();
+        let storage = crate::lease_storage::Storage::custom(&s.0);
+        let binding = resolve_binding(&storage, "usb-A").unwrap();
+        let original = serde_json::to_vec(&binding).unwrap();
+        set(&s.0, request(1, "B", &["usb-B"], true)).unwrap();
+        let lease = crate::devlease::Lease::acquire_device(
+            &storage,
+            &binding,
+            "test",
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(lease.serial, "usb-A");
+        assert_eq!(lease.device_binding(), Some(&binding));
+        drop(lease);
+        set(&s.0, request(2, "A", &["usb-A", "wifi-A"], false)).unwrap();
+        drop(
+            crate::devlease::Lease::acquire_device(
+                &storage,
+                &binding,
+                "test",
+                std::time::Duration::ZERO,
+            )
+            .unwrap(),
+        );
+        let history = s.0.join("device-registry-history");
+        if history.exists() {
+            fs::remove_dir_all(history).unwrap();
+        }
+        let recovery = crate::devlease::Lease::acquire_device_recovery(
+            &storage,
+            &binding,
+            &s.0,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(recovery.serial, "usb-A");
+        assert_eq!(
+            serde_json::to_vec(recovery.device_binding().unwrap()).unwrap(),
+            original
+        );
+        assert_eq!(snapshot(&s.0).unwrap().0, 3);
+    }
+    #[test]
+    fn binding_resolves_aliases_and_keeps_basic_format_checks() {
+        if crate::isolate_fd_test(
+            "device_registry::tests::binding_resolves_aliases_and_keeps_basic_format_checks",
+        ) {
+            return;
+        }
         let s = Scratch::new();
         set(&s.0, request(0, "A", &["usb-A", "192.0.2.1:5555"], true)).unwrap();
-
         let storage = crate::lease_storage::Storage::custom(&s.0);
         let usb = resolve_binding(&storage, "usb-A").unwrap();
         let wifi = resolve_binding(&storage, "192.0.2.1:5555").unwrap();
         assert_eq!(usb.device_id, wifi.device_id);
         assert_eq!(snapshot(&s.0).unwrap().0, usb.registry_revision);
-        validate_binding(&s.0, &usb).unwrap();
         let original = serde_json::to_string(&usb).unwrap();
         assert_eq!(parse_binding(&original).unwrap(), usb);
         assert!(parse_binding(&(original.clone() + &" ".repeat(4096))).is_err());
         let mut historical = serde_json::to_value(&usb).unwrap();
         historical["domain_id"] = json!("a".repeat(32));
         assert_eq!(parse_binding(&historical.to_string()).unwrap(), usb);
-        let mut wrong = usb.clone();
-        wrong.serial = "not-an-alias".into();
-        assert!(validate_binding(&s.0, &wrong).is_err());
+        for (key, value) in [
+            ("schema", json!("wrong")),
+            ("device_id", json!("../bad")),
+            ("serial", json!("a b")),
+        ] {
+            let mut malformed = historical.clone();
+            malformed[key] = value;
+            assert!(parse_binding(&malformed.to_string()).is_err());
+        }
         set(&s.0, request(1, "A", &["usb-A", "192.0.2.1:5555"], false)).unwrap();
-        assert!(validate_binding(&s.0, &usb).is_err());
-        validate_recorded_binding(&s.0, &usb).unwrap();
-        validate_recorded_binding(&s.0, &wifi).unwrap();
-        wrong = usb;
-        wrong.registry_revision = 2;
-        assert!(validate_binding(&s.0, &wrong).is_err());
-        assert!(validate_recorded_binding(&s.0, &wrong).is_err());
         assert!(resolve_binding(&storage, "usb-A").is_err());
         assert_eq!(get(&s.0).unwrap()["execution_scope"], "global");
-        fs::write(s.0.join(HISTORY).join("1.json"), b"{}\n").unwrap();
-        assert!(validate_recorded_binding(&s.0, &wifi).is_err());
     }
     #[test]
-    fn registry_cas_preserves_originals_and_disabled_aliases() {
-        if crate::isolate_fd_test("device_registry::tests::registry_cas_preserves_originals_and_disabled_aliases") { return; }
+    fn registry_cas_and_disabled_aliases() {
+        if crate::isolate_fd_test("device_registry::tests::registry_cas_and_disabled_aliases") {
+            return;
+        }
         let scratch = Scratch::new();
         assert_eq!(get(&scratch.0).unwrap()["revision"], 0);
         assert!(!scratch.0.exists());
@@ -731,27 +574,18 @@ mod tests {
             .unwrap(),
             first
         );
-        assert_eq!(
-            set(&scratch.0, request(0, "B", &["usb-B"], true))
-                .unwrap_err()
-                .code,
-            "conflict"
-        );
-        assert_eq!(
-            set(&scratch.0, request(1, "B", &["usb-A"], true))
-                .unwrap_err()
-                .code,
-            "conflict"
-        );
+        for r in [
+            request(0, "B", &["usb-B"], true),
+            request(1, "B", &["usb-A"], true),
+        ] {
+            assert_eq!(set(&scratch.0, r).unwrap_err().code, "conflict");
+        }
+        assert_eq!(fs::read(scratch.0.join(CURRENT)).unwrap(), bytes);
         set(
             &scratch.0,
             request(1, "A", &["usb-A", "192.0.2.1:5555"], false),
         )
         .unwrap();
-        assert_eq!(
-            fs::read(scratch.0.join(HISTORY).join("1.json")).unwrap(),
-            bytes
-        );
         assert_eq!(
             set(&scratch.0, request(2, "B", &["usb-A"], true))
                 .unwrap_err()
@@ -764,55 +598,20 @@ mod tests {
         assert_eq!(final_value["execution_scope"], "global");
         assert_eq!(final_value["physical_identity_verified"], false);
         assert_eq!(
-            fs::read(scratch.0.join(HISTORY).join("1.json")).unwrap(),
-            bytes
-        );
-
-        assert_eq!(
             set(&scratch.0, request(4, "B", &["usb-A"], false)).unwrap()["revision"],
             5
         );
+        assert!(!scratch.0.join("device-registry-history").exists());
     }
+    // Real process waiting/cancellation and ignored marker/queue records are
+    // exercised in tests/fd_lock_protocol.rs.
     #[test]
-    fn registry_writes_refuse_bridge_queue_and_unknown_owner_without_cleanup() {
-        if crate::isolate_fd_test("device_registry::tests::registry_writes_refuse_bridge_queue_and_unknown_owner_without_cleanup") { return; }
-        let scratch = Scratch::new();
-        set(&scratch.0, request(0, "A", &["usb-A"], true)).unwrap();
-        let original = fs::read(scratch.0.join(CURRENT)).unwrap();
-        let bridge = File::open(scratch.0.join("phonefarm-bridge.lock")).unwrap();
-        bridge.try_lock().unwrap();
-        assert_eq!(
-            set(&scratch.0, request(1, "B", &["usb-B"], true))
-                .unwrap_err()
-                .code,
-            "busy"
-        );
-        drop(bridge);
-        for name in ["devlock.d", "phonefarm-lease.d"] {
-            fs::create_dir(scratch.0.join(name)).unwrap();
-            assert_eq!(
-                set(&scratch.0, request(1, "B", &["usb-B"], true))
-                    .unwrap_err()
-                    .code,
-                "busy"
-            );
-            assert!(scratch.0.join(name).is_dir());
-            fs::remove_dir(scratch.0.join(name)).unwrap();
+    fn registry_rejects_invalid_input_but_ignores_old_archive() {
+        if crate::isolate_fd_test(
+            "device_registry::tests::registry_rejects_invalid_input_but_ignores_old_archive",
+        ) {
+            return;
         }
-        fs::write(scratch.0.join("devlock.queue"), b"queued\n").unwrap();
-        assert_eq!(
-            set(&scratch.0, request(1, "B", &["usb-B"], true))
-                .unwrap_err()
-                .code,
-            "busy"
-        );
-        assert_eq!(fs::read(scratch.0.join(CURRENT)).unwrap(), original);
-        assert!(!scratch.0.join("devlock.qmutex").exists());
-        assert_eq!(get(&scratch.0).unwrap()["revision"], 1);
-    }
-    #[test]
-    fn registry_rejects_invalid_input_and_preserves_interrupted_archive() {
-        if crate::isolate_fd_test("device_registry::tests::registry_rejects_invalid_input_and_preserves_interrupted_archive") { return; }
         for value in [
             json!({"expected_revision":0,"device":{"device_id":"../bad","label":"bad","aliases":["a"],"enabled":true}}),
             json!({"expected_revision":0,"device":{"device_id":"A","label":"a","aliases":["a","a"],"enabled":true}}),
@@ -829,24 +628,23 @@ mod tests {
         }
         let scratch = Scratch::new();
         set(&scratch.0, request(0, "A", &["usb-A"], true)).unwrap();
-        let original = fs::read(scratch.0.join(CURRENT)).unwrap();
-        archive(&scratch.0, 1, &original).unwrap(); // publication never happened
-        assert_eq!(get(&scratch.0).unwrap()["revision"], 1);
+        let history = scratch.0.join("device-registry-history");
+        fs::create_dir(&history).unwrap();
+        fs::write(history.join("1.json"), b"incomplete old archive").unwrap();
         set(&scratch.0, request(1, "B", &["usb-B"], true)).unwrap();
+        assert_eq!(get(&scratch.0).unwrap()["revision"], 2);
         assert_eq!(
-            fs::read(scratch.0.join(HISTORY).join("1.json")).unwrap(),
-            original
+            fs::read(history.join("1.json")).unwrap(),
+            b"incomplete old archive"
         );
-        let current = fs::read(scratch.0.join(CURRENT)).unwrap();
-        fs::write(scratch.0.join(HISTORY).join("2.json"), b"{}\n").unwrap();
+        fs::write(scratch.0.join(CURRENT), b"{}\n").unwrap();
+        assert_eq!(get(&scratch.0).unwrap_err().code, "unavailable");
         assert_eq!(
             set(&scratch.0, request(2, "A", &["usb-A"], false))
                 .unwrap_err()
                 .code,
             "unavailable"
         );
-        assert_eq!(fs::read(scratch.0.join(CURRENT)).unwrap(), current);
-        fs::write(scratch.0.join(CURRENT), b"{}\n").unwrap();
-        assert_eq!(get(&scratch.0).unwrap_err().code, "unavailable");
+        assert_eq!(fs::read(scratch.0.join(CURRENT)).unwrap(), b"{}\n");
     }
 }

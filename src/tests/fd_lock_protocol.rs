@@ -463,3 +463,47 @@ while not (root/'client-ready').exists():time.sleep(.01)
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+
+#[test]
+fn registry_updates_wait_for_the_same_global_lock_and_ignore_old_markers() {
+    let f = Fixture::new();
+    let root = f.0.join("locks");
+    let original = fs::read(root.join("device-registry.json")).unwrap();
+    for name in ["devlock.d", "phonefarm-lease.d", "devlock.queue"] {
+        fs::write(root.join(name), b"historical evidence").unwrap();
+    }
+    let mut holder = Group(f.pf().args(["lease", "--serial", "fake-a", "--", "/bin/sh", "-c",
+        "touch \"$1/ready\"; while [ ! -f \"$1/finish\" ]; do sleep .02; done", "holder"])
+        .arg(&f.0).process_group(0).spawn().unwrap());
+    f.until("ready");
+    let request = f.0.join("update.json");
+    fs::write(&request, json!({"expected_revision":2,"device":{
+        "device_id":"b","label":"B updated","aliases":["fake-b","wifi-b"],"enabled":true}}).to_string()).unwrap();
+    let spawn = || Group(f.pf().args(["lease", "devices-set", "--request"]).arg(&request)
+        .arg("--json").stdout(Stdio::null()).process_group(0).spawn().unwrap());
+    let mut cancelled = spawn();
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(cancelled.0.try_wait().unwrap().is_none());
+    cancelled.0.kill().unwrap();
+    cancelled.0.wait().unwrap();
+    let mut waiter = spawn();
+    // The old implementation returned busy at two seconds.
+    std::thread::sleep(Duration::from_millis(2200));
+    assert!(waiter.0.try_wait().unwrap().is_none(), "registry rejected a live owner instead of waiting");
+    assert_eq!(fs::read(root.join("device-registry.json")).unwrap(), original);
+    fs::write(f.0.join("finish"), b"").unwrap();
+    assert!(holder.0.wait().unwrap().success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = waiter.0.try_wait().unwrap() { assert!(status.success()); break; }
+        assert!(Instant::now() < deadline, "registry did not proceed after owner exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let updated: Value = serde_json::from_slice(&fs::read(root.join("device-registry.json")).unwrap()).unwrap();
+    assert_eq!(updated["revision"], 3);
+    for name in ["devlock.d", "phonefarm-lease.d", "devlock.queue"] {
+        assert_eq!(fs::read(root.join(name)).unwrap(), b"historical evidence");
+    }
+    assert!(f.try_device("fake-a").status.success());
+}
