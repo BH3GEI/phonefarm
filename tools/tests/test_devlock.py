@@ -234,6 +234,13 @@ with open(root / 'phonefarm-bridge.lock', 'w') as stream:
                     holder.communicate(timeout=5)
                 self.env["DEVLOCK_WAIT_SECONDS"] = "0"
 
+    def test_legacy_lease_warns_about_global_domain(self):
+        result = subprocess.run([str(BINARY), "lease", "--serial", "fixture-device", "--timeout-ms", "1000",
+                                 "--", "/usr/bin/true"], env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("还没有设备 lane", result.stderr)
+        self.assertIn("全农场", result.stderr)
+
     def test_registered_serial_leases_overlap(self):
         initialized = subprocess.run([str(BINARY), "lease", "domain-init", "--participants-stopped", "--json"],
                                      env=self.env, capture_output=True, text=True, timeout=5)
@@ -262,6 +269,7 @@ with open(root / 'phonefarm-bridge.lock', 'w') as stream:
                             for marker in markers), markers)
         first_out, first_err = first.communicate(timeout=5)
         self.assertEqual(first.returncode, 0, first_out + first_err)
+        self.assertNotIn("还没有设备 lane", first_err + second_err)
         unregistered = subprocess.run([str(BINARY), "lease", "--serial", "serial-c", "--timeout-ms", "1",
                                        "--", "/usr/bin/true"], env=self.env, capture_output=True, text=True, timeout=5)
         self.assertNotEqual(unregistered.returncode, 0)
