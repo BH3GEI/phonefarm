@@ -500,7 +500,7 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 None => {
                     busy = true;
                     Ok(
-                        json!({"schema":"phonefarm/devlock-busy@1","reason":"global device domain is occupied; queued intent is retained"}),
+                        json!({"schema":"phonefarm/devlock-busy@1","reason":"global device domain is occupied"}),
                     )
                 }
             },

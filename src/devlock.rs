@@ -9,8 +9,8 @@
 //! 1. 先 `devlock renew <label>`: 成功 = 继承的实例身份与活的外层进程树已核验 (外层的
 //!    game_opt_loop optimize、外层的 `devlock run <label>`, 或调起我们的父 phonefarm)。
 //!    这时**原地执行**, 心跳归外层管, 收尾也不释放 —— 否则就是自己等自己。
-//! 2. 无继承实例时 `devlock acquire <label>`, 没轮到就每 45 秒重试 (重试不丢队位), 等到
-//!    `--lock-wait` 用完还没拿到就退出 2, **一个字节都不碰设备**。
+//! 2. 无继承实例时把 `--lock-wait` 的剩余预算交给 `devlock acquire <label>`；
+//!    等待期间保留 FIFO 队位，最终放弃会删除自己的标签，没拿到就退出 2，**一个字节都不碰设备**。
 //! 3. 拿到之后把同一条命令作为子进程再跑一遍 (环境里带 `DEVLOCK_LABEL` 与 `DEVLOCK_INSTANCE_ID`, 子进程
 //!    走第 1 步原地执行), 父进程每 60 秒续一次心跳, 子进程退出就释放, 退出码原样透传。
 //!    子进程里任何一处 `process::exit` 或 panic 都不会漏掉释放 —— 释放在父进程里。
