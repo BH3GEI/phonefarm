@@ -1,4 +1,5 @@
 //! Identity for the existing outer queue owner. No device commands or long-lived locks.
+use crate::device_registry::DeviceBinding;
 use crate::host_process::{boot_id, clean_identity, process};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -68,6 +69,8 @@ pub(crate) struct QueueOwner {
     pub holder_start: String,
     pub host_boot_id: String,
     pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_binding: Option<DeviceBinding>,
 }
 
 pub(crate) fn valid_instance(id: &str) -> bool {
@@ -135,6 +138,26 @@ fn bounded(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn validate_owner(dir: &Path, owner: &QueueOwner) -> Result<(), String> {
+    if owner.schema != SCHEMA
+        || !valid_instance(&owner.instance_id)
+        || !valid_label(&owner.label)
+        || owner.holder_pid <= 1
+        || owner.holder_pid > i32::MAX as u32
+        || !clean_identity(&owner.holder_start)
+        || !clean_identity(&owner.host_boot_id)
+        || !owner.owner.starts_with(&format!("{} since ", owner.label))
+        || !owner.owner.ends_with(&format!(" instance={}\n", owner.instance_id))
+        || owner.owner[..owner.owner.len() - 1].contains(['\r', '\n'])
+    {
+        return Err("invalid queue owner identity".into());
+    }
+    if bounded(&dir.join("owner"))? != owner.owner.as_bytes() {
+        return Err("queue marker and owner text differ".into());
+    }
+    Ok(())
+}
+
 /// No writes and no liveness assumption. A known strong marker belongs to devlease.
 pub(crate) fn read(root: &Path) -> Result<Option<QueueOwner>, String> {
     let dir = queue_path(root)?.join("devlock.d");
@@ -148,24 +171,35 @@ pub(crate) fn read(root: &Path) -> Result<Option<QueueOwner>, String> {
     }
     let owner: QueueOwner =
         serde_json::from_value(value).map_err(|e| format!("unrecognized queue owner: {e}"))?;
-    if owner.schema != SCHEMA
-        || !valid_instance(&owner.instance_id)
-        || !valid_label(&owner.label)
-        || owner.holder_pid <= 1
-        || owner.holder_pid > i32::MAX as u32
-        || !clean_identity(&owner.holder_start)
-        || !clean_identity(&owner.host_boot_id)
-        || !owner.owner.starts_with(&format!("{} since ", owner.label))
-        || !owner
-            .owner
-            .ends_with(&format!(" instance={}\n", owner.instance_id))
-        || owner.owner[..owner.owner.len() - 1].contains(['\r', '\n'])
-    {
-        return Err("invalid queue owner identity".into());
+    validate_owner(&dir, &owner)?;
+    Ok(Some(owner))
+}
+
+pub(crate) fn read_device(root: &Path, binding: &DeviceBinding) -> Result<Option<QueueOwner>, String> {
+    let paths = crate::lease_domain::inspect(root)?;
+    let dir = paths.lane_marker(&binding.device_id)?;
+    if !checked_dir(&dir)? {
+        return Ok(None);
     }
-    if bounded(&dir.join("owner"))? != owner.owner.as_bytes() {
-        return Err("queue marker and owner text differ".into());
+    let value: Value = serde_json::from_slice(&bounded(&dir.join(MARKER))?)
+        .map_err(|e| format!("invalid device queue marker JSON: {e}"))?;
+    crate::devlease::marker_state(&value)?;
+    if value["format"] != 2 || value["scope"] != "device" || value["device_binding"] != json!(binding) {
+        return Err("device queue marker binding changed; preserved".into());
     }
+    let instance = value["outer_instance_id"].as_str().ok_or("device queue instance is missing")?;
+    let owner = QueueOwner {
+        schema: SCHEMA.into(),
+        instance_id: instance.into(),
+        label: value["label"].as_str().ok_or("device queue label is missing")?.into(),
+        holder_pid: value["pid"].as_u64().filter(|pid| *pid <= u32::MAX as u64)
+            .ok_or("device queue holder PID is invalid")? as u32,
+        holder_start: value["pid_start"].as_str().ok_or("device queue holder start is missing")?.into(),
+        host_boot_id: value["host_boot_id"].as_str().ok_or("device queue boot identity is missing")?.into(),
+        owner: value["owner"].as_str().ok_or("device queue owner text is missing")?.into(),
+        device_binding: Some(binding.clone()),
+    };
+    validate_owner(&dir, &owner)?;
     Ok(Some(owner))
 }
 
@@ -221,6 +255,12 @@ pub(crate) fn inherited(root: &Path) -> Result<Option<QueueOwner>, String> {
     let owner = read(root)?.ok_or("inherited queue owner is absent or is a strong lease")?;
     authorize(&owner, &instance, &label)?;
     Ok(Some(owner))
+}
+
+pub(crate) fn authorize_device(root: &Path, binding: &DeviceBinding, instance: &str, label: &str) -> Result<QueueOwner, String> {
+    let owner = read_device(root, binding)?.ok_or("typed device queue owner is absent")?;
+    authorize(&owner, instance, label)?;
+    Ok(owner)
 }
 
 pub(crate) fn lock(root: &Path) -> Result<File, String> {
@@ -282,9 +322,27 @@ fn try_bridge(root: &Path) -> Result<Option<File>, String> {
         Err(error) => Err(format!("bridge unavailable: {error}")),
     }
 }
+fn try_bridge_shared(root: &Path) -> Result<Option<File>, String> {
+    let file = crate::shared_access::lock_file(&root.join("phonefarm-bridge.lock"), 0o600)
+        .map_err(|e| e.to_string())?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(format!("bridge unavailable: {error}")),
+    }
+}
+
 fn bridge(root: &Path) -> Result<File, String> {
     try_bridge(root)?.ok_or_else(|| "bridge is held; existing ownership preserved".into())
 }
+pub(crate) fn new_instance_id() -> Result<String, String> {
+    let mut random = [0u8; 16];
+    File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut random))
+        .map_err(|e| e.to_string())?;
+    Ok(random.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn create(
     root: &Path,
     expected_queue: &Path,
@@ -321,11 +379,7 @@ fn create(
     if !descendant(holder, std::process::id())? {
         return Err("queue holder is not an actual caller ancestor".into());
     }
-    let mut random = [0u8; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut random))
-        .map_err(|e| e.to_string())?;
-    let instance_id: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    let instance_id = new_instance_id()?;
     let owner = QueueOwner {
         schema: SCHEMA.into(),
         owner: format!(
@@ -337,6 +391,7 @@ fn create(
         holder_pid: holder,
         holder_start: info.start,
         host_boot_id: boot_id()?,
+        device_binding: None,
     };
     check_live(&owner)?;
     crate::shared_access::create_dir(&dir)
@@ -352,6 +407,77 @@ fn create(
     same(root, &owner)?;
     Ok(Some(owner))
 }
+fn create_device(
+    root: &Path,
+    expected_queue: &Path,
+    binding: &DeviceBinding,
+    label: &str,
+    holder: u32,
+) -> Result<Option<QueueOwner>, String> {
+    if !valid_label(label) || holder <= 1 || holder > i32::MAX as u32 {
+        return Err("invalid queue label or holder PID".into());
+    }
+    let _lock = lock(root)?;
+    let Some(_bridge) = try_bridge_shared(root)? else { return Ok(None); };
+    let paths = crate::lease_domain::inspect(root)?;
+    if !expected_queue.is_absolute() || expected_queue != paths.queue_dir {
+        return Err("queue directory changed since check; no owner was created".into());
+    }
+    let Some(dir) = crate::devlease::prepare_device_lane(root, binding)? else { return Ok(None); };
+    if exists(&dir)? || exists(&paths.queue_dir.join("phonefarm-lease.d"))? {
+        return Ok(None);
+    }
+    let info = process(holder)?.filter(|p| !p.zombie).ok_or("queue holder is not live")?;
+    if !descendant(holder, std::process::id())? {
+        return Err("queue holder is not an actual caller ancestor".into());
+    }
+    let instance_id = new_instance_id()?;
+    let boot = boot_id()?;
+    let owner_text = format!("{label} since {} instance={instance_id}\n", chrono::Local::now().format("%F %T"));
+    let owner = QueueOwner {
+        schema: SCHEMA.into(), instance_id: instance_id.clone(), label: label.into(), holder_pid: holder,
+        holder_start: info.start.clone(), host_boot_id: boot.clone(), owner: owner_text.clone(),
+        device_binding: Some(binding.clone()),
+    };
+    check_live(&owner)?;
+    crate::shared_access::create_dir(&dir).map_err(|e| format!("device queue slot changed; preserved: {e}"))?;
+    let marker = json!({"format":2,"scope":"device","producer":"phonefarm","pid":holder,"token":instance_id,
+        "serial":binding.serial,"label":label,"owner":owner_text,"device_binding":binding,
+        "outer_instance_id":owner.instance_id,"host_boot_id":boot,"pid_start":info.start});
+    crate::devlease::durable_replace(&dir.join(MARKER), &serde_json::to_vec(&marker).map_err(|e| e.to_string())?)?;
+    crate::devlease::durable_replace(&dir.join("owner"), owner.owner.as_bytes())?;
+    File::open(dir.parent().ok_or("device queue parent missing")?).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+    if read_device(root, binding)?.as_ref() != Some(&owner) {
+        return Err("typed device queue identity changed during creation".into());
+    }
+    Ok(Some(owner))
+}
+
+fn renew_or_release_device(
+    root: &Path,
+    binding: &DeviceBinding,
+    instance: &str,
+    label: &str,
+    release: bool,
+) -> Result<Value, String> {
+    let _lock = lock(root)?;
+    let owner = read_device(root, binding)?.ok_or("typed device queue owner is absent")?;
+    authorize(&owner, instance, label)?;
+    if release {
+        let paths = crate::lease_domain::inspect(root)?;
+        let dir = paths.lane_marker(&binding.device_id)?;
+        exact_files(&dir, &[MARKER, "owner"])?;
+        if read_device(root, binding)?.as_ref() != Some(&owner) {
+            return Err("typed device queue instance changed; metadata preserved".into());
+        }
+        fs::remove_file(dir.join("owner")).map_err(|e| e.to_string())?;
+        fs::remove_file(dir.join(MARKER)).map_err(|e| e.to_string())?;
+        fs::remove_dir(&dir).map_err(|e| e.to_string())?;
+        File::open(dir.parent().ok_or("device queue parent missing")?).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+    }
+    Ok(json!({"schema":SCHEMA,"status":if release{"released"}else{"held"},"instance_id":instance}))
+}
+
 fn retire(root: &Path, owner: &QueueOwner) -> Result<(), String> {
     let queue = queue_path(root)?;
     let dir = queue.join("devlock.d");
@@ -454,6 +580,14 @@ fn reconcile(root: &Path, instance: &str) -> Result<Value, String> {
     )
 }
 
+fn env_binding() -> Result<Option<DeviceBinding>, String> {
+    match std::env::var("PF_JOB_DEVICE_BINDING") {
+        Ok(value) => Ok(Some(crate::device_registry::parse_binding(&value)?)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err("PF_JOB_DEVICE_BINDING is not UTF-8".into()),
+    }
+}
+
 pub(crate) fn run(args: &[String]) -> i32 {
     let mut busy = false;
     let result = (|| -> Result<Value, String> {
@@ -484,24 +618,27 @@ pub(crate) fn run(args: &[String]) -> i32 {
         }
         let root = root.ok_or("queue helper requires --root")?;
         root_path(&root)?;
+        let binding = env_binding()?;
         if operation != "create" && expected_queue.is_some() {
             return Err("--queue-dir is only an expected path for create".into());
         }
         match operation.as_str() {
-            "create" => match create(
-                &root,
-                expected_queue
-                    .as_deref()
-                    .ok_or("create requires --queue-dir from check")?,
-                label.as_deref().ok_or("create requires --label")?,
-                holder.ok_or("create requires --holder-pid")?,
-            )? {
-                Some(owner) => serde_json::to_value(owner).map_err(|e| e.to_string()),
-                None => {
-                    busy = true;
-                    Ok(
-                        json!({"schema":"phonefarm/devlock-busy@1","reason":"global device domain is occupied"}),
-                    )
+            "create" => {
+                let created = if let Some(binding) = &binding {
+                    create_device(&root, expected_queue.as_deref().ok_or("create requires --queue-dir from check")?,
+                        binding, label.as_deref().ok_or("create requires --label")?,
+                        holder.ok_or("create requires --holder-pid")?)
+                } else {
+                    create(&root, expected_queue.as_deref().ok_or("create requires --queue-dir from check")?,
+                        label.as_deref().ok_or("create requires --label")?,
+                        holder.ok_or("create requires --holder-pid")?)
+                };
+                match created? {
+                    Some(owner) => serde_json::to_value(owner).map_err(|e| e.to_string()),
+                    None => {
+                        busy = true;
+                        Ok(json!({"schema":"phonefarm/devlock-busy@1","reason":"global device domain is occupied"}))
+                    }
                 }
             },
             "check" => {
@@ -509,7 +646,11 @@ pub(crate) fn run(args: &[String]) -> i32 {
                     let instance = instance
                         .or_else(|| std::env::var("DEVLOCK_INSTANCE_ID").ok())
                         .ok_or("check requires a queue instance")?;
-                    let owner = read(&root)?.ok_or("no typed queue owner")?;
+                    let owner = if let Some(binding) = &binding {
+                        read_device(&root, binding)?.ok_or("no typed queue owner")?
+                    } else {
+                        read(&root)?.ok_or("no typed queue owner")?
+                    };
                     authorize(&owner, &instance, &label)?;
                     serde_json::to_value(owner).map_err(|e| e.to_string())
                 } else {
@@ -532,12 +673,13 @@ pub(crate) fn run(args: &[String]) -> i32 {
                 let instance = instance
                     .or_else(|| std::env::var("DEVLOCK_INSTANCE_ID").ok())
                     .ok_or("renew/release requires DEVLOCK_INSTANCE_ID")?;
-                renew_or_release(
-                    &root,
-                    &instance,
-                    label.as_deref().ok_or("renew/release requires --label")?,
-                    operation == "release",
-                )
+                if let Some(binding) = &binding {
+                    renew_or_release_device(&root, binding, &instance,
+                        label.as_deref().ok_or("renew/release requires --label")?, operation == "release")
+                } else {
+                    renew_or_release(&root, &instance,
+                        label.as_deref().ok_or("renew/release requires --label")?, operation == "release")
+                }
             }
             "reconcile" if stopped && idle => reconcile(
                 &root,
@@ -583,6 +725,7 @@ mod tests {
             holder_start: info.start,
             host_boot_id: boot_id().unwrap(),
             owner: String::new(),
+            device_binding: None,
         };
         assert!(authorize(&owner, &owner.instance_id, "test").is_ok());
         assert!(authorize(&owner, "ffffffffffffffffffffffffffffffff", "test").is_err());

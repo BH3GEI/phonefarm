@@ -275,6 +275,74 @@ with open(root / 'phonefarm-bridge.lock', 'w') as stream:
         self.assertNotEqual(unregistered.returncode, 0)
         self.assertIn("not a registered device alias", unregistered.stderr)
 
+    def test_typed_devlock_overlap_same_device_and_global_priority(self):
+        initialized = subprocess.run([str(BINARY), "lease", "domain-init", "--participants-stopped", "--json"],
+                                     env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
+        bindings = {}
+        for revision, device, serial in ((0, "A", "serial-a"), (1, "B", "serial-b")):
+            request = self.root / f"typed-{serial}.json"
+            request.write_text(json.dumps({"expected_revision": revision,
+                "device": {"device_id": device, "label": device, "aliases": [serial], "enabled": True}}))
+            registered = subprocess.run([str(BINARY), "lease", "devices-set", "--request", str(request), "--json"],
+                                        env=self.env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(registered.returncode, 0, registered.stdout + registered.stderr)
+        for serial in ("serial-a", "serial-b"):
+            resolved = subprocess.run([str(BINARY), "lease", "resolve", "--serial", serial, "--json"],
+                                      env=self.env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(resolved.returncode, 0, resolved.stdout + resolved.stderr)
+            value = json.loads(resolved.stdout)
+            bindings[serial] = value.get("binding", value)
+
+        def environment(serial=None, wait="5"):
+            value = dict(self.env, DEVLOCK_WAIT_SECONDS=wait)
+            if serial is None:
+                value.pop("PF_JOB_DEVICE_BINDING", None)
+            else:
+                value["PF_JOB_DEVICE_BINDING"] = json.dumps(bindings[serial], separators=(",", ":"))
+            return value
+
+        def spawn(serial, label, seconds, wait="5"):
+            return subprocess.Popen(["zsh", str(DEVLOCK), "run", label, "--", sys.executable, "-c",
+                                     f"import time; time.sleep({seconds})"], env=environment(serial, wait),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        first = spawn("serial-a", "lane-a", 1)
+        second = spawn("serial-b", "lane-b", .2)
+        second_out, second_err = second.communicate(timeout=10)
+        self.assertEqual(second.returncode, 0, second_out + second_err)
+        overlapped = first.poll() is None
+        first_out, first_err = first.communicate(timeout=10)
+        self.assertEqual(first.returncode, 0, first_out + first_err)
+        self.assertTrue(overlapped, "different typed devices did not overlap: " + first_out + first_err)
+        global_owner = self.root / "v2/global/devlock.d"
+        self.assertFalse(global_owner.exists(), global_owner.read_text() if global_owner.is_file() else global_owner.exists())
+
+        first = spawn("serial-a", "same-a-1", .8)
+        second = spawn("serial-a", "same-a-2", .1)
+        second_out, second_err = second.communicate(timeout=10)
+        self.assertEqual(second.returncode, 0, second_out + second_err)
+        self.assertIsNotNone(first.poll(), "same-device typed runs did not serialize")
+        first.communicate(timeout=10)
+
+        global_owner = spawn(None, "global-owner", .8)
+        deadline = time.monotonic() + 5
+        while not (self.root / "v2/global/devlock.d").exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertTrue((self.root / "v2/global/devlock.d").exists(), "global owner did not start")
+        typed = spawn("serial-a", "typed-after-global", .1)
+        typed_out, typed_err = typed.communicate(timeout=10)
+        self.assertEqual(typed.returncode, 0, typed_out + typed_err)
+        self.assertIsNotNone(global_owner.poll(), "typed lane bypassed the global owner")
+        global_owner.communicate(timeout=10)
+
+        (self.root / "devlock.queue").write_text("global-wait\n")
+        (self.root / "devlock.seen").write_text(f"global-wait {int(time.time())}\n")
+        blocked = subprocess.run(["zsh", str(DEVLOCK), "run", "typed-blocked", "--", "/usr/bin/true"],
+                                 env=environment("serial-a", "0"), capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
+        self.assertEqual((self.root / "devlock.queue").read_text(), "global-wait\n")
+
     @unittest.skipUnless(BINARY.is_file(), "set PHONEFARM_TEST_BINARY to an existing signed test build")
     def test_real_nested_lease_allows_inherited_child_but_not_outside_caller(self):
         ready, finish = self.root / "ready.json", self.root / "finish"

@@ -20,7 +20,7 @@ fn id_fd_path(root: &Path, device_id: &str) -> PathBuf {
 pub(super) fn binding(m: &Value) -> Result<Option<DeviceBinding>, String> {
     match m["format"].as_u64() {
         Some(1) if m.get("scope").is_none() && m.get("device_binding").is_none() => Ok(None),
-        Some(2) if m["scope"] == "device" && m.get("outer_instance_id").is_none() => {
+        Some(2) if m["scope"] == "device" => {
             let value = crate::device_registry::parse_binding(&m["device_binding"].to_string())?;
             if m["serial"] != value.serial { return Err("scoped marker serial differs from binding".into()); }
             Ok(Some(value))

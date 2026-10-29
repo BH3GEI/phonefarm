@@ -291,6 +291,24 @@ esac
         if let Some(binding) = binding { cmd.arg("--device-binding").arg(binding.to_string()); }
         cmd
     };
+    let typed = Command::new("/usr/bin/zsh")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/devlock"))
+        .args(["run", "typed-outer", "--", env!("CARGO_BIN_EXE_phonefarm"), "screen", "capture", "--serial", "screen-A", "--out"])
+        .arg(f.0.join("typed.png"))
+        .args(["--json", "--device-binding"])
+        .arg(a.to_string())
+        .env("DEVLOCK_DIR", f.0.join("locks"))
+        .env("PHONEFARM_LEASE_DIR", f.0.join("leases"))
+        .env("ADB_BIN", f.0.join("bin/adb"))
+        .env("PATH", format!("{}:{}", f.0.join("bin").display(), std::env::var("PATH").unwrap_or_default()))
+        .env("FIXTURE", &f.0)
+        .env("PHONEFARM_BIN", env!("CARGO_BIN_EXE_phonefarm"))
+        .env("PF_JOB_DEVICE_BINDING", a.to_string())
+        .env("DEVLOCK_WAIT_SECONDS", "5")
+        .output()
+        .unwrap();
+    assert!(typed.status.success(), "{} {}", String::from_utf8_lossy(&typed.stdout), String::from_utf8_lossy(&typed.stderr));
+    assert!(!f.0.join("locks/v2/global/devlock.d").exists());
     // The only concurrent child is owned here and bounded by the observation worker.
     struct Owned(Option<std::process::Child>);
     impl Drop for Owned {

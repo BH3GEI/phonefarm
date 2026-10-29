@@ -54,6 +54,7 @@ fi
 D=$QROOT/devlock.d; LOG=$QROOT/devlock.log; Q=$QROOT/devlock.queue; SEEN=$QROOT/devlock.seen; M=$QROOT/devlock.qmutex
 N=$QROOT/phonefarm-lease.d
 STALE=${DEVLOCK_STALE:-600}
+TYPED=${PF_JOB_DEVICE_BINDING:-}
 now(){ date +%s; }
 ts(){ date '+%F %T'; }
 valid_label(){ [[ -n "$1" && ${#1} -le 128 && "$1" != *[[:space:][:cntrl:]]* ]]; }
@@ -114,6 +115,15 @@ acquire_once(){
   local label=$1 holder=$2 head result rc
   valid_label "$label" || { print -u2 'queue label must be 1..128 non-whitespace characters'; return 2; }
   (( ${+DEVLOCK_INSTANCE_ID} )) && { print -u2 'acquire cannot replace an inherited instance; use its checked owner'; return 2; }
+  if [[ -n "$TYPED" ]]; then
+    result=$("$PF" __queue-owner create --root "$B" --queue-dir "$QROOT" --label "$label" --holder-pid "$holder")
+    rc=$?
+    (( rc == 0 )) && print -r -- "$(ts) acquire $label lane" >> "$LOG"
+    (( rc == 1 )) && return 1
+    (( rc == 0 )) || return 2
+    print -r -- "$result"
+    return 0
+  fi
   qlock || return 2
   seen "$label"
   if [[ -e "$D" || -L "$D" ]] || nested; then
@@ -158,6 +168,11 @@ acquire(){
     fi
     if (( $(now) - started >= wait_seconds )); then
       why=$(blocker)
+      if [[ -n "$TYPED" ]]; then
+        print -r -- "$(ts) busy $label lane ($why)" >> "$LOG"
+        print -ru2 -- "wait expired after ${wait_seconds}s ($why)"
+        return 1
+      fi
       qlock || return 2
       head=$(qhead)
       qdrop "$label"

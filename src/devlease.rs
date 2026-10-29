@@ -59,6 +59,17 @@ fn device_lock_path(root: &Path, serial: &str, binding: Option<&DeviceBinding>) 
 }
 
 /// Caller may already own the root mutex/bridge; never take either again here.
+pub(crate) fn prepare_device_lane(root: &Path, binding: &DeviceBinding) -> Result<Option<PathBuf>, String> {
+    let paths = crate::lease_domain::inspect(root)?;
+    crate::device_registry::validate_binding(root, binding)?;
+    if scopes::global_clear(&paths).is_err() || scopes::queue_waiting(&paths)? {
+        return Ok(None);
+    }
+    scopes::scan(root, &paths)?;
+    crate::lease_domain::ensure_lanes(&paths)?;
+    Ok(Some(paths.lane_marker(&binding.device_id)?))
+}
+
 pub(crate) fn lane_occupancy(root: &Path) -> Result<bool, String> {
     let paths = crate::lease_domain::inspect(root)?;
     Ok(!scopes::scan(root, &paths)?.is_empty())
@@ -131,7 +142,7 @@ fn marker(path: &Path) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(path.join("phonefarm-lease.json")).ok()?).ok()
 }
 /// Missing extension fields support old format-1 owners; present malformed fields never do.
-fn marker_state(m: &Value) -> Result<(bool, bool), String> {
+pub(crate) fn marker_state(m: &Value) -> Result<(bool, bool), String> {
     if !m.is_object() || !matches!(m["format"].as_u64(), Some(1 | 2)) || m["producer"] != "phonefarm" {
         return Err("unknown lease marker format/producer".into());
     }
@@ -586,7 +597,7 @@ impl Lease {
             return Err("lease requires a resolved device serial".into());
         }
         if let Some(binding) = binding {
-            if observation || binding.serial != serial || std::env::var_os("DEVLOCK_INSTANCE_ID").is_some() {
+            if observation || binding.serial != serial {
                 return Err("device scope cannot change its serial or borrow a global outer instance".into());
             }
         }
@@ -613,7 +624,20 @@ impl Lease {
         // release/replacement. This guard is never held during device work.
         let mut queue_guard = if observation { None } else { Some(crate::queue_owner::lock(legacy_root)?) };
         let mut fifo = if binding.is_some() { Some(crate::queue_owner::QueueMutex::acquire(queue_root)?) } else { None };
-        let outer = if observation || binding.is_some() { None } else { crate::queue_owner::inherited(legacy_root)? };
+        let outer = if observation {
+            None
+        } else if let Some(binding) = binding {
+            match std::env::var("DEVLOCK_INSTANCE_ID") {
+                Ok(instance) => {
+                    let owner_label = std::env::var("DEVLOCK_LABEL").unwrap_or_else(|_| label.to_owned());
+                    Some(crate::queue_owner::authorize_device(legacy_root, binding, &instance, &owner_label)?)
+                }
+                Err(std::env::VarError::NotPresent) => None,
+                Err(_) => return Err("DEVLOCK_INSTANCE_ID is not UTF-8".into()),
+            }
+        } else {
+            crate::queue_owner::inherited(legacy_root)?
+        };
         if outer.is_none() && binding.is_none() { drop(queue_guard.take()); }
         if let Some(binding) = binding {
             crate::device_registry::validate_binding(legacy_root, binding)?;
@@ -624,8 +648,10 @@ impl Lease {
         } else if lane_occupancy(legacy_root)? {
             return Err("device lane owner/recovery blocks global execution".into());
         }
-        let legacy = if let Some(binding) = binding { paths.lane_marker(&binding.device_id)? }
-        else if observation {
+        let legacy = if let Some(binding) = binding {
+            let lane = paths.lane_marker(&binding.device_id)?;
+            if outer.is_some() { lane.join(NESTED_DIR) } else { lane }
+        } else if observation {
             observation_available(queue_root)?;
             queue_root.join("devlock.d")
         } else if outer.is_some() { queue_root.join(NESTED_DIR) }
@@ -701,7 +727,11 @@ impl Lease {
             info["device_binding"] = json!(binding);
         }
         bind_identity(&mut info, &process_identity);
-        let outer_instance = outer.map(|owner| owner.instance_id);
+        let outer_instance = match (outer, binding) {
+            (Some(owner), _) => Some(owner.instance_id),
+            (None, Some(_)) => Some(crate::queue_owner::new_instance_id()?),
+            (None, None) => None,
+        };
         if let Some(instance) = &outer_instance { info["outer_instance_id"] = json!(instance); }
         if let Some(r) = &receipt {
             r.bind_marker(&mut info)?;
@@ -1601,6 +1631,15 @@ pub fn run_lease(args: &[String]) -> i32 {
     }
     let mut cmd = std::process::Command::new(command);
     cmd.args(&args[split + 2..]);
+    if let Some(instance) = &_lease.outer_instance {
+        cmd.env("DEVLOCK_INSTANCE_ID", instance).env("DEVLOCK_LABEL", &_lease.label);
+    }
+    if let Some(binding) = &_lease.device_binding {
+        match serde_json::to_string(binding) {
+            Ok(value) => { cmd.env("PF_JOB_DEVICE_BINDING", value); }
+            Err(error) => { eprintln!("lease binding serialization: {error}"); return 2; }
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
