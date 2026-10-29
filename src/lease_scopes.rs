@@ -89,13 +89,11 @@ pub(super) fn status(storage: &crate::lease_storage::Storage) -> Value {
             Err(error) => errors.push(error.to_string()),
         }
     }
-    if storage.readiness != "ready" {
-        errors.extend(storage.error.iter().cloned());
-    }
+    errors.extend(storage.error.iter().cloned());
     json!({"schema_version":1,"status":if errors.is_empty(){state(bridge_held)}else{"unknown"},
         "bridge_held":bridge_held,"entries":entries,
         "error":if errors.is_empty(){None}else{Some(errors.join("; "))}, "storage":storage,
-        "device_scopes":{"schema":"phonefarm/device-scopes@1","domain_id":storage.domain_id,
+        "device_scopes":{"schema":"phonefarm/device-scopes@1",
             "registry_revision":revision,"global":{"status":state(global_held),"error":null},
             "queue_waiting":false,"unknown":!errors.is_empty(),"devices":devices}})
 }

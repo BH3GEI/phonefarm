@@ -85,7 +85,7 @@ impl Session {
             return Err("invalid gray capture package or evidence origin".into());
         }
         if marker.is_some_and(|name| !valid_marker(name)) { return Err("launch marker must be a safe, distinct filename in the target files directory".into()); }
-        crate::shared_access::create_dir_all(out).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
         let token = lease.token().to_owned();
         // The control descriptor publishes this relative directory. Its name
         // must not disclose the internal Lease token used by other producers.
@@ -93,14 +93,10 @@ impl Session {
             format!("gray-session-{}-{}", std::process::id(), stamp()?)
         } else { format!("gray-{token}") };
         let output_root = out.canonicalize().map_err(|e| e.to_string())?;
-        let shared_output = crate::shared_access::for_path(&output_root).map_err(|e| e.to_string())?.is_some();
         let dir = output_root.join(name);
-        crate::shared_access::create_dir(&dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
         for parent in dir.ancestors() {
             fs::File::open(parent).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
-            // The privileged worker owns and persists the enclosing job tree.
-            // Its traversal-only directory is outside the producer's output.
-            if shared_output && parent == output_root { break; }
         }
         let mut state = json!({"schema":SCHEMA,"serial":lease.serial,"token":token,"package":pkg,
             "completion_owner":owner,"launch_marker":marker,"generation":0,"round_label":null,"base_recovery":null,
@@ -156,7 +152,7 @@ impl Session {
             let binding = crate::device_registry::parse_binding(&binding.to_string())?;
             Lease::acquire_device_recovery(&storage, &binding, &dir, crate::devlease::wait_timeout()?)?
         } else {
-            let (root, legacy) = storage.require_ready()?;
+            let (root, legacy) = storage.roots()?;
             Lease::acquire_recovery(&root, &legacy, serial, &dir, crate::devlease::wait_timeout()?)?
         };
         Ok(Self {lease:RefCell::new(lease), adb:adb_path()?, dir, state:RefCell::new(state),

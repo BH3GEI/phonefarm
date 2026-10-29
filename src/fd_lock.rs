@@ -3,11 +3,16 @@ use crate::device_registry::DeviceBinding;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::process::CommandExt;
+use std::os::unix::{process::CommandExt, fs::OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+pub(crate) fn open_file(path: &Path, mode: u32) -> std::io::Result<File> {
+    OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .mode(mode).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)
+}
 
 pub(crate) const FDS: &str = "PF_LOCK_FDS";
 pub(crate) const SCOPE: &str = "PF_LOCK_SCOPE";
@@ -49,7 +54,7 @@ pub(crate) fn device_path(root: &Path, key: &str) -> PathBuf {
 }
 
 fn acquire_file(path: &Path, shared: bool, deadline: Option<Instant>) -> Result<File, String> {
-    let file = crate::shared_access::lock_file(path, 0o666)
+    let file = crate::fd_lock::open_file(path, 0o666)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     loop {
         match if shared {
@@ -121,12 +126,12 @@ impl Guard {
                 farm: farm_root.into(),
             });
         }
-        crate::shared_access::create_dir_all(farm_root).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(farm_root).map_err(|e| e.to_string())?;
         let deadline = timeout.and_then(|duration| Instant::now().checked_add(duration));
         let mut files = Vec::new();
         if let Some(key) = &requested.key {
             let path = device_path(device_root, key);
-            crate::shared_access::create_dir_all(path.parent().unwrap())
+            std::fs::create_dir_all(path.parent().unwrap())
                 .map_err(|e| e.to_string())?;
             files.push(acquire_file(&path, false, deadline)?);
         }
@@ -357,7 +362,7 @@ pub(crate) fn handoff(args: &[String]) -> i32 {
             }
         }
         let storage = crate::lease_storage::resolve();
-        let (root, farm) = storage.require_ready()?;
+        let (root, farm) = storage.roots()?;
         let scope = serial
             .map(|serial| crate::devlease::resolve_scope(&storage, serial))
             .transpose()?

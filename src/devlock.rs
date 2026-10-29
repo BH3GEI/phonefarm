@@ -218,7 +218,7 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
             return Ok(Gate::Proceed);
         }
         let storage = crate::lease_storage::resolve();
-        let (root, farm) = storage.require_ready()?;
+        let (root, farm) = storage.roots()?;
         let mut serials = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             if arg == "--serial" {

@@ -139,7 +139,7 @@ impl Session {
             &dir,
             ShellStderr::Merged,
         )?;
-        crate::shared_access::create_dir(&dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
         File::open(&dir)
             .and_then(|f| f.sync_all())
             .map_err(|e| e.to_string())?;

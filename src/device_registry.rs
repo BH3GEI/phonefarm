@@ -39,10 +39,8 @@ pub(crate) struct Device {
     pub enabled: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct DeviceBinding {
     pub schema: String,
-    pub domain_id: String,
     pub registry_revision: u64,
     pub device_id: String,
     pub serial: String,
@@ -174,13 +172,13 @@ fn check_directory(path: &Path) -> Result<()> {
             path.display()
         )));
     }
-    crate::shared_access::check_directory(path).map_err(unavailable)
+    Ok(())
 }
 fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>> {
     if !exists(path)? {
         return Ok(None);
     }
-    crate::shared_access::check_existing(path, false).map_err(unavailable)?;
+
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -252,7 +250,6 @@ pub(crate) fn snapshot(root: &Path) -> std::result::Result<(u64, Vec<Device>), S
 }
 fn valid_binding(binding: &DeviceBinding) -> std::result::Result<(), String> {
     if binding.schema != BINDING_SCHEMA
-        || !crate::queue_owner::valid_instance(&binding.domain_id)
         || !(1..=MAX_REVISION).contains(&binding.registry_revision)
     {
         return Err("unsupported or invalid device binding identity".into());
@@ -282,12 +279,7 @@ pub(crate) fn resolve_binding(
     serial: &str,
 ) -> std::result::Result<DeviceBinding, String> {
     valid_serial(serial)?;
-    let (device_root, root) = storage.require_ready()?;
-    let paths = crate::lease_domain::inspect(&root)?;
-    paths.require_device_root(&device_root)?;
-    let domain_id = paths
-        .domain_id
-        .ok_or("device binding requires layout 2; use explicit domain-init first")?;
+    let (_, root) = storage.roots()?;
     let (revision, devices) = snapshot(&root)?;
     let device = devices
         .iter()
@@ -298,7 +290,6 @@ pub(crate) fn resolve_binding(
     }
     Ok(DeviceBinding {
         schema: BINDING_SCHEMA.into(),
-        domain_id,
         registry_revision: revision,
         device_id: device.device_id.clone(),
         serial: serial.into(),
@@ -310,10 +301,6 @@ pub(crate) fn validate_binding(
     binding: &DeviceBinding,
 ) -> std::result::Result<(), String> {
     valid_binding(binding)?;
-    let paths = crate::lease_domain::inspect(root)?;
-    if paths.domain_id.as_ref() != Some(&binding.domain_id) {
-        return Err("device binding domain does not match the configured domain".into());
-    }
     let (revision, devices) = snapshot(root)?;
     if revision != binding.registry_revision {
         return Err("device binding registry revision changed; no device work was started".into());
@@ -336,9 +323,6 @@ pub(crate) fn validate_recorded_binding(
     binding: &DeviceBinding,
 ) -> std::result::Result<(), String> {
     valid_binding(binding)?;
-    if crate::lease_domain::inspect(root)?.domain_id.as_ref() != Some(&binding.domain_id) {
-        return Err("recorded device binding domain does not match the configured domain".into());
-    }
     let (current, _) = read_current(root)
         .map_err(|e| e.message)?
         .ok_or("recorded device binding has no registry original")?;
@@ -401,7 +385,7 @@ fn archive(root: &Path, revision: u64, bytes: &[u8]) -> Result<()> {
     if exists(&dir)? {
         check_directory(&dir)?;
     } else {
-        crate::shared_access::create_dir(&dir).map_err(unavailable)?;
+        std::fs::create_dir(&dir).map_err(unavailable)?;
     }
     let path = dir.join(format!("{revision}.json"));
     if let Some(old) = read_bounded(&path)? {
@@ -432,7 +416,7 @@ fn archive(root: &Path, revision: u64, bytes: &[u8]) -> Result<()> {
         .open(&temp)
         .map_err(unavailable)?;
     let result = (|| {
-        crate::shared_access::created_file(&temp, &file, false).map_err(unavailable)?;
+
         file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(unavailable)?;
@@ -499,10 +483,10 @@ fn update_locked(root: &Path, queue_dir: &Path, request: Request) -> Result<Valu
     crate::devlease::durable_replace(&root.join(CURRENT), &bytes).map_err(unavailable)?;
     serde_json::to_value(next).map_err(unavailable)
 }
-fn set(root: &Path, device_root: &Path, request: Request) -> Result<Value> {
-    crate::shared_access::create_dir_all(root).map_err(unavailable)?;
+fn set(root: &Path, _device_root: &Path, request: Request) -> Result<Value> {
+    std::fs::create_dir_all(root).map_err(unavailable)?;
     check_directory(root)?;
-    let bridge = crate::shared_access::lock_file(&root.join("phonefarm-bridge.lock"), 0o600)
+    let bridge = crate::fd_lock::open_file(&root.join("phonefarm-bridge.lock"), 0o600)
         .map_err(unavailable)?;
     struct BridgeTrace(File, String);
     impl BridgeTrace {
@@ -546,9 +530,7 @@ fn set(root: &Path, device_root: &Path, request: Request) -> Result<Value> {
             }
         }
     }
-    let paths = crate::lease_domain::inspect(root).map_err(unavailable)?;
-    paths.require_device_root(device_root).map_err(unavailable)?;
-    update_locked(root, &paths.queue_dir, request)
+    update_locked(root, root, request)
 }
 fn request_bytes(path: &str) -> Result<Vec<u8>> {
     if path != "-" {
@@ -639,7 +621,7 @@ fn run(args: &[String]) -> Result<Value> {
         }
     };
     let (devices, root) = crate::lease_storage::resolve()
-        .require_ready()
+        .roots()
         .map_err(unavailable)?;
     match request {
         Some(request) => set(&root, &devices, request),
@@ -700,25 +682,20 @@ mod tests {
         if crate::isolate_fd_test("device_registry::tests::binding_resolves_aliases_and_rejects_changed_or_unavailable_identity") { return; }
         let s = Scratch::new();
         set(&s.0, request(0, "A", &["usb-A", "192.0.2.1:5555"], true)).unwrap();
-        assert!(resolve_binding(&crate::lease_storage::Storage::custom(&s.0), "usb-A").is_err());
-        crate::lease_domain::init(&s.0, &s.0.join("devices")).unwrap();
+
         let storage = crate::lease_storage::Storage::custom(&s.0);
         let usb = resolve_binding(&storage, "usb-A").unwrap();
         let wifi = resolve_binding(&storage, "192.0.2.1:5555").unwrap();
         assert_eq!(usb.device_id, wifi.device_id);
-        assert_eq!(usb.domain_id, wifi.domain_id);
         assert_eq!(snapshot(&s.0).unwrap().0, usb.registry_revision);
         validate_binding(&s.0, &usb).unwrap();
         let original = serde_json::to_string(&usb).unwrap();
         assert_eq!(parse_binding(&original).unwrap(), usb);
         assert!(parse_binding(&(original.clone() + &" ".repeat(4096))).is_err());
-        let mut invalid = serde_json::to_value(&usb).unwrap();
-        invalid["extra"] = json!(true);
-        assert!(parse_binding(&invalid.to_string()).is_err());
+        let mut historical = serde_json::to_value(&usb).unwrap();
+        historical["domain_id"] = json!("a".repeat(32));
+        assert_eq!(parse_binding(&historical.to_string()).unwrap(), usb);
         let mut wrong = usb.clone();
-        wrong.domain_id = "ffffffffffffffffffffffffffffffff".into();
-        assert!(validate_binding(&s.0, &wrong).is_err());
-        wrong = usb.clone();
         wrong.serial = "not-an-alias".into();
         assert!(validate_binding(&s.0, &wrong).is_err());
         set(&s.0, request(1, "A", &["usb-A", "192.0.2.1:5555"], false)).unwrap();
@@ -790,12 +767,11 @@ mod tests {
             fs::read(scratch.0.join(HISTORY).join("1.json")).unwrap(),
             bytes
         );
-        crate::lease_domain::init(&scratch.0, &scratch.0.join("devices")).unwrap();
+
         assert_eq!(
             set(&scratch.0, request(4, "B", &["usb-A"], false)).unwrap()["revision"],
             5
         );
-        assert!(scratch.0.join("devlock.d").is_file());
     }
     #[test]
     fn registry_writes_refuse_bridge_queue_and_unknown_owner_without_cleanup() {

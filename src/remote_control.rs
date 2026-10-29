@@ -131,7 +131,6 @@ fn record(kind: &str, request_id: &str) -> String {
 struct Store {
     root: File,
     path: PathBuf,
-    shared: Option<crate::shared_access::Policy>,
 }
 impl Store {
     fn open(path: &Path) -> Result<Self> {
@@ -146,11 +145,7 @@ impl Store {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)?;
-        let shared = crate::shared_access::for_path(&path)?;
-        if let Some(policy) = shared {
-            policy.check(&root, 0o2770)?;
-        }
-        Ok(Self { root, path, shared })
+        Ok(Self { root, path })
     }
     fn name(name: &str) -> Result<CString> {
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
@@ -174,18 +169,6 @@ impl Store {
         let file = unsafe { File::from_raw_fd(fd) };
         if !file.metadata()?.is_file() {
             return Err(io_error("session record is not a regular file"));
-        }
-        if let Some(policy) = self.shared {
-            let mode = if flags & libc::O_RDWR != 0 {
-                0o660
-            } else {
-                0o640
-            };
-            if flags & libc::O_EXCL != 0 {
-                policy.apply_new(&file, mode)?;
-            } else {
-                policy.check(&file, mode)?;
-            }
         }
         Ok(file)
     }
@@ -379,16 +362,12 @@ fn scoped_result(mut value: Value, original: &Value) -> Result<Value> {
     attach_scope(&mut value, saved_binding(original)?.as_ref());
     Ok(value)
 }
-/// The snapshot is PF's existing authority. Known B activity and global FIFO
-/// intent do not change A's recorded scope; unidentifiable state still blocks.
+/// PF reports actual fd ownership. Known B activity does not change A's scope.
 fn scope_status<'a>(observed: &'a Value, binding: Option<&DeviceBinding>) -> Result<&'a str> {
-    if observed["storage"]["readiness"] != "ready" {
-        return Err(io_error("lease storage unavailable; remote release is unverified"));
-    }
     let status = if let Some(binding) = binding {
         let scopes = &observed["device_scopes"];
         if scopes["schema"] != "phonefarm/device-scopes@1"
-            || scopes["domain_id"] != binding.domain_id || scopes["unknown"] != false
+            || scopes["unknown"] != false
             || scopes["global"]["status"] != "clear" {
             return Err(io_error("remote device scope/global ownership is unavailable"));
         }
@@ -1376,7 +1355,7 @@ fn start(a: &Args) -> Result<()> {
     if !out.is_absolute() {
         return Err(error("invalid_request", "out must be absolute"));
     }
-    crate::shared_access::create_dir_all(out)?;
+    std::fs::create_dir_all(out)?;
     let store = Store::open(out)?;
     // Session directories are never reused, including an interrupted preparation.
     let owner = store.file("owner.lock", libc::O_CREAT | libc::O_EXCL | libc::O_RDWR)?;
@@ -1408,7 +1387,7 @@ fn start(a: &Args) -> Result<()> {
     let acquisition = if let Some(binding) = &a.binding {
         Lease::acquire_device(&storage, binding, "remote-control", timeout)
     } else {
-        storage.require_ready().and_then(|(root, legacy)| {
+        storage.roots().and_then(|(root, legacy)| {
             Lease::acquire(&root, &legacy, serial, "remote-control", timeout)
         })
     };
@@ -1526,7 +1505,7 @@ fn recover(a: &Args) -> Result<Value> {
     let mut lease = if let Some(binding) = &binding {
         Lease::acquire_device_recovery(&storage, binding, &store.path, crate::devlease::wait_timeout().map_err(io_error)?)
     } else {
-        let (root, legacy) = storage.require_ready().map_err(io_error)?;
+        let (root, legacy) = storage.roots().map_err(io_error)?;
         Lease::acquire_recovery(&root, &legacy, a.serial.as_deref().unwrap(), &store.path, crate::devlease::wait_timeout().map_err(io_error)?)
     }.map_err(|e| error("recovery_required", e))?;
     let proof = json!({"schema":"phonefarm/remote-control-recovery@1", "session_id":s["session_id"],
@@ -1829,13 +1808,13 @@ mod tests {
             } else {
                 fs::remove_file(store.path.join(STATE)).unwrap();
             }
-            let mut clear = json!({"status":"clear","bridge_held":false,"entries":[],"error":null,"storage":{"readiness":"ready"}});
+            let mut clear = json!({"status":"clear","bridge_held":false,"entries":[],"error":null,"storage":{"schema_version":1,"error":null}});
             if scoped {
                 clear["status"] = json!("held");
                 clear["bridge_held"] = json!(true);
                 clear["entries"] = json!([{"scope":"device","device_id":"B","state":"active"}]);
                 clear["device_scopes"] = json!({"schema":"phonefarm/device-scopes@1",
-                    "domain_id":binding.domain_id,"registry_revision":2,"unknown":false,
+                    "registry_revision":2,"unknown":false,
                     "queue_waiting":true,"global":{"status":"clear","error":null},
                     "devices":[{"device_id":"A","status":"clear","error":null},
                         {"device_id":"B","status":"held","error":null}]});

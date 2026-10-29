@@ -49,8 +49,6 @@ class DevlockBridgeTests(unittest.TestCase):
             return subprocess.run([str(BINARY), *args], env=env or self.env, cwd=self.root,
                                   capture_output=True, text=True, timeout=10)
 
-        initialized = pf("lease", "domain-init", "--participants-stopped", "--json")
-        self.assertEqual(initialized.returncode, 0, initialized.stderr)
         for revision, device in enumerate(("a", "b")):
             request = self.root / (device + ".json")
             request.write_text(json.dumps({"expected_revision": revision, "device": {
@@ -117,8 +115,6 @@ class DevlockBridgeTests(unittest.TestCase):
             return subprocess.run([str(BINARY), *args], env=env or self.env, cwd=self.root,
                                   capture_output=True, text=True, timeout=10)
 
-        initialized = pf("lease", "domain-init", "--participants-stopped", "--json")
-        self.assertEqual(initialized.returncode, 0, initialized.stderr)
         for revision, device in enumerate(("a", "b")):
             request = self.root / (device + ".json")
             request.write_text(json.dumps({"expected_revision": revision, "device": {
@@ -275,9 +271,6 @@ sys.exit(7)
         self.env.pop("DEVLOCK_WAIT_SECONDS", None)
 
     def test_registered_serial_leases_overlap(self):
-        initialized = subprocess.run([str(BINARY), "lease", "domain-init", "--participants-stopped", "--json"],
-                                     env=self.env, capture_output=True, text=True, timeout=5)
-        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
         for revision, device, serial in ((0, "A", "serial-a"), (1, "B", "serial-b")):
             request = self.root / f"register-{serial}.json"
             request.write_text(json.dumps({"expected_revision": revision,
@@ -308,9 +301,6 @@ sys.exit(7)
         self.assertEqual(unregistered.returncode, 0, unregistered.stderr)
 
     def test_typed_devlock_overlap_same_device_and_global_exclusion(self):
-        initialized = subprocess.run([str(BINARY), "lease", "domain-init", "--participants-stopped", "--json"],
-                                     env=self.env, capture_output=True, text=True, timeout=5)
-        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
         bindings = {}
         for revision, device, serial in ((0, "A", "serial-a"), (1, "B", "serial-b")):
             request = self.root / f"typed-{serial}.json"
@@ -374,6 +364,7 @@ sys.exit(7)
         self.assertIsNotNone(global_owner.poll(), "typed lane bypassed the global owner")
         global_owner.communicate(timeout=10)
 
+        (self.root / "v2/global").mkdir(parents=True)
         (self.root / "v2/global/devlock.queue").write_text("old-global-wait\n")
         result = subprocess.run(["zsh", str(DEVLOCK), "run", "typed", "--", "/usr/bin/true"],
                                 env=environment("serial-a", "0"), capture_output=True, text=True, timeout=5)

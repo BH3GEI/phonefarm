@@ -254,7 +254,7 @@ impl Session {
             &dir,
             ShellStderr::Separate,
         )?;
-        crate::shared_access::create_dir(&dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
         File::open(&dir)
             .and_then(|f| f.sync_all())
             .map_err(|e| e.to_string())?;
@@ -958,7 +958,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        crate::lease_domain::init(&root, &root.join("devices")).unwrap();
+        fs::create_dir(&root).unwrap();
         fs::write(root.join("device-registry.json"), json!({
             "schema":"phonefarm/device-registry@1","revision":1,"updated_at":now(),
             "identity_basis":"operator_declared","physical_identity_verified":false,"execution_scope":"global",
@@ -981,7 +981,6 @@ mod tests {
                 .env("ADB_BIN", "/usr/bin/false");
             for key in [
                 "DEVLOCK_INSTANCE_ID",
-                "PHONEFARM_SHARED_GID",
                 "PF_JOB_ID",
                 "PF_JOB_LEASE_DIR",
                 "PF_JOB_OUT",

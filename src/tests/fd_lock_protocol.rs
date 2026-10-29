@@ -20,16 +20,6 @@ impl Fixture {
         ));
         fs::create_dir_all(root.join("locks")).unwrap();
         let f = Self(root);
-        let init = f
-            .pf()
-            .args(["lease", "domain-init", "--participants-stopped", "--json"])
-            .output()
-            .unwrap();
-        assert!(
-            init.status.success(),
-            "{}",
-            String::from_utf8_lossy(&init.stderr)
-        );
         for (revision, id) in ["a", "b"].into_iter().enumerate() {
             let request = f.0.join("register.json");
             fs::write(&request, json!({"expected_revision": revision, "device": {
@@ -230,7 +220,7 @@ while not (root/'finish').exists(): time.sleep(.01)
 fn old_recovery_records_never_block_a_new_fd_owner() {
     let f = Fixture::new();
     let marker = f.0.join("locks/v2/global/devlock.d");
-    fs::create_dir(&marker).unwrap();
+    fs::create_dir_all(&marker).unwrap();
     let bytes = json!({"format": 1, "producer": "phonefarm", "serial": "fake-a", "recovery_required": true});
     fs::write(marker.join("phonefarm-lease.json"), bytes.to_string()).unwrap();
     fs::write(marker.join("owner"), "old owner since fixture\n").unwrap();
@@ -249,6 +239,17 @@ fn old_recovery_records_never_block_a_new_fd_owner() {
 
 #[test]
 fn adb_and_hdc_daemons_do_not_inherit_task_descriptors() {
+    // Other libtest threads can fork while this fixture writes its executable,
+    // briefly copying the write handle and causing ETXTBSY. Keep fixture creation
+    // and the actual daemon/fd assertions in their own process, without retries.
+    if std::env::var_os("PF_FD_DAEMON_TEST_CHILD").is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "adb_and_hdc_daemons_do_not_inherit_task_descriptors", "--nocapture"])
+            .env("PF_FD_DAEMON_TEST_CHILD", "1").output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr));
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     for name in ["adb", "hdc"] {
         let f = Fixture::new();

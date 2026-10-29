@@ -62,7 +62,7 @@ fn output_file(path: &Path) -> Result<File, String> {
         .mode(0o600)
         .open(path)
         .map_err(|e| format!("command output {}: {e}", path.display()))?;
-    crate::shared_access::created_file(path, &file, false).map_err(|e| e.to_string())?;
+
     Ok(file)
 }
 
@@ -156,7 +156,7 @@ fn supervise(
     timeout: Duration,
     worker: bool,
 ) -> Result<Output, String> {
-    crate::shared_access::create_dir_all(dir).map_err(|e| format!("command output directory: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("command output directory: {e}"))?;
     let stem = format!(
         "{}-{:06}",
         std::process::id(),

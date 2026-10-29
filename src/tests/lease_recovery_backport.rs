@@ -61,8 +61,7 @@ fn status_without_serial_leaves_missing_roots_missing() {
     let mut status = f.status();
     let storage = status.as_object_mut().unwrap().remove("storage").unwrap();
     assert_eq!(storage["schema_version"], 1);
-    assert_eq!(storage["mode"], "custom");
-    assert_eq!(storage["readiness"], "ready");
+    assert_eq!(storage["error"], Value::Null);
     assert_eq!(storage["devlock_dir"], json!(f.dir.canonicalize().unwrap().join("legacy")));
     assert_eq!(status["status"], "clear");
     assert_eq!(status["bridge_held"], false);
@@ -116,7 +115,7 @@ elif '/sys/class/thermal' in cmd: print('cpu-0 40000')
     let calls = std::fs::read(f.dir.join("fake-calls")).unwrap();
     assert_eq!(std::fs::read(marker).unwrap(), before);
 
-    // Invalid storage fails before the default 120-minute queue wait or any probe.
+    // Invalid storage fails before lock waiting or any probe.
     let start = std::time::Instant::now();
     let invalid = Command::new(env!("CARGO_BIN_EXE_phonefarm"))
         .env("DEVLOCK_DIR", "relative-invalid")

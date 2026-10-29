@@ -61,7 +61,7 @@ exit 0
             let output = self.cmd().args(args).output().unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         };
-        call(&["lease", "domain-init", "--participants-stopped", "--json"]);
+
         for (revision, serial) in serials.iter().enumerate() {
             let request = self.0.join("register.json");
             fs::write(&request, serde_json::json!({"expected_revision":revision, "device": {
@@ -363,7 +363,7 @@ fn bound_screen_samples_another_device_without_widening_its_worker() {
         serde_json::from_slice(&output.stdout).unwrap()
     };
     assert_eq!(json_call(&["screen", "capabilities", "--json"])["device_binding_v1"], true);
-    json_call(&["lease", "domain-init", "--participants-stopped", "--json"]);
+
     for (revision, id, aliases) in [(0, "A", vec!["screen-A"]), (1, "B", vec!["screen-B", "screen-B-wifi"])] {
         let request = f.0.join("register.json");
         fs::write(&request, serde_json::json!({"expected_revision":revision,

@@ -293,7 +293,7 @@ fn request(path: &Path) -> Result<(Request, Vec<u8>, Vec<u8>, Vec<u8>), String> 
     Ok((req, bytes, w, a))
 }
 fn roots() -> Result<(PathBuf, PathBuf, Option<Duration>), String> {
-    let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
+    let (root, legacy) = crate::lease_storage::resolve().roots()?;
     Ok((root, legacy, crate::devlease::wait_timeout()?))
 }
 fn snapshot_source(render: bool) -> String {

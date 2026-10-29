@@ -19,7 +19,7 @@ pub(crate) fn resolve_scope(
     storage: &crate::lease_storage::Storage,
     serial: &str,
 ) -> Result<Scope, String> {
-    let (_, root) = storage.require_ready()?;
+    let (_, root) = storage.roots()?;
     resolve_scope_at(&root, serial)
 }
 fn resolve_scope_at(farm: &Path, serial: &str) -> Result<Scope, String> {
@@ -28,16 +28,13 @@ fn resolve_scope_at(farm: &Path, serial: &str) -> Result<Scope, String> {
         .iter()
         .find(|device| device.aliases.iter().any(|alias| alias == serial))
         .map(|device| {
-            let domain = crate::lease_domain::inspect(farm)?;
-            Ok::<_, String>(DeviceBinding {
+            DeviceBinding {
                 schema: "phonefarm/device-binding@1".into(),
-                domain_id: domain.domain_id.unwrap_or_default(),
                 registry_revision: revision,
                 device_id: device.device_id.clone(),
                 serial: serial.into(),
-            })
-        })
-        .transpose()?;
+            }
+        });
     Ok(Scope::device(serial, binding))
 }
 
@@ -112,7 +109,7 @@ impl Lease {
         label: &str,
         timeout: impl Into<Option<Duration>>,
     ) -> Result<Self, String> {
-        let (root, farm) = storage.require_ready()?;
+        let (root, farm) = storage.roots()?;
         crate::device_registry::validate_binding(&farm, binding)?;
         Self::new(
             &root,
@@ -125,7 +122,7 @@ impl Lease {
     }
     pub fn target(requested: Option<&str>, label: &str) -> Result<Self, String> {
         let storage = crate::lease_storage::resolve();
-        let (root, farm) = storage.require_ready()?;
+        let (root, farm) = storage.roots()?;
         let binding = crate::device_registry::inherited_binding()?;
         let serial = crate::device::resolve_serial(
             requested.or(binding.as_ref().map(|b| b.serial.as_str())),
@@ -188,7 +185,7 @@ impl Lease {
         context: &Path,
         timeout: impl Into<Option<Duration>>,
     ) -> Result<Self, String> {
-        let (root, farm) = storage.require_ready()?;
+        let (root, farm) = storage.roots()?;
         let mut lease = Self::new(
             &root,
             &farm,
@@ -218,7 +215,7 @@ impl EphemeralObservation {
         storage: &crate::lease_storage::Storage,
         serial: &str,
     ) -> Result<Self, String> {
-        let (root, farm) = storage.require_ready()?;
+        let (root, farm) = storage.roots()?;
         let guard = Guard::acquire(
             &root,
             &farm,
@@ -240,8 +237,7 @@ impl EphemeralObservation {
 
 pub(crate) fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    let parent = path.parent().ok_or("marker parent missing")?;
-    crate::shared_access::check_existing(path, false).map_err(|e| e.to_string())?;
+    let parent = path.parent().ok_or("record parent missing")?;
     let tmp = parent.join(format!(
         ".lease-write-{}-{}",
         std::process::id(),
@@ -255,7 +251,7 @@ pub(crate) fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .write(true)
         .open(&tmp)
         .map_err(|e| e.to_string())?;
-    crate::shared_access::created_file(&tmp, &f, false).map_err(|e| e.to_string())?;
+
     f.write_all(bytes)
         .and_then(|_| f.sync_all())
         .map_err(|e| e.to_string())?;
@@ -272,55 +268,11 @@ pub(crate) fn storage_status(storage: &crate::lease_storage::Storage) -> Value {
 }
 
 pub fn run_lease(args: &[String]) -> i32 {
-    if args.first().map(String::as_str) == Some("domain-init") {
-        let result =
-            if args.len() == 3 && args[1] == "--participants-stopped" && args[2] == "--json" {
-                crate::lease_storage::resolve()
-                    .upgrade_domain()
-                    .map_err(|error| ("unavailable", error))
-            } else {
-                Err((
-                    "invalid_request",
-                    "phonefarm lease domain-init --participants-stopped --json".into(),
-                ))
-            };
-        return match result {
-            Ok(storage) => {
-                println!("{}", storage_status(&storage));
-                0
-            }
-            Err((code, error)) => {
-                println!(
-                    "{}",
-                    json!({"schema":"phonefarm/lease-domain-error@1","code":code,"error":error})
-                );
-                2
-            }
-        };
-    }
     if matches!(
         args.first().map(String::as_str),
         Some("devices" | "devices-set" | "resolve")
     ) {
         return crate::device_registry::run_cli(args);
-    }
-    if args.first().map(String::as_str) == Some("init") {
-        if args.len() != 2 || args[1] != "--participants-stopped" {
-            eprintln!(
-                "phonefarm lease init --participants-stopped (stop every old participant first)"
-            );
-            return 2;
-        }
-        return match crate::lease_storage::resolve().init() {
-            Ok(storage) => {
-                println!("{}", storage_status(&storage));
-                0
-            }
-            Err(e) => {
-                eprintln!("lease initialization refused: {e}");
-                2
-            }
-        };
     }
     if args.first().map(String::as_str) == Some("status") {
         if args.len() != 2 || args[1] != "--json" {
@@ -358,7 +310,7 @@ pub fn run_lease(args: &[String]) -> i32 {
     };
     let result: Result<i32, String> = (|| {
         let storage = crate::lease_storage::resolve();
-        let (root, farm) = storage.require_ready()?;
+        let (root, farm) = storage.roots()?;
         let binding = crate::device_registry::inherited_binding()?;
         let serial = serial
             .as_deref()

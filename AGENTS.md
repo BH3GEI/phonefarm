@@ -287,13 +287,10 @@ typed off/status和历史/离线分析保留；shell off改为同一typed入口�
    是否完成本地构建与代码同步。性能测量必须上真机，模拟器的帧时与功耗没有意义。
 4. **设备纪律**（性能测量相关）：
    - 同一个候选的 A/B 两臂必须落在**同一台**手机上。跨机比较会把机间差异算进改动的效果里。
-   - 设备是共享资源，跑之前用设备锁 `devlock` 抢占（拿锁 → 后台心跳续期 → 跑完释放）。
-     被别人占着时排队，不要绕过去硬跑——两个任务同时压一台手机，两边的数都作废。
-     锁脚本在 `tools/devlock`（安装：`ln -sf "$PWD/tools/devlock" ~/.local/bin/devlock`）。
-     碰设备的子命令自己拿锁（`src/devlock.rs`，通用参数 `--lock-label` / `--lock-wait` / `--no-devlock`，
-     label 缺省取 `$DEVLOCK_LABEL` 再缺省 `phonefarm`），不必在外面包 `devlock run`；
-     只有继承实例与实际holder进程树核验通过才借用；label仅显示和排队。`devlock run`会传同一实例。
-     lead 预排了队列时 label 用队列里的名字。
+   - 设备入口共用 fd 锁：同机互斥，不同手机并行；默认等待到拿锁或被取消。
+     `tools/devlock run` 可包住多阶段实验，PF 子命令会借用继承的实际 fd。
+     `--lock-label` 只作显示，`--lock-wait` 可显式指定等待上限；Python 子进程须传递 `PF_LOCK_FDS`。
+     任务结束关闭最后一个 fd 后立即释放，恢复用 reset 和原 session／adb。
    - 影响稳态的环境条件（风扇开关、冷机阈值、供电状态）逐轮记进证据。这些不是无关细节，
      条件不同的两批数据不能混在一起比。
    - 规划中的设备构成：安卓旗舰机（一台跑测试、一台留给调试，要并行跑多条线得是同型号多台）、
@@ -389,17 +386,10 @@ tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campa
 - 主 Agent 聚焦系统结构、协议与整合；前端等独立模块可交具体 subagent，划分文件所有权。
 - 每批记录已做、未做、测试层级和恢复义务；模拟通过不等于真机或全流程已可用。
 
-## 外层队列实例（源码与隔离宿主已验，未部署）
+## 任务锁与恢复
 
-显式已登记设备的灰层会话可用 `lease resolve --serial S --json` 冻结绑定，再以
-`gray-layer session --device-binding JSON` 使用设备范围；同设备别名共锁，其他设备可并行。
-省略绑定的旧入口仍为全域。恢复继承原会话绑定，不能换设备；局部完成须按对应范围核查释放。
-首次使用会永久创建 v2/devices，使旧 v2 二进制持续拒绝；不能删目录来降级。
-Node、网页与 CLI 共用同一冻结请求和范围事实。仅源码与隔离宿主替身验证，未部署/真机验收；
-合同见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/DEVICE-LANES.md 。
+所有设备入口共用 fd 锁：单机 device EX + farm SH，全场 farm EX。同设备别名归一到 device_id，普通显式 serial 自动选择单设备范围；tools/devlock run 和 GOL 使用同一 PF 实现。Python 子进程须 pass_fds，adb/hdc server 不能继承任务 fd。
 
-`tools/devlock` 与 PF/GOL 必须一起升级。队列owner用phonefarm/devlock-owner@1持久化实例与宿主进程/启动身份；继承ID校验失败不创建新实例。nested强lease显式关联outer_instance_id，父holder退出不阻断已有强owner有界恢复。`devlock reconcile INSTANCE --participants-stopped --confirm-device-idle`仅退休已退出且无nested的外层元数据，不能代替设备恢复。旧/坏/缺失记录不按TTL自动删除。实现与验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/LEASE-IDENTITY.md 。
+锁只由最后一个 fd 关闭释放，owner JSON 仅作显示。cancel/reset 停止任务剩余进程组，设备恢复使用原 session 或 adb；不得删除锁文件来解锁，不留持久恢复屏障。原实验结果、恢复上下文与真假失败事实保留。
 
-强lease另存宿主boot与owner/child启动身份；旧宿主boot仅证明旧本地进程结束，同boot PID复用仍须检查原进程组。pending与设备恢复屏障不因宿主身份变化释放；旧记录全缺身份时保守兼容，部分缺失拒绝。CLI/API和网页呈现host_process事实，不能据此宣称设备恢复。实现与隔离宿主验证范围见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/STRONG-LEASE-IDENTITY.md 。
-
-跨UID会话仅在管理员显式配置PHONEFARM_SHARED_GID及输出/持久state/lease根时使用共享权限；参与进程须已在该组。新目录2770、协调锁/追加日志660、原子记录/原件640，发布前设置；既有私有状态拒绝，禁止在线递归chmod代替迁移。默认CLI权限保持原样；有限正常停止链不证明任意producer、全局供电恢复或worker失联恢复，完整范围见JOB-CONTAINMENT合同。
+锁路径来自 PHONEFARM_STATE_DIR、DEVLOCK_DIR、PHONEFARM_LEASE_DIR，不再需要 init/domain-init、layout fence 或共享 GID。部署协议切换须先清空旧任务；不混跑新旧参与者。宿主替身验证不代表设备恢复已通过真机验收。

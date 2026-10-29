@@ -94,13 +94,9 @@ fn number(v: &Value, key: &str) -> Result<u64> {
 struct Store {
     root: File,
     path: PathBuf,
-    shared: Option<crate::shared_access::Policy>,
 }
 impl Store {
     fn open(path: &Path) -> Result<Self> {
-        Self::open_source(path, false)
-    }
-    fn open_source(path: &Path, recovery: bool) -> Result<Self> {
         if fs::symlink_metadata(path)?.file_type().is_symlink() {
             return Err(err("invalid_request", "out must not be a symlink"));
         }
@@ -109,21 +105,7 @@ impl Store {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)?;
-        let mut shared = crate::shared_access::Policy::from_env()?;
-        if recovery && shared.is_some() {
-            if crate::shared_access::is_private_directory(&root)? {
-                shared = None;
-            } else if crate::shared_access::for_path(&path)?.is_none() {
-                return Err(err(
-                    "invalid_request",
-                    "shared recovery source must be declared in PF_RECOVERY_OUT",
-                ));
-            }
-        }
-        if let Some(policy) = shared {
-            policy.check(&root, 0o2770)?;
-        }
-        Ok(Self { root, path, shared })
+        Ok(Self { root, path })
     }
     fn parent(&self, rel: &str) -> Result<(File, CString)> {
         let mut parts = Vec::new();
@@ -157,9 +139,6 @@ impl Store {
                 return Err(std::io::Error::last_os_error().into());
             }
             dir = unsafe { File::from_raw_fd(fd) };
-            if let Some(policy) = self.shared {
-                policy.check(&dir, 0o2770)?;
-            }
         }
         Ok((dir, name))
     }
@@ -182,18 +161,6 @@ impl Store {
                 "invalid_request",
                 "control record is not a regular file",
             ));
-        }
-        if let Some(policy) = self.shared {
-            let mode = if flags & libc::O_RDWR != 0 {
-                0o660
-            } else {
-                0o640
-            };
-            if flags & libc::O_EXCL != 0 {
-                policy.apply_new(&file, mode)?;
-            } else {
-                policy.check(&file, mode)?;
-            }
         }
         Ok(file)
     }
@@ -228,13 +195,6 @@ impl Store {
         self.write_bytes(rel, &bytes, replace)
     }
     fn write_bytes(&self, rel: &str, bytes: &[u8], replace: bool) -> Result<()> {
-        if self.shared.is_some() {
-            match self.open_file(rel, libc::O_RDONLY) {
-                Ok(_) => {}
-                Err(e) if e.code == "not_found" => {}
-                Err(e) => return Err(e),
-            }
-        }
         let (dir, name) = self.parent(rel)?;
         let tmp = CString::new(format!(
             ".control-{}-{}",
@@ -255,9 +215,6 @@ impl Store {
         }
         let mut file = unsafe { File::from_raw_fd(fd) };
         let saved = (|| -> Result<()> {
-            if let Some(policy) = self.shared {
-                policy.apply_new(&file, 0o640)?;
-            }
             file.write_all(bytes)?;
             file.sync_all()?;
             let code = unsafe {
@@ -293,21 +250,6 @@ impl Store {
         let (dir, name) = self.parent(rel)?;
         if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
             return Err(std::io::Error::last_os_error().into());
-        }
-        if let Some(policy) = self.shared {
-            let fd = unsafe {
-                libc::openat(
-                    dir.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-            let child = unsafe { File::from_raw_fd(fd) };
-            policy.apply_new(&child, 0o2770)?;
-            child.sync_all()?;
         }
         dir.sync_all()?;
         Ok(())
@@ -1094,7 +1036,7 @@ fn start(a: &Args) -> Result<(Value, i32)> {
     crate::gray_eval_session::admit_control_power(a.serial.as_ref().unwrap(), &a.power_policy)
         .map_err(device)?;
     let out = a.out.as_ref().unwrap();
-    crate::shared_access::create_dir_all(out)?;
+    std::fs::create_dir_all(out)?;
     let store = Store::open(out)?;
     let job = job_identity(&store)?;
     if store.optional(DESCRIPTOR)?.is_some() {
@@ -1899,7 +1841,7 @@ fn recover(a: &Args) -> Result<(Value, i32)> {
     let out = session
         .parent()
         .ok_or_else(|| err("invalid_request", "session has no out parent"))?;
-    let store = Store::open_source(out, true)?;
+    let store = Store::open(out)?;
     let mut d = descriptor(&store)?;
     if session != store.path.join(string(&d, "session_path")?)
         || d["serial"] != a.serial.as_deref().unwrap()

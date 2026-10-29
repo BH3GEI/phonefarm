@@ -64,7 +64,7 @@ impl Session {
         let dir = dir.canonicalize().map_err(|e| e.to_string())?;
         let state = read_state(&dir)?;
         validate(&state, serial)?;
-        let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
+        let (root, legacy) = crate::lease_storage::resolve().roots()?;
         let lease = Lease::acquire_recovery(&root, &legacy, serial, &dir, crate::devlease::wait_timeout()?)?;
         Ok(Self {
             lease: RefCell::new(lease),

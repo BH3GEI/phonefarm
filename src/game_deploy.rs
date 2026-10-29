@@ -462,7 +462,7 @@ pub(crate) fn acquire_context(
             crate::devlease::wait_timeout()?,
         )?
     } else {
-        let (device, legacy) = storage.require_ready()?;
+        let (device, legacy) = storage.roots()?;
         crate::devlease::Lease::acquire_recovery(
             &device,
             &legacy,
@@ -500,7 +500,7 @@ pub(crate) fn save_report(out: &Path, report: &Value) -> Result<(), String> {
     )
 }
 fn output(out: &Path) -> Result<PathBuf, String> {
-    crate::shared_access::create_dir_all(out).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let out = out.canonicalize().map_err(|e| e.to_string())?;
     for name in ["deployment.json", "game-deploy"] {
         match std::fs::symlink_metadata(out.join(name)) {
