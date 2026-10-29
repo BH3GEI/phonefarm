@@ -109,6 +109,67 @@ impl Drop for Group {
 }
 
 #[test]
+fn another_actor_can_acquire_immediately_after_task_end_but_not_during_task() {
+    let f = Fixture::new();
+    let mut owner = Group(
+        f.pf()
+            .env("PF_JOB_ACTOR", "actor-a")
+            .args([
+                "lease",
+                "--serial",
+                "fake-a",
+                "--",
+                "/bin/sh",
+                "-c",
+                "touch \"$1/actor-ready\"; while [ ! -f \"$1/actor-finish\" ]; do sleep .02; done",
+                "holder",
+            ])
+            .arg(&f.0)
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+    );
+    f.until("actor-ready");
+    let take = || {
+        f.pf()
+            .env("PF_JOB_ACTOR", "actor-b")
+            .args([
+                "lease",
+                "--serial",
+                "wifi-a",
+                "--timeout-ms",
+                "0",
+                "--",
+                "/usr/bin/true",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(
+        !take().status.success(),
+        "another actor entered during the task"
+    );
+    fs::write(f.0.join("actor-finish"), b"").unwrap();
+    assert!(owner.0.wait().unwrap().success());
+    let acquired = take();
+    assert!(
+        acquired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&acquired.stderr)
+    );
+    // Existing cooldown files are historical data, not admission state.
+    let lock = fs::read_dir(f.0.join("devices/by-device-id"))
+        .unwrap()
+        .map(|item| item.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "lock"))
+        .unwrap();
+    let old = lock.with_extension("cooldown.json");
+    fs::write(&old, b"old cooldown evidence").unwrap();
+    assert!(take().status.success());
+    assert_eq!(fs::read(&old).unwrap(), b"old cooldown evidence");
+}
+
+#[test]
 fn killing_owner_keeps_child_fd_exclusive_until_the_child_exits() {
     let f = Fixture::new();
     let script = r#"import json,os,sys,time

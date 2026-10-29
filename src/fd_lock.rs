@@ -1,7 +1,7 @@
 //! One kernel lock protocol. Owner JSON is display data, never admission state.
 use crate::device_registry::DeviceBinding;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::os::fd::{AsRawFd, RawFd};
@@ -94,7 +94,6 @@ pub(crate) struct Guard {
     pub scope: Scope,
     files: Vec<File>,
     pub fds: Vec<RawFd>,
-    cooldown: Option<PathBuf>,
     label: String,
     farm: PathBuf,
 }
@@ -118,7 +117,6 @@ impl Guard {
                 },
                 files: Vec::new(),
                 fds,
-                cooldown: None,
                 label: label.into(),
                 farm: farm_root.into(),
             });
@@ -126,15 +124,6 @@ impl Guard {
         crate::shared_access::create_dir_all(farm_root).map_err(|e| e.to_string())?;
         let deadline = timeout.and_then(|duration| Instant::now().checked_add(duration));
         let mut files = Vec::new();
-        let cooldown = requested
-            .binding
-            .as_ref()
-            .map(|binding| device_path(device_root, &binding.device_id));
-        if let Some(path) = &cooldown {
-            if let Some(reason) = cooldown_active(path, label)? {
-                return Err(reason);
-            }
-        }
         if let Some(key) = &requested.key {
             let path = device_path(device_root, key);
             crate::shared_access::create_dir_all(path.parent().unwrap())
@@ -160,7 +149,6 @@ impl Guard {
             scope: requested,
             files,
             fds,
-            cooldown,
             label: label.into(),
             farm: farm_root.into(),
         })
@@ -205,14 +193,7 @@ impl Guard {
         !self.files.is_empty()
     }
 }
-impl Drop for Guard {
-    fn drop(&mut self) {
-        if let Some(path) = &self.cooldown {
-            write_cooldown(path, &self.label);
-        }
-        // File::drop closes our copies. LOCK_UN would unlock copies still held by children.
-    }
-}
+// Dropping files closes our copies. LOCK_UN would unlock copies still held by children.
 
 /// Raw shell/Python tasks also use the transport boundary. The two symlinks are
 /// launchers, not ownership records; they do not participate in acquisition.
@@ -413,43 +394,4 @@ pub(crate) fn held(path: &Path, shared: bool) -> Result<bool, String> {
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
         Err(error) => Err(format!("{}: {error}", path.display())),
     }
-}
-
-fn write_cooldown(device_path: &Path, label: &str) {
-    let agent = match std::env::var("PF_JOB_ACTOR") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => return, // 未声明 agent（原生工作流）：不写冷却
-    };
-    let label = agent.as_str();
-    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs()).unwrap_or(0);
-    let payload = serde_json::json!({
-        "schema": "phonefarm/device-cooldown@1",
-        "agent": label,
-        "at": at,
-    });
-    let _ = fs::write(device_path.with_extension("cooldown.json"), serde_json::to_string(&payload).unwrap_or_default());
-}
-
-/// AGENT-04：acquire 前检查冷却——同 agent 跳过，其他 agent 30min 内拒绝。
-fn cooldown_active(device_path: &Path, label: &str) -> Result<Option<String>, String> {
-    let agent = match std::env::var("PF_JOB_ACTOR") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => return Ok(None), // 未声明 agent：不检查
-    };
-    let label = agent.as_str();
-    let path = device_path.with_extension("cooldown.json");
-    if !path.exists() { return Ok(None); }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("cooldown read: {e}"))?;
-    let value: Value = serde_json::from_str(&raw).map_err(|e| format!("cooldown parse: {e}"))?;
-    let agent = value["agent"].as_str().unwrap_or("");
-    let at = value["at"].as_u64().unwrap_or(0);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs()).unwrap_or(0);
-    if agent == label || now.saturating_sub(at) >= 1800 {
-        let _ = fs::remove_file(&path); // 过期或同 agent：清除
-        return Ok(None);
-    }
-    Ok(Some(format!("设备 {agent} 刚释放，{agent} 有 30 分钟优先权（还剩 {} 分钟）",
-        (1800 - (now - at)) / 60)))
 }
