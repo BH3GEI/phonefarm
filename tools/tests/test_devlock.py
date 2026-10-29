@@ -38,6 +38,75 @@ class DevlockBridgeTests(unittest.TestCase):
         os.utime(owner, (1, 1))
         return owner
 
+    def test_registered_target_reaches_transport_while_another_device_is_held(self):
+        """E9: the real outer gate and Lease::target must use the same lane."""
+        self.env.update(DEVLOCK_BIN=str(DEVLOCK), PHONEFARM_LEASE_TIMEOUT_MS="100",
+                        DEVLOCK_WAIT_SECONDS="1")
+
+        def pf(*args, env=None):
+            return subprocess.run([str(BINARY), *args], env=env or self.env, cwd=self.root,
+                                  capture_output=True, text=True, timeout=10)
+
+        initialized = pf("lease", "domain-init", "--participants-stopped", "--json")
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        for revision, device in enumerate(("a", "b")):
+            request = self.root / (device + ".json")
+            request.write_text(json.dumps({"expected_revision": revision, "device": {
+                "device_id": device, "label": device, "aliases": ["fake-" + device], "enabled": True}}))
+            result = pf("lease", "devices-set", "--request", str(request), "--json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+        binding = pf("lease", "resolve", "--serial", "fake-a", "--json").stdout.strip()
+        adb_log = self.root / "adb-calls"
+        adb = self.root / "fake-adb"
+        adb.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$FAKE_ADB_LOG"\nexit 1\n')
+        adb.chmod(0o755)
+        self.env.update(ADB_BIN=str(adb), FAKE_ADB_LOG=str(adb_log))
+        request = self.root / "eval.json"
+        request.write_text(json.dumps({"version": 2, "kind": "sysparam", "candidate_id": "c",
+            "serial": "fake-a", "package": "refbench", "payload": {"params": {}},
+            "workload": {"carrier": "game_replay", "script": None, "seconds": 30},
+            "conditions": {"cool_c": 42, "require_root": True, "require_discharging": True,
+                           "charging_suspend": {"enabled": True, "node": None}, "inject": False},
+            "protocol": {"rounds": 6, "alternating": True, "p_threshold": 0.05}}))
+        ready, finish = self.root / "ready-b", self.root / "finish-b"
+        holder = subprocess.Popen([str(BINARY), "lease", "--serial", "fake-b", "--timeout-ms", "500",
+            "--", sys.executable, "-c",
+            "from pathlib import Path; import sys,time\nPath(sys.argv[1]).touch()\n"
+            "while not Path(sys.argv[2]).exists(): time.sleep(.01)\n", str(ready), str(finish)],
+            cwd=self.root, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and holder.poll() is None and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(ready.exists(), "device B did not acquire its real lease")
+            for wrapper in ("typed", "shell", "direct", "request"):
+                for command in ("perf", "eval"):
+                    if wrapper == "request" and command != "eval":
+                        continue
+                    with self.subTest(wrapper=wrapper, command=command):
+                        adb_log.write_text("")
+                        args = (["perf", "--serial", "fake-a", "--rounds", "1", "--json"] if command == "perf"
+                                else ["eval", "--serial", "fake-a", "--request", str(request),
+                                      "--out", str(self.root / ("out-" + wrapper)), "--json"])
+                        args += ["--lock-wait", "1s"]
+                        env = dict(self.env)
+                        if wrapper in ("typed", "shell"):
+                            env["PF_JOB_DEVICE_BINDING"] = binding
+                        if wrapper == "request":
+                            args.remove("--serial")
+                            args.remove("fake-a")
+                        argv = [str(BINARY), *args]
+                        if wrapper == "shell":
+                            argv = ["zsh", str(DEVLOCK), "run", "shell-a", "--", *argv]
+                        result = subprocess.run(argv, env=env, cwd=self.root, capture_output=True,
+                                                text=True, timeout=10)
+                        self.assertTrue(adb_log.read_text(), result.stdout + result.stderr)
+                        self.assertIsNone(holder.poll(), "A only reached transport after B exited")
+        finally:
+            finish.touch()
+            stdout, stderr = holder.communicate(timeout=5)
+        self.assertEqual(holder.returncode, 0, stdout + stderr)
+
     def test_default_follows_selected_resolver_without_read_side_creation_or_fallback(self):
         self.env.pop("DEVLOCK_DIR")
         target = self.root / "selected persistent locks"

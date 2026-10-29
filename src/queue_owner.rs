@@ -581,11 +581,7 @@ fn reconcile(root: &Path, instance: &str) -> Result<Value, String> {
 }
 
 fn env_binding() -> Result<Option<DeviceBinding>, String> {
-    match std::env::var("PF_JOB_DEVICE_BINDING") {
-        Ok(value) => Ok(Some(crate::device_registry::parse_binding(&value)?)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(_) => Err("PF_JOB_DEVICE_BINDING is not UTF-8".into()),
-    }
+    crate::device_registry::inherited_binding()
 }
 
 pub(crate) fn run(args: &[String]) -> i32 {

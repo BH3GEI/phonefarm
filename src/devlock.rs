@@ -297,6 +297,29 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
         std::env::set_var("DEVLOCK_LABEL", &label);
         return Gate::Proceed;
     }
+    // Freeze one registered device for both the outer queue and Lease::target.
+    // Existing global parents and legacy game recovery retain their original scope.
+    let recorded_scope = subcommand == "game-deploy"
+        || subcommand == "gray-layer" && args.get(1).is_some_and(|arg| arg == "session");
+    if std::env::var_os("PF_JOB_DEVICE_BINDING").is_none() && !recorded_scope {
+        let mut serials: Vec<String> = args.iter().enumerate().filter_map(|(i, arg)| {
+            if arg == "--serial" { args.get(i + 1).map(String::as_str) }
+            else { arg.strip_prefix("--serial=") }
+        }).map(str::to_owned).collect();
+        if serials.is_empty() && matches!(subcommand.as_str(), "eval" | "gpu-op") {
+            let request = args.iter().position(|arg| arg == "--request")
+                .and_then(|i| args.get(i + 1)).and_then(|path| std::fs::read(path).ok())
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            if let Some(serial) = request.as_ref().and_then(|value| value["serial"].as_str()) {
+                serials.push(serial.into());
+            }
+        }
+        if let Some(serial) = serials.first().filter(|serial| serials.iter().all(|other| other == *serial)) {
+            if let Ok(binding) = crate::device_registry::resolve_binding(&crate::lease_storage::resolve(), serial) {
+                std::env::set_var("PF_JOB_DEVICE_BINDING", serde_json::to_string(&binding).expect("device binding"));
+            }
+        }
+    }
     let instance = match acquire(&script, &label, opts.wait) {
         Ok(instance) => instance,
         Err(e) => return e.reject(&subcommand),

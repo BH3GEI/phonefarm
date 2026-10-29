@@ -1241,7 +1241,8 @@ impl Lease {
 
     pub fn target(requested: Option<&str>, label: &str) -> Result<Self, String> {
         let (root, legacy) = crate::lease_storage::resolve().require_ready()?;
-        let serial = crate::device::resolve_serial(requested)
+        let binding = crate::device_registry::inherited_binding()?;
+        let serial = crate::device::resolve_serial(requested.or(binding.as_ref().map(|b| b.serial.as_str())))
             .ok_or("cannot resolve exactly one device; pass --serial (lease not acquired)")?;
         let ms = std::env::var("PHONEFARM_LEASE_TIMEOUT_MS")
             .ok()
@@ -1249,7 +1250,7 @@ impl Lease {
             .transpose()
             .map_err(|_| "bad PHONEFARM_LEASE_TIMEOUT_MS")?
             .unwrap_or(600_000);
-        Self::acquire(&root, &legacy, &serial, label, Duration::from_millis(ms))
+        Self::acquire_inner(&root, &legacy, &serial, label, Duration::from_millis(ms), false, binding.as_ref())
     }
 }
 impl Drop for Lease {
@@ -1601,15 +1602,20 @@ pub fn run_lease(args: &[String]) -> i32 {
     if std::env::var_os("DEVLOCK_INSTANCE_ID").is_none() && !typed {
         eprintln!("这个节点还没有设备 lane；lease 占的是全农场的锁");
     }
-    let mut _lease = if std::env::var_os("DEVLOCK_INSTANCE_ID").is_none() && typed {
-        let binding = match crate::device_registry::resolve_binding(&crate::lease_storage::resolve(), &serial) {
+    let inherited = match crate::device_registry::inherited_binding() {
+        Ok(value) => value,
+        Err(error) => { eprintln!("{error}"); return 2; }
+    };
+    let mut _lease = if inherited.is_some() || std::env::var_os("DEVLOCK_INSTANCE_ID").is_none() && typed {
+        let binding = match inherited.map(Ok).unwrap_or_else(||
+            crate::device_registry::resolve_binding(&crate::lease_storage::resolve(), &serial)) {
             Ok(value) => value,
             Err(e) => {
                 eprintln!("{e}");
                 return 2;
             }
         };
-        match Lease::acquire_device(&crate::lease_storage::resolve(), &binding, "lease", timeout) {
+        match Lease::acquire_inner(&root, &legacy, &serial, "lease", timeout, false, Some(&binding)) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("{e}");

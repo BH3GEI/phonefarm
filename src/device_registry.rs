@@ -269,6 +269,14 @@ pub(crate) fn parse_binding(raw: &str) -> std::result::Result<DeviceBinding, Str
     valid_binding(&binding)?;
     Ok(binding)
 }
+pub(crate) fn inherited_binding() -> std::result::Result<Option<DeviceBinding>, String> {
+    match std::env::var("PF_JOB_DEVICE_BINDING") {
+        Ok(value) => Ok(Some(parse_binding(&value)?)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err("PF_JOB_DEVICE_BINDING is not UTF-8".into()),
+    }
+}
+
 pub(crate) fn resolve_binding(
     storage: &crate::lease_storage::Storage,
     serial: &str,

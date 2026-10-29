@@ -167,7 +167,7 @@ pub(super) fn snapshot(root: &Path, paths: &Paths, entries: &mut Vec<Value>,
                     }
                 }
             };
-            devices.push(json!({"device_id":device.device_id,"status":state,"error":error}));
+            devices.push(json!({"device_id":device.device_id,"aliases":device.aliases,"status":state,"error":error}));
         }
         if lanes.iter().any(|lane| !registered.iter().any(|d| d.device_id == lane.binding.device_id)) {
             errors.push("recorded device lane is absent from the current registry".into());
