@@ -22,6 +22,10 @@ pub(crate) struct Scope {
     pub key: Option<String>,
     pub serial: Option<String>,
     pub binding: Option<DeviceBinding>,
+    // Only serial-derived scopes follow the registry during acquisition.
+    // An explicitly saved binding keeps its original device identity.
+    #[serde(skip)]
+    pub resolve_alias: bool,
 }
 impl Scope {
     pub fn global() -> Self {
@@ -29,6 +33,7 @@ impl Scope {
             key: None,
             serial: None,
             binding: None,
+            resolve_alias: false,
         }
     }
     pub fn device(serial: &str, binding: Option<DeviceBinding>) -> Self {
@@ -41,6 +46,7 @@ impl Scope {
             ),
             serial: Some(serial.into()),
             binding,
+            resolve_alias: false,
         }
     }
     fn contains(&self, other: &Self) -> bool {
@@ -106,7 +112,7 @@ impl Guard {
     pub fn acquire(
         device_root: &Path,
         farm_root: &Path,
-        requested: Scope,
+        mut requested: Scope,
         label: &str,
         timeout: Option<Duration>,
     ) -> Result<Self, String> {
@@ -128,15 +134,28 @@ impl Guard {
         }
         std::fs::create_dir_all(farm_root).map_err(|e| e.to_string())?;
         let deadline = timeout.and_then(|duration| Instant::now().checked_add(duration));
-        let mut files = Vec::new();
-        if let Some(key) = &requested.key {
-            let path = device_path(device_root, key);
-            std::fs::create_dir_all(path.parent().unwrap())
-                .map_err(|e| e.to_string())?;
-            files.push(acquire_file(&path, false, deadline)?);
-        }
         let farm = farm_root.join("phonefarm-bridge.lock");
-        files.push(acquire_file(&farm, requested.key.is_some(), deadline)?);
+        let files = loop {
+            let mut files = Vec::new();
+            if let Some(key) = &requested.key {
+                let path = device_path(device_root, key);
+                std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+                files.push(acquire_file(&path, false, deadline)?);
+            }
+            files.push(acquire_file(&farm, requested.key.is_some(), deadline)?);
+            if requested.resolve_alias {
+                let current = crate::devlease::resolve_scope_at(farm_root, requested.serial.as_deref().unwrap())?;
+                let changed = current.key != requested.key;
+                requested = current;
+                if changed {
+                    // A registrar held farm EX between resolution and farm SH.
+                    // Close both old fds before retrying the canonical key.
+                    drop(files);
+                    continue;
+                }
+            }
+            break files;
+        };
         let info_path = requested
             .key
             .as_ref()

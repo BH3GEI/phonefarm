@@ -22,7 +22,7 @@ pub(crate) fn resolve_scope(
     let (_, root) = storage.roots()?;
     resolve_scope_at(&root, serial)
 }
-fn resolve_scope_at(farm: &Path, serial: &str) -> Result<Scope, String> {
+pub(crate) fn resolve_scope_at(farm: &Path, serial: &str) -> Result<Scope, String> {
     let (revision, devices) = crate::device_registry::snapshot(farm)?;
     let binding = devices
         .iter()
@@ -35,7 +35,9 @@ fn resolve_scope_at(farm: &Path, serial: &str) -> Result<Scope, String> {
                 serial: serial.into(),
             }
         });
-    Ok(Scope::device(serial, binding))
+    let mut scope = Scope::device(serial, binding);
+    scope.resolve_alias = true;
+    Ok(scope)
 }
 
 pub(crate) fn wait_timeout() -> Result<Option<Duration>, String> {

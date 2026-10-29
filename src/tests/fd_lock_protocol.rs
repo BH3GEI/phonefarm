@@ -1,7 +1,9 @@
 //! Real host processes and kernel locks; transport and state roots are isolated.
 #![cfg(unix)]
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -96,6 +98,53 @@ impl Drop for Group {
         }
         let _ = self.0.wait();
     }
+}
+
+#[test]
+fn first_registration_between_device_and_farm_locks_rekeys_the_waiter() {
+    let f = Fixture::new();
+    let farm = fs::OpenOptions::new().read(true).write(true)
+        .open(f.0.join("locks/phonefarm-bridge.lock")).unwrap();
+    farm.lock().unwrap();
+    let mut waiter = Group(f.pf().args(["lease", "--serial", "raw-new", "--", "/bin/sh", "-c",
+        "touch \"$1/rekey-ready\"; while [ ! -f \"$1/rekey-finish\" ]; do sleep .02; done", "holder"])
+        .arg(&f.0).process_group(0).spawn().unwrap());
+    let raw_path = f.0.join("devices/by-device-id")
+        .join(format!("{:x}.lock", Sha256::digest(b"raw-new")));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(raw) = fs::OpenOptions::new().read(true).write(true).open(&raw_path) {
+            if matches!(raw.try_lock(), Err(std::fs::TryLockError::WouldBlock)) { break; }
+        }
+        assert!(Instant::now() < deadline, "waiter never acquired its initial raw serial key");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let request = f.0.join("register-new.json");
+    fs::write(&request, json!({"expected_revision":2,"device":{
+        "device_id":"new-device","label":"new","aliases":["raw-new","wifi-new"],"enabled":true
+    }}).to_string()).unwrap();
+    // The registrar borrows this real farm EX, so registration deterministically
+    // commits while the first task is parked between device EX and farm SH.
+    let fd = farm.as_raw_fd();
+    let mut registrar = f.pf();
+    registrar.args(["lease", "devices-set", "--request"]).arg(request).arg("--json")
+        .env("PF_LOCK_FDS", fd.to_string())
+        .env("PF_LOCK_SCOPE", json!({"key":null,"serial":null,"binding":null}).to_string());
+    unsafe { registrar.pre_exec(move || {
+        if libc::fcntl(fd, libc::F_SETFD, 0) < 0 { return Err(std::io::Error::last_os_error()); }
+        Ok(())
+    }); }
+    let update = registrar.output().unwrap();
+    assert!(update.status.success(), "{}", String::from_utf8_lossy(&update.stderr));
+    drop(farm);
+    f.until("rekey-ready");
+    for serial in ["raw-new", "wifi-new"] {
+        assert!(!f.try_device(serial).status.success(), "same phone admitted twice through {serial}");
+    }
+    assert!(f.try_device("fake-b").status.success(), "another phone must remain usable");
+    fs::write(f.0.join("rekey-finish"), b"").unwrap();
+    assert!(waiter.0.wait().unwrap().success());
+    assert!(f.try_device("wifi-new").status.success());
 }
 
 #[test]
