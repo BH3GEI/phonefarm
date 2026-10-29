@@ -205,7 +205,7 @@ pub fn script_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-fn call(script: &PathBuf, args: &[&str], instance: Option<&str>) -> (Option<i32>, String) {
+fn call(script: &PathBuf, args: &[&str], instance: Option<&str>, wait: Option<Duration>) -> (Option<i32>, String) {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => return (None, format!("cannot select phonefarm storage resolver: {e}")),
@@ -213,6 +213,7 @@ fn call(script: &PathBuf, args: &[&str], instance: Option<&str>) -> (Option<i32>
     let mut command = Command::new(script);
     command.args(args).env("PHONEFARM_BIN", exe).env_remove("DEVLOCK_INSTANCE_ID");
     if let Some(instance) = instance { command.env("DEVLOCK_INSTANCE_ID", instance); }
+    if let Some(wait) = wait { command.env("DEVLOCK_WAIT_SECONDS", wait.as_secs().to_string()); }
     match command.output() {
         Ok(o) => (
             o.status.code(),
@@ -288,7 +289,7 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
     };
     // An inherited instance must verify; a stale identity is not a new queue request.
     if let Ok(instance) = std::env::var("DEVLOCK_INSTANCE_ID") {
-        let (code, out) = call(&script, &["renew", &label], Some(&instance));
+        let (code, out) = call(&script, &["renew", &label], Some(&instance), None);
         if code != Some(0) {
             return AdmissionError::new("inherited_instance_unverified",
                 format!("inherited device lock identity rejected: {out}")).reject(&subcommand);
@@ -322,7 +323,7 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
     };
     stop.store(true, Ordering::SeqCst);
     let _ = hb.join();
-    let (release_code, out) = call(&script, &["release", &label], Some(&instance));
+    let (release_code, out) = call(&script, &["release", &label], Some(&instance), None);
     if release_code != Some(0) {
         eprintln!("设备锁释放失败 ({label}): {out}");
     }
@@ -377,7 +378,8 @@ fn acquire(script: &PathBuf, label: &str, wait: Duration) -> Result<String, Admi
     loop {
         crate::lease_storage::resolve().require_ready()
             .map_err(|e| AdmissionError::new("lease_storage_unavailable", e))?;
-        let (code, out) = call(script, &["acquire", label], None);
+        let remaining = wait.saturating_sub(t0.elapsed());
+        let (code, out) = call(script, &["acquire", label], None, Some(remaining));
         if code == Some(0) {
             let owner: crate::queue_owner::QueueOwner = serde_json::from_str(&out)
                 .map_err(|_| AdmissionError::new("devlock_owner_invalid",
@@ -423,7 +425,7 @@ fn heartbeat(script: PathBuf, label: String, instance: String, stop: Arc<AtomicB
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
-            let (code, out) = call(&script, &["renew", &label], Some(&instance));
+            let (code, out) = call(&script, &["renew", &label], Some(&instance), None);
             if code != Some(0) && !warned {
                 eprintln!("⚠ 设备锁续期失败 ({label}): {out} —— 锁可能已被接管, 这一轮数据要存疑");
                 warned = true;

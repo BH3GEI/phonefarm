@@ -1566,17 +1566,30 @@ pub fn run_lease(args: &[String]) -> i32 {
         eprintln!("phonefarm lease --serial S [--timeout-ms N] -- COMMAND ...");
         return 2;
     };
-    let mut _lease = match Lease::acquire(
-        &root,
-        &legacy,
-        &serial,
-        "lease",
-        Duration::from_millis(timeout.unwrap_or(600_000)),
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{e}");
-            return 2;
+    let timeout = Duration::from_millis(timeout.unwrap_or(600_000));
+    let typed = crate::lease_domain::inspect(&legacy).ok().and_then(|paths| paths.domain_id).is_some();
+    let mut _lease = if std::env::var_os("DEVLOCK_INSTANCE_ID").is_none() && typed {
+        let binding = match crate::device_registry::resolve_binding(&crate::lease_storage::resolve(), &serial) {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        };
+        match Lease::acquire_device(&crate::lease_storage::resolve(), &binding, "lease", timeout) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
+        }
+    } else {
+        match Lease::acquire(&root, &legacy, &serial, "lease", timeout) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}");
+                return 2;
+            }
         }
     };
     if let Err(e) = _lease.record_command_pending("lease-wrapper") {

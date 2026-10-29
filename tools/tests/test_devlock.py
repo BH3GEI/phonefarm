@@ -22,7 +22,7 @@ class DevlockBridgeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="devlock-bridge-test-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.env = dict(os.environ, DEVLOCK_DIR=str(self.root), DEVLOCK_STALE="1",
+        self.env = dict(os.environ, DEVLOCK_DIR=str(self.root), DEVLOCK_STALE="1", DEVLOCK_WAIT_SECONDS="0",
                         PHONEFARM_LEASE_DIR=str(self.root / "devices"), PHONEFARM_BIN=str(BINARY))
         self.env.pop("DEVLOCK_INSTANCE_ID", None)
         self.env.pop("DEVLOCK_LABEL", None)
@@ -198,6 +198,74 @@ while True:
                 self.assertEqual(reconciled.returncode, 0, reconciled.stdout + reconciled.stderr)
                 self.assertFalse(json.loads(reconciled.stdout)["device_recovery_verified"])
                 self.assertTrue((self.root / "devlock-reconciliations" / (identity["instance_id"] + ".json")).is_file())
+
+    def test_busy_bridge_waits_then_acquires_and_timeout_cleans_queue(self):
+        script = """import fcntl, pathlib, time
+root = pathlib.Path(__import__('sys').argv[1])
+(root / 'ready').write_text('held')
+with open(root / 'phonefarm-bridge.lock', 'w') as stream:
+    fcntl.flock(stream, fcntl.LOCK_EX)
+    time.sleep(float(__import__('sys').argv[2]))
+"""
+        for seconds, expected in ((2, 0), (4, 1)):
+            with self.subTest(seconds=seconds):
+                holder = subprocess.Popen([sys.executable, "-c", script, str(self.root), str(seconds)],
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (self.root / "ready").exists() and time.monotonic() < deadline:
+                        time.sleep(.02)
+                    self.assertTrue((self.root / "ready").exists(), "bridge was not held")
+                    self.env["DEVLOCK_WAIT_SECONDS"] = "5" if expected == 0 else "1"
+                    result = self.call("run", "outer", "--", "/usr/bin/true")
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                    if expected == 0:
+                        self.assertIn("acquire outer", (self.root / "devlock.log").read_text())
+                    else:
+                        self.assertIn("wait expired", result.stderr)
+                        self.assertIn("sampling/ownership transition", result.stderr)
+                        queue = self.root / "devlock.queue"
+                        self.assertFalse(queue.exists() and "outer" in queue.read_text().splitlines())
+                        self.assertIn("busy outer (bridge held (sampling/ownership transition))", (self.root / "devlock.log").read_text())
+                finally:
+                    (self.root / "ready").unlink(missing_ok=True)
+                    if holder.poll() is None:
+                        holder.kill()
+                    holder.communicate(timeout=5)
+                self.env["DEVLOCK_WAIT_SECONDS"] = "0"
+
+    def test_registered_serial_leases_overlap(self):
+        initialized = subprocess.run([str(BINARY), "lease", "domain-init", "--participants-stopped", "--json"],
+                                     env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
+        for revision, device, serial in ((0, "A", "serial-a"), (1, "B", "serial-b")):
+            request = self.root / f"register-{serial}.json"
+            request.write_text(json.dumps({"expected_revision": revision,
+                "device": {"device_id": device, "label": device, "aliases": [serial], "enabled": True}}))
+            registered = subprocess.run([str(BINARY), "lease", "devices-set", "--request", str(request), "--json"],
+                                        env=self.env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(registered.returncode, 0, registered.stdout + registered.stderr)
+        first = subprocess.Popen([str(BINARY), "lease", "--serial", "serial-a", "--timeout-ms", "4000",
+                                  "--", sys.executable, "-c", "import time; time.sleep(1)"], env=self.env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        second = subprocess.Popen([str(BINARY), "lease", "--serial", "serial-b", "--timeout-ms", "4000",
+                                   "--", sys.executable, "-c", "import time; time.sleep(.2)"], env=self.env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        second_out, second_err = second.communicate(timeout=5)
+        self.assertEqual(second.returncode, 0, second_out + second_err)
+        self.assertIsNone(first.poll(), "the other serial did not start while the first lease was held")
+        alias = subprocess.run([str(BINARY), "lease", "--serial", "serial-a", "--timeout-ms", "0",
+                                "--", "/usr/bin/true"], env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(alias.returncode, 0, alias.stdout + alias.stderr)
+        markers = [json.loads(path.read_text()) for path in self.root.rglob("phonefarm-lease.json")]
+        self.assertTrue(any(marker.get("format") == 2 and marker.get("scope") == "device" and marker.get("device_binding")
+                            for marker in markers), markers)
+        first_out, first_err = first.communicate(timeout=5)
+        self.assertEqual(first.returncode, 0, first_out + first_err)
+        unregistered = subprocess.run([str(BINARY), "lease", "--serial", "serial-c", "--timeout-ms", "1",
+                                       "--", "/usr/bin/true"], env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(unregistered.returncode, 0)
+        self.assertIn("not a registered device alias", unregistered.stderr)
 
     @unittest.skipUnless(BINARY.is_file(), "set PHONEFARM_TEST_BINARY to an existing signed test build")
     def test_real_nested_lease_allows_inherited_child_but_not_outside_caller(self):

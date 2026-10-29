@@ -118,6 +118,7 @@ fn sampling_window_excludes_strong_and_legacy_writers_then_releases() {
             .args(["acquire", "writer"])
             .env("DEVLOCK_DIR", f.0.join("locks"))
             .env("PHONEFARM_BIN", env!("CARGO_BIN_EXE_phonefarm"))
+            .env("DEVLOCK_WAIT_SECONDS", "0")
             .output()
             .unwrap();
         assert_eq!(legacy.status.code(), Some(1));

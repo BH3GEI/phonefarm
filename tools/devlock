@@ -85,7 +85,32 @@ seen_age(){
   local seen_time=$(awk -v label="$1" '$1 == label {value=$2} END {print value}' "$SEEN" 2>/dev/null)
   [[ "$seen_time" == <-> ]] && print $(( $(now) - seen_time )) || print 0
 }
-acquire(){
+blocker(){
+  local snapshot
+  snapshot=$("$PF" lease status --json 2>/dev/null)
+  print -r -- "$snapshot" | python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin)
+except ValueError:
+    print("owner unavailable")
+    raise SystemExit
+parts = []
+for entry in value.get("entries", []):
+    label = entry.get("label") or entry.get("directory") or "unknown"
+    if entry.get("scope") == "device" or entry.get("device_binding"):
+        serial = entry.get("serial") or (entry.get("device_binding") or {}).get("serial") or "unknown"
+        parts.append(f"lane {serial}: {label}")
+    else:
+        parts.append(f"global: {label}")
+if not parts and value.get("bridge_held"):
+    parts.append("bridge held (sampling/ownership transition)")
+if value.get("error"):
+    parts.append(str(value["error"]))
+print("; ".join(parts) or "owner unavailable")
+'
+}
+acquire_once(){
   local label=$1 holder=$2 head result rc
   valid_label "$label" || { print -u2 'queue label must be 1..128 non-whitespace characters'; return 2; }
   (( ${+DEVLOCK_INSTANCE_ID} )) && { print -u2 'acquire cannot replace an inherited instance; use its checked owner'; return 2; }
@@ -93,7 +118,6 @@ acquire(){
   seen "$label"
   if [[ -e "$D" || -L "$D" ]] || nested; then
     qappend "$label"; qunlock
-    print -u2 'busy: queue/strong/nested records are protected; inspect phonefarm lease status --json'
     return 1
   fi
   head=$(qhead)
@@ -103,11 +127,9 @@ acquire(){
   done
   if [[ -n "$head" && "$head" != "$label" ]]; then
     qappend "$label"; qunlock
-    print -u2 -- "not your turn (queued): head=$head"
     return 1
   fi
   # Publish global intent before the bridge attempt so new device lanes yield.
-  # A failed or timed-out caller retains its queue entry for existing management.
   qappend "$label"
   result=$("$PF" __queue-owner create --root "$B" --queue-dir "$QROOT" --label "$label" --holder-pid "$holder")
   rc=$?
@@ -118,11 +140,39 @@ acquire(){
   qunlock
   # A partially published identity is retained on error, never guessed empty.
   if (( rc == 1 )); then
-    print -ru2 -- "$result"
     return 1
   fi
   (( rc == 0 )) || return 2
   print -r -- "$result"
+}
+acquire(){
+  local label=$1 holder=$2 rc result started=$(now) head why
+  local wait_seconds=${DEVLOCK_WAIT_SECONDS:-900}
+  [[ "$wait_seconds" == <-> ]] || { print -u2 'DEVLOCK_WAIT_SECONDS must be a nonnegative integer'; return 2; }
+  while true; do
+    result=$(acquire_once "$label" "$holder")
+    rc=$?
+    if (( rc != 1 )); then
+      print -r -- "$result"
+      return $rc
+    fi
+    if (( $(now) - started >= wait_seconds )); then
+      why=$(blocker)
+      qlock || return 2
+      head=$(qhead)
+      qdrop "$label"
+      [[ -n "$head" && "$head" != "$label" ]] && why="$why; fifo head=$head"
+      print -r -- "$(ts) busy $label ($why)" >> "$LOG"
+      qunlock
+      if [[ -n "$result" ]]; then
+        print -ru2 -- "$result; wait expired after ${wait_seconds}s ($why)"
+      else
+        print -ru2 -- "wait expired after ${wait_seconds}s ($why)"
+      fi
+      return 1
+    fi
+    sleep ${DEVLOCK_WAIT_POLL:-1}
+  done
 }
 renew(){ "$PF" __queue-owner renew --root "$B" --label "$1"; }
 release(){
