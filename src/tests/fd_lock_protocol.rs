@@ -251,7 +251,8 @@ from pathlib import Path
 root=Path(sys.argv[1])
 fds=[int(fd) for fd in os.environ.get('PF_LOCK_FDS','').split(',') if fd]
 for fd in fds: os.fstat(fd)
-(root/'fds.json').write_text(json.dumps(fds))
+(root/'fds.json.tmp').write_text(json.dumps(fds))
+os.replace(root/'fds.json.tmp', root/'fds.json')
 while not (root/'finish').exists(): time.sleep(.01)
 "#;
     let mut owner = Group(
@@ -357,7 +358,8 @@ for fd in range(3,256):
     except OSError: pass
 for fd in range(3): os.close(fd)
 (root/'server.pid').write_text(str(os.getpid()))
-(root/'daemon-fds.json').write_text(json.dumps(held))
+(root/'daemon-fds.json.tmp').write_text(json.dumps(held))
+os.replace(root/'daemon-fds.json.tmp', root/'daemon-fds.json')
 time.sleep(15)
 "#).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
