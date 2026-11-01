@@ -398,11 +398,21 @@ fn adb_and_hdc_daemons_do_not_inherit_task_descriptors() {
 import json,os,signal,sys,time
 from pathlib import Path
 root=Path(os.environ['DAEMON_TEST_ROOT'])
-if sys.argv[1]=='kill-server':
-    if (root/'server.pid').exists(): os.kill(int((root/'server.pid').read_text()),signal.SIGKILL)
+args=sys.argv[1:]
+if args[:1]==['-p']: args=args[1:]
+if args[0]=='kill-server':
+    if (root/'server.pid').exists():
+        os.kill(int((root/'server.pid').read_text()),signal.SIGKILL)
+        (root/'server.pid').unlink()
     sys.exit(0)
+if (root/'server.pid').exists(): sys.exit(0)
+ready,notify=os.pipe()
 pid=os.fork()
-if pid: sys.exit(0)
+if pid:
+    os.close(notify)
+    assert os.read(ready,1)==b'1'
+    sys.exit(0)
+os.close(ready)
 os.setsid()
 signal.alarm(15)
 held=[]
@@ -415,6 +425,8 @@ for fd in range(3): os.close(fd)
 (root/'server.pid').write_text(str(os.getpid()))
 (root/'daemon-fds.json.tmp').write_text(json.dumps(held))
 os.replace(root/'daemon-fds.json.tmp', root/'daemon-fds.json')
+os.write(notify,b'1')
+os.close(notify)
 time.sleep(15)
 "#).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();

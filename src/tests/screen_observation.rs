@@ -20,6 +20,8 @@ impl Fixture {
         let hdc = root.join("bin/hdc");
         fs::write(&hdc, r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FIXTURE/calls"
+[ "$1/$2" != list/targets ] || exit 0
+[ "$1" != -p ] || shift
 case "$3/$4" in
 shell/snapshot_display)
   while [ -f "$FIXTURE/hold" ]; do /bin/sleep 0.02; done

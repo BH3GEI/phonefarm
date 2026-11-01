@@ -306,8 +306,8 @@ pub(crate) fn transport_entry() -> Option<i32> {
         "hdc" => "PF_TRANSPORT_HDC",
         _ => return None,
     };
-    let program = std::env::var_os(key)?;
-    let mut cmd = transport_command(program);
+    std::env::var_os(key)?;
+    let mut cmd = transport_command(name);
     cmd.args(std::env::args_os().skip(1)).env(
         "PATH",
         std::env::var_os("PF_TRANSPORT_PATH").unwrap_or_default(),
@@ -346,7 +346,24 @@ pub(crate) fn transport_lifeline(
 pub(crate) fn transport_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     // The finite proxy retains the task fds; Python closes them for the actual
     // client, so a server fork cannot retain them. Reset kills the whole group.
-    const PROXY: &str = r#"import os,signal,subprocess,sys,threading,time
+    const PROXY: &str = r#"import fcntl,os,signal,subprocess,sys,threading,time
+BOOTSTRAP = r'''import os,signal,subprocess,sys,threading
+client=subprocess.Popen(sys.argv[1:],stdin=subprocess.DEVNULL,close_fds=True)
+def stop(*unused): client.kill()
+for sig in (signal.SIGINT,signal.SIGTERM): signal.signal(sig,stop)
+def watch():
+    os.read(0,1)
+    stop()
+threading.Thread(target=watch,daemon=True).start()
+try:
+    code=client.wait(timeout=12)
+except subprocess.TimeoutExpired:
+    client.kill()
+    client.wait()
+    print('hdc bootstrap timed out',file=sys.stderr)
+    sys.exit(124)
+sys.exit(code if code>=0 else 128-code)
+'''
 child=None
 def forward(signum,frame):
     if child is not None:
@@ -363,11 +380,36 @@ if lifeline is not None:
     threading.Thread(target=watch,daemon=True).start()
 env=dict(os.environ)
 for name in ('PF_LOCK_FDS','PF_LOCK_SCOPE'): env.pop(name,None)
-child=subprocess.Popen(sys.argv[1:],env=env,close_fds=True)
+hdc,program,*args=sys.argv[1:]
+if hdc=='1':
+    # HDC's ProgramMutex uses a POSIX record lock here. Check that live lock,
+    # without trusting/storing a PID or launching an extra client on the hot path.
+    tmp=next((env[k] for k in ('TMPDIR','TMP','TEMP','TEMPDIR') if k in env),'/tmp')
+    running=False
+    try:
+        with open(tmp.rstrip('/')+'/.HDCServer.pid','rb') as mutex:
+            try: fcntl.lockf(mutex,fcntl.LOCK_SH|fcntl.LOCK_NB)
+            except BlockingIOError: running=True
+    except FileNotFoundError: pass
+    # HDC forks its server without setsid. Enumerate outside the caller's group
+    # using the same wrapper/environment for credentials as the real request.
+    # -p keeps the finite client from spawning a server inside the caller's group.
+    if not running:
+        # This supervisor survives caller-group cleanup. Its deadline/EOF handling
+        # kills only the finite bootstrap client, never the server it forked.
+        child=subprocess.Popen([sys.executable,'-c',BOOTSTRAP,program,'list','targets'],
+                               env=env,close_fds=True,start_new_session=True,
+                               stdin=subprocess.PIPE,stdout=subprocess.DEVNULL)
+        code=child.wait()
+        child.stdin.close()
+        if code: sys.exit(code if code>=0 else 128-code)
+    args.insert(0,'-p')
+child=subprocess.Popen([program,*args],env=env,close_fds=True)
 code=child.wait()
 sys.exit(code if code>=0 else 128-code)
 "#;
     let program = program.as_ref();
+    let hdc = program == "hdc" || std::env::var_os("HDC_BIN").as_deref() == Some(program);
     let actual = if std::env::var_os("PF_TRANSPORT_PATH").is_some() {
         if program == "adb" || std::env::var_os("ADB_BIN").as_deref() == Some(program) {
             std::env::var_os("PF_TRANSPORT_ADB")
@@ -382,6 +424,7 @@ sys.exit(code if code>=0 else 128-code)
     let mut command = std::process::Command::new("python3");
     command
         .args(["-c", PROXY])
+        .arg(if hdc { "1" } else { "0" })
         .arg(actual.as_deref().unwrap_or(program));
     if let Some(path) = std::env::var_os("PF_TRANSPORT_PATH") {
         command.env("PATH", path);
