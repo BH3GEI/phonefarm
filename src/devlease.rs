@@ -180,7 +180,8 @@ impl Lease {
         context: &Path,
         timeout: impl Into<Option<Duration>>,
     ) -> Result<Self, String> {
-        let mut lease = Self::acquire(root, farm, serial, "recovery", timeout)?;
+        let mut lease = Self::new(root, farm, resolve_scope_at(farm, serial)?.for_recovery(),
+            serial, "recovery", timeout.into())?;
         lease.hold_for_recovery(context)?;
         Ok(lease)
     }
@@ -194,7 +195,7 @@ impl Lease {
         let mut lease = Self::new(
             &root,
             &farm,
-            Scope::device(&binding.serial, Some(binding.clone())),
+            Scope::device(&binding.serial, Some(binding.clone())).for_recovery(),
             &binding.serial,
             "recovery",
             timeout.into(),

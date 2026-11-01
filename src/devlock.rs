@@ -256,7 +256,12 @@ pub fn gate(args: &mut Vec<String>) -> Gate {
             .filter(|first| serials.iter().all(|serial| serial == *first))
         {
             Some(serial) => crate::devlease::resolve_scope(&storage, serial)?,
-            None => crate::fd_lock::Scope::global(),
+            None => {
+                for serial in &serials {
+                    crate::devlease::resolve_scope(&storage, serial)?.check_enabled(&farm)?;
+                }
+                crate::fd_lock::Scope::global()
+            }
         };
         let guard = crate::fd_lock::Guard::acquire(&root, &farm, scope, &label, opts.wait)?;
         if !guard.owns() {

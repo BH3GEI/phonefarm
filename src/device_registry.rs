@@ -12,6 +12,7 @@ const CURRENT: &str = "device-registry.json";
 const LIMIT: u64 = 64 * 1024;
 const MAX_REVISION: u64 = (1_u64 << 53) - 1;
 const BINDING_SCHEMA: &str = "phonefarm/device-binding@1";
+pub(crate) const DISABLED_DEVICE: &str = "这台手机在登记里停用了；要用请先在登记里启用";
 
 #[derive(Debug)]
 struct Error {
@@ -250,7 +251,7 @@ pub(crate) fn resolve_binding(
         .find(|d| d.aliases.iter().any(|alias| alias == serial))
         .ok_or("serial is not a registered device alias")?;
     if !device.enabled {
-        return Err("registered device is disabled".into());
+        return Err(DISABLED_DEVICE.into());
     }
     Ok(DeviceBinding {
         schema: BINDING_SCHEMA.into(),
@@ -492,14 +493,14 @@ mod tests {
         assert_eq!(lease.device_binding(), Some(&binding));
         drop(lease);
         set(&s.0, request(2, "A", &["usb-A", "wifi-A"], false)).unwrap();
-        drop(
+        assert!(
             crate::devlease::Lease::acquire_device(
                 &storage,
                 &binding,
                 "test",
                 std::time::Duration::ZERO,
             )
-            .unwrap(),
+            .err().unwrap().contains(DISABLED_DEVICE),
         );
         let history = s.0.join("device-registry-history");
         if history.exists() {
@@ -518,6 +519,25 @@ mod tests {
             original
         );
         assert_eq!(snapshot(&s.0).unwrap().0, 3);
+    }
+    #[test]
+    fn disabled_device_still_allows_serial_recovery() {
+        if crate::isolate_fd_test("device_registry::tests::disabled_device_still_allows_serial_recovery") { return; }
+        let s = Scratch::new();
+        set(&s.0, request(0, "A", &["usb-A", "wifi-A"], false)).unwrap();
+        let storage = crate::lease_storage::Storage::custom(&s.0);
+        let (root, farm) = storage.roots().unwrap();
+        assert!(crate::devlease::Lease::acquire(&root, &farm, "usb-A", "test", std::time::Duration::ZERO)
+            .err().unwrap().contains(DISABLED_DEVICE));
+        std::env::set_var("DEVLOCK_DIR", &farm);
+        std::env::set_var("PHONEFARM_LEASE_DIR", &root);
+        assert!(crate::devlease::Lease::target(Some("usb-A"), "test")
+            .err().unwrap().contains(DISABLED_DEVICE));
+        let recovery = crate::devlease::Lease::acquire_recovery(
+            &root, &farm, "usb-A", &s.0, std::time::Duration::ZERO).unwrap();
+        assert_eq!(recovery.serial, "usb-A");
+        assert_eq!(recovery.device_binding().unwrap().device_id, "A");
+        assert_eq!(snapshot(&s.0).unwrap().0, 1);
     }
     #[test]
     fn binding_resolves_aliases_and_keeps_basic_format_checks() {

@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -71,6 +72,15 @@ impl Fixture {
             .output()
             .unwrap()
     }
+    fn set_a_enabled(&self, revision: u64, enabled: bool) {
+        let request = self.0.join("enable-a.json");
+        fs::write(&request, json!({"expected_revision": revision, "device": {
+            "device_id": "a", "label": "a", "aliases": ["fake-a", "wifi-a"], "enabled": enabled
+        }}).to_string()).unwrap();
+        let out = self.pf().args(["lease", "devices-set", "--request"])
+            .arg(request).arg("--json").output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
     fn until(&self, path: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !self.0.join(path).exists() {
@@ -98,6 +108,51 @@ impl Drop for Group {
         }
         let _ = self.0.wait();
     }
+}
+
+#[test]
+fn disabled_registered_device_cannot_acquire_a_lock() {
+    let f = Fixture::new();
+    f.set_a_enabled(2, false);
+    for serial in ["fake-a", "wifi-a"] {
+        let out = f.try_device(serial);
+        assert!(!out.status.success(), "disabled device acquired a lock through {serial}");
+        assert!(String::from_utf8_lossy(&out.stderr)
+            .contains("这台手机在登记里停用了；要用请先在登记里启用"));
+    }
+    let adb = f.0.join("fake-adb");
+    fs::write(&adb, "#!/bin/sh\nprintf called > \"$PF_TEST_TRANSPORT_CALLED\"\nexit 42\n").unwrap();
+    fs::set_permissions(&adb, fs::Permissions::from_mode(0o755)).unwrap();
+    for args in [
+        vec!["exec", "--serial", "fake-a", "--yes", "true"],
+        vec!["exec", "--serial", "fake-b", "--serial", "fake-a", "--yes", "true"],
+        vec!["lease", "--", env!("CARGO_BIN_EXE_phonefarm"), "lease", "--serial", "fake-a", "--", "/usr/bin/true"],
+        vec!["lease", "resolve", "--serial", "fake-a", "--json"],
+    ] {
+        let out = f.pf().args(&args).env("ADB_BIN", &adb)
+            .env("PF_TEST_TRANSPORT_CALLED", f.0.join("transport-called")).output().unwrap();
+        assert!(!out.status.success(), "disabled device admitted by {args:?}");
+        let report = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(report.contains("这台手机在登记里停用了；要用请先在登记里启用"), "{args:?}: {report}");
+    }
+    assert!(!f.0.join("transport-called").exists(), "disabled device reached adb");
+}
+
+#[test]
+fn reenabling_a_registered_device_allows_the_same_serial_to_acquire() {
+    let f = Fixture::new();
+    f.set_a_enabled(2, false);
+    f.set_a_enabled(3, true);
+    let out = f.try_device("fake-a");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn an_unregistered_serial_still_acquires_with_a_disabled_device_in_the_registry() {
+    let f = Fixture::new();
+    f.set_a_enabled(2, false);
+    let out = f.try_device("unregistered-serial");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[test]

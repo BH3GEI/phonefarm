@@ -26,6 +26,9 @@ pub(crate) struct Scope {
     // An explicitly saved binding keeps its original device identity.
     #[serde(skip)]
     pub resolve_alias: bool,
+    // Only explicit restoration entry points may use a disabled device.
+    #[serde(skip)]
+    recovery: bool,
 }
 impl Scope {
     pub fn global() -> Self {
@@ -34,6 +37,7 @@ impl Scope {
             serial: None,
             binding: None,
             resolve_alias: false,
+            recovery: false,
         }
     }
     pub fn device(serial: &str, binding: Option<DeviceBinding>) -> Self {
@@ -47,7 +51,26 @@ impl Scope {
             serial: Some(serial.into()),
             binding,
             resolve_alias: false,
+            recovery: false,
         }
+    }
+    pub fn for_recovery(mut self) -> Self {
+        self.recovery = true;
+        self
+    }
+    pub(crate) fn check_enabled(&self, farm: &Path) -> Result<(), String> {
+        if self.recovery || self.serial.is_none() {
+            return Ok(());
+        }
+        let (_, devices) = crate::device_registry::snapshot(farm)?;
+        let device = devices.iter().find(|device| match &self.binding {
+            Some(binding) => device.device_id == binding.device_id,
+            None => device.aliases.iter().any(|alias| Some(alias) == self.serial.as_ref()),
+        });
+        if device.is_some_and(|device| !device.enabled) {
+            return Err(crate::device_registry::DISABLED_DEVICE.into());
+        }
+        Ok(())
     }
     fn contains(&self, other: &Self) -> bool {
         self.key.is_none() || self.key == other.key
@@ -133,6 +156,7 @@ impl Guard {
         poll_cancel: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<Self, String> {
         poll_cancel()?;
+        requested.check_enabled(farm_root)?;
         if let Some((scope, fds)) = inherited()? {
             if !scope.contains(&requested) {
                 return Err("task lock does not cover the requested device/global scope; submit a global task for multiple devices".into());
@@ -161,7 +185,8 @@ impl Guard {
             }
             files.push(acquire_file(&farm, requested.key.is_some(), deadline, poll_cancel)?);
             if requested.resolve_alias {
-                let current = crate::devlease::resolve_scope_at(farm_root, requested.serial.as_deref().unwrap())?;
+                let mut current = crate::devlease::resolve_scope_at(farm_root, requested.serial.as_deref().unwrap())?;
+                current.recovery = requested.recovery;
                 let changed = current.key != requested.key;
                 requested = current;
                 if changed {
@@ -171,6 +196,7 @@ impl Guard {
                     continue;
                 }
             }
+            requested.check_enabled(farm_root)?;
             break files;
         };
         let info_path = requested
