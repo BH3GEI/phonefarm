@@ -172,7 +172,10 @@ fn supervise(
     if worker {
         let deadline_ms = std::time::SystemTime::now().checked_add(timeout)
             .ok_or("worker deadline is too large")?.duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_millis();
+        // The token binds a worker to the session its parent created under
+        // this lease; the inherited lock fd remains the device authority.
         command.stdin(Stdio::piped()).env("PHONEFARM_WORKER_SERIAL", &lease.serial)
+            .env("PHONEFARM_WORKER_TOKEN", lease.token())
             .env("PHONEFARM_WORKER_DEADLINE_MS", deadline_ms.to_string());
     } else { command.stdin(Stdio::null()); }
     let lifeline = if worker { None } else { Some(crate::fd_lock::transport_lifeline(&mut command)?) };
@@ -322,6 +325,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("deadline exceeded"), "{error}");
+    }
+
+    #[test]
+    fn worker_receives_the_lease_token_and_serial() {
+        let scratch = Scratch::new();
+        let lease = scratch.lease();
+        let result = run_worker(
+            &lease,
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "printf '%s %s' \"$PHONEFARM_WORKER_TOKEN\" \"$PHONEFARM_WORKER_SERIAL\"".into(),
+            ],
+            &scratch.0.join("commands"),
+            "worker-identity",
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(
+            (result.code, result.stdout),
+            (0, format!("{} {}", lease.token(), lease.serial))
+        );
     }
 
     #[test]

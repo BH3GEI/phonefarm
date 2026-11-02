@@ -339,8 +339,10 @@ pub(crate) fn run_worker(args: &[String]) -> i32 {
         Err(e) => (json!({"report":null,"error":e}), 2),
     };
     value["schema"] = json!("phonefarm/capture-worker-result@1");
-    value["token"] = json!(std::env::var("PHONEFARM_WORKER_TOKEN").unwrap());
-    value["serial"] = json!(std::env::var("PHONEFARM_WORKER_SERIAL").unwrap());
+    // A missing authority is recorded as null; the parent then refuses the
+    // completion and keeps recovery required instead of losing the result.
+    value["token"] = json!(std::env::var("PHONEFARM_WORKER_TOKEN").ok());
+    value["serial"] = json!(std::env::var("PHONEFARM_WORKER_SERIAL").ok());
     value["exit_code"] = json!(code);
     if let Err(e) = crate::confirmation_transport::new_file(
         &dir.join("worker-result.json"),
