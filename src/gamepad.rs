@@ -83,7 +83,7 @@ impl GamepadState {
 /// 虚拟手柄控制器会话
 pub struct Gamepad {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     state: GamepadState,
 }
 
@@ -125,7 +125,7 @@ impl Gamepad {
 
         let mut gp = Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             state: GamepadState::default(),
         };
 
@@ -144,8 +144,9 @@ impl Gamepad {
         });
         let mut msg = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
         msg.push('\n');
-        self.stdin.write_all(msg.as_bytes()).map_err(|e| format!("写入 HID 报文失败: {e}"))?;
-        self.stdin.flush().map_err(|e| format!("刷新 HID 缓冲失败: {e}"))?;
+        let stdin = self.stdin.as_mut().ok_or("手柄管道已关闭")?;
+        stdin.write_all(msg.as_bytes()).map_err(|e| format!("写入 HID 报文失败: {e}"))?;
+        stdin.flush().map_err(|e| format!("刷新 HID 缓冲失败: {e}"))?;
         Ok(())
     }
 
@@ -321,7 +322,49 @@ impl Drop for Gamepad {
     fn drop(&mut self) {
         // 尝试发送中立状态并关闭标准输入以让系统卸载虚拟设备
         let _ = self.reset();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // EOF lets `hid` unregister the device and the adb client exit itself.
+        // `child` is the transport proxy: SIGKILL would orphan that client in
+        // the caller's process group, so escalate through SIGTERM, which the
+        // proxy forwards, before killing it.
+        drop(self.stdin.take());
+        let exited = |child: &mut Child, ms: u64| {
+            let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => return true,
+                    Ok(None) if std::time::Instant::now() >= deadline => return false,
+                    Ok(None) => sleep(Duration::from_millis(20)),
+                }
+            }
+        };
+        if exited(&mut self.child, 3000) {
+            return;
+        }
+        unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
+        if !exited(&mut self.child, 1000) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drop_waits_for_the_transport_client_to_exit() {
+        let dir = std::env::temp_dir().join(format!("pf-gamepad-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let adb = dir.join("adb");
+        let mark = dir.join("client-exited");
+        // Like `adb shell hid -`: unregister after stdin EOF, then exit.
+        std::fs::write(&adb, format!("#!/bin/sh\ncat >/dev/null\nsleep 0.3\ntouch '{}'\n", mark.display())).unwrap();
+        std::fs::set_permissions(&adb, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let gamepad = Gamepad::new_named(adb.to_str().unwrap(), Some("fake"), "test pad").unwrap();
+        drop(gamepad);
+        let exited = mark.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(exited, "the adb client must have exited when the gamepad is dropped");
     }
 }
