@@ -12,6 +12,10 @@ use std::{
 };
 
 const SCHEMA: &str = "phonefarm/capture-session@1";
+/// Some Android builds deny the shell user /proc/bus/input/devices; a rooted
+/// device can still answer. Both readers parse the same /proc format.
+pub(crate) const INPUT_DEVICES: &str =
+    "cat /proc/bus/input/devices 2>/dev/null || su -c 'cat /proc/bus/input/devices'";
 
 pub(crate) struct Session {
     lease: RefCell<Lease>,
@@ -240,7 +244,7 @@ impl Session {
                 let mut absent = false;
                 for attempt in 0..4 {
                     let devices =
-                        self.read("input_readback", "cat /proc/bus/input/devices", 8000)?;
+                        self.read("input_readback", INPUT_DEVICES, 8000)?;
                     absent = input_absent_from(&devices, &name)?;
                     if absent {
                         break;

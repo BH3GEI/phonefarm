@@ -314,7 +314,7 @@ impl Worker {
                 &self.hid_name,
             ))?;
             *self.gamepad.borrow_mut() = Some(gamepad);
-            let devices = self.text("cat /proc/bus/input/devices", 8_000)?;
+            let devices = self.text(crate::capture_session::INPUT_DEVICES, 8_000)?;
             if hid_name_count(&devices, &self.hid_name) != 1 {
                 return self
                     .fail("capture HID registration was not uniquely observed; pending retained");
@@ -417,6 +417,31 @@ mod tests {
             bad[key] = value;
             assert!(validate_session(&bad).is_err(), "{key}");
         }
+    }
+
+    #[test]
+    fn input_readback_uses_root_when_the_shell_user_is_denied() {
+        let dir = std::env::temp_dir().join(format!("pf-input-readback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Shadow cat (denied, as on the device) and su (root succeeds).
+        for (name, body) in [
+            ("cat", "echo \"cat: $1: Permission denied\" >&2; exit 1"),
+            ("su", "printf 'I: Bus=0005\\nN: Name=\"capture-fixture\"\\n'"),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", crate::capture_session::INPUT_DEVICES])
+            .env("PATH", format!("{}:{}", dir.display(), std::env::var("PATH").unwrap()))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(out.status.success(), "{text}");
+        assert_eq!(hid_name_count(&text, "capture-fixture"), 1);
+        assert_eq!(crate::capture_session::input_absent_from(&text, "other").unwrap(), true);
     }
 
     #[test]
