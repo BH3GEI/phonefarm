@@ -23,6 +23,8 @@ pub struct Telemetry {
     #[serde(skip_serializing_if = "Option::is_none")] pub batt_current_ua: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")] pub cpu_temp: Option<Vec<(String, f32)>>,
     #[serde(skip_serializing_if = "Option::is_none")] pub gpu_info: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub gpu_freq_mhz: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub gpu_util_pct: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")] pub disk_free_kb: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")] pub disk_total_kb: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")] pub storage_raw: Option<String>,
@@ -382,6 +384,18 @@ pub fn parse_battery_oh(s: &str) -> (Option<i32>, Option<i32>, Option<f32>, Opti
 }
 
 /// hidumper -s RenderService -a fpsCount: "Refresh Rate:60, Count:3497" → (Hz, 累计帧)
+/// OH devfreq 的 GPU 当前频率（`/sys/class/devfreq/gpufreq/cur_freq`，单位 Hz）→ MHz
+pub fn parse_gpufreq_oh(s: &str) -> Option<i64> {
+    first_num(s).filter(|v| *v > 0.0).map(|v| (v / 1_000_000.0).round() as i64)
+}
+
+/// OH GPU 利用率节点（`.../gpu_utilisation`，形如「Gpu utilisation : 46」，单位 %）
+pub fn parse_gpuutil_oh(s: &str) -> Option<f32> {
+    let l = s.lines().find(|l| l.to_ascii_lowercase().contains("utilisation") || l.trim().parse::<f64>().is_ok())?;
+    let v = first_num(l.rsplit(':').next().unwrap_or(l))? as f32;
+    (0.0..=100.0).contains(&v).then_some(v)
+}
+
 pub fn parse_fpscount_oh(s: &str) -> (Option<f32>, Option<i64>) {
     let l = s.lines().find(|l| l.contains("Refresh Rate:") && l.contains("Count:"));
     match l {
@@ -551,6 +565,8 @@ pub fn from_oh(raw: &str) -> Telemetry {
     }
     if let Some(s) = sec(&ss, "cpufreq") { t.cpu_freq_khz = parse_cpufreq_oh(s); }
     if let Some(s) = sec(&ss, "thermal") { t.cpu_temp = parse_thermal(s); }
+    if let Some(s) = sec(&ss, "gpufreq") { t.gpu_freq_mhz = parse_gpufreq_oh(s); }
+    if let Some(s) = sec(&ss, "gpuutil") { t.gpu_util_pct = parse_gpuutil_oh(s); }
     if let Some(s) = sec(&ss, "fpscount") {
         let (hz, cnt) = parse_fpscount_oh(s);
         (t.refresh_hz, t.screen_frames, t.frames_total) = (hz, cnt, cnt);
@@ -602,6 +618,17 @@ pub fn from_oh(raw: &str) -> Telemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oh_gpu_freq_and_util() {
+        assert_eq!(parse_gpufreq_oh("329000000\n"), Some(329));
+        assert_eq!(parse_gpufreq_oh(""), None);
+        assert_eq!(parse_gpuutil_oh("Gpu utilisation : 46\n"), Some(46.0));
+        assert_eq!(parse_gpuutil_oh("permission denied"), None);
+        let raw = "-----PF:gpufreq-----\n850000000\n-----PF:gpuutil-----\nGpu utilisation : 7\n";
+        let t = from_oh(raw);
+        assert_eq!((t.gpu_freq_mhz, t.gpu_util_pct), (Some(850), Some(7.0)));
+    }
 
     const A_CPU: &str = include_str!("testdata/tele_a_cpuinfo.txt");
     const A_BAT: &str = include_str!("testdata/tele_a_battery.txt");

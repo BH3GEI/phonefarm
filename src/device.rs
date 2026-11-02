@@ -1289,6 +1289,8 @@ echo "-----PF:battery-----"; hidumper -s BatteryService -a -i 2>/dev/null | head
 echo "-----PF:cpufreq-----"; hidumper --cpufreq 2>/dev/null | head -60
 echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do cat $z/type $z/temp 2>/dev/null; done
 echo "-----PF:fpscount-----"; hidumper -s RenderService -a fpsCount 2>/dev/null | head -12
+echo "-----PF:gpufreq-----"; cat /sys/class/devfreq/gpufreq/cur_freq 2>/dev/null
+echo "-----PF:gpuutil-----"; for f in /sys/devices/platform/*/gpu_utilisation; do cat $f 2>/dev/null && break; done
 echo "-----PF:status-----"; if [ -n "$PID" ]; then grep -E "^(VmRSS|VmHWM|Threads):" /proc/$PID/status 2>/dev/null; fi
 echo "-----PF:nettcp-----"; cat /proc/net/tcp 2>/dev/null | wc -l; cat /proc/net/tcp6 2>/dev/null | wc -l
 echo "-----PF:faultcnt-----"; hidumper -e --list 2>/dev/null | head -10
