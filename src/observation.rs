@@ -70,18 +70,18 @@ pub(crate) fn run(
     storage: &Storage,
     timeout: Duration,
 ) -> Result<Output, Failure> {
-    if kind == "fleet" {
-        run_fleet(args, storage, timeout)
+    if matches!(kind, "fleet" | "app-snapshot") {
+        run_unscoped(kind, args, storage, timeout)
     } else {
         run_scoped(kind, args, storage, timeout, None)
     }
 }
 
-fn run_fleet(args: &[String], storage: &Storage, timeout: Duration) -> Result<Output, Failure> {
+fn run_unscoped(kind: &str, args: &[String], storage: &Storage, timeout: Duration) -> Result<Output, Failure> {
     // The worker chooses each phone's scope after enumeration. Enumeration and
     // lightweight telemetry never acquire a device or global lock.
-    let (mut cmd, out, err) = worker_command("fleet", args, storage, timeout)?;
-    supervise_ephemeral(&mut cmd, "fleet", timeout, &out.0, &err.0)
+    let (mut cmd, out, err) = worker_command(kind, args, storage, timeout)?;
+    supervise_ephemeral(&mut cmd, kind, timeout, &out.0, &err.0)
 }
 
 pub(crate) fn run_scoped(
@@ -173,6 +173,7 @@ fn wait_output(
         "fleet" => matches!(status.code(), Some(0 | 1)),
         "preflight" => matches!(status.code(), Some(0 | 2 | 3)),
         "screen" => matches!(status.code(), Some(0 | 1)),
+        "app-snapshot" => status.success(),
         _ => false,
     };
     if !expected || !group_gone(child.id()) {
@@ -243,6 +244,11 @@ pub(crate) fn run_worker(args: &[String]) -> i32 {
             crate::preflight::run_preflight(&args[1..])
         }
         Some("screen") => crate::screen::capture_worker(&args[1..]),
+        Some("app-snapshot") => match args.get(2).zip(args.get(4)).ok_or("missing serial/tmp".to_string())
+            .and_then(|(serial, tmp)| crate::app_snapshot::collect(serial, tmp)) {
+                Ok(value) => { println!("{value}"); 0 },
+                Err(error) => { eprintln!("{error}"); 1 },
+            },
         _ => 90,
     }
 }

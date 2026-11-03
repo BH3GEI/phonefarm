@@ -4,6 +4,7 @@
 //! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod autoloop;
+mod app_snapshot;
 mod bench;
 mod bench_session;
 mod lease_command;
@@ -245,6 +246,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (设备上已有 CTS/XTS 结果 → hdc file recv/adb pull 拉回 + 断言扫描 → assertions.json)
 任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神场景插件的独立长跑Agent)
 设备:  devices | keepalive [--status|--watch [秒]] [--serial S] [--json] | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
+       app-snapshot --serial S  (只读：前台与正在运行的第三方应用；读取失败记入 errors)
        fleet [--json] [--serial S] [--screenshot-dir 目录]
        (农场只读快照: 一趟 shell 把每台手机的在线/型号/电量/温度/风扇/亮屏/前台应用/
         保活策略/设备锁读齐, 采不到的字段留空并写明原因。截图默认关, 且别人持锁时不截)
