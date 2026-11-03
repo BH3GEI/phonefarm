@@ -1,4 +1,4 @@
-//! Reproduce the HUAWEI transport cost: every hdc shell invocation costs 1.5 s.
+//! HDC batch coverage, including the measured HUAWEI bundle-detail cost.
 #![cfg(unix)]
 use serde_json::{json, Value};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command, time::Instant};
@@ -17,7 +17,8 @@ args=sys.argv[1:]
 if args==['list','targets']: sys.exit(0)
 assert args[:4]==['-p','-t','harmony-test','shell'],args
 with open(os.environ['HDC_CALLS'],'a') as log: log.write(json.dumps(args)+'\n')
-time.sleep(1.5)  # Measured transport latency, not synchronization or a retry.
+# Keep the earlier synthetic round-trip stress case, not a production timing claim.
+time.sleep(0.15 if os.environ['APP_MODE']=='scale' else 1.5)
 os.execv('/bin/sh',['sh','-c',args[4]])
 "#,
         )
@@ -25,30 +26,47 @@ os.execv('/bin/sh',['sh','-c',args[4]])
         fs::set_permissions(&hdc, fs::Permissions::from_mode(0o755)).unwrap();
         let device = root.join("device-command");
         fs::write(&device, r#"#!/usr/bin/env python3
-import json,os,pathlib,signal,sys
+import json,os,pathlib,signal,sys,time
 name=pathlib.Path(sys.argv[0]).name
 args=[name,*sys.argv[1:]]
 mode=os.environ['APP_MODE']
+system=([f'com.huawei.hmos.app{i}' for i in range(14)]
+        +[f'com.ohos.app{i}' for i in range(4)]+[f'ohos.app{i}' for i in range(4)])
+running=[*system,'com.diangroup.myapplication','com.atomicservice.fixture']
+bundles=[*running,*[f'com.example.stopped{i}' for i in range(200)]]
+processes=['NAME',*running,'com.diangroup.myapplication:renderer',*[f'daemon{i}' for i in range(152)]]
+assert len(processes)==178 and len(bundles)==224
+assert len(set(p.split(':')[0] for p in processes)&set(bundles))==24
 with open(os.environ['DEVICE_CALLS'],'a') as log: log.write(json.dumps(args)+'\n')
 if name=='aa':
     assert args==['aa','dump','-a'],args
     if mode=='fail-aa': sys.exit(3)
-    print('bundle name [com.example.game]\nmain name [Main]\nstate #FOREGROUND')
+    foreground='com.diangroup.myapplication' if mode=='scale' else 'com.example.game'
+    print('bundle name ['+foreground+']\nmain name [Main]\nstate #FOREGROUND')
 elif name=='ps':
     assert args==['ps','-A','-o','NAME'],args
     if mode=='hung':
         pathlib.Path(os.environ['HUNG_PID']).write_text(str(os.getpid()))
         signal.alarm(20)
         signal.pause()
-    print('NAME\n  com.example.game\ncom.example.game:renderer\ncom.example.megacity\ncom.ohos.sceneboard')
+    if mode=='scale':
+        time.sleep(0.17)
+        print('\n'.join(processes))
+    else:
+        print('NAME\n  com.example.game\ncom.example.game:renderer\ncom.example.megacity\ncom.ohos.sceneboard')
 elif args==['bm','dump','-a']:
-    print('OK!\ncom.example.game\ncom.example.megacity\ncom.example.stopped\ncom.ohos.sceneboard')
+    if mode=='fail-bm': sys.exit(9)
+    if mode=='scale':
+        time.sleep(0.23)
+        print('OK!\n'+'\n'.join(bundles))
+    else:
+        print('OK!\ncom.example.game\ncom.example.megacity\ncom.example.stopped\ncom.ohos.sceneboard')
 else:
-    assert args[:3]==['bm','dump','-n'],args
+    assert mode=='scale' and args[:3]==['bm','dump','-n'],args
     bundle=args[3]
-    assert bundle in ('com.example.game','com.example.megacity','com.ohos.sceneboard'),args
-    if mode=='fail-bm' and bundle=='com.example.megacity': sys.exit(9)
-    print(bundle+':\n'+json.dumps({'applicationInfo':{'isSystemApp':bundle=='com.ohos.sceneboard'}}))
+    assert bundle in running,args
+    time.sleep(0.34)  # Measured per-bundle device work, independent of transport.
+    print(bundle+':\n'+json.dumps({'applicationInfo':{'isSystemApp':bundle in system},'padding':'x'*(31*1024)}))
 "#).unwrap();
         fs::set_permissions(&device, fs::Permissions::from_mode(0o755)).unwrap();
         for name in ["aa", "ps", "bm"] {
@@ -97,6 +115,32 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn huawei_sized_inventory_does_not_query_bundle_details() {
+    let fixture = Fixture::new("scale");
+    let value = fixture.run("scale");
+    assert_eq!(
+        value["foreground"], "com.diangroup.myapplication",
+        "{value}"
+    );
+    assert_eq!(
+        value["running_third_party"],
+        json!(["com.atomicservice.fixture", "com.diangroup.myapplication"]),
+        "{value}"
+    );
+    assert_eq!(value["errors"], json!([]), "{value}");
+    assert_eq!(fixture.calls("hdc-calls").len(), 1);
+    assert_eq!(
+        fixture.calls("device-calls"),
+        vec![
+            json!(["aa", "dump", "-a"]),
+            json!(["ps", "-A", "-o", "NAME"]),
+            json!(["bm", "dump", "-a"])
+        ]
+    );
+    assert!(!fixture.0.join("locks").exists());
+}
+
+#[test]
 fn slow_hdc_samples_all_apps_in_one_shell_round_trip() {
     let fixture = Fixture::new("ok");
     let value = fixture.run("ok");
@@ -110,17 +154,14 @@ fn slow_hdc_samples_all_apps_in_one_shell_round_trip() {
     assert_eq!(
         fixture.calls("hdc-calls").len(),
         1,
-        "including per-bundle detail reads"
+        "all three inventory reads"
     );
     assert_eq!(
         fixture.calls("device-calls"),
         vec![
             json!(["aa", "dump", "-a"]),
             json!(["ps", "-A", "-o", "NAME"]),
-            json!(["bm", "dump", "-a"]),
-            json!(["bm", "dump", "-n", "com.example.game"]),
-            json!(["bm", "dump", "-n", "com.example.megacity"]),
-            json!(["bm", "dump", "-n", "com.ohos.sceneboard"])
+            json!(["bm", "dump", "-a"])
         ]
     );
     assert!(!fixture.0.join("locks").exists());

@@ -25,14 +25,10 @@ values={
  'ps -A -o NAME': 'NAME\ncom.example.game\ncom.example.game:renderer\ncom.example.megacity\ncom.ohos.sceneboard',
  'aa dump -a': 'bundle name [com.example.game]\nmain name [Main]\nstate #FOREGROUND',
  'bm dump -a': 'OK!\ncom.example.game\ncom.example.megacity\ncom.example.stopped\ncom.ohos.sceneboard',
- "bm dump -n 'com.example.game'": 'com.example.game:\n{"applicationInfo":{"isSystemApp":false}}',
- "bm dump -n 'com.example.megacity'": 'com.example.megacity:\n{"applicationInfo":{"isSystemApp":false}}',
- "bm dump -n 'com.ohos.sceneboard'": 'com.ohos.sceneboard:\n{"applicationInfo":{"isSystemApp":true}}',
 }
 name=os.path.basename(sys.argv[0])
 if name in ('aa','ps','bm'):
     key=' '.join([name,*args])
-    if args[:2]==['dump','-n']: key="bm dump -n '"+args[2]+"'"
     assert key in values, ('unexpected device action',name,args)
     print(values[key])
     sys.exit(0)

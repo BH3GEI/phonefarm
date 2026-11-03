@@ -6,8 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-// HDC has substantial per-call latency. Run the inventory and selected bundle
-// details on the device in one shell, retaining each command's exit status.
+// Read the foreground and inventory in one shell, retaining each exit status.
 const HARMONY_APPS: &str = r#"
 part() {
     printf '\n__PF_APP_PART__%s\n' "$1"
@@ -16,21 +15,8 @@ part() {
     printf '\n__PF_APP_STATUS__%s\n' "$?"
 }
 part foreground aa dump -a
-processes=$(ps -A -o NAME)
-ps_status=$?
-printf '\n__PF_APP_PART__processes\n%s\n__PF_APP_STATUS__%s\n' "$processes" "$ps_status"
-bundles=$(bm dump -a)
-bm_status=$?
-printf '\n__PF_APP_PART__bundles\n%s\n__PF_APP_STATUS__%s\n' "$bundles" "$bm_status"
-if [ "$ps_status" -eq 0 ] && [ "$bm_status" -eq 0 ]; then
-    names=' '
-    for process in $processes; do names="$names${process%%:*} "; done
-    for bundle in $bundles; do
-        case "$names" in
-            *" $bundle "*) part "$bundle" bm dump -n "$bundle" ;;
-        esac
-    done
-fi
+part processes ps -A -o NAME
+part bundles bm dump -a
 "#;
 
 fn response(command: &str, text: &str) -> Result<String, String> {
@@ -99,22 +85,16 @@ fn part(output: &str, name: &str) -> Result<String, String> {
 fn running_harmony(output: &str) -> Result<Vec<String>, String> {
     let names = process_names(&part(output, "processes")?)?;
     let bundles = parse_bm_bundles(&part(output, "bundles")?);
-    let mut result = vec![];
-    for bundle in bundles.into_iter().filter(|name| names.contains(name)) {
-        let text = part(output, &bundle)?;
-        let start = text
-            .find('{')
-            .ok_or_else(|| format!("bm: no application info for {bundle}"))?;
-        let value: Value =
-            serde_json::from_str(&text[start..]).map_err(|e| format!("bm {bundle}: {e}"))?;
-        // OpenHarmony ApplicationInfo reports the system-app bit; package prefixes do not.
-        match value["applicationInfo"]["isSystemApp"].as_bool() {
-            Some(false) => result.push(bundle),
-            Some(true) => (),
-            None => return Err(format!("bm {bundle}: isSystemApp unavailable")),
-        }
-    }
-    Ok(result)
+    // Approximate third-party visibility without expensive per-bundle metadata.
+    Ok(bundles
+        .into_iter()
+        .filter(|name| {
+            names.contains(name)
+                && !["com.huawei.", "com.ohos.", "ohos."]
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        })
+        .collect())
 }
 
 pub(crate) fn snapshot(serial: &str) -> Result<Value, String> {
