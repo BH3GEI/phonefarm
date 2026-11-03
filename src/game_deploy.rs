@@ -21,7 +21,7 @@ pub(crate) const INITIALIZE_REQUEST_SCHEMA: &str = "phonefarm/game-initialize-re
 pub(crate) const INITIALIZE_RECIPE_SCHEMA: &str = "phonefarm/game-initialize-recipe@1";
 pub(crate) const INITIALIZE_REPORT_SCHEMA: &str = "phonefarm/game-initialization@1";
 pub(crate) const INITIALIZE_SCOPE: &str = "owned_launcher_attempt_force_stopped";
-const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR [--device-binding JSON] --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0: matching installed-engine resources, explicitly absent single-APK installation, or bounded launcher/typed Doom scene attempts. Application configuration and new scene runtime files are retained; attempts never grant permissions or certify scene readiness. No replacement or root escalation. Confirmed installations are retained.";
+pub(crate) const USAGE: &str = "phonefarm game-deploy capabilities --json\nphonefarm game-deploy --request FILE --serial S --out DIR [--device-binding JSON] --json\nphonefarm game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json\nAndroid user 0: matching installed-engine resources, explicitly absent single-APK installation, or bounded launcher/typed Doom scene attempts. Application configuration and new scene runtime files are retained; attempts never grant permissions or certify scene readiness. No replacement or root escalation. Confirmed installations are retained.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

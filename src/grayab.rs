@@ -29,7 +29,7 @@ pub(crate) fn screencap_raw_bin(serial: &str) -> Vec<u8> {
 
 const LOADOP_PROTOCOL: &str = "gray_ab_loadop_whole_round_charge_v1";
 const LOADOP_SECONDS: u64 = 30;
-const USAGE: &str = "用法: phonefarm gray-ab [--pairs N] [--mode loadop] [--serial S] --out <目录> [--json] [--evidence-origin device|synthetic]\n       phonefarm gray-ab recover --session DIR --serial S [--json]\ncopyprobe 当前不支持执行。";
+pub(crate) const USAGE: &str = "用法: phonefarm gray-ab [--pairs N] [--mode loadop] [--serial S] --out <目录> [--json] [--evidence-origin device|synthetic]\n       phonefarm gray-ab recover --session DIR --serial S [--json]\ncopyprobe 当前不支持执行。";
 
 fn save_json(path: &Path, value: &Value) -> Result<(), String> {
     crate::confirmation_transport::new_file(path, &serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?)

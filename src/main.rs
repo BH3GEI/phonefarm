@@ -232,6 +232,7 @@ impl Config {
 }
 
 const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
+帮助:  help [命令...]                             (只打印用法，不查询设备)
 身份:  runtime-info --json                        (本程序构建声明；纯宿主，不查询设备)
 跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--max-steps N] [--app P] [--assert \"词1,词2\"] [--perceive ocr] \"<目标>\"
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
@@ -451,8 +452,20 @@ fn isolate_fd_test(name: &str) -> bool {
 
 fn main() {
     if let Some(code) = fd_lock::transport_entry() { std::process::exit(code); }
-    runtime_identity::report_startup();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // A document read, including for commands whose old parser ignores --help.
+    if args.first().is_some_and(|arg| arg == "help") {
+        let usage = match args.get(1).map(String::as_str) {
+            Some("gray-layer") => graylayer::USAGE,
+            Some("gray-ab") => grayab::USAGE,
+            Some("eval") => eval::USAGE,
+            Some("game-deploy") => game_deploy::USAGE,
+            _ => USAGE,
+        };
+        println!("{usage}");
+        return;
+    }
+    runtime_identity::report_startup();
     // 碰设备的子命令先过设备锁 (src/devlock.rs): 没拿到锁不碰设备
     if let Some(sub) = args.first().cloned() {
         let gray = matches!(sub.as_str(), "gray-layer" | "gray-ab");

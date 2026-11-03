@@ -55,7 +55,7 @@ pub(crate) const LAYER_PROPERTIES: [&str; 12] = [
     FA_PROP, FA_TS_PROP, FA_GO_PROP, STOREOP_PROP, STOREOP_LIVE_PROP, STOREOP_ON_PROP,
 ];
 
-const USAGE: &str = "用法: phonefarm gray-layer {status|off [pkg] [--json]} [--serial S]\n挂层使用: phonefarm gray-layer session --mode MODE --package PKG --serial S --out DIR --max-seconds N\n旧 probe/loadop/passdump/frameaudit/frameaudit-ts/target 已退役；旧 --keep-prop 的仅安装不启动语义不再提供，新 session 始终启动目标。\ncopyprobe/upop 当前不支持执行（包括自定义 SO）；工件与历史证据仍可离线分析。\nnpuop 挂层同样退役 (尚未接入持久 Session)；旧 eval npuop 中断留下的挂载用: phonefarm gray-layer npuop-restore <run 目录> [pkg] [--serial S]";
+pub(crate) const USAGE: &str = "用法: phonefarm gray-layer {status|off [pkg] [--json]} [--serial S]\n挂层使用: phonefarm gray-layer session --mode MODE --package PKG --serial S --out DIR --max-seconds N\n旧 probe/loadop/passdump/frameaudit/frameaudit-ts/target 已退役；旧 --keep-prop 的仅安装不启动语义不再提供，新 session 始终启动目标。\ncopyprobe/upop 当前不支持执行（包括自定义 SO）；工件与历史证据仍可离线分析。\nnpuop 挂层同样退役 (尚未接入持久 Session)；旧 eval npuop 中断留下的挂载用: phonefarm gray-layer npuop-restore <run 目录> [pkg] [--serial S]";
 
 /// Only the old install-and-exit commands are retired. The same mode names
 /// remain available to the persistent control Session.

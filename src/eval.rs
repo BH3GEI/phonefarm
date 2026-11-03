@@ -51,7 +51,7 @@ const DEFAULT_DENY_KEYWORDS: [&str; 7] = [
 /// 现在校验直接走 `parse_gray_rewrites`, 这张表只用于报错文字, 两者由单测锁在一起。
 pub(crate) const GRAY_SUPPORTED_KNOBS: [&str; 3] = ["loadop_dont_care", "storeop_dont_care", "npuop"];
 
-const USAGE: &str = "恢复: phonefarm eval recover --session DIR --serial S [--json]
+pub(crate) const USAGE: &str = "恢复: phonefarm eval recover --session DIR --serial S [--json]
 用法: phonefarm eval --request <eval_request.json> [--serial S] [--power-rail usb|battery] [--out 目录] [--no-curtail] [--lock-gpu-level N] [--evidence-origin device|synthetic] [--json] [--validate-only]
   --validate-only: 只做收端校验 (validate_v2 + gray 改写解析 + 负载脚本/层 .so 是否找得到), 不碰设备; 退出码 0 = 收, 2 = 拒
   --lock-gpu-level N  评测期间把 kgsl min/max_pwrlevel 都钉在 N 档 (审计 #9: 档位不受控时同一配置帧率跳台阶),
