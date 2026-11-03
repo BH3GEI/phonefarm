@@ -29,13 +29,24 @@ values={
  "bm dump -n 'com.example.megacity'": 'com.example.megacity:\n{"applicationInfo":{"isSystemApp":false}}',
  "bm dump -n 'com.ohos.sceneboard'": 'com.ohos.sceneboard:\n{"applicationInfo":{"isSystemApp":true}}',
 }
+name=os.path.basename(sys.argv[0])
+if name in ('aa','ps','bm'):
+    key=' '.join([name,*args])
+    if args[:2]==['dump','-n']: key="bm dump -n '"+args[2]+"'"
+    assert key in values, ('unexpected device action',name,args)
+    print(values[key])
+    sys.exit(0)
+if '__PF_APP_PART__' in command:
+    os.execv('/bin/sh',['sh','-c',command])
 key=command.split('\n')[0]
 assert key in values, ('unexpected transport action',args)
 print(values[key])
 print('__PF_APP_STATUS__0')
 "#).unwrap();
     fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
-    std::os::unix::fs::symlink(&tool, root.join("hdc")).unwrap();
+    for name in ["hdc", "aa", "ps", "bm"] {
+        std::os::unix::fs::symlink(&tool, root.join(name)).unwrap();
+    }
     for serial in ["android-test", "hdc:harmony-test", "unavailable", "hung"] {
         let started = std::time::Instant::now();
         let out = Command::new(env!("CARGO_BIN_EXE_phonefarm"))

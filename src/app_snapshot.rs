@@ -6,16 +6,34 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn read(phone: &Device, command: &str, deadline: Instant) -> Result<String, String> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(format!("{command}: observation deadline exceeded"));
-    }
-    // Device::shell already bounds the transport client and detaches adb/hdc servers.
-    let text = phone.shell(
-        &format!("{command}\nprintf '\\n__PF_APP_STATUS__%s\\n' \"$?\""),
-        remaining.as_millis() as u64,
-    );
+// HDC has substantial per-call latency. Run the inventory and selected bundle
+// details on the device in one shell, retaining each command's exit status.
+const HARMONY_APPS: &str = r#"
+part() {
+    printf '\n__PF_APP_PART__%s\n' "$1"
+    shift
+    "$@"
+    printf '\n__PF_APP_STATUS__%s\n' "$?"
+}
+part foreground aa dump -a
+processes=$(ps -A -o NAME)
+ps_status=$?
+printf '\n__PF_APP_PART__processes\n%s\n__PF_APP_STATUS__%s\n' "$processes" "$ps_status"
+bundles=$(bm dump -a)
+bm_status=$?
+printf '\n__PF_APP_PART__bundles\n%s\n__PF_APP_STATUS__%s\n' "$bundles" "$bm_status"
+if [ "$ps_status" -eq 0 ] && [ "$bm_status" -eq 0 ]; then
+    names=' '
+    for process in $processes; do names="$names${process%%:*} "; done
+    for bundle in $bundles; do
+        case "$names" in
+            *" $bundle "*) part "$bundle" bm dump -n "$bundle" ;;
+        esac
+    done
+fi
+"#;
+
+fn response(command: &str, text: &str) -> Result<String, String> {
     let Some((body, status)) = text.rsplit_once("__PF_APP_STATUS__") else {
         return Err(format!(
             "{command}: no completed response (transport unavailable or timed out)"
@@ -31,30 +49,59 @@ fn read(phone: &Device, command: &str, deadline: Instant) -> Result<String, Stri
     Ok(body.trim().to_string())
 }
 
-fn running(phone: &Device, harmony: bool, deadline: Instant) -> Result<Vec<String>, String> {
-    let processes = read(phone, "ps -A -o NAME", deadline)?;
+fn read(phone: &Device, command: &str, deadline: Instant) -> Result<String, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(format!("{command}: observation deadline exceeded"));
+    }
+    // Device::shell already bounds the transport client and detaches adb/hdc servers.
+    let text = phone.shell(
+        &format!("{command}\nprintf '\\n__PF_APP_STATUS__%s\\n' \"$?\""),
+        remaining.as_millis() as u64,
+    );
+    response(command, &text)
+}
+
+fn process_names(processes: &str) -> Result<BTreeSet<String>, String> {
     if !processes.lines().any(|line| line.trim() == "NAME") {
         return Err("ps: process list header unavailable".into());
     }
-    let names: BTreeSet<_> = processes
+    Ok(processes
         .lines()
         .skip(1)
         .map(|line| line.trim().split(':').next().unwrap_or("").to_string())
-        .collect();
-    if !harmony {
-        return Ok(read(phone, "pm list packages -3", deadline)?
-            .lines()
-            .filter_map(|line| line.strip_prefix("package:"))
-            .filter(|name| names.contains(*name))
-            .map(str::to_string)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect());
-    }
-    let bundles = parse_bm_bundles(&read(phone, "bm dump -a", deadline)?);
+        .collect())
+}
+
+fn running_android(phone: &Device, deadline: Instant) -> Result<Vec<String>, String> {
+    let names = process_names(&read(phone, "ps -A -o NAME", deadline)?)?;
+    Ok(read(phone, "pm list packages -3", deadline)?
+        .lines()
+        .filter_map(|line| line.strip_prefix("package:"))
+        .filter(|name| names.contains(*name))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+fn part(output: &str, name: &str) -> Result<String, String> {
+    let body = output
+        .split("__PF_APP_PART__")
+        .skip(1)
+        .filter_map(|part| part.split_once('\n'))
+        .find(|(label, _)| label.trim() == name)
+        .map(|(_, body)| body)
+        .unwrap_or("");
+    response(name, body)
+}
+
+fn running_harmony(output: &str) -> Result<Vec<String>, String> {
+    let names = process_names(&part(output, "processes")?)?;
+    let bundles = parse_bm_bundles(&part(output, "bundles")?);
     let mut result = vec![];
     for bundle in bundles.into_iter().filter(|name| names.contains(name)) {
-        let text = read(phone, &format!("bm dump -n '{}'", bundle), deadline)?;
+        let text = part(output, &bundle)?;
         let start = text
             .find('{')
             .ok_or_else(|| format!("bm: no application info for {bundle}"))?;
@@ -104,35 +151,32 @@ pub(crate) fn snapshot(serial: &str) -> Result<Value, String> {
 pub(crate) fn collect(serial: &str, tmp: &str) -> Result<Value, String> {
     let phone = Device::new(Some(serial.into()), tmp.into());
     let deadline = Instant::now() + Duration::from_secs(4);
-    let harmony = serial.starts_with("hdc:");
-    let mut errors = vec![];
-    let foreground = read(
-        &phone,
-        if harmony {
-            "aa dump -a"
-        } else {
-            "dumpsys window"
-        },
-        deadline,
-    )
-    .and_then(|text| {
-        let value = if harmony {
+    let (foreground, running) = if serial.starts_with("hdc:") {
+        let output = phone.shell(
+            HARMONY_APPS,
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64,
+        );
+        let foreground = part(&output, "foreground").and_then(|text| {
             let (name, _) = parse_aa_dump(&text);
             if name.is_empty() {
-                None
+                Err("foreground application unavailable".into())
             } else {
-                Some(name)
+                Ok(name)
             }
-        } else {
+        });
+        (foreground, running_harmony(&output))
+    } else {
+        let foreground = read(&phone, "dumpsys window", deadline).and_then(|text| {
             crate::fleet::parse_foreground(&text)
-        };
-        value.ok_or_else(|| "foreground application unavailable".into())
-    })
-    .map_err(|e| errors.push(e))
-    .ok();
-    let running = running(&phone, harmony, deadline)
-        .map_err(|e| errors.push(e))
-        .ok();
+                .ok_or_else(|| "foreground application unavailable".into())
+        });
+        (foreground, running_android(&phone, deadline))
+    };
+    let mut errors = vec![];
+    let foreground = foreground.map_err(|e| errors.push(e)).ok();
+    let running = running.map_err(|e| errors.push(e)).ok();
     Ok(
         json!({"serial": serial, "foreground": foreground, "running_third_party": running, "errors": errors}),
     )
