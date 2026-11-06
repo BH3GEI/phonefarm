@@ -39,6 +39,9 @@ const ACTIONS: &[&str] = &[
     "screenshot",
     "logcat",
     "diagnostics",
+    "shell",
+    "install",
+    "push",
     "tap",
     "swipe",
     "text",
@@ -421,7 +424,7 @@ fn live(store: &Store, state: &Value) -> Result<bool> {
 }
 fn owner_actions(s: &Value) -> Vec<&'static str> {
     ACTIONS.iter().copied().filter(|action| {
-        s.get("action_capabilities").map_or(!matches!(*action, "logcat" | "diagnostics"), |declared| {
+        s.get("action_capabilities").map_or(!matches!(*action, "logcat" | "diagnostics" | "shell" | "install" | "push"), |declared| {
             declared.as_array().is_some_and(|items| items.iter().any(|v| v == action))
         })
     }).collect()
@@ -722,6 +725,20 @@ fn validate_request(r: &Value) -> Result<()> {
     let p = &r["params"];
     let coordinate = |k| bounded(p, k, 0, 100_000).map(|_| ());
     match action {
+        "shell" => {
+            keys(p, &["cmd", "timeout_s"])?;
+            string(p, "cmd")?;
+            if p.get("timeout_s").is_some() { bounded(p, "timeout_s", 1, 120)?; }
+        }
+        "install" | "push" => {
+            keys(p, if action == "push" { &["sha256", "path"] } else { &["sha256"] })?;
+            let digest = string(p, "sha256")?;
+            // This value is a filename under the owner, never a host path.
+            if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(error("invalid_request", "sha256 must name uploaded content"));
+            }
+            if action == "push" { string(p, "path")?; }
+        }
         "screenshot" => { keys(p, &["max_side"])?; if p.get("max_side").is_some() { bounded(p, "max_side", 0, 8192)?; } }
         "logcat" => {
             keys(p, &["lines", "pid"])?;
@@ -745,7 +762,7 @@ fn validate_request(r: &Value) -> Result<()> {
             }
         }
         "renew" | "release" => keys(p, &[])?,
-        _ => return Err(error("unsupported", "action is not supported by this owner; raw shell/install/files/HDC/video are unavailable")),
+        _ => return Err(error("unsupported", "action is not supported by this owner")),
     }
     if matches!(action, "tap" | "swipe") && !id(string(p, "frame_id")?) {
         return Err(error("invalid_request", "frame_id must identify a screenshot request"));
@@ -810,6 +827,7 @@ fn save(store: &Store, s: &mut Value) -> Result<()> {
 fn shell_command(r: &Value) -> Result<(String, u64)> {
     let p = &r["params"];
     Ok(match string(r, "action")? {
+        "shell" => (format!("sh -c {} 2>&1", q(string(p, "cmd")?)), p["timeout_s"].as_u64().unwrap_or(20)),
         "logcat" => {
             let mut command = format!("logcat -d -t {} -v threadtime", p["lines"].as_u64().unwrap_or(200));
             if let Some(pid) = p["pid"].as_u64() { command.push_str(&format!(" --pid={pid}")); }
@@ -956,6 +974,20 @@ fn execute(store: &Store, lease: &Lease, transport: &mut Transport, s: &Value, r
     if r["action"] == "screenshot" {
         return capture_image(store, lease, transport, s, r, false);
     }
+    if matches!(r["action"].as_str(), Some("install" | "push")) {
+        let digest = string(&r["params"], "sha256")?;
+        let path = store.path.join(format!("upload-{digest}.apk"));
+        let bytes = fs::metadata(&path)?.len();
+        let mut args = if r["action"] == "install" { vec!["install".into(), "-r".into()] }
+                       else { vec!["push".into()] };
+        args.push(path.to_string_lossy().into_owned());
+        if r["action"] == "push" { args.push(string(&r["params"], "path")?.into()); }
+        let out = transport.raw(lease, &format!("remote-{}", string(r, "action")?), args, 120)
+            .map_err(|e| error(if e.uncertain { "unknown" } else { "io_error" }, e.message))?;
+        return Ok(json!({"exit":out.code,"stdout":out.stdout.chars().take(8192).collect::<String>(),
+            "stderr":out.stderr.chars().take(8192).collect::<String>(),"sha256":digest,"bytes":bytes,
+            "stdout_truncated":out.stdout.chars().nth(8192).is_some()}));
+    }
     let coordinate_input = matches!(r["action"].as_str(), Some("tap" | "swipe"));
     let mut verification = Value::Null;
     if coordinate_input {
@@ -989,7 +1021,7 @@ fn execute(store: &Store, lease: &Lease, transport: &mut Transport, s: &Value, r
         )
         .map_err(|e| error(if e.uncertain { "unknown" } else { "io_error" }, e.message))?;
     let mut value = json!({"exit":out.code,"stdout":out.stdout.chars().take(8192).collect::<String>()});
-    if matches!(r["action"].as_str(), Some("logcat" | "diagnostics")) {
+    if matches!(r["action"].as_str(), Some("logcat" | "diagnostics" | "shell")) {
         value["stdout_truncated"] = json!(out.stdout.chars().nth(8192).is_some());
     }
     if coordinate_input {
@@ -1139,6 +1171,8 @@ fn claim(store: &Store, s: &mut Value, completed: &HashSet<String>, end: Instant
     }
     let budget = if action == "screenshot" {
         34
+    } else if matches!(action, "install" | "push") {
+        122
     } else if matches!(action, "renew" | "release") {
         0
     } else {
@@ -1652,8 +1686,8 @@ mod tests {
         json!({"schema":ACTION,"session_id":"test-session","request_id":request_id,"action":action,"params":params})
     }
     #[test]
-    fn typed_boundary_rejects_raw_commands_and_unbounded_input() {
-        if crate::isolate_fd_test("remote_control::tests::typed_boundary_rejects_raw_commands_and_unbounded_input") { return; }
+    fn typed_boundary_preserves_action_parameters_and_owner_capabilities() {
+        if crate::isolate_fd_test("remote_control::tests::typed_boundary_preserves_action_parameters_and_owner_capabilities") { return; }
         for action in ["logcat", "diagnostics"] {
             assert!(ACTIONS.contains(&action));
             let scratch = Scratch::new();
@@ -1697,12 +1731,9 @@ mod tests {
             json!({"pid":"123; id"}), json!({"clear":true})] {
             assert!(validate_request(&request("bad-logcat", "logcat", params)).is_err());
         }
-        assert_eq!(
-            validate_request(&request("a", "shell", json!({"cmd":"id"})))
-                .unwrap_err()
-                .code,
-            "unsupported"
-        );
+        let shell = request("a", "shell", json!({"cmd":"id"}));
+        validate_request(&shell).unwrap();
+        assert_eq!(shell_command(&shell).unwrap(), ("sh -c 'id' 2>&1".into(), 20));
         assert!(validate_request(&request(
             "a",
             "swipe",
