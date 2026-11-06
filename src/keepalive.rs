@@ -73,12 +73,9 @@ fn parse_adb_devices(text: &str) -> Vec<String> {
     v
 }
 
-/// hdc list targets → connect key 集: 滤空行与 [Empty] 哨兵(与 devices 子命令同一纪律)
+/// hdc list targets → 能用的 connect key 集 (未授权、离线的不算; 见 fleet::hdc_targets)
 fn parse_hdc_targets(text: &str) -> Vec<String> {
-    text.lines().map(|l| l.trim())
-        .filter(|l| !l.is_empty() && *l != "[Empty]" && !l.starts_with("[Fail"))
-        .map(|l| l.to_string())
-        .collect()
+    crate::fleet::parse_hdc_targets(text)
 }
 
 /// dumpsys power 的 mWakefulness: Awake→true; 其余(Asleep/Dozing)→false; 采不到 None
@@ -298,6 +295,7 @@ mod tests {
         assert!(parse_hdc_targets("[Empty]\n").is_empty());
         assert!(parse_hdc_targets("").is_empty());
         assert!(parse_hdc_targets("[Fail]Connect failed\n").is_empty());
+        assert_eq!(parse_hdc_targets("abc\n88X9K26901026869\tUnauthorized\nxyz\tOffline\n"), vec!["abc"]);
     }
 
     #[test]

@@ -165,14 +165,11 @@ pub fn single_online_adb(text: &str) -> Option<String> {
     online.next().is_none().then_some(first)
 }
 
-/// `hdc list targets` 里恰好一台设备的 connect key。
+/// `hdc list targets` 里恰好一台能用的设备的 connect key (未授权、离线的不算)。
 pub fn single_online_hdc(text: &str) -> Option<String> {
-    let mut it = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && *l != "[Empty]" && !l.starts_with("[Fail"));
+    let mut it = crate::fleet::parse_hdc_targets(text).into_iter();
     let first = it.next()?;
-    it.next().is_none().then(|| first.to_string())
+    it.next().is_none().then_some(first)
 }
 
 /// 这一局实际落在哪台机器上。
@@ -1598,6 +1595,8 @@ mod tests {
         assert_eq!(single_online_hdc("[Empty]\n"), None);
         assert_eq!(single_online_hdc("[Fail]Connect failed\n"), None);
         assert_eq!(single_online_hdc("a\nb\n"), None, "两台就判不出");
+        assert_eq!(single_online_hdc("88X9K26901026869\tUnauthorized\n"), None, "未授权的不能用");
+        assert_eq!(single_online_hdc("abc\n88X9K26901026869\tUnauthorized\n").as_deref(), Some("abc"));
     }
 
     /// 不给 --serial 时的自动解析。

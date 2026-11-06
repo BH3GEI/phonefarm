@@ -267,13 +267,30 @@ pub fn parse_adb_devices_l(text: &str) -> Vec<AdbEntry> {
     out
 }
 
-/// `hdc list targets` → connect key 集 (滤掉空行与 `[Empty]` / `[Fail...]` 哨兵)。
-pub fn parse_hdc_targets(text: &str) -> Vec<String> {
+/// `hdc list targets` → (connect key, 状态), 滤掉空行与 `[Empty]` / `[Fail...]` 哨兵。
+///
+/// hdc 在 key 后面可能跟一个状态 (`88X9K26901026869\tUnauthorized`): key 只取第一列, 不带状态。
+/// 没有状态或状态是 `Connected` 的才能用, 记作 `device` (与 adb 同一说法); `Unauthorized`、`Offline`
+/// 等记作小写的状态名, 不算在线。
+pub fn hdc_targets(text: &str) -> Vec<(String, String)> {
+    const STATES: [&str; 5] = ["Connected", "Ready", "Offline", "Unauthorized", "Unknown"];
     text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && *l != "[Empty]" && !l.starts_with("[Fail"))
-        .map(str::to_string)
+        .filter_map(|l| {
+            let mut columns = l.split_whitespace();
+            let key = columns.next()?.to_string();
+            let state = columns
+                .find_map(|c| STATES.iter().find(|s| s.eq_ignore_ascii_case(c)))
+                .map_or("device".to_string(), |s| if *s == "Connected" { "device".to_string() } else { s.to_ascii_lowercase() });
+            Some((key, state))
+        })
         .collect()
+}
+
+/// `hdc list targets` 里能用的 connect key (见 `hdc_targets`)。
+pub fn parse_hdc_targets(text: &str) -> Vec<String> {
+    hdc_targets(text).into_iter().filter(|(_, state)| state == "device").map(|(key, _)| key).collect()
 }
 
 /// `dumpsys battery` 的充电状态。
@@ -962,7 +979,7 @@ fn cached_shot(serial: &str, screens: &Screens) -> Option<Screenshot> {
 type AdbEntry = (String, String, Option<String>);
 
 /// 枚举两族设备。某一族的工具不在 PATH 就整族跳过 —— 与 `devices` 子命令同纪律。
-fn enumerate(adb: Option<&str>) -> (Vec<AdbEntry>, Vec<String>) {
+fn enumerate(adb: Option<&str>) -> (Vec<AdbEntry>, Vec<(String, String)>) {
     let mut android = Vec::new();
     if let Some(adb) = adb {
         if let Ok(out) = crate::fd_lock::transport_command(adb).args(["devices", "-l"]).output() {
@@ -971,7 +988,7 @@ fn enumerate(adb: Option<&str>) -> (Vec<AdbEntry>, Vec<String>) {
     }
     let mut oh = Vec::new();
     if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
-        oh = parse_hdc_targets(&String::from_utf8_lossy(&out.stdout));
+        oh = hdc_targets(&String::from_utf8_lossy(&out.stdout));
     }
     (android, oh)
 }
@@ -1067,8 +1084,12 @@ pub fn collect(opts: &Opts) -> Result<Fleet, String> {
         devices.push(card);
     }
 
-    for key in oh.into_iter().filter(|k| want(&format!("hdc:{k}"))) {
+    for (key, state) in oh.into_iter().filter(|(k, _)| want(&format!("hdc:{k}"))) {
         let serial = format!("hdc:{key}");
+        if state != "device" {
+            devices.push(offline_card(&serial, "hdc", &state, None));
+            continue;
+        }
         let t0 = Instant::now();
         let lease = crate::devlease::EphemeralObservation::acquire(&storage, &serial).ok();
         let depth = if lease.is_some() { "full" } else { "light" };
@@ -1331,6 +1352,18 @@ mod tests {
         assert_eq!(parse_hdc_targets("abc\ndef\n"), vec!["abc", "def"]);
         assert!(parse_hdc_targets("[Empty]\n").is_empty());
         assert!(parse_hdc_targets("[Fail]Connect failed\n").is_empty());
+    }
+
+    #[test]
+    fn an_hdc_status_is_not_part_of_the_key_and_only_connected_targets_are_usable() {
+        let text = "88X9K26901026869\tUnauthorized\nabc\nxyz\tOffline\nk1\tUSB\tConnected\tlocalhost\thdc\n";
+        let pair = |k: &str, s: &str| (k.to_string(), s.to_string());
+        assert_eq!(hdc_targets(text), vec![pair("88X9K26901026869", "unauthorized"), pair("abc", "device"),
+                                           pair("xyz", "offline"), pair("k1", "device")]);
+        assert_eq!(parse_hdc_targets(text), vec!["abc", "k1"]);
+        // An unauthorized phone is listed under its own serial (the one it is registered by), not online.
+        let card = offline_card("hdc:88X9K26901026869", "hdc", "unauthorized", None);
+        assert_eq!((card.serial.as_str(), card.state.as_str(), card.online), ("hdc:88X9K26901026869", "unauthorized", false));
     }
 
     /// `status: 4` 是 Not charging, **不是**放电 —— 停充之后内核常常就写这个。

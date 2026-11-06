@@ -578,11 +578,9 @@ fn main() {
                 eprintln!("(未找到 adb,仅列 hdc;ADB_BIN=/path/to/adb 可指定)");
             }
             if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
-                for l in String::from_utf8_lossy(&out.stdout).lines() {
-                    let l = l.trim();
-                    if !l.is_empty() && l != "[Empty]" {
-                        println!("hdc:{l}");
-                    }
+                // 与 adb devices 一样: 第一列是可直接用的 serial, 不能用的在后面标出状态
+                for (key, state) in crate::fleet::hdc_targets(&String::from_utf8_lossy(&out.stdout)) {
+                    if state == "device" { println!("hdc:{key}"); } else { println!("hdc:{key}\t{state}"); }
                 }
             }
             // iOS: 经 WebDriverAgent, serial 形态 "ios:<udid>"。
