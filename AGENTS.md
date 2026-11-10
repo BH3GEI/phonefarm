@@ -11,43 +11,28 @@ iOS `wda`），
 
 ## 在整体里的位置（改这个仓库之前先看这一段）
 
-整套东西服务于外部 Agent：使用远程真机系统性优化指定游戏/系统，探索多种方向，
-完成可复现实验并留下可审核结果。Agent 的优先级判断可在任意工具里完成；GOL 是可选客户端。
-网页与 CLI/API 同等优先。目标、方向、实验、证据、人工指导/协助/评价独立于聊天工具持久化；
-人异步参与，只阻断依赖其反馈的方向，其他可行方向继续。
-当前产品准则与开发计划见 https://github.com/HGamey/docs/tree/main/plans/2026-10-22-agent-platform 。
-本仓库提供设备与测量底座，当前能力主要分为四类：
+phonefarm 是移动端 / 鸿蒙设备的**设备层**：在一台宿主机上发现设备、操作设备、采集产物、
+执行测试，并用本机设备锁保证同一台设备不被两个任务同时使用。它不做跨宿主调度，
+也不替上层做业务判断。典型调用方：
 
-- 设备：adb / hdc / iOS(WebDriverAgent) 三族的连接、保活、确定性脚本回放。新增一种设备/平台 = 实现 `platform::Backend`
-  并登记 serial 前缀，各平台能开哪几层及原因见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DEVICES.md`。
-- 应用改动（`knobs/`）：黑档系统参数，灰档 Vulkan layer 注入。
-- 测量：安卓 sysfs 电源轨加 raw ftrace kgsl，鸿蒙 HiSmartPerf，上层拿同一份 JSON；
-  测功耗期间停充。
-- 统计判定与还原：规则先于数据冻结，不显著就回退，退出前恢复现场。
+- 测试与迁移 harness（例如 Westlake / AOSP→OH harness 的 D600 开发板集群）：
+  上层负责板号分配、跨宿主板锁与任务派发，phonefarm 负责单台宿主上的设备操作与采集。
+  接入说明见 `docs/D600_HARNESS.md`。
+- AI Agent：通过 `serve`（MCP）或 `skills/phonefarm/SKILL.md` 直接驱动设备。
+- 人：命令行直接用，产物全部落盘，可离线下钻。
 
-外部 Agent、GOL 或人提出候选；本仓库按冻结合同采集和判定。
-用户可在实验前选择性能/画质预算、原游戏基线和模块 ms 目标；探索与确认分层。
-不能在看到候选结果后改写旧实验的判据，也不能把未知功耗或没有胜过双线性直接等同于无优化价值。
+当前能力分四类：
 
-优化分三个层级：① 游戏代码（需要白盒）② 图形接口 Vulkan 层 ③ 系统参数。
-闭源商用游戏的可用路线还取决于游戏内设置和公开接口；不能仅按是否 root 做统一结论。
-鸿蒙商用机的 root 注入/系统改动不能照搬 Android；HiSmartPerf 等来源须按具体设备、
-版本和实际字段验证。工程机、官方接口或自签名应用也是待核路线，不是现成能力。
+- 设备：adb / hdc / iOS(WebDriverAgent) 三族的发现、连接、保活、确定性脚本回放。新增一种设备/平台 = 实现 `platform::Backend`
+  并登记 serial 前缀，各平台差异见 `docs/DEVICES.md`。
+- 采集：每步截图、原始 UI 树、`log.jsonl` 记录、遥测；`capture` / `collect` / `fleet` / `screen` / `perf`。
+- 测试：CTS / XTS 批量执行与结果提取（Android / OpenHarmony 双协议）。
+- 可选的图形性能研究通路：`knobs/`（系统参数与 Vulkan layer 注入）、`loop_v1/`、`eval` / `gpu-op` / `gray-*`。
+  这一组工具服务于移动 GPU 能效研究（上游客户端之一是 HGamey/game_opt_loop），设备层不依赖它们。
 
-Harmony SmartPerf 电池功率要求采样前后 BatteryService 均确认断电且负电流；离线 CSV
-需同轮 battery_before.txt / battery_after.txt。缺失或不符则功率 null 并给原因；两端合格
-不证明全窗口供电不变或游戏每帧能耗。合同见
-https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/HARMONY-SUPPLY.md。
-
-测试载体在 `loop_v1/carriers/`（Megacity / Vulkan-Samples / AnKi），
-白盒靶子在本仓库的 `refbench/`。`sr_loop` 是已结项的前序实验，不在当前主线上。
-
-**前期方法迁移进展，不能作为当前平台完成度**：当前产品与待办见上述平台计划；以下保留既有方法记录。`loop_v1/` 的判定口径（解析→归因→统计→判据收口→白名单→判定→
-画面判据→模型交互/本地变异器）、两通路对照、Vulkan-Samples 三道闸与两臂判读面、refbench/vks
-报告都已经收进 Rust，`autoloop` 编排（`phonefarm autoloop`）与灰档主机侧编排（`phonefarm gray-layer` / `gray-ab` / `shot-diff`）也已收进，剩下载体构建/路线工具、
-设备端 shell（按约定保持设备端）与 `knobs/` 超分那批实验脚本还没收。上层的 `game_opt_loop` 那边，`optimize` 总入口、agent skill 与
-可视化前端已有实现，系统参数与画面流程改写两层仍按具体实验核验——`eval --request`
-入口已经落地并真机验证（③ 系统参数端到端已出报告，② 灰档机械链路已通、命中口径已对齐——真机实测命中 27 处 / begins 9195）。写目标形态时要标明状态。
+能力声明按设备实例核验：鸿蒙商用机通常拿不到 root，系统参数与图形层改动不能照搬 Android；
+OpenHarmony 开发板、不同系统版本上 `uitest` / `snapshot_display` / `SP_daemon` 的可用性和字段要逐项验证，
+不从系统名或品牌推断支持。写文档时，计划中的能力写成「计划」，不写成「已完成」。
 
 ## 能力族与常用命令
 
@@ -128,7 +113,7 @@ CTS携带本地APK的安装目前仅支持Android默认或精确`pm install -r {
 
 产出的是**清单**不是**结论**：一次调用最多滑 `--max-swipes` 屏，某屏无新内容立即停（绝不盲滑），
 `coverage.complete` 如实区分「采完整屏列表」与「撞到有界上限」。判定仍归判定那一侧。
-契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_OBSERVATION_BUDGET.md`。
+契约见 `docs/SPEC_OBSERVATION_BUDGET.md`。
 
 **决策原语**（零 Token 降级档）
 
@@ -140,7 +125,7 @@ CTS携带本地APK的安装目前仅支持Android默认或精确`pm install -r {
 
 一个 state + 一组 typed question（`choice`/`score`/`noul`）→ 一组 typed answer。
 **仓库不含任何模型**：`--local` 那档是降级占位不是模型（概率均匀、未校准），
-只在「总比停摆强」这个意义上成立。契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_DECISION_PATH.md`。
+只在「总比停摆强」这个意义上成立。契约见 `docs/SPEC_DECISION_PATH.md`。
 
 **设备屏幕观战窗口**（零 Token，只读）
 
@@ -154,94 +139,23 @@ CTS携带本地APK的安装目前仅支持Android默认或精确`pm install -r {
 服务本身与缓存读取不持锁。子进程超时/退出不确定时保留屏障，不能自动推断设备端空闲。
 当前合同见 `https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/OBSERVATION-OWNERSHIP.md`。
 
-**持续灰层控制会话**（源码与宿主替身已验，尚未部署/真机验收）
-
-`runtime-info` 的 `phonefarm/gray-control-gateway@1` 声明现有灰层会话网关支持；
-实际 owner 的 parent 格式、动作能力、租约和恢复证据仍逐项核验。
-Node 新建会话使用配置 PF 并核该声明；旧会话读取、stop 与 typed recovery 不套用新建门禁。
-合同见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/BUSINESS-COMPATIBILITY.md 。
-
-`gray-layer session --mode MODE --package PKG --serial S --out DIR` 在同一个 owner 内挂层、抓图、有限输入和恢复。
-网页、`pf-node session-status/session-action` 与本机 `gray-layer session-status/session-action` 共用有序请求及回执；
-连接已有会话不另拿设备锁。请求超时保留原 request_id 并查询，不换 ID 重放输入。
-人工接管只改变控制 epoch，lease 仍归原 owner；stop/SIGINT 在有界动作结束后恢复。
-失败使用 `gray-layer session-recover --session DIR --serial S --json` 接续原上下文。
-局部恢复收据不自动解除整个 job，沿用 fresh lease clear + 核查说明释放流程。
-`sample` 动作可在当前场景采1至120秒，保持同一 owner；不自动重启，供电遵循创建时固定政策，风扇/频率不变。
-可选 input + frame_id 在同一采样中执行有限计划；无 input 保持 idle。计划必须覆盖 seconds+10、最多600秒，
-依最新真实截图核坐标，并在部署后放行前再核图龄/方向；不自动补输入。旧owner缺 sample v2 能力时明确拒绝。
-每轮plan和自然完成原件保留，新资源父@3仍可恢复旧C1/C2A/B1会话。
-可选 render_comm 必须显式给出；留空仍保留 raw/env，帧指标为未知，不套 Unity 默认。
-GPU submit proxy 不等于显示 FPS，首批不按不同窗口推算每帧能耗。采样资源先恢复，之后才完成灰层范围。
-会话可在创建时显式选择 --power-policy observe|battery，默认只观察；battery首次采样准备一次并跨轮保持，
-原记录绑定当前context。独立恢复供电不代表自然输入/整个会话已恢复；未知时保留屏障及原件。
-同期trace电池能量/平均功率是V×I采样积分估计，缺覆盖或放电资格时null；每帧能耗仍待完整分组窗口。
-画质检查点使用同一owner的quality begin/checkpoint/finish动作，逐阶段保存当前控制epoch，
-完整原图与明确派生的半尺寸预览分开；缺marker保原图且阶段不前进，显式新请求可重采失败阶段。
-Web/CLI共读持久manifest；采集完成不代表同场景或画质通过。
-旧genshin_quality客户端只连接显式既有session/job，要求尺寸/方向/坐标profile，每个输入前重新截图；
-它不启动或重启游戏。重复完整调用返回旧原件，partial/未知不自动重走导航；远程状态缺失与断网分别处理。
-合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-QUALITY.md。
-REF_ARM=1参考客户端也只连接显式既有passdump会话，按profile和供电期望执行capture/sample/marker。
-默认保留40秒有限输入与30秒采样，WL/CAPDUR可给默认值，LEAD仅支持现有owner固定的6秒；
-不安装/重启/停止会话、不推断世界场景或极高精度。完整重复返回旧结果，partial不自动重采。
-网页已补整组profile/epoch/label校验及同组回执查询，隐藏或离开页面停止后续提交；合同见
-https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-REFERENCE-CLIENT.md。
-四臂refbench已完成源码与宿主替身验收，`gray-layer refbench-loadop --serial S --out DIR` 使用一个Session，
-A/B确实未安装层，C/D才安装改写；所有extras为字符串，八份原件与started事实保留。
-自然退出、应用自报、改写预期及资源恢复分开；D的创建期effective可以非空，实际begins必须为0。
-不测FPS/功耗；恢复入口`gray-layer refbench-recover --session DIR --serial S --json`仅接续原上下文。
-实现合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-REFBENCH-SESSION.md。
-旧gray-layer挂层后退出入口已退役（源码与零设备拦截验证），旧keep-prop仅安装不启动语义不能直接alias为session。
-typed off/status和历史/离线分析保留；shell off改为同一typed入口，去掉全盘删SO/settings私链。
-合同见https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-LEGACY-MOUNT-RETIREMENT.md。
-持续会话合同见
-`https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-CONTROL-SESSION.md`。
-
-**Compute Shader 算子标尺**（零 Token，需 root）
+**可选：图形性能研究通路**（多数需 root；服务于移动 GPU 能效研究）
 
 ```bash
-./phonefarm eval --request <eval_request.json> --serial S --json      # 评测唯一入口: v1 转交 gpu-op; v2 按 kind 路由 shader/sysparam/gray
-                                                                     # sysparam 真机已验证 (probe + 1 候选端到端, optimize 可直连);
-                                                                     # 自驱动负载 workload.launch = {extras, marker, static_extras} (Megacity city_flythrough):
-                                                                     #   sysparam 每臂带 extras 重启应用、等 marker 落地再采; gray 挂层时带 extras 启动;
-                                                                     #   gray 的画面比对改为上机前跑一次 storeop-check (static_extras 场景, 孪生 pass 现场开关)
-                                                                     # sysparam / gray 每臂开跑前按 conditions.cool_c 等冷 (每 8s 读一次, 最多 300s, 超时不作废),
-                                                                     #   逐臂起跑温度记进 conditions_observed.cool_per_arm, cool_reached_c = 最热的一次
-                                                                     # sysparam 改写臂施加后 +12s 与负载末尾各回读一次, 对不上 = 被厂商性能服务抢回 (contested),
-                                                                     #   那一臂不进统计, conditions_observed.contested_arms 单列; 快照里只有厂商服务会动的
-                                                                     #   频率边界 (kgsl.*pwrlevel、cpu.*.scaling_max/min) 变了不判留痕, 记进 snapshot_vendor_drift
-                                                                     # gray 命中口径已对齐 (hits = effective[].begins 之和, 真机实测 9195); 注意游戏必须先进入渲染态, 否则 require_hit 如实 ABORT
-                                                                     # gray 改写: loadop_dont_care / storeop_dont_care (scope="<frame-audit sig 前缀≥8位>:<附件下标>", 可多条);
-                                                                     #   每轮两臂负载前同位置截图比 PSNR, 低于 payload.image_check.min_psnr_db (缺省 30) → ABORT「画面出错」;
-                                                                     #   过了才做统计判定 (可判 PASS/REJECT), psnr_db = 最差一轮。真机未验证
-./phonefarm gpu-op --request <eval_request.json> --serial S --json   # shader 通路的实现本体 (等冷+锁频+A/B/A/B+Welch t 检验)
-./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
+./phonefarm perf --serial S [--app 包名] [--source sysfs|smartperf|sflatency] --json   # 归一化性能快照（鸿蒙走 SP_daemon）
+./phonefarm frame-sources --serial S [--app 包名] --json                              # 这台设备有哪些帧率/帧时来源
+./phonefarm eval --request <eval_request.json> --serial S --json                     # 评测入口：v1 转交 gpu-op；v2 按 kind 路由 shader/sysparam/gray
+./phonefarm gpu-op --request <eval_request.json> --serial S --json                   # Compute Shader 算子标尺（等冷 + 锁频 + A/B + Welch t）
+./phonefarm gray-layer session --mode MODE --package PKG --serial S --out DIR        # Vulkan 灰层会话：挂层、抓图、有限输入与恢复
+./phonefarm autoloop --out <证据目录>                                                  # 系统参数自动闭环
 ```
 
-当前 gray eval 的 launch 与有限触控 script 走同一父会话；恢复用 `eval recover --session DIR --serial S`。
-有限脚本支持 sleep/tap/swipe 及精确旧 `input swipe` 数值格式；不支持 onboard、HID 或任意 shell。
-输入中断而缺自然完成收据时，进程消失也不能解除恢复屏障。当前验收层级为宿主替身，不能外推真机恢复。
-规格与限制见 https://github.com/HGamey/docs/blob/main/plans/2026-10-22-agent-platform/GRAY-EVAL-SCRIPT-SESSION.md 。
-
-`game_opt_loop` 决策层的物理采样与统计裁决端，契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_GPU_OP.md`。
-设备条件化与功耗遥测在 `src/hwcond.rs`（与 `bench` 共享），统计在 `src/gpustat.rs`。
-设备侧 `vkop_runner` 已构建（`tools/vkop/android_aarch64_vkop_runner`，源码与 `build.sh` 同目录）。
-画质补测支持真机参考帧集，回包里 `quality_reference` 记清真值出处。
-
-**性能优化闭环**（零 Token，需 root）
-
-实现在 `loop_v1/`（工具链 + 纯函数解析器），**不是 phonefarm 子命令**。
-跑法与五条判据见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/loop_v1/README.md`；候选改动从 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/MOBILE_GPU_OPT_ROUTES.md` 的清单里挑。
-
-三条纪律，动手前必须清楚：
-
-- **判定规则先于数据冻结**——统计判据在看到候选数据之前落盘；不达标须按合同恢复，失败和负结果仍保留原件
-- **sysfs 写入承担恢复义务**，进出快照与实际恢复收据独立核验；失败或未知保留屏障，不能以进程退出代替
-- **解析全是纯函数**，同一份 trace 每次重算必须逐字节一致
-
-帧时序走 raw ftrace 的 kgsl 事件（不侵入游戏进程）。`SurfaceFlinger --latency`、
-`gfxinfo`、Perfetto GPU producer 三条路都已在本机实测排除，别再重复试，原因见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/loop_v1/README.md`。
+`loop_v1/`（帧时序 / 功耗采集与统计判定闭环）与 `knobs/` 的说明见各自目录下的 README。
+三条纪律：判定规则先于数据冻结；sysfs 写入承担恢复义务，进出快照与恢复收据独立核验；解析全是纯函数。
+灰层会话、确认采样、资格评估等合同与实验记录在
+https://github.com/HGamey/docs/tree/main/repos/phonefarm 与
+https://github.com/HGamey/docs/tree/main/plans/2026-10-22-agent-platform 。
+游戏资源部署 `game-deploy` 是 Cargo 可选特性 `game`，默认不编译（`cargo build --release --features game`）。
 
 **假设—实验—证据闭环**
 
@@ -282,9 +196,9 @@ typed off/status和历史/离线分析保留；shell off改为同一typed入口�
    这些零 Token 通路，可自由执行。
 2. **密钥管理**：程序运行时自动检测并加载 `./secrets.env`。缺失密钥时提示格式并安全退出。
    严禁在代码、日志及任何可提交文件（`AGENTS.md`、`README.md` 等）中硬编码真实密钥。
-3. **测试环境约束**：VLM 通路与 CTS 通路的 Android 侧统一使用 AVD 模拟器（AVD 名 `agentphone`）；
-   OpenHarmony 需在特定的 intel-mac 物理中转端上通过 ssh 控制，连接真机前先核实该物理端
-   是否完成本地构建与代码同步。性能测量必须上真机，模拟器的帧时与功耗没有意义。
+3. **测试环境约束**：VLM 通路与 CTS 通路的 Android 侧可用 AVD 模拟器（AVD 名 `agentphone`）；
+   OpenHarmony 设备通过所在宿主机上的 `hdc` 访问，远程宿主先核实它用的是当前源码构建的二进制。
+   性能测量必须上真机，模拟器的帧时与功耗没有意义。
 4. **设备纪律**（性能测量相关）：
    - 同一个候选的 A/B 两臂必须落在**同一台**手机上。跨机比较会把机间差异算进改动的效果里。
    - 设备入口共用 fd 锁：同机互斥，不同手机并行；默认等待到拿锁或被取消。
@@ -293,10 +207,8 @@ typed off/status和历史/离线分析保留；shell off改为同一typed入口�
      任务结束关闭最后一个 fd 后立即释放，恢复用 reset 和原 session／adb。
    - 影响稳态的环境条件（风扇开关、冷机阈值、供电状态）逐轮记进证据。这些不是无关细节，
      条件不同的两批数据不能混在一起比。
-   - 规划中的设备构成：安卓旗舰机（一台跑测试、一台留给调试，要并行跑多条线得是同型号多台）、
-     鸿蒙手机 1 到 2 台做对照、海外版华为手机若干。连接、root、测量、图形接口与系统写能力
-     均按具体实例验证，不从系统或品牌推断支持。这是计划不是现状，
-     不要按「已有这些机器」来写流程。
+   - 连接、root、测量、图形接口与系统写能力均按具体设备实例验证，不从系统或品牌推断支持。
+   - 跨宿主的设备分配与锁（例如 D600 集群的板锁）归上层；本仓库的锁只管同一台宿主。
 5. **数据持久化规范**：程序唯一合法写入路径为 `tasks/<任务名>/`。`log.jsonl` 只追加；
    `lessons.jsonl` 必须原子写；禁止自行清理 `runs/` 历史目录；媒体与树结构大文件已由 `.gitignore`
    排除，严禁提交大体积非文本文件。`test-batch`/`cts-fetch`/`bench`/`capture` 的产物写入各自 `--out` 目录。
@@ -309,7 +221,7 @@ typed off/status和历史/离线分析保留；shell off改为同一typed入口�
    先确认用的是当前源码构建并已签名的二进制。
 8. **缺陷修复规范**：记录触发条件、行为变化和验证范围；保证通用性，
    不针对特定任务或界面硬编码拦截，也不以无关真机流程代替受影响行为的回归。
-9. **版本控制与提交**：按根目录 AGENTS.md 直接推 main。部署与提交分开；部署用根目录 deploy.py。
+9. **版本控制与提交**：只从最新 main 开分支，经 PR 合并，不直接推 main；一个 PR 只做一件事，不叠 PR。
 10. **汇报规范**：呈报进度或结果时给最直接的技术事实、运行指标与对局结论（成功率、耗时分位数、
     Token 支出），禁止含糊夸张的非技术词汇，严禁在文档中堆砌虚假的性能或战绩宣称。
     计划中的能力写成「计划」，不写成「已完成」；撤回过的结论不要再引用。
@@ -339,10 +251,9 @@ VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`de
 ```
 loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（Python 工具链，正在往 Rust 收）
   carriers/            测试载体：megacity / vulkan-samples / anki-sponza
-  refbench/            白盒靶子的驱动侧（靶子本身在本仓库的 refbench/）；判定链已知答案自检 phonefarm selftest 的用法也在这里
+  refbench/            白盒靶子的驱动侧（靶子本身在 HGamey/refbench）；判定链已知答案自检 phonefarm selftest 的用法也在这里
   auto/                自动挑旋钮：白名单探测 → 冻结规则 → 大模型选参 → 逐组对照
-knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，
-                       说明见 https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/README.md；原 HGamey/knobs 仓库已归档并入，shell 正在往 Rust 收）
+knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，说明见 knobs/README.md）
 src/                   Rust 内核源码
   universal/           通用核心：统一动作协议、三大算子、优先级引擎、插件契约
   plugins/             场景插件层
@@ -374,21 +285,18 @@ tasks/<任务名>/        任务数据目录（lessons.jsonl、tree.json、campa
   `cat ...stepN.xml.gz` 查原始 UI 树做离线解析与断言复盘。
 - 局 ID 支持前缀模糊匹配。
 - VLM 通路严格遵守单步六阶段回路（采集 → 组装 → 决策 → 校验 → 执行 → 验收）。
-- 核心架构契约见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/DESIGN.md`；任何核心功能升级或协议重写，必须先做 SPEC 定义，并与既有架构保持一致。
+- 核心架构契约见 `docs/DESIGN.md`；任何核心功能升级或协议重写，必须先做 SPEC 定义，并与既有架构保持一致。
 
-## 代码仓库只放代码
+## 分支与 PR
 
-见根目录 [AGENTS.md](../AGENTS.md)：提交、文档、测试与部署规则对全仓库统一。
-
-## 直接提交与团队开发
-
-- 基于当前 main 分批开发，提交与部署按根目录 AGENTS.md。
-- 主 Agent 聚焦系统结构、协议与整合；前端等独立模块可交具体 subagent，划分文件所有权。
+- 只从最新 main 开分支，经 PR 合并；一个 PR 只做一件事，不叠 PR。
+- 文档跟代码一起改：命令、参数或行为变了，同一个 PR 里更新 README / AGENTS.md / docs / skills。
 - 每批记录已做、未做、测试层级和恢复义务；模拟通过不等于真机或全流程已可用。
+- 来自 HGamey/hgamey 单仓的改动按提交同步，提交信息里写清来源提交号。
 
 ## 任务锁与恢复
 
-所有设备入口共用 fd 锁：单机 device EX + farm SH，全场 farm EX。同设备别名归一到 device_id，普通显式 serial 自动选择单设备范围；tools/devlock run 和 GOL 使用同一 PF 实现。Python 子进程须 pass_fds，adb/hdc server 不能继承任务 fd。
+所有设备入口共用 fd 锁：单机 device EX + farm SH，全场 farm EX。同设备别名归一到 device_id，普通显式 serial 自动选择单设备范围；tools/devlock run 与上层调用方使用同一 PF 实现。Python 子进程须 pass_fds，adb/hdc server 不能继承任务 fd。
 
 锁只由最后一个 fd 关闭释放，owner JSON 仅作显示。cancel/reset 停止任务剩余进程组，设备恢复使用原 session 或 adb；不得删除锁文件来解锁，不留持久恢复屏障。原实验结果、恢复上下文与真假失败事实保留。
 
