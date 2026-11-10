@@ -597,10 +597,28 @@ while not (root/'client-ready').exists():time.sleep(.01)
         "live orphan proxy must retain its lock"
     );
     assert!(f.try_device("fake-b").status.success());
-    let node = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../harness-ops/node");
-    let cleanup = Command::new("python3").args(["-c",
-        "import sys;sys.path.insert(0,sys.argv[1]);from job_runtime import terminate_group;print(terminate_group(int(sys.argv[2]),.1))"])
-        .arg(node).arg(task.0.id().to_string()).output().unwrap();
+    // Same contract as an orchestrator's group reset: SIGTERM the recorded task group,
+    // wait briefly for it to disappear, then SIGKILL whatever is left.
+    let cleanup = Command::new("python3").args(["-c", r#"
+import os, signal, sys, time
+pg = int(sys.argv[1])
+try:
+    os.killpg(pg, signal.SIGTERM)
+except ProcessLookupError:
+    sys.exit(0)
+end = time.monotonic() + .1
+while time.monotonic() < end:
+    try:
+        os.killpg(pg, 0)
+    except ProcessLookupError:
+        sys.exit(0)
+    time.sleep(.025)
+try:
+    os.killpg(pg, signal.SIGKILL)
+except ProcessLookupError:
+    pass
+"#])
+        .arg(task.0.id().to_string()).output().unwrap();
     assert!(
         cleanup.status.success(),
         "{}",
