@@ -213,7 +213,8 @@ class DevlockBridgeTests(unittest.TestCase):
         resolver.chmod(0o755)
         self.env["PHONEFARM_BIN"] = str(resolver)
         value = json.loads(self.call("status").stdout)
-        self.assertEqual(value["storage"]["devlock_dir"], str(target))
+        # phonefarm reports canonical paths (macOS temp dirs live behind /var -> /private/var).
+        self.assertEqual(value["storage"]["devlock_dir"], str(target.parent.resolve() / target.name))
         self.assertFalse(target.exists())
         self.assertEqual(self.call("run", "outer", "--", "/usr/bin/true").returncode, 0)
         self.assertTrue((target / "phonefarm-bridge.lock").exists())

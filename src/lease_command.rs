@@ -265,7 +265,8 @@ mod tests {
                 SEQUENCE.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&path).unwrap();
-            Self(path)
+            // macOS temp_dir is /var/... -> /private/var/...; leases store canonical paths.
+            Self(path.canonicalize().unwrap())
         }
         fn lease(&self) -> Lease {
             Lease::acquire(

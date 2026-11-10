@@ -126,6 +126,8 @@ mod tests {
     fn paths_and_status_are_read_only_and_custom_overrides_are_explicit() {
         let root = std::env::temp_dir().join(format!("pf-paths-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
+        // Storage resolves canonical paths; on macOS temp_dir is a /var -> /private/var symlink.
+        let root = root.canonicalize().unwrap();
         let storage = Storage::from_paths(Some(root.join("state")), None, None);
         assert_eq!(
             storage.roots().unwrap(),
