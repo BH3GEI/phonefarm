@@ -16,7 +16,7 @@ phonefarm 是移动端 / 鸿蒙设备的**设备层**：在一台宿主机上发
 也不替上层做业务判断。典型调用方：
 
 - 测试与迁移 harness（例如 Westlake / AOSP→OH harness 的 D600 开发板集群）：
-  上层负责板号分配、跨宿主板锁与任务派发，phonefarm 负责单台宿主上的设备操作与采集。
+  上层负责设备号（m07-d03）分配、跨宿主板锁与任务派发，phonefarm 负责单台宿主上的设备操作与采集。
   接入说明见 `docs/D600_HARNESS.md`。
 - AI Agent：通过 `serve`（MCP）或 `skills/phonefarm/SKILL.md` 直接驱动设备。
 - 人：命令行直接用，产物全部落盘，可离线下钻。

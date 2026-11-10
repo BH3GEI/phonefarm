@@ -10,7 +10,7 @@ D600 集群：100 块 OpenHarmony 7.0.0.39 开发板，10 台 Mac mini，每台�
 
 | 层 | 负责什么 | 谁来做 |
 | :--- | :--- | :--- |
-| 调度 | 板号 1–100 的分配、跨宿主板锁、排队、重试、任务派发、结果汇总 | 上层 harness |
+| 调度 | 设备号（m01-d01 … m10-d10）的分配、跨宿主板锁、排队、重试、任务派发、结果汇总 | 上层 harness |
 | 宿主代理 | 在每台 Mac mini 上起 phonefarm 子进程、收集产物回传 | 上层 harness（或它的 per-host agent） |
 | 设备层 | 本机设备发现、设备操作、截图 / UI 树 / 日志 / 遥测采集、XTS 执行、本机设备锁 | phonefarm |
 
@@ -28,22 +28,24 @@ phonefarm 不跨宿主：一份 phonefarm 只看见、只管理它所在 Mac min
 - `hdc` 从 `PATH` 找；hdc server 不会被 phonefarm 的任务进程组带走（任务被取消时 server 继续跑）。
 - serial 里的状态不是 serial 的一部分：`hdc list targets` 里带 `Offline` / `Unauthorized` 的目标会被单独标出，不会被当成可用设备。
 
-## 3. 板号登记（可选，推荐）
+## 3. 设备号登记（可选，推荐）
+
+设备号按 octoloop 会后版的写法：`m07-d03` 表示第 7 单元（第 7 台 Mac mini）的第 3 块 D600，与 hub 的 USB 口固定对应；Android 对照机写作 `m10-a01`。
 
 每台 Mac mini 的设备登记表最多 128 台，足够放 10 块板。登记做三件事：同一块板的多个别名
 （USB connect key、网络地址）归到同一把锁；坏板可以停用；产物里记录 `device_id`。
 
 ```bash
 ./phonefarm lease devices --json      # 读当前登记，拿到 revision
-cat > d600-042.json <<'EOF'
+cat > m07-d03.json <<'EOF'
 {"expected_revision": 0,
- "device": {"device_id": "d600-042", "label": "D600 #42 (mini-05 槽位 2)",
+ "device": {"device_id": "m07-d03", "label": "D600 m07-d03（m07 单元，hub 口 3）",
             "aliases": ["hdc:<connect key>"], "enabled": true}}
 EOF
-./phonefarm lease devices-set --request d600-042.json --json   # revision 不对会返回 conflict，重读后再提交
+./phonefarm lease devices-set --request m07-d03.json --json   # revision 不对会返回 conflict，重读后再提交
 ```
 
-登记**不改变命令的寻址方式**：命令里仍然写 `--serial hdc:<connect key>`。板号 → serial 的映射
+登记**不改变命令的寻址方式**：命令里仍然写 `--serial hdc:<connect key>`。设备号 → serial 的映射
 由上层维护（可以从 `lease devices --json` 读）。`enabled=false` 的板子会被普通加锁拒绝。
 
 ## 4. 板锁与 phonefarm 的设备锁
@@ -124,6 +126,6 @@ phonefarm 是命令行程序，上层以子进程调用，读退出码和 stdout
 4. **HAP 安装**：`test-batch` 携带安装包的路径只支持 Android `pm install`；HAP 安装需要上层先装好，
    或用 `exec --serial hdc:<key> "bm install -p …" --yes`。
 5. **板子身份核验**：登记是操作员声明（`physical_identity_verified=false`），USB 口变动后
-   connect key 与板号的对应要由上层重新核对。
+   connect key 与设备号的对应要由上层重新核对。
 6. **hdc 多实例**：一台 Mac mini 上 10 块板共用一个 hdc server；hdc server 崩溃会同时影响 10 块板，
    phonefarm 不负责重启它。

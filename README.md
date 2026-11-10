@@ -55,9 +55,9 @@ D600 集群：100 块 OpenHarmony 7.0.0.39 开发板，10 台 Mac mini 各挂 10
 
 - **设备池**：每台 Mac mini 上跑一份 phonefarm，`devices` / `fleet --json` 枚举本机 `hdc` 目标，
   serial 形如 `hdc:<connect key>`。
-- **板号 1–100**：上层用 `lease devices-set` 把板号登记成本机的设备身份（`device_id` 如 `d600-042`，
+- **设备号 m07-d03**：上层用 `lease devices-set` 把设备号登记成本机的设备身份（`device_id` 如 `m07-d03`，
   `aliases` 里放 `hdc:<connect key>`）。登记只用于把别名归到同一把锁、停用坏板（`enabled=false`）
-  和在产物里记下板号；命令里仍然写真实 serial `hdc:<key>`，板号 → serial 的映射由上层维护
+  和在产物里记下设备号；命令里仍然写真实 serial `hdc:<key>`，设备号 → serial 的映射由上层维护
   （可从 `lease devices --json` 读）。
 - **板锁由上层负责**：跨宿主的板锁、排队、任务派发归 harness。phonefarm 自带的设备锁是本机
   fd 锁（同一块板互斥、不同板并行），只防同一台 Mac mini 上的进程互踩，不替代上层的板锁。
