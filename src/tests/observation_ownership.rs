@@ -8,15 +8,19 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 struct Fixture(PathBuf);
+static FIXTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
             "pf-observation-test-{}-{}",
             std::process::id(),
+            // macOS clocks tick in microseconds: parallel fixtures need a counter too.
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
+                + FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
         ));
         fs::create_dir_all(root.join("bin")).unwrap();
         fs::create_dir(root.join("locks")).unwrap();
@@ -175,7 +179,7 @@ fi
     let same = f.cmd().args(["lease", "--serial", "fake-a", "--timeout-ms", "0", "--", "/usr/bin/true"])
         .output().unwrap();
     let binding = f.cmd().args(["lease", "resolve", "--serial", "fake-a", "--json"]).output().unwrap();
-    let outer = Command::new("/usr/bin/zsh")
+    let outer = Command::new("zsh")
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/devlock"))
         .args(["run", "raw-writer-a", "--", "/usr/bin/true"])
         .env("PHONEFARM_BIN", env!("CARGO_BIN_EXE_phonefarm"))
@@ -404,7 +408,7 @@ esac
         if let Some(binding) = binding { cmd.arg("--device-binding").arg(binding.to_string()); }
         cmd
     };
-    let typed = Command::new("/usr/bin/zsh")
+    let typed = Command::new("zsh")
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/devlock"))
         .args(["run", "typed-outer", "--", env!("CARGO_BIN_EXE_phonefarm"), "screen", "capture", "--serial", "screen-A", "--out"])
         .arg(f.0.join("typed.png"))

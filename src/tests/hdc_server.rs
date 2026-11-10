@@ -12,15 +12,19 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 struct Fixture(PathBuf);
+static FIXTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
             "pf-hdc-server-{}-{}",
             std::process::id(),
+            // macOS clocks tick in microseconds: parallel fixtures need a counter too.
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
+                + FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
         ));
         fs::create_dir_all(root.join("bin")).unwrap();
         fs::create_dir(root.join("tmp")).unwrap();
