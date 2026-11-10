@@ -1939,11 +1939,12 @@ pub fn episode(cfg: &Config, task: &str, goal: &str, serial: Option<String>,
             t.ocr = Some(cap.ocr); // OCR 触发即 UI 树失效时刻的自动标注
             if t.root.is_none() { t.root = Some(tele_root); }
             if let Some(ms) = tele_cold.take() { t.cold_start_ms = Some(ms); }
-            if let Some(ft) = t.frames_total {
+            if let Some((ft, kind)) = t.frame_counter() {
                 if let Some((pf, pt)) = tele_prev_frames {
                     let dt = now.duration_since(pt).as_secs_f32();
                     if dt > 0.5 && ft >= pf {
                         t.fps = Some(((ft - pf) as f32 / dt * 10.0).round() / 10.0);
+                        t.fps_source = Some(kind);
                     }
                 }
                 tele_prev_frames = Some((ft, now));

@@ -27,6 +27,10 @@ allowed_sysfs() {
     /sys/devices/system/cpu/cpufreq/policy*/scaling_min_freq) return 0 ;;
     /sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq) return 0 ;;
     /sys/devices/system/cpu/cpufreq/policy*/scaling_governor)  return 0 ;;
+    /sys/devices/system/cpu/cpufreq/policy*/walt/hispeed_load)       return 0 ;;
+    /sys/devices/system/cpu/cpufreq/policy*/walt/hispeed_freq)       return 0 ;;
+    /sys/devices/system/cpu/cpufreq/policy*/walt/up_rate_limit_us)   return 0 ;;
+    /sys/devices/system/cpu/cpufreq/policy*/walt/down_rate_limit_us) return 0 ;;
     /sys/class/kgsl/kgsl-3d0/min_pwrlevel)                     return 0 ;;
     /sys/class/kgsl/kgsl-3d0/max_pwrlevel)                     return 0 ;;
     /sys/class/kgsl/kgsl-3d0/devfreq/min_freq)                 return 0 ;;
@@ -156,6 +160,10 @@ case "${1:-status}" in
       fi
     done < "$PLAN"
 
+    # 我们要写进去的值另存一份: restore 回读对不上时, 据此分清「我们的改动还在」(真失败)
+    # 和「厂商性能服务已经把节点改成了它自己的值」(我们的约束已不在, 不算还原失败)
+    grep -v '^#' "$PLAN" > "$STATE.applied"
+
     # 两遍写: 第一遍可能被 min>max 之类的顺序约束夹回, 第二遍补齐
     pass=1
     while [ "$pass" -le 2 ]; do
@@ -199,14 +207,19 @@ case "${1:-status}" in
     while IFS="$(printf '\t')" read -r kind path val; do
       [ -n "${kind:-}" ] || continue
       back=$(read_one "$kind" "$path")
+      mine=$(grep -F "	$path	" "$STATE.applied" 2>/dev/null | head -1 | cut -f3)
       if [ "$back" = "$val" ]; then
         echo "KNOB_RESTORED $path: -> $back"
-      else
-        echo "KNOB_RESTORE_FAIL $path: 想写 $val, 回读 $back"
+      elif [ -n "$mine" ] && [ "$back" = "$mine" ]; then
+        echo "KNOB_RESTORE_FAIL $path: 想写 $val, 回读 $back (仍是我们施加的值)"
         ok=0
+      else
+        # 2026-10-22 红魔实测: 厂商性能服务在写回与回读之间就把 scaling_max_freq 改成了它的动态值
+        # (3628800 → 1228800); 节点上已不是我们的值, 我们的约束不在了
+        echo "KNOB_RESTORED_VENDOR $path: 写回 $val, 回读 $back (厂商服务已改写, 不是我们施加的 ${mine:-兄弟节点})"
       fi
     done < "$STATE"
-    [ "$ok" = "1" ] && rm -f "$STATE"
+    [ "$ok" = "1" ] && rm -f "$STATE" "$STATE.applied"
     [ "$ok" = "1" ] || exit 4
     ;;
 

@@ -10,7 +10,7 @@
 
 use serde_json::json;
 use std::io::Write;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -83,7 +83,7 @@ impl GamepadState {
 /// 虚拟手柄控制器会话
 pub struct Gamepad {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     state: GamepadState,
 }
 
@@ -91,7 +91,12 @@ impl Gamepad {
     /// 在 PC 端通过 ADB 标准输入通道拉起与管理虚拟手柄会话
     /// 全生命周期完全受控于宿主机，手机端不落盘任何脚本或守护服务
     pub fn new(adb_bin: &str, serial: Option<&str>) -> Result<Self, String> {
-        let mut cmd = Command::new(adb_bin);
+        Self::new_named(adb_bin, serial, "Xbox Wireless Controller")
+    }
+
+    /// Use a session-specific input name when the caller verifies device removal.
+    pub fn new_named(adb_bin: &str, serial: Option<&str>, name: &str) -> Result<Self, String> {
+        let mut cmd = crate::fd_lock::transport_command(adb_bin);
         if let Some(s) = serial {
             cmd.arg("-s").arg(s);
         }
@@ -106,7 +111,12 @@ impl Gamepad {
         // 注册标准 Xbox Wireless Controller HID 描述符 (通过标准输入下发，纯内存通信)
         const REG_JSON: &str = r#"{"id":1,"command":"register","name":"Xbox Wireless Controller","vid":1118,"pid":765,"bus":"bluetooth","source":"KEYBOARD | GAMEPAD | JOYSTICK","descriptor":[5,1,9,5,161,1,133,1,9,1,161,0,9,48,9,49,21,0,39,255,255,0,0,149,2,117,16,129,2,192,9,1,161,0,9,50,9,53,21,0,39,255,255,0,0,149,2,117,16,129,2,192,5,2,9,197,21,0,38,255,3,149,1,117,10,129,2,21,0,37,0,117,6,149,1,129,3,5,2,9,196,21,0,38,255,3,149,1,117,10,129,2,21,0,37,0,117,6,149,1,129,3,5,1,9,57,21,1,37,8,53,0,70,59,1,102,20,0,117,4,149,1,129,66,117,4,149,1,21,0,37,0,53,0,69,0,101,0,129,3,5,9,25,1,41,15,21,0,37,1,117,1,149,15,129,2,21,0,37,0,117,1,149,1,129,3,5,12,10,36,2,21,0,37,1,149,1,117,1,129,2,21,0,37,0,117,7,149,1,129,3,192,5,15,9,33,133,3,161,2,9,151,21,0,37,1,117,4,149,1,145,2,21,0,37,0,117,4,149,1,145,3,9,112,21,0,37,100,117,8,149,4,145,2,9,80,102,1,16,85,14,21,0,38,255,0,117,8,149,1,145,2,9,167,21,0,38,255,0,117,8,149,1,145,2,101,0,85,0,9,124,21,0,38,255,0,117,8,149,1,145,2,192,5,6,9,32,133,4,21,0,38,255,0,117,8,149,1,129,2,192]}"#;
 
-        stdin.write_all(REG_JSON.as_bytes()).map_err(|e| format!("注册虚拟手柄失败: {e}"))?;
+        let mut registration: serde_json::Value = serde_json::from_str(REG_JSON)
+            .map_err(|e| format!("无效的手柄注册模板: {e}"))?;
+        registration["name"] = json!(name);
+        let registration = serde_json::to_vec(&registration)
+            .map_err(|e| format!("编码手柄注册报文失败: {e}"))?;
+        stdin.write_all(&registration).map_err(|e| format!("注册虚拟手柄失败: {e}"))?;
         stdin.write_all(b"\n").map_err(|e| format!("写入换行失败: {e}"))?;
         stdin.flush().map_err(|e| format!("刷新注册报文失败: {e}"))?;
 
@@ -115,7 +125,7 @@ impl Gamepad {
 
         let mut gp = Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             state: GamepadState::default(),
         };
 
@@ -134,8 +144,9 @@ impl Gamepad {
         });
         let mut msg = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
         msg.push('\n');
-        self.stdin.write_all(msg.as_bytes()).map_err(|e| format!("写入 HID 报文失败: {e}"))?;
-        self.stdin.flush().map_err(|e| format!("刷新 HID 缓冲失败: {e}"))?;
+        let stdin = self.stdin.as_mut().ok_or("手柄管道已关闭")?;
+        stdin.write_all(msg.as_bytes()).map_err(|e| format!("写入 HID 报文失败: {e}"))?;
+        stdin.flush().map_err(|e| format!("刷新 HID 缓冲失败: {e}"))?;
         Ok(())
     }
 
@@ -311,7 +322,49 @@ impl Drop for Gamepad {
     fn drop(&mut self) {
         // 尝试发送中立状态并关闭标准输入以让系统卸载虚拟设备
         let _ = self.reset();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // EOF lets `hid` unregister the device and the adb client exit itself.
+        // `child` is the transport proxy: SIGKILL would orphan that client in
+        // the caller's process group, so escalate through SIGTERM, which the
+        // proxy forwards, before killing it.
+        drop(self.stdin.take());
+        let exited = |child: &mut Child, ms: u64| {
+            let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => return true,
+                    Ok(None) if std::time::Instant::now() >= deadline => return false,
+                    Ok(None) => sleep(Duration::from_millis(20)),
+                }
+            }
+        };
+        if exited(&mut self.child, 3000) {
+            return;
+        }
+        unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
+        if !exited(&mut self.child, 1000) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drop_waits_for_the_transport_client_to_exit() {
+        let dir = std::env::temp_dir().join(format!("pf-gamepad-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let adb = dir.join("adb");
+        let mark = dir.join("client-exited");
+        // Like `adb shell hid -`: unregister after stdin EOF, then exit.
+        std::fs::write(&adb, format!("#!/bin/sh\ncat >/dev/null\nsleep 0.3\ntouch '{}'\n", mark.display())).unwrap();
+        std::fs::set_permissions(&adb, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let gamepad = Gamepad::new_named(adb.to_str().unwrap(), Some("fake"), "test pad").unwrap();
+        drop(gamepad);
+        let exited = mark.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(exited, "the adb client must have exited when the gamepad is dropped");
     }
 }

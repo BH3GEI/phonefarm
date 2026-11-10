@@ -104,6 +104,21 @@
         "depth_priming": {
           "type": "string",
           "description": "白盒旋钮原样回写 (没给为空串), 见 launch.json"
+        },
+        "pace": {
+          "enum": [
+            "time",
+            "frame"
+          ],
+          "description": "路线推进方式, 见 launch.json"
+        },
+        "route_seconds": {
+          "type": "number",
+          "description": "pace=time 时的被测窗口长度 (秒)"
+        },
+        "fps_cap": {
+          "type": "integer",
+          "description": "vsync=off 时要求的 targetFrameRate"
         }
       }
     },
@@ -210,9 +225,65 @@
       "type": "string",
       "description": "实测到的图形提交线程 comm 名 (harness 扫 /proc/self/task/*/comm 得到)。给 phonefarm parse-trace --comm 用, 不靠猜。"
     },
+    "frame_pacing": {
+      "type": "object",
+      "description": "帧率上限的事实 (审计 #8)。observed_fps = 帧数/真实时间, 只用来核对实际上限 (例: 仍是 30 就说明没解锁), 不进判定; 帧时仍由 loop_v1 从 raw ftrace 算。",
+      "properties": {
+        "pace": {
+          "enum": [
+            "time",
+            "frame"
+          ]
+        },
+        "route_seconds": {
+          "type": "number"
+        },
+        "requested_target_frame_rate": {
+          "type": "integer"
+        },
+        "target_frame_rate": {
+          "type": "integer",
+          "description": "Application.targetFrameRate 回读"
+        },
+        "vsync_count": {
+          "type": "integer"
+        },
+        "display_refresh_hz": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Screen.currentResolution.refreshRateRatio"
+        },
+        "warmup_seconds": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "warmup_observed_fps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "window_seconds": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "window_observed_fps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
     "frames_rendered": {
       "type": "integer",
-      "description": "被测窗口内实际渲染帧数。< params.frames 说明中途被打断。"
+      "description": "被测窗口内实际渲染帧数。pace=frame 时 < params.frames 说明中途被打断; pace=time 时随帧率变化, 不核对。"
     },
     "warmup_frames_rendered": {
       "type": "integer"

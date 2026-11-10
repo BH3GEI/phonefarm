@@ -36,6 +36,76 @@ pub const SRC_HARMONY_SMARTPERF: &str = "harmony_smartperf";
 /// 安卓侧的 HiSmartPerf 通路 (设备端 `GamePerfToolCollector`, 见 `gpdaemon`)。
 /// 与 `harmony_smartperf` 同名不同物: 那边是 `SP_daemon` 落盘 CSV, 这边是 socket 实时流。
 pub const SRC_ANDROID_SMARTPERF: &str = "android_smartperf";
+/// 安卓无 root 的显示帧来源: `dumpsys SurfaceFlinger --latency <图层>` (见 `sflatency`)。
+pub const SRC_ANDROID_SF_LATENCY: &str = "android_sf_latency";
+/// iOS 侧**没有**性能来源。
+pub const SRC_IOS_NONE: &str = "ios_none";
+
+/// `FrameJudge::frame_source` 的取值: 鸿蒙 `SP_daemon -PKG` 的逐帧间隔 (应用帧, 华为真机 W1 实测只数目标应用)。
+pub const FRAME_SRC_SP_DAEMON_PKG: &str = "sp_daemon_pkg";
+/// `FrameJudge::frame_source` 的取值: 安卓 SurfaceFlinger 图层的 actualPresentTime 间隔 (显示帧, 无需 root)。
+pub const FRAME_SRC_SF_LATENCY: &str = "sf_latency";
+
+/// 能进判定表的帧指标: 键名与 ftrace 的 `looptrace` summary 同名 (`frame_p50` / `frame_p95` / `fps_mean`),
+/// 外加 `frame_source` 标明口径。没有口径标签的帧数不许进判定表 (HGamey/.github#20)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrameJudge {
+    /// [`FRAME_SRC_SP_DAEMON_PKG`] | [`FRAME_SRC_SF_LATENCY`]
+    pub frame_source: String,
+    pub n_frames: usize,
+    pub fps_mean: f64,
+    pub frame_mean: f64,
+    pub frame_p50: f64,
+    pub frame_p95: f64,
+    pub frame_p99: f64,
+    /// 帧间隔 > 1.5 × p50 的比例 (%)
+    pub jank_pct: f64,
+}
+
+/// 逐帧间隔 (毫秒) → 判定表指标。`fps_mean` 给了就用给的 (设备自报的每秒帧数), 不给按 1000/均值反推。
+/// 样本少于 2 帧算不出分布, 返回 None。
+pub fn frame_judge_from_intervals(ms: &[f64], fps_mean: Option<f64>, source: &str) -> Option<FrameJudge> {
+    let ms: Vec<f64> = ms.iter().copied().filter(|v| v.is_finite() && *v > 0.0).collect();
+    if ms.len() < 2 {
+        return None;
+    }
+    let mean = gpustat::mean(&ms);
+    let p50 = gpustat::percentile(&ms, 0.50);
+    let p95 = gpustat::percentile(&ms, 0.95);
+    let p99 = gpustat::percentile(&ms, 0.99);
+    let jank = ms.iter().filter(|v| **v > 1.5 * p50).count() as f64 / ms.len() as f64 * 100.0;
+    Some(FrameJudge {
+        frame_source: source.to_string(),
+        n_frames: ms.len(),
+        fps_mean: fps_mean.unwrap_or(1000.0 / mean),
+        frame_mean: mean,
+        frame_p50: p50,
+        frame_p95: p95,
+        frame_p99: p99,
+        jank_pct: jank,
+    })
+}
+
+/// 鸿蒙 `SP_daemon` 帧率的口径: 带 `-PKG` 是目标应用的帧, 不带是整机 (华为 W1 实测: 不带时直接给 NA)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FpsScope {
+    /// `-PKG <包名>`: 只数目标应用的帧 (W1 实测: 应用退到后台 fps=0, 不随桌面/设置变)
+    App,
+    /// 没给 `-PKG`: 整机合成口径, 不能当应用帧, `fps` 一律记缺失
+    Global,
+    /// 离线解析一份盘上的 CSV, 不知道采集时带没带 `-PKG`: 数字照出, 但不进判定表
+    Unknown,
+}
+
+impl FpsScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FpsScope::App => "app",
+            FpsScope::Global => "global",
+            FpsScope::Unknown => "unknown",
+        }
+    }
+}
 
 /// `unavailable` 里的特殊字段名: 不是某一个字段缺了, 是**整条采集通路不可用**
 /// (设备端没有 SP_daemon、不是鸿蒙设备等)。调用方据此把退出码与「设备在、但这轮没采到」区分开。
@@ -71,7 +141,10 @@ pub struct PerfSnapshot {
     pub battery_temp_c: Option<f64>,
     /// 采集侧的元数据: 鸿蒙走设备探测 (`SP_daemon -deviceinfo`) 或 HiSmartPerf 报告的
     /// `general.csv`; 安卓侧这条通路没有对应物, 为 null。原样透传, 不解释不换算。
+    /// 帧率口径在 `fps_scope` 键 (`app` / `global` / `unknown`)。
     pub meta: Option<BTreeMap<String, String>>,
+    /// 能进判定表的帧指标 (带口径标签)。只有逐帧数据且口径是目标应用时才有; 其余 null。
+    pub frame_judge: Option<FrameJudge>,
     /// 逐条说明上面哪些字段为什么是 null
     pub unavailable: Vec<Unavailable>,
 }
@@ -90,8 +163,13 @@ impl PerfSnapshot {
             gpu_temp_c: None,
             battery_temp_c: None,
             meta: None,
+            frame_judge: None,
             unavailable: Vec::new(),
         }
+    }
+
+    fn meta_put(&mut self, k: &str, v: impl Into<String>) {
+        self.meta.get_or_insert_with(BTreeMap::new).insert(k.to_string(), v.into());
     }
 
     fn miss(&mut self, field: &str, reason: impl Into<String>) {
@@ -448,10 +526,21 @@ impl Default for HarmonySmartPerf {
     }
 }
 
-/// 纯函数: 一组 `SP_daemon` 采样 → 归一化快照。
+/// 纯函数: 一组 `SP_daemon -PKG` 采样 → 归一化快照 (应用口径)。
+#[cfg(test)]
 pub fn summarize_harmony(samples: &[SpSample]) -> PerfSnapshot {
+    summarize_harmony_scoped(samples, FpsScope::App)
+}
+
+/// 纯函数: 一组 `SP_daemon` 采样 + 帧率口径 → 归一化快照。
+///
+/// 口径进 `meta.fps_scope`。`Global` 时 `fps` / 帧时一律缺失 —— 整机合成帧不是应用帧,
+/// 填进去会被上层当成游戏帧率 (frame-source 报告 4.1)。`App` 且有逐帧间隔时填 `frame_judge`
+/// (来源 [`FRAME_SRC_SP_DAEMON_PKG`]), 供鸿蒙 fps / 帧时进判定表。
+pub fn summarize_harmony_scoped(samples: &[SpSample], scope: FpsScope) -> PerfSnapshot {
     let mut snap = PerfSnapshot::empty(SRC_HARMONY_SMARTPERF);
     snap.sample_count = samples.len();
+    snap.meta_put("fps_scope", scope.as_str());
     if samples.is_empty() {
         for f in [
             "fps",
@@ -468,32 +557,57 @@ pub fn summarize_harmony(samples: &[SpSample]) -> PerfSnapshot {
     }
 
     // ── 帧率 ──
-    let fps: Vec<f64> =
-        samples.iter().filter_map(|s| s.fps).filter(|v| v.is_finite() && *v > 0.0).collect();
-    if fps.is_empty() {
-        snap.miss("fps", "SP_daemon 未上报 fps (未开 -f, 或该应用的帧数据拿不到)");
-    } else {
-        snap.fps = Some(gpustat::mean(&fps));
-    }
-
-    // ── 帧时 ──
+    let fps_raw: Vec<f64> = samples.iter().filter_map(|s| s.fps).filter(|v| v.is_finite()).collect();
+    let fps: Vec<f64> = fps_raw.iter().copied().filter(|v| *v > 0.0).collect();
     let ft: Vec<f64> = samples
         .iter()
         .flat_map(|s| s.frame_intervals_ms())
         .filter(|v| v.is_finite() && *v > 0.0)
         .collect();
-    if ft.is_empty() {
-        let why = "SP_daemon 未上报 fpsJitters (未开 -f, 或该应用的逐帧间隔拿不到)";
+    if scope == FpsScope::Global {
+        let why = "没带 -PKG: SP_daemon 给的是整机合成口径 (华为真机上干脆是 NA), 不是目标应用的帧, 不当 fps 用";
+        snap.miss("fps", why);
         snap.miss("frame_time_mean_ms", why);
         snap.miss("fps_p95_ms", why);
     } else {
-        snap.frame_time_mean_ms = Some(gpustat::mean(&ft));
-        let p95 = gpustat::percentile(&ft, 0.95);
-        if p95.is_finite() {
-            snap.fps_p95_ms = Some(p95);
+        if fps.is_empty() {
+            if !fps_raw.is_empty() && fps_raw.iter().all(|v| *v == 0.0) {
+                snap.miss("fps", "目标应用没在出帧 (fps 逐秒全为 0): 不在前台, 或还没画出第一帧");
+            } else {
+                snap.miss("fps", "SP_daemon 未上报 fps (未开 -f, 或该应用的帧数据拿不到)");
+            }
         } else {
-            snap.miss("fps_p95_ms", "帧间隔样本算不出 p95");
+            snap.fps = Some(gpustat::mean(&fps));
         }
+
+        // ── 帧时 ──
+        if ft.is_empty() {
+            let why = "SP_daemon 未上报 fpsJitters (未开 -f, 或该应用的逐帧间隔拿不到)";
+            snap.miss("frame_time_mean_ms", why);
+            snap.miss("fps_p95_ms", why);
+        } else {
+            snap.frame_time_mean_ms = Some(gpustat::mean(&ft));
+            let p95 = gpustat::percentile(&ft, 0.95);
+            if p95.is_finite() {
+                snap.fps_p95_ms = Some(p95);
+            } else {
+                snap.miss("fps_p95_ms", "帧间隔样本算不出 p95");
+            }
+        }
+        // ── 判定表口径 (只有确知是 -PKG 的应用帧才给) ──
+        if scope == FpsScope::App {
+            snap.frame_judge = frame_judge_from_intervals(&ft, snap.fps, FRAME_SRC_SP_DAEMON_PKG);
+        }
+    }
+    if snap.frame_judge.is_none() {
+        snap.miss(
+            "frame_judge",
+            match scope {
+                FpsScope::App => "没有逐帧间隔, 进不了判定表",
+                FpsScope::Global => "整机口径不进判定表",
+                FpsScope::Unknown => "离线 CSV 不知道采集时带没带 -PKG, 不进判定表 (给 --app 可声明)",
+            },
+        );
     }
 
     // ── 功耗 ──
@@ -589,6 +703,41 @@ impl HarmonySmartPerf {
     }
 }
 
+// Battery current can look plausible while USB is charging. These are
+// endpoint observations, not proof of uninterrupted discharge over the window.
+fn battery_power_usable(report: &str) -> Result<(), String> {
+    let value = |key: &str| -> Option<i32> {
+        report.lines().find_map(|line| {
+            let (name, value) = line.trim().split_once(':')?;
+            (name == key).then(|| value.trim().parse().ok()).flatten()
+        })
+    };
+    match (value("chargingStatus"), value("pluggedType"), value("nowCurrent")) {
+        (Some(0), Some(0), Some(current)) if current < 0 => Ok(()),
+        (Some(charge), Some(plug), Some(current)) => Err(format!(
+            "设备未确认放电 (chargingStatus={charge}, pluggedType={plug}, nowCurrent={current}); 充电电流不能当整机功耗"
+        )),
+        _ => Err("BatteryService 未给出完整供电状态; 无法验证功耗口径".into()),
+    }
+}
+
+fn qualify_harmony_power(snap: &mut PerfSnapshot, supply: Result<(), String>) {
+    match supply {
+        Ok(()) => snap.meta_put("power_supply", "discharging_at_endpoints"),
+        Err(reason) => {
+            snap.power_watt = None;
+            snap.unavailable.retain(|u| u.field != "power_watt");
+            snap.miss("power_watt", reason);
+            snap.meta_put("power_supply", "unusable");
+        }
+    }
+}
+
+fn harmony_supply_endpoints(before: &str, after: &str) -> Result<(), String> {
+    battery_power_usable(before).map_err(|e| format!("采样前: {e}"))?;
+    battery_power_usable(after).map_err(|e| format!("采样后: {e}"))
+}
+
 impl PerfSource for HarmonySmartPerf {
     fn id(&self) -> &'static str {
         SRC_HARMONY_SMARTPERF
@@ -606,6 +755,7 @@ impl PerfSource for HarmonySmartPerf {
         };
         // 每个采集点约一秒, 再给 hdc 往返留 15 秒余量
         let budget_ms = (rounds as u64) * 1_000 + 15_000;
+        let supply_before = phone.shell("hidumper -s BatteryService -a -i", 8_000);
 
         // 上一轮的 data.csv 会原地留在设备上。不先删掉, 这一轮若超时或失败,
         // `cat` 读回来的就是上一轮的数据 —— 一份陈旧读数冒充本次实测, 比采不到更糟。
@@ -614,6 +764,7 @@ impl PerfSource for HarmonySmartPerf {
 
         let cmd = smartperf::collect_cmd(rounds, self.pkg.as_deref(), self.flags);
         let stdout = phone.shell(&cmd, budget_ms);
+        let supply_after = phone.shell("hidumper -s BatteryService -a -i", 8_000);
 
         // 默认口径读设备落盘的 data.csv (官方文档指定的产物, 列名有据可查);
         // 读不到再退回 stdout —— stdout 的逐行布局尚未在真机上验证过。
@@ -634,8 +785,15 @@ impl PerfSource for HarmonySmartPerf {
             meta.insert(k.into(), v);
         }
 
-        let mut snap = summarize_harmony(&samples);
+        let scope = if self.pkg.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+            FpsScope::App
+        } else {
+            FpsScope::Global
+        };
+        let mut snap = summarize_harmony_scoped(&samples, scope);
+        meta.insert("fps_scope".into(), scope.as_str().into());
         snap.meta = Some(meta);
+        qualify_harmony_power(&mut snap, harmony_supply_endpoints(&supply_before, &supply_after));
         if snap.sample_count == 0 {
             snap.miss(
                 "sample_count",
@@ -651,17 +809,28 @@ impl PerfSource for HarmonySmartPerf {
 /// 存在的意义: 采集与解析必须能分开跑 —— 数据在盘上, 任何时候重算都该逐字节一致;
 /// 也让「没有鸿蒙真机」时仍能用真实产物验证整条解析链。
 /// 同目录若有 HiSmartPerf 报告的 `general.csv`, 一并读进 `meta` 当本轮的采集元数据。
-pub fn snapshot_from_csv_file(path: &std::path::Path) -> Result<PerfSnapshot, String> {
+/// 电池功率另需调用方提供同轮 battery_before.txt / battery_after.txt；仅验证端点放电状态。
+/// `scope`: 调用方声明这份 CSV 是不是 `-PKG` 采的 (`--app` 给了 = App); 不声明按 Unknown, 不进判定表。
+pub fn snapshot_from_csv_file(path: &std::path::Path, scope: FpsScope) -> Result<PerfSnapshot, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("读不了 {}: {e}", path.display()))?;
-    let mut snap = summarize_harmony(&smartperf::parse_sp_csv(&text));
+    let mut snap = summarize_harmony_scoped(&smartperf::parse_sp_csv(&text), scope);
     if let Some(general) = path.parent().map(|d| d.join("general.csv")) {
         if let Ok(g) = std::fs::read_to_string(&general) {
             let m = smartperf::parse_report_general(&g);
-            if !m.is_empty() {
-                snap.meta = Some(m);
+            for (k, v) in m {
+                snap.meta_put(&k, v);
             }
         }
     }
+    let supply = path.parent().and_then(|dir| {
+        let before = std::fs::read_to_string(dir.join("battery_before.txt")).ok()?;
+        let after = std::fs::read_to_string(dir.join("battery_after.txt")).ok()?;
+        Some((before, after))
+    });
+    qualify_harmony_power(&mut snap, match supply {
+        Some((before, after)) => harmony_supply_endpoints(&before, &after),
+        None => Err("离线 CSV 缺可读 battery_before.txt / battery_after.txt，无法验证供电状态".into()),
+    });
     Ok(snap)
 }
 
@@ -674,6 +843,8 @@ pub enum AndroidSource {
     Sysfs,
     /// HiSmartPerf 安卓通路: 设备端 `GamePerfToolCollector` + socket 实时流 (`gpdaemon`)。
     SmartPerf,
+    /// 无 root 的显示帧: `dumpsys SurfaceFlinger --latency <目标图层>` 轮询 (`sflatency`)。只出帧, 不出功耗。
+    SfLatency,
 }
 
 /// 设备后端 → 采集源。`hdc:` 前缀的设备走鸿蒙, 其余走安卓, 与 `Device::new` 同一判据。
@@ -687,12 +858,40 @@ pub fn for_device(phone: &Device, a: &PerfArgs) -> Box<dyn PerfSource> {
             xpower_out: a.xpower_out.as_ref().map(std::path::PathBuf::from),
             ..Default::default()
         }),
+        // iOS 走**如实失败**的路, 而不是悄悄退回安卓的 sysfs: 后者会拿着一个空的
+        // `shell` 结果往下走, 最后交出一份「数字全是 null, 但 source 写着 android_sysfs」
+        // 的报告 —— 那是比失败更坏的东西。
+        "wda" => Box::new(IosNoSource),
         _ => match a.android_source {
             AndroidSource::Sysfs => Box::new(AndroidSysfs { rail: a.rail }),
             AndroidSource::SmartPerf => {
                 Box::new(AndroidSmartPerf { pkg: a.pkg.clone(), ..Default::default() })
             }
+            AndroidSource::SfLatency => {
+                Box::new(crate::sflatency::AndroidSfLatency { pkg: a.pkg.clone(), layer: a.layer.clone() })
+            }
         },
+    }
+}
+
+/// iOS: 整条性能通路不可用。
+///
+/// 依据: WDA 不提供帧时与功耗(确定); iOS 设备侧也没有安卓那样的 sysfs 电源轨、
+/// 没有 ftrace、没有 shell —— 本后端连 `shell` 都如实返回空串。
+/// 与「采到了但某个字段缺」不同, 这里是 `FIELD_PIPELINE`(整条通路)。
+pub struct IosNoSource;
+
+impl PerfSource for IosNoSource {
+    fn id(&self) -> &'static str {
+        SRC_IOS_NONE
+    }
+    fn collect(&self, _phone: &Device, _rounds: u32) -> PerfSnapshot {
+        let mut snap = PerfSnapshot::empty(SRC_IOS_NONE);
+        snap.miss(
+            FIELD_PIPELINE,
+            "iOS 后端没有性能数据来源: WDA 不提供帧时与功耗, 设备侧也没有 sysfs/ftrace 可读",
+        );
+        snap
     }
 }
 
@@ -711,6 +910,8 @@ pub struct PerfArgs {
     pub xpower_out: Option<String>,
     /// 安卓侧走哪条通路 (鸿蒙侧忽略此项)
     pub android_source: AndroidSource,
+    /// `--source sflatency` 时指定图层名; 不给按包名从 `--list` 里挑
+    pub layer: Option<String>,
     /// 测量期间停充 (root 写 sysfs), 测完自动恢复。
     ///
     /// 默认关: 这是**有副作用的写操作**。开了才谈得上量整机功耗 ——
@@ -729,6 +930,7 @@ pub fn parse_perf_args(args: &[String]) -> Result<PerfArgs, String> {
         from_csv: None,
         xpower_out: None,
         android_source: AndroidSource::Sysfs,
+        layer: None,
         suspend_charging: false,
     };
     let mut it = args.iter().peekable();
@@ -762,12 +964,14 @@ pub fn parse_perf_args(args: &[String]) -> Result<PerfArgs, String> {
                 a.android_source = match v.as_str() {
                     "sysfs" => AndroidSource::Sysfs,
                     "smartperf" => AndroidSource::SmartPerf,
+                    "sflatency" => AndroidSource::SfLatency,
                     other => {
-                        return Err(format!("--source 只能是 sysfs 或 smartperf, 给的是 {other}"))
+                        return Err(format!("--source 只能是 sysfs、smartperf 或 sflatency, 给的是 {other}"))
                     }
                 }
             }
             "--from-csv" => a.from_csv = Some(val!("--from-csv")),
+            "--layer" => a.layer = Some(val!("--layer")),
             "--xpower-out" => a.xpower_out = Some(val!("--xpower-out")),
             "--suspend-charging" => a.suspend_charging = true,
             "--json" => a.json = true,
@@ -785,7 +989,7 @@ pub fn parse_perf_args(args: &[String]) -> Result<PerfArgs, String> {
 ///
 /// 退出码: 0 = 采到了至少一个采样点; 1 = 设备在但什么都没采到; 2 = 参数或设备不可用。
 pub fn run_perf(args: &[String]) -> i32 {
-    let a = match parse_perf_args(args) {
+    let mut a = match parse_perf_args(args) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
@@ -794,7 +998,8 @@ pub fn run_perf(args: &[String]) -> i32 {
     };
     // 离线口径: 盘上已有 data.csv, 不碰设备
     if let Some(p) = &a.from_csv {
-        return match snapshot_from_csv_file(std::path::Path::new(p)) {
+        let scope = if a.pkg.is_some() { FpsScope::App } else { FpsScope::Unknown };
+        return match snapshot_from_csv_file(std::path::Path::new(p), scope) {
             Ok(snap) => {
                 emit_perf(&snap, a.json);
                 exit_code_of(&snap)
@@ -806,46 +1011,83 @@ pub fn run_perf(args: &[String]) -> i32 {
         };
     }
 
-    let tmp = std::env::temp_dir().join(format!("phonefarm-perf-{}", std::process::id()));
-    if let Err(e) = std::fs::create_dir_all(&tmp) {
-        eprintln!("建不了临时目录 {}: {e}", tmp.display());
-        return 2;
+    let lease = match crate::devlease::Lease::target(a.serial.as_deref(), "perf") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    a.serial = Some(lease.serial.clone());
+    match collect_under_lease(&a, &lease) {
+        Ok(snap) => {
+            emit_perf(&snap, a.json);
+            exit_code_of(&snap)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            2
+        }
     }
+}
+
+/// Explicit borrowed lease for nested measurement in gray-ab; target must match its owner.
+pub(crate) fn perf_to_file_under_lease(
+    args: &[String],
+    lease: &crate::devlease::Lease,
+    out: &std::path::Path,
+) -> Result<(), String> {
+    let a = parse_perf_args(args)?;
+    let snap = collect_under_lease(&a, lease)?;
+    std::fs::write(
+        out,
+        serde_json::to_string_pretty(&snap).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if exit_code_of(&snap) != 0 {
+        return Err("nested perf returned unavailable samples".into());
+    }
+    Ok(())
+}
+fn collect_under_lease(
+    a: &PerfArgs,
+    lease: &crate::devlease::Lease,
+) -> Result<PerfSnapshot, String> {
+    if a.serial.as_deref() != Some(lease.serial.as_str()) {
+        return Err("nested perf target differs from lease".into());
+    }
+    let charge_state = hwcond::lock_state_path("charge", &a.serial)?;
+    let tmp = std::env::temp_dir().join(format!("phonefarm-perf-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("perf directory: {e}"))?;
     let phone = Device::new(a.serial.clone(), tmp.to_string_lossy().to_string());
     if !phone.health_check(8_000) {
-        eprintln!("设备无心跳 (devices 里不是在线态, 或未指定 --serial)");
-        return 2;
+        return Err("device has no heartbeat".into());
     }
-    // 先回滚上次遗留的停充状态 (进程被杀没来得及还原)。无条件做, 与 --suspend-charging 无关 ——
-    // 遗留状态的危害是"手机一直没在充电", 不该等到下次有人恰好又要停充才被清掉。
-    let charge_state = hwcond::lock_state_path("charge", &a.serial);
-    hwcond::recover_stale_charge_ctl(&phone, &charge_state);
-
-    let mut suspend = None;
-    if a.suspend_charging {
-        match hwcond::ChargeSuspend::apply(&phone, &charge_state) {
-            Ok(g) => suspend = Some(g),
-            Err(e) => {
-                eprintln!("停充失败: {e}");
-                return 2;
-            }
-        }
+    let has_charge_state = charge_state.try_exists()
+        .map_err(|e| format!("inspect charging state {}: {e}", charge_state.display()))?;
+    if (has_charge_state || a.suspend_charging) && !hwcond::root_ok(&phone) {
+        return Err("charging control/recovery requires verified root".into());
     }
-
-    let src = for_device(&phone, &a);
-    // 进度一律走 stderr: --json 时 stdout 只能有 JSON, 而「这次走的是哪条采集源」必须看得见
-    hwcond::progress("perf", &format!("采集源 {} · {} 个采集点", src.id(), a.rounds));
+    if hwcond::recover_stale_charge_ctl(&phone, &charge_state)? == Some(false) {
+        return Err("stale charging restoration failed".into());
+    }
+    let suspend = if a.suspend_charging {
+        Some(hwcond::ChargeSuspend::apply(&phone, &charge_state)?)
+    } else {
+        None
+    };
+    let src = for_device(&phone, a);
+    hwcond::progress(
+        "perf",
+        &format!("采集源 {} · {} 个采集点", src.id(), a.rounds),
+    );
     let snap = src.collect(&phone, a.rounds);
-
-    // 测完立刻恢复充电, 在打印之前 —— 打印失败也不能把手机丢在不充电的状态里
     if let Some(mut g) = suspend {
         if !g.restore(&phone) {
-            eprintln!("警告: 恢复充电后回读不符 ({}); 状态文件留着, 下次启动会再试一次", g.node());
+            return Err("charging restoration readback failed".into());
         }
     }
-
-    emit_perf(&snap, a.json);
-    exit_code_of(&snap)
+    Ok(snap)
 }
 
 /// 退出码: `0` = 采到了至少一个采样点; `1` = 设备在、但这轮什么都没采到;
@@ -884,6 +1126,16 @@ pub fn render_perf_text(s: &PerfSnapshot) -> String {
     out.push_str(&format!("  整机功耗    {}\n", v(s.power_watt, "W")));
     out.push_str(&format!("  SoC / GPU / 电池温度  {} / {} / {}\n",
         v(s.soc_temp_c, "C"), v(s.gpu_temp_c, "C"), v(s.battery_temp_c, "C")));
+    if let Some(scope) = s.meta.as_ref().and_then(|m| m.get("fps_scope")) {
+        out.push_str(&format!("  帧率口径    {scope}\n"));
+    }
+    match &s.frame_judge {
+        Some(j) => out.push_str(&format!(
+            "  判定表帧指标 [{}]  {} 帧  fps_mean {:.2}  frame_p50 {:.2} ms  frame_p95 {:.2} ms  frame_p99 {:.2} ms  jank {:.1}%\n",
+            j.frame_source, j.n_frames, j.fps_mean, j.frame_p50, j.frame_p95, j.frame_p99, j.jank_pct
+        )),
+        None => out.push_str("  判定表帧指标 无 (没有带口径的逐帧数据)\n"),
+    }
     if !s.unavailable.is_empty() {
         out.push_str("  未测到的字段:\n");
         for u in &s.unavailable {
@@ -897,6 +1149,18 @@ pub fn render_perf_text(s: &PerfSnapshot) -> String {
 mod tests {
     use super::*;
     use crate::smartperf::parse_sp_csv;
+
+    #[test]
+    fn nested_perf_requires_exact_parent_target_before_any_device_call() {
+        let dir=std::env::temp_dir().join(format!("perf-lease-test-{}",std::process::id()));
+        let lease=crate::devlease::Lease::acquire(&dir.join("lease"),&dir.join("legacy"),"parent-fake","test",std::time::Duration::from_millis(20)).unwrap();
+        let args=["--serial","different-fake","--rounds","1"].iter().map(|s|s.to_string()).collect::<Vec<_>>();
+        let error=perf_to_file_under_lease(&args,&lease,&dir.join("perf.json")).unwrap_err();
+        assert!(error.contains("target differs"));
+        assert!(!dir.join("perf.json").exists());
+        drop(lease);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     const SP_CSV: &str = include_str!("testdata/sp_daemon_data.csv");
 
@@ -1188,9 +1452,16 @@ soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
         let csv = dir.join("data.csv");
         std::fs::write(&csv, SP_CSV).unwrap();
         std::fs::write(dir.join("general.csv"), include_str!("testdata/hismartperf_general.csv")).unwrap();
-
-        let snap = snapshot_from_csv_file(&csv).unwrap();
+        let snap = snapshot_from_csv_file(&csv, FpsScope::App).unwrap();
+        assert_eq!(snap.meta.as_ref().unwrap().get("fps_scope").map(String::as_str), Some("app"));
+        assert_eq!(snap.frame_judge.as_ref().unwrap().frame_source, FRAME_SRC_SP_DAEMON_PKG);
+        // 不声明口径: 数字照出, 但不进判定表
+        let unknown = snapshot_from_csv_file(&csv, FpsScope::Unknown).unwrap();
+        assert_eq!(unknown.fps, snap.fps);
+        assert!(unknown.frame_judge.is_none());
         assert_eq!(snap.sample_count, 3);
+        assert_eq!(snap.power_watt, None, "原 CSV 没有供电证据，不能把数值合理当作放电");
+        assert!(snap.unavailable.iter().any(|u| u.field == "power_watt" && u.reason.contains("battery_before.txt")));
         assert!((snap.fps_p95_ms.unwrap() - 33.3).abs() < 1e-9);
         // 同目录的 general.csv 被当成本轮采集元数据读了进来
         let meta = snap.meta.as_ref().expect("有 general.csv 就该有 meta");
@@ -1198,10 +1469,41 @@ soc:54000;gpuTemp:51000;batTemp:39000;npuTemp:0;gpuType:qualcomm;}";
         assert_eq!(meta.get("target_fps").map(String::as_str), Some("60"));
 
         // 同一份盘上数据重算两次必须逐字节一致
-        assert_eq!(snap, snapshot_from_csv_file(&csv).unwrap());
+        assert_eq!(snap, snapshot_from_csv_file(&csv, FpsScope::App).unwrap());
 
-        assert!(snapshot_from_csv_file(&dir.join("nope.csv")).is_err());
+        assert!(snapshot_from_csv_file(&dir.join("nope.csv"), FpsScope::App).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn harmony_power_requires_two_discharging_endpoints() {
+        const DISCHARGING: &str = "chargingStatus: 0\npluggedType: 0\nnowCurrent: -1000000\n";
+        let charging = include_str!("testdata/tele_oh_battery.txt");
+        assert!(battery_power_usable(charging).unwrap_err().contains("充电电流"));
+        assert!(battery_power_usable("chargingStatus: 0\npluggedType: 0\n").is_err());
+        assert!(battery_power_usable(&DISCHARGING.replace("-1000000", "0")).is_err());
+
+        let dir = std::env::temp_dir().join(format!("pf-perfsrc-supply-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("data.csv");
+        std::fs::write(&csv, "currentNow,voltageNow\n1000,4000000\n").unwrap();
+        std::fs::write(dir.join("battery_before.txt"), DISCHARGING).unwrap();
+        assert_eq!(snapshot_from_csv_file(&csv, FpsScope::Unknown).unwrap().power_watt, None);
+        std::fs::write(dir.join("battery_after.txt"), DISCHARGING).unwrap();
+        let usable = snapshot_from_csv_file(&csv, FpsScope::Unknown).unwrap();
+        assert_eq!(usable.power_watt, Some(4.0));
+        assert_eq!(usable.meta.unwrap().get("power_supply").map(String::as_str), Some("discharging_at_endpoints"));
+
+        // Either endpoint invalidates the estimate; raw files remain available.
+        std::fs::write(dir.join("battery_after.txt"), charging).unwrap();
+        let invalid = snapshot_from_csv_file(&csv, FpsScope::Unknown).unwrap();
+        assert_eq!(invalid.power_watt, None);
+        assert!(invalid.unavailable.iter().any(|u| u.field == "power_watt" && u.reason.starts_with("采样后")));
+        std::fs::write(dir.join("battery_after.txt"), DISCHARGING).unwrap();
+        std::fs::remove_file(dir.join("battery_before.txt")).unwrap();
+        assert_eq!(snapshot_from_csv_file(&csv, FpsScope::Unknown).unwrap().power_watt, None);
+        assert!(harmony_supply_endpoints(charging, DISCHARGING).unwrap_err().starts_with("采样前"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

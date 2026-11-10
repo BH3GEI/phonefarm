@@ -44,7 +44,7 @@ harness is the batch executor on top of it. Both speak the same contract:
 ## When to use this skill
 
 - Launching a batch from an APK directory, explicit module, or per-API profile
-  — on either platform
+  — installed modules on either platform; local APK installation only on Android
 - Pulling results that **another** tool already produced on the device, and
   scanning them for assertion failures (`cts-fetch`), without re-running
 - Checking progress / exporting reports of a running or finished batch
@@ -53,18 +53,20 @@ harness is the batch executor on top of it. Both speak the same contract:
 - Deciding whether a batch outcome is claimable (recovery VERIFIED, no
   ENV_BLOCKED/TIMEOUT) vs. diagnostic-only
 
+Local APK installation requires successful aapt/aapt2 metadata, transport and remote completion, exact installer success, and current installed APK verification. Evidence is retained under `<out>/installation`. Unknown completion is not automatically retried and does not yet create a typed recovery barrier; transport termination does not prove remote stop or rollback. Legacy replace installation is distinct from the typed games fresh-install transaction.
+
 ## Commands
 
 ```bash
-# 1. Batch from colleague's per-API profile (Class#method slices)
+# 1. Already-installed OH profile (Class#method slices); omit apk_path
 phonefarm test-batch --profile .work/cts-fast/profiles/getPackageInfo.json \
   --environment .work/cts-fast/environment.json --serial hdc:<key>
 
-# 2. Whole APK directory (differential deploy: sha256 cache on device skips
-#    unchanged pushes/installs — the 50s→2s overhead lever)
-phonefarm test-batch --dir ./cts-apks/ --serial hdc:<key> \
+# 2. Android APK directory. Skip installation only after current installed
+#    APK identity and bytes are verified; transfer cache alone is insufficient.
+phonefarm test-batch --dir ./cts-apks/ --serial <android-serial> \
   --include 'android\.(content|graphics)\..*' --exclude '.*\.perftest\..*' \
-  --retry 1 --heal-script ./scripts/a2oh_bridge_restart.sh
+  --retry 1
 
 # 3. Single module, ad-hoc — Android
 phonefarm test-batch --module android.content.cts/androidx.test.runner.AndroidJUnitRunner
@@ -96,7 +98,7 @@ Flags:
 | `--timeout-ms` | Total watchdog per instrument run (default 600000) |
 | `--idle-timeout-ms` | Silent-pipe watchdog (default 90000) |
 | `--heal-script` | External A2OH bridge restart script, fired on crash/disconnect |
-| `--install-cmd` | Device-side install template with `{apk}` placeholder (required for hdc/A2OH; the bridge owns its install entry, we don't invent it) |
+| `--install-cmd` | Only exact `pm install -r {apk}` is supported, equivalent to the Android default. HAP/A2OH/custom installation requires a future identity/completion adapter; run already-installed modules without apk_path. |
 | `--detach` | Run in the background; poll `<out>/summary.json` |
 | `--out` | Output directory (default `cts-batch-<ts>`) |
 

@@ -16,7 +16,7 @@
 //! [`verdict`] 报「变化像素占抽样点的比例」, 带 20% 门槛, 进 report.json, 由 autoloop 用;
 //! [`avg_pixel_diff_pct`] 报「平均逐像素绝对差 (%)」, 是给人手查一对帧的 CLI。
 //! 两个量不同但互补 —— 前者对变化**范围**敏感, 后者对变化**幅度**敏感 —— 且对同一对
-//! 裸帧结论一致: `runs_sysparam/genshin1/spin_check/spin_{a,b}.raw` 上分别是
+//! 裸帧结论一致: `fixtures/golden/runs_sysparam/genshin1/spin_check/spin_{a,b}.raw` 上分别是
 //! 81.77% 与 13.637%, 都远在各自门槛之上。要改判据请两个一起改。
 //!
 //! `screencap` 原始格式
@@ -309,7 +309,7 @@ mod tests {
     /// spin_check.json 逐字节比。两个统计量的数也一并钉住 —— 模块注释引的就是它们。
     #[test]
     fn real_frames_match_recorded_golden() {
-        let d = repo_root().join("loop_v1/runs_sysparam/genshin1/spin_check");
+        let d = repo_root().join("loop_v1/fixtures/golden/runs_sysparam/genshin1/spin_check");
         let (a, b) = (d.join("spin_a.raw"), d.join("spin_b.raw"));
         if !a.exists() || !b.exists() {
             return;

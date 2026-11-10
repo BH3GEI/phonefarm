@@ -46,7 +46,7 @@
 //!     数据却只从这条通道出来 —— 只连控制通道的话, `startCollect` 回 `ret=0` 一切正常,
 //!     然后你一条样本都收不到。
 //!
-//! **单位口径** (同一时刻与 `hwcond` 直读 sysfs 比对出来的, 见 `docs/SPEC_PERF_SOURCE.md` 第 7 节):
+//! **单位口径** (同一时刻与 `hwcond` 直读 sysfs 比对出来的, 见 `https://github.com/HGamey/docs/blob/main/repos/phonefarm/docs/SPEC_PERF_SOURCE.md` 第 7 节):
 //!
 //! | 字段 | 实测 | 结论 |
 //! |---|---|---|
@@ -344,7 +344,7 @@ pub fn sample_power(s: &GpSample) -> Option<crate::hwcond::PowerSample> {
 
 /// 一条样本 → 瓦特。
 pub fn sample_watt(s: &GpSample) -> Option<f64> {
-    sample_power(s).map(|p| p.watt())
+    sample_power(s).and_then(|p| p.watt())
 }
 
 /// 温度字段名 → 统一契约里的热区。对应关系取自 `dist/umi.js` 的安卓↔鸿蒙映射表。
@@ -947,7 +947,7 @@ batTemp:44000;}"
         let (s, _) = parse_stream(real_sample());
         let p = sample_power(&s[1]).unwrap();
         assert_eq!((p.curr_ua, p.volt_uv), (-87_000, 4_206_000));
-        assert_eq!(sample_watt(&s[1]), Some(p.watt()));
+        assert_eq!(sample_watt(&s[1]), p.watt());
         // 放电电流是负的; 要的是功率的大小。87 mA x 4.206 V = 0.366 W
         let w = sample_watt(&s[1]).unwrap();
         assert!((w - 0.365_922).abs() < 1e-6, "{w}");

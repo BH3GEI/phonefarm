@@ -1,7 +1,7 @@
 //! loop_v1 的解析与归因: ftrace 文本 → 帧时序指标 → "这一帧的时间花在哪类开销上"。
 //!
 //! 由 `loop_v1/tools/parse_trace.py` 与 `loop_v1/tools/attribute.py` 逐行搬过来,
-//! 口径与输出字节完全一致 (对照测试见本文件末尾, 用的是 `loop_v1/runs/` 里的真实录制)。
+//! 口径与输出字节完全一致 (对照测试见本文件末尾, 用的是 `loop_v1/fixtures/golden/runs/` 里的真实录制)。
 //! **不碰设备**, 因此可对着归档的 trace 离线重跑, 结果逐字节可复现 (判据 5 的可回放性)。
 //!
 //! 指标口径
@@ -69,7 +69,10 @@ fn acf(xs: &[f64], lag: usize) -> f64 {
     let n = xs.len() - lag;
     let (a, b) = (&xs[..n], &xs[lag..lag + n]);
     let nf = n as f64;
-    let (ma, mb) = (py_sum(a.iter().copied()) / nf, py_sum(b.iter().copied()) / nf);
+    let (ma, mb) = (
+        py_sum(a.iter().copied()) / nf,
+        py_sum(b.iter().copied()) / nf,
+    );
     let num: f64 = py_sum((0..n).map(|i| (a[i] - ma) * (b[i] - mb)));
     let da = py_sum(a.iter().map(|v| (v - ma).powi(2))).sqrt();
     let db = py_sum(b.iter().map(|v| (v - mb).powi(2))).sqrt();
@@ -210,6 +213,42 @@ pub struct Parsed {
     pub pwrlevel: Vec<(f64, i64)>,
     pub gpufreq: Vec<(f64, i64)>,
     pub thermal_events: Vec<(f64, String)>,
+    /// 进程归属。trace 头里有 `target_tids` (采集脚本拿 `-PKG` 记下的目标进程线程号) 时为
+    /// `Some`, 只收这些线程的提交; 老 trace 没有这项, 为 `None`, 只能按线程名认, 不保证是目标应用。
+    pub attribution: Option<Attribution>,
+    // Exact original grouping boundaries, deliberately absent from the legacy
+    // summary/full JSON. A cadence group is not a verified display frame.
+    submit_groups: Vec<(f64, f64)>,
+    trailing_incomplete_intervals: usize,
+    pub(crate) submit_grouping: &'static str,
+    pub(crate) submit_filtering: &'static str,
+    pub(crate) submit_cpus: Vec<u32>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct SubmitGroupWindow {
+    pub start: f64,
+    pub end: f64,
+    pub group_count: usize,
+    pub submits_per_group: usize,
+    pub discarded_head_groups: usize,
+    pub discarded_tail_groups: usize,
+    pub trailing_incomplete_intervals: usize,
+}
+
+/// 提交按进程归属的结果。只在 trace 头带了目标线程号时才有。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribution {
+    pub target_pid: String,
+    pub n_target_tids: usize,
+    /// 线程名对得上 (或被截成 `<...>`)、但线程号不在目标进程里的提交 —— 别的进程的, 没算。
+    pub n_foreign_submits: usize,
+}
+
+/// trace 头 `target_tids=1,2,3` → 线程号集合。缺这项返回 `None` (老 trace)。
+fn target_tids(meta: &Meta) -> Option<Vec<u64>> {
+    let raw = meta.get("target_tids")?;
+    Some(raw.split(',').filter_map(|t| t.trim().parse().ok()).collect())
 }
 
 struct Retire {
@@ -229,7 +268,7 @@ fn kv(re: &Regex, rest: &str) -> HashMap<String, i64> {
 }
 
 pub fn parse(text: &str, render_comm: &str) -> Parsed {
-    parse_with_spf(text, render_comm, None)
+    parse_grouped(text, render_comm, None, None)
 }
 
 /// 同 [`parse`], 但每帧提交数由调用方给定 (`Some(n)`), 不从数据自检。
@@ -240,12 +279,32 @@ pub fn parse(text: &str, render_comm: &str) -> Parsed {
 /// 帧数少 3 倍 (10-11 selftest 标定 3000 工作组: 8.28 ms 实为 2.76 ms)。
 /// 自检的打分照样算出来记在 `spf_scores` 里, 只是不用它分组。
 pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -> Parsed {
+    parse_grouped(text, render_comm, fixed_spf, None)
+}
+
+/// 只认 `contexts` 里这些 kgsl ctx 的提交 (目标归属已由调用方冻结), 每帧提交数可冻结。
+pub fn parse_owned_contexts(
+    text: &str,
+    render_comm: &str,
+    contexts: &std::collections::BTreeSet<i64>,
+    spf: Option<usize>,
+) -> Parsed {
+    parse_grouped(text, render_comm, spf, Some(contexts))
+}
+
+fn parse_grouped(
+    text: &str,
+    render_comm: &str,
+    fixed_spf: Option<usize>,
+    contexts: Option<&std::collections::BTreeSet<i64>>,
+) -> Parsed {
     let line_re = Regex::new(LINE_RE).expect("LINE_RE");
     let kv_re = Regex::new(KV_RE).expect("KV_RE");
 
     let mut meta = Meta::default();
-    let mut submits: Vec<(f64, i64, i64)> = Vec::new();
-    let mut truncated: Vec<(f64, i64, i64)> = Vec::new();
+    // (墙钟, ctx, ts, tid, CPU). CPU is used only for new loss provenance.
+    let mut submits: Vec<(f64, i64, i64, u64, u32)> = Vec::new();
+    let mut truncated: Vec<(f64, i64, i64, u64, u32)> = Vec::new();
     let mut retires: HashMap<(i64, i64), Retire> = HashMap::new();
     let mut buslevel = Vec::new();
     let mut pwrlevel = Vec::new();
@@ -287,15 +346,17 @@ pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -
                 // ftrace 在 comm 列放不下时写成 "<...>", 提交还在, 只是名字丢了
                 // (2026-10-14 better1_1 重考: 6/20 臂因此 n_frames=0)。整窗一个正常
                 // 名字都没有时, 才把截断的提交算进来, 避免和别的进程的提交混在一起。
+                // 给了 owned contexts 时按 ctx 归属认提交, 不看 comm。
                 let comm = m["comm"].trim();
+                let tid: u64 = m["tid"].parse().unwrap_or(0);
+                let cpu = m["cpu"].parse::<u32>().unwrap_or(u32::MAX);
                 if let (Some(&ctx), Some(&ts)) = (f.get("ctx"), f.get("ts")) {
-                    if comm == render_comm {
-                        if !render_ctxs.contains(&ctx) {
-                            render_ctxs.push(ctx);
-                        }
-                        submits.push((wall, ctx, ts));
-                    } else if comm == "<...>" {
-                        truncated.push((wall, ctx, ts));
+                    // 给了 owned contexts (main 侧冻结的 ctx 归属) 时按 ctx 认; 否则按线程名。
+                    // render_ctxs 在进程归属过滤之后统一收 (ruler 侧 target_tids)。
+                    if contexts.map_or(comm == render_comm, |owned| owned.contains(&ctx)) {
+                        submits.push((wall, ctx, ts, tid, cpu));
+                    } else if contexts.is_none() && comm == "<...>" {
+                        truncated.push((wall, ctx, ts, tid, cpu));
                     }
                 }
             }
@@ -331,16 +392,55 @@ pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -
         }
     }
 
-    if submits.is_empty() && !truncated.is_empty() {
-        submits = truncated;
-        for &(_, ctx, _) in &submits {
-            if !render_ctxs.contains(&ctx) {
-                render_ctxs.push(ctx);
+    // 进程归属: 线程名不认进程 —— 两个 Unity 应用的渲染线程都叫 UnityGfxDeviceW,
+    // `<...>` 更是谁都可能。trace 头带了目标进程的线程号时, 只收这些线程的提交:
+    //   - 有正常名字的: 线程号必须在目标进程里;
+    //   - `<...>`: 线程号是目标进程里、本窗内以渲染线程名出现过的线程 (名字丢了, 线程还是那条);
+    //     一条正常名字都没有时, 退一步收目标进程里任何线程的 `<...>` 提交 —— 至少还是这个进程的。
+    // 没有线程号 (老 trace) 时保持原行为, attribution 为 None, 由下游当「未归属」看待。
+    let submit_filtering = if contexts.is_some() {
+        "caller_provided_contexts"
+    } else if target_tids(&meta).is_some() {
+        "render_comm_and_recorded_target_tids"
+    } else if submits.is_empty() && !truncated.is_empty() {
+        "truncated_names_fallback"
+    } else {
+        "render_comm"
+    };
+    let attribution = match target_tids(&meta) {
+        Some(tids) => {
+            let before = submits.len() + truncated.len();
+            submits.retain(|s| tids.contains(&s.3));
+            let named_tids: Vec<u64> = submits.iter().map(|s| s.3).collect();
+            if named_tids.is_empty() {
+                truncated.retain(|s| tids.contains(&s.3));
+            } else {
+                truncated.retain(|s| named_tids.contains(&s.3));
             }
+            submits.append(&mut truncated);
+            Some(Attribution {
+                target_pid: meta.get("target_pid").unwrap_or("").to_string(),
+                n_target_tids: tids.len(),
+                n_foreign_submits: before - submits.len(),
+            })
         }
+        None => {
+            if submits.is_empty() && !truncated.is_empty() {
+                submits = std::mem::take(&mut truncated);
+            }
+            None
+        }
+    };
+    let mut submit_cpus = Vec::new();
+    for &(_, ctx, _, _, cpu) in &submits {
+        if !render_ctxs.contains(&ctx) {
+            render_ctxs.push(ctx);
+        }
+        if !submit_cpus.contains(&cpu) { submit_cpus.push(cpu); }
     }
     submits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     render_ctxs.sort_unstable();
+    submit_cpus.sort_unstable();
 
     // ── 提交间隔 → 自检每帧提交数 → 按帧分组 ──
     let gaps: Vec<f64> = submits
@@ -352,15 +452,17 @@ pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -
 
     // 帧时长 = 每 spf 个间隔一组求和。组边界同时用来聚合该帧的 GPU 活跃时长。
     let mut frame_ms = Vec::new();
+    let mut submit_groups = Vec::new();
     let mut gpu_active_ms = Vec::new();
     let mut queue_ms = Vec::new();
     if gaps.len() >= spf {
         for i in (0..=gaps.len() - spf).step_by(spf) {
             frame_ms.push(py_sum(gaps[i..i + spf].iter().copied()));
+            submit_groups.push((submits[i].0, submits[i + spf].0));
             let mut act_sum = 0.0;
             let mut q_sum = 0.0;
             let mut matched = 0usize;
-            for &(wall, ctx, ts) in &submits[i..(i + spf).min(submits.len())] {
+            for &(wall, ctx, ts, _, _) in &submits[i..(i + spf).min(submits.len())] {
                 let Some(r) = retires.get(&(ctx, ts)) else {
                     continue;
                 };
@@ -402,13 +504,66 @@ pub fn parse_with_spf(text: &str, render_comm: &str, fixed_spf: Option<usize>) -
         pwrlevel,
         gpufreq,
         thermal_events,
+        attribution,
+        submit_groups,
+        trailing_incomplete_intervals: gaps.len() % spf,
+        submit_grouping: if fixed_spf.is_some_and(|n| n >= 1) {
+            "existing_parser_fixed"
+        } else {
+            "existing_parser_inferred"
+        },
+        submit_filtering,
+        submit_cpus,
     }
 }
 
 impl Parsed {
+    /// Keep only whole, contiguous groups inside capture, preserving the
+    /// parser's original cadence and phase. GPU retire completion is separate.
+    pub(crate) fn complete_group_window(
+        &self,
+        capture: (f64, f64),
+    ) -> Result<SubmitGroupWindow, String> {
+        let (start, end) = capture;
+        if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
+            return Err("capture window has no finite positive duration".into());
+        }
+        if self.submit_groups.iter().any(|&(a, b)| {
+            !a.is_finite() || !b.is_finite() || a < 0.0 || b <= a
+        }) || self.submit_groups.windows(2).any(|w| w[0].1 != w[1].0)
+        {
+            return Err("GPU-submit groups lack continuous finite positive intervals".into());
+        }
+        let first = self.submit_groups.iter().position(|&(a, b)| a >= start && b <= end)
+            .ok_or("no complete GPU-submit groups inside capture window")?;
+        let count = self.submit_groups[first..].iter()
+            .take_while(|&&(a, b)| a >= start && b <= end).count();
+        Ok(SubmitGroupWindow {
+            start: self.submit_groups[first].0,
+            end: self.submit_groups[first + count - 1].1,
+            group_count: count,
+            submits_per_group: self.submits_per_frame,
+            discarded_head_groups: first,
+            discarded_tail_groups: self.submit_groups.len() - first - count,
+            trailing_incomplete_intervals: self.trailing_incomplete_intervals,
+        })
+    }
+
+    /// 归属字段 (只在 trace 头带了目标线程号时追加, 老 trace 的输出逐字节不变)。
+    fn with_attribution(&self, v: PyVal) -> PyVal {
+        let (PyVal::Obj(mut kv), Some(a)) = (v.clone(), &self.attribution) else {
+            return v;
+        };
+        kv.push(("frame_attribution".into(), PyVal::Str("target_tids".into())));
+        kv.push(("target_pid".into(), PyVal::Str(a.target_pid.clone())));
+        kv.push(("n_target_tids".into(), a.n_target_tids.into()));
+        kv.push(("n_foreign_submits".into(), a.n_foreign_submits.into()));
+        PyVal::Obj(kv)
+    }
+
     /// `--full`: 逐帧序列全出。
     pub fn to_pyval(&self) -> PyVal {
-        pyobj! {
+        self.with_attribution(pyobj! {
             "meta" => self.meta.to_pyval(),
             "render_comm" => self.render_comm.clone(),
             "render_ctxs" => self.render_ctxs.clone(),
@@ -433,7 +588,7 @@ impl Parsed {
             "thermal_events" => PyVal::List(self.thermal_events.iter().map(|(t, e)| {
                 pyobj!{ "t" => py_round(*t, 4), "event" => e.clone() }
             }).collect()),
-        }
+        })
     }
 
     /// 把逐帧序列压成一行可比的账。每个字段都是确定性函数, 无随机。
@@ -444,7 +599,7 @@ impl Parsed {
         let mean4 = |xs: &[f64]| {
             (!xs.is_empty()).then(|| py_round(py_sum(xs.iter().copied()) / xs.len() as f64, 4))
         };
-        pyobj! {
+        self.with_attribution(pyobj! {
             "span_s" => self.span_s,
             "n_frames" => f.len(),
             "n_submits" => self.n_submits,
@@ -468,7 +623,7 @@ impl Parsed {
             "ddr_boost_khz" => self.meta.get("ddr_boost_khz").map(String::from),
             "llcc_boost_khz" => self.meta.get("llcc_boost_khz").map(String::from),
             "thermal_pwrlevel" => self.meta.get("thermal_pwrlevel").map(String::from),
-        }
+        })
     }
 }
 
@@ -520,10 +675,9 @@ fn num_or_zero(s: &PyVal, k: &str) -> f64 {
 /// —— 悄悄填个 0 等于凭空造一个测量值, 比整轮失败更糟。
 fn str_num_or_zero(s: &PyVal, k: &str) -> Result<f64, String> {
     match s.get(k) {
-        Some(PyVal::Str(t)) if !t.is_empty() => t
-            .trim()
-            .parse()
-            .map_err(|_| format!("{k} 不是数字: {t:?}")),
+        Some(PyVal::Str(t)) if !t.is_empty() => {
+            t.trim().parse().map_err(|_| format!("{k} 不是数字: {t:?}"))
+        }
         Some(v) => Ok(match v.as_f64() {
             Some(x) if x != 0.0 => x,
             _ => 0.0,
@@ -722,14 +876,14 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
     }
 
-    /// 归因的对照源: `loop_v1/runs/*/summary.json` → `attribution.json`,
+    /// 归因的对照源: `loop_v1/fixtures/golden/runs/*/summary.json` → `attribution.json`,
     /// 21 组全是真机录制后由旧 Python 版落盘的, 逐字节比。
     #[test]
     fn attribute_matches_recorded_golden() {
-        let runs = repo_root().join("loop_v1/runs");
+        let runs = repo_root().join("loop_v1/fixtures/golden/runs");
         let mut checked = 0;
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(&runs)
-            .expect("loop_v1/runs 不在")
+            .expect("loop_v1/fixtures/golden/runs 不在")
             .filter_map(|e| e.ok().map(|e| e.path()))
             .collect();
         dirs.sort();
@@ -766,7 +920,10 @@ mod tests {
             for (name, got) in [
                 (format!("{stem}.summary.json"), summary.clone()),
                 (format!("{stem}.full.json"), dumps(&d.to_pyval())),
-                (format!("{stem}.attr.json"), dumps(&attribute(&parsed).unwrap())),
+                (
+                    format!("{stem}.attr.json"),
+                    dumps(&attribute(&parsed).unwrap()),
+                ),
             ] {
                 let want = std::fs::read_to_string(dir.join(&name)).unwrap();
                 assert_eq!(got, want.trim_end_matches('\n'), "{name} 不一致");
@@ -834,6 +991,32 @@ mod tests {
     }
 
     #[test]
+    fn complete_group_window_preserves_phase_and_excludes_incomplete_tail() {
+        let trace = [100.0, 100.1, 100.2, 100.3, 100.4, 100.5].iter().enumerate()
+            .map(|(i,t)|format!("Render-42 [000] ..... {t:.6}: adreno_cmdbatch_submitted: ctx=1 ts={i}\n"))
+            .collect::<String>();
+        let mut parsed = parse_with_spf(&trace,"Render",Some(2));
+        let old_summary = dumps(&parsed.summarize());
+        assert_eq!(parsed.complete_group_window((99.0,101.0)).unwrap(),SubmitGroupWindow {
+            start:100.0,end:100.4,group_count:2,submits_per_group:2,
+            discarded_head_groups:0,discarded_tail_groups:0,trailing_incomplete_intervals:1,
+        });
+        let trimmed = parsed.complete_group_window((100.1,100.4)).unwrap();
+        assert_eq!((trimmed.start,trimmed.end,trimmed.group_count,trimmed.discarded_head_groups),(100.2,100.4,1,1));
+        assert_eq!(parsed.complete_group_window((100.0,100.3)).unwrap().discarded_tail_groups,1);
+        assert_eq!(old_summary,dumps(&parsed.summarize()));
+        assert_eq!(parsed.span_s,0.5); // Old denominator still includes the tail.
+        assert!(parsed.complete_group_window((100.1,100.3)).is_err());
+        assert!(parsed.complete_group_window((f64::NAN,101.0)).is_err());
+        parsed.submit_groups[1].0 += 0.01;
+        assert!(parsed.complete_group_window((99.0,101.0)).is_err());
+        let empty = parse("", "Render");
+        assert!(empty.complete_group_window((0.0,1.0)).is_err());
+        let zero = parse_with_spf(&trace.replace("100.100000","100.000000"),"Render",Some(1));
+        assert!(zero.complete_group_window((99.0,101.0)).is_err());
+    }
+
+    #[test]
     fn meta_dict_keeps_insertion_order_on_overwrite() {
         let mut m = Meta::default();
         m.set("a", "1");
@@ -858,6 +1041,88 @@ mod tests {
         assert_eq!(auto.submits_per_frame, 3, "这段节奏正是会骗过自检的那种");
         assert_eq!(fixed.submits_per_frame, 1);
         assert!(fixed.frame_ms.len() > 2 * auto.frame_ms.len());
+    }
+
+    fn submit(comm: &str, tid: u64, t: f64, ctx: i64, ts: i64) -> String {
+        format!("     {comm}-{tid}   [001] ..... {t:.6}: adreno_cmdbatch_submitted: ctx={ctx} ctx_prio=1 ts={ts} inflight=1\n")
+    }
+
+    /// 两个进程的渲染线程同名 (两个 Unity 应用都叫 UnityGfxDeviceW): trace 头带了目标进程
+    /// 线程号时, 别的进程的提交一条都不能进帧序列。
+    #[test]
+    fn same_comm_in_another_process_is_not_counted_when_target_tids_known() {
+        let mut text = String::from("#loop_v1_meta target_pkg=com.game target_pid=100 target_tids=100,101,102\n");
+        for i in 0..60 {
+            let t = 100.0 + i as f64 * 0.0333;
+            text.push_str(&submit("UnityGfxDeviceW", 101, t, 7, i)); // 目标游戏 30fps
+            text.push_str(&submit("UnityGfxDeviceW", 900, t + 0.010, 9, i)); // 后台另一个 Unity 应用
+        }
+        let d = parse_with_spf(&text, DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(d.n_submits, 60);
+        assert_eq!(d.render_ctxs, vec![7]);
+        let fps = d.fps_mean.unwrap();
+        assert!((fps - 30.0).abs() < 0.5, "{fps}");
+        let a = d.attribution.clone().unwrap();
+        assert_eq!(a.n_foreign_submits, 60);
+        assert_eq!(a.target_pid, "100");
+        let sum = dumps(&d.summarize());
+        assert!(sum.contains("\"frame_attribution\": \"target_tids\""), "{sum}");
+        assert!(sum.contains("\"n_foreign_submits\": 60"), "{sum}");
+
+        // 不带线程号的老 trace: 两边混在一起, 帧率虚高一倍 —— 这正是要修的口子
+        let old = text.replacen("target_tids=100,101,102", "x=1", 1);
+        let o = parse_with_spf(&old, DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(o.n_submits, 120);
+        assert!(o.attribution.is_none());
+        assert!(!dumps(&o.summarize()).contains("frame_attribution"));
+    }
+
+    /// 名字被截成 `<...>` 的提交: 只收目标进程里、以渲染线程名出现过的那条线程;
+    /// SurfaceFlinger 等别的进程截名的提交不收。
+    #[test]
+    fn truncated_submits_are_kept_only_for_the_target_render_thread() {
+        let mut text = String::from("#loop_v1_meta target_pid=100 target_tids=100,101,105\n");
+        for i in 0..40 {
+            let t = 100.0 + i as f64 * 0.0166;
+            let comm = if i % 2 == 0 { "UnityGfxDeviceW" } else { "<...>" };
+            text.push_str(&submit(comm, 101, t, 7, i));
+            text.push_str(&submit("<...>", 105, t + 0.002, 8, i)); // 目标进程里的别的线程
+            text.push_str(&submit("<...>", 1500, t + 0.004, 3, i)); // 合成进程
+        }
+        let d = parse_with_spf(&text, DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(d.n_submits, 40);
+        assert_eq!(d.render_ctxs, vec![7]);
+        assert_eq!(d.attribution.unwrap().n_foreign_submits, 80);
+    }
+
+    /// 一条正常名字都没有: 老行为是把所有 `<...>` 都当渲染提交 (含别的进程的);
+    /// 有线程号时只收目标进程的。
+    #[test]
+    fn all_truncated_falls_back_to_target_process_only() {
+        let mut text = String::from("#loop_v1_meta target_pid=100 target_tids=100,101\n");
+        for i in 0..30 {
+            let t = 100.0 + i as f64 * 0.0333;
+            text.push_str(&submit("<...>", 101, t, 7, i));
+            text.push_str(&submit("<...>", 1500, t + 0.01, 3, i));
+        }
+        let d = parse_with_spf(&text, DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(d.n_submits, 30);
+        assert_eq!(d.render_ctxs, vec![7]);
+        let old = parse_with_spf(&text.replacen("target_tids=100,101", "x=1", 1), DEFAULT_RENDER_COMM, Some(1));
+        assert_eq!(old.n_submits, 60, "老口径把合成进程的提交也算成了游戏帧");
+    }
+
+    /// 目标进程不在 (pidof 为空, target_tids 为空串): 一帧都不算, 不能退回按名字认。
+    #[test]
+    fn empty_target_tids_yields_no_frames() {
+        let mut text = String::from("#loop_v1_meta target_pid= target_tids=\n");
+        for i in 0..10 {
+            text.push_str(&submit("UnityGfxDeviceW", 900, 100.0 + i as f64 * 0.0333, 9, i));
+        }
+        let d = parse(&text, DEFAULT_RENDER_COMM);
+        assert_eq!(d.n_submits, 0);
+        assert_eq!(d.fps_mean, None);
+        assert_eq!(d.attribution.unwrap().n_foreign_submits, 10);
     }
 
     #[test]

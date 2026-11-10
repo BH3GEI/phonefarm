@@ -13,7 +13,8 @@
 //!   charging 只报不查（待机就该充电；停充是 eval 每臂自己的事）
 //!   screen   只报不查（前台应用/亮屏）
 //!
-//! 退出码: 0 全过（或 --fix 修好了）；2 有不过；3 设备不在线或判不出是哪台。
+//! 只读探测前租约域必须明确 clear；--fix 全程持有实际强租约。标签不提供绕过许可。
+//! 退出码: 0 全过（或 --fix 修好了）；2 有不过；3 设备或租约域不可用。
 
 use crate::device::{self, Device};
 use serde::Serialize;
@@ -45,7 +46,7 @@ fn info(name: &'static str, detail: impl Into<String>) -> Check {
 
 const USAGE: &str = "phonefarm preflight [--serial X] [--fix] [--json] [--temp-cap 48]
 开测前的环境不变量核查: 风扇常关(owner 政策) / 媒体静音 / SoC 温度 / 充电与前台(只报)。
---fix 自动修能修的(关风扇、音量置 0)。退出码 0 全过 / 2 有不过 / 3 判不出设备。";
+--fix 在实际强租约内自动修能修的(关风扇、音量置 0)。只读入口要求租约域空闲。退出码 0 全过 / 2 有不过 / 3 设备或租约域不可用。";
 
 pub fn run_preflight(args: &[String]) -> i32 {
     let mut serial: Option<String> = None;
@@ -72,7 +73,33 @@ pub fn run_preflight(args: &[String]) -> i32 {
         }
     }
 
-    let Some(serial) = device::resolve_serial(serial.as_deref()) else {
+    if !fix && !crate::observation::in_worker() {
+        return match crate::observation::run("preflight", args,
+            &crate::lease_storage::resolve(), std::time::Duration::from_secs(45)) {
+            Ok(output) => {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&output.stdout);
+                let _ = std::io::stderr().write_all(&output.stderr);
+                output.status.code().unwrap_or(3)
+            }
+            Err(e) => {
+                if json { println!("{}", serde_json::json!({"observation":e.state,"reason":e.reason})); }
+                eprintln!("preflight {}: {}", e.state, e.reason);
+                3
+            }
+        };
+    }
+    // main's outer devlock is coordination; the actual strong lease protects --fix.
+    let _lease = if fix {
+        match crate::devlease::Lease::target(serial.as_deref(), "preflight-fix") {
+            Ok(lease) => Some(lease),
+            Err(e) => { eprintln!("preflight: {e}"); return 3; }
+        }
+    } else {
+        None
+    };
+    let Some(serial) = _lease.as_ref().map(|l| l.serial.clone())
+        .or_else(|| device::resolve_serial(serial.as_deref())) else {
         eprintln!("preflight: 判不出用哪台设备（零台/多台在线，--serial 指定）");
         return 3;
     };
@@ -81,16 +108,6 @@ pub fn run_preflight(args: &[String]) -> i32 {
     let _ = std::fs::create_dir_all(&tmpd);
     let tmp = tmpd.display().to_string();
     let phone = Device::new(Some(serial.clone()), tmp);
-
-    // 锁在别人手里 → 轻量档: 只 cat sysfs（风扇/温度/充电），不拉 cmd/dumpsys 进程——
-    // 对面可能正在量帧时，多一个进程就是多一帧 jank（与 fleet 同一条纪律）。
-    let lock_dir = std::env::var("DEVLOCK_DIR").unwrap_or_else(|_| "/private/tmp/claude-501".into());
-    let light = crate::fleet::read_lock(std::path::Path::new(&lock_dir)).is_some_and(|l| {
-        !l.stale
-            && l.held_by.as_ref().is_some_and(|h| {
-                std::env::var("DEVLOCK_LABEL").ok().as_deref() != Some(h.as_str())
-            })
-    });
 
     let mut checks: Vec<Check> = Vec::new();
 
@@ -114,10 +131,8 @@ pub fn run_preflight(args: &[String]) -> i32 {
         checks.push(fail("fan", format!("风扇开着（fan_enable={fan}）——--fix 关掉")));
     }
 
-    // ── volume：测量纪律静音（锁在别人手里时不拉 cmd 进程，跳过记 na）──
-    if light {
-        checks.push(Check { name: "volume", status: "na".into(), detail: "设备锁在别人手里，不拉进程打扰测量，跳过".into() });
-    } else {
+    // ── volume：测量纪律静音 ──
+    {
         let v = phone.shell("cmd media_session volume --stream 3 --get", 8000);
         let vol = v
             .split("volume is ")
@@ -164,9 +179,7 @@ pub fn run_preflight(args: &[String]) -> i32 {
         "charging",
         format!("电池 {}，charging_enabled={}", bat.trim(), ce.trim()),
     ));
-    if light {
-        checks.push(Check { name: "screen", status: "na".into(), detail: "设备锁在别人手里，不拉 dumpsys 打扰测量，跳过".into() });
-    } else {
+    {
         let focus = phone.shell("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus", 8000);
         let focus = focus.trim().rsplit(['/', '}']).nth(1).unwrap_or("?").to_string();
         checks.push(info("screen", format!("前台 {focus}")));
