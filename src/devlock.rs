@@ -45,6 +45,7 @@ pub struct LockOpts {
 /// `eval --request /nonexistent/...` 就是这么问"认不认这个参数"的, 它在读文件那一步
 /// 就退出, 碰不到设备) 都不拿 —— 否则别人持锁时连探活都要排队。
 pub fn needs_lock(sub: &str, rest: &[String]) -> bool {
+    #[cfg(feature = "game")]
     if sub == "game-deploy" {
         return crate::game_deploy::needs_queue(rest).unwrap_or(false);
     }

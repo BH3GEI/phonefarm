@@ -1,4 +1,5 @@
 //! Host-only single-base APK inspection. PackageInstaller remains the signature verifier.
+#[cfg(feature = "game")]
 use crate::{devlease::Lease, game_deploy::Asset};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +38,7 @@ fn identity(info: &Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
     )
 }
 
+#[cfg(feature = "game")]
 fn unchanged(asset: &Asset, held: &File, before: &Metadata) -> Result<(), String> {
     let current = crate::game_deploy::source_file(asset)?;
     if identity(before) != identity(&held.metadata().map_err(|e| e.to_string())?)
@@ -47,6 +49,7 @@ fn unchanged(asset: &Asset, held: &File, before: &Metadata) -> Result<(), String
     Ok(())
 }
 
+#[cfg(feature = "game")]
 pub(crate) fn inspect(lease: &Lease, dir: &Path, asset: &Asset) -> Result<Value, String> {
     let program = tool().ok_or(
         "APK metadata unavailable: configure an absolute executable AAPT2_BIN or explicit PATH",

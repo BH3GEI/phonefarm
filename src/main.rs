@@ -58,13 +58,18 @@ mod confirmation_driver;
 mod confirmation_transport;
 mod fold;
 mod gamepad;
+#[cfg(feature = "game")]
 mod game_deploy;
+#[cfg(feature = "game")]
 mod game_deploy_session;
 mod game_deploy_transport;
 mod remote_control;
 mod runtime_identity;
+#[cfg(feature = "game")]
 mod game_initialize;
+#[cfg(feature = "game")]
 mod game_scene;
+#[cfg(feature = "game")]
 mod game_install_session;
 mod apk_metadata;
 mod frameaudit;
@@ -280,7 +285,7 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
-游戏资源: game-deploy capabilities --json
+游戏资源 (可选特性 game, 默认不编译): game-deploy capabilities --json
        game-deploy --request FILE --serial S --out DIR [--device-binding JSON] --json
        game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json
 灰档:  gray-layer status [--serial S] | off [pkg] [--serial S] [--json]
@@ -450,6 +455,10 @@ fn isolate_fd_test(name: &str) -> bool {
     true
 }
 
+#[cfg(not(feature = "game"))]
+const GAME_FEATURE_OFF: &str =
+    "game-deploy 属于可选特性 game, 本构建未启用: cd src && cargo build --release --features game";
+
 fn main() {
     if let Some(code) = fd_lock::transport_entry() { std::process::exit(code); }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -459,6 +468,7 @@ fn main() {
             Some("gray-layer") => graylayer::USAGE,
             Some("gray-ab") => grayab::USAGE,
             Some("eval") => eval::USAGE,
+            #[cfg(feature = "game")]
             Some("game-deploy") => game_deploy::USAGE,
             _ => USAGE,
         };
@@ -493,11 +503,19 @@ fn main() {
         }
         // True help was handled above. A gray option's value named --help must
         // not trigger the legacy gate's token-based help exemption.
+        #[cfg(not(feature = "game"))]
+        if deployment {
+            eprintln!("{GAME_FEATURE_OFF}");
+            std::process::exit(2);
+        }
         let queue_required = if deployment {
+            #[cfg(feature = "game")]
             match game_deploy::needs_queue(&args[1..]) {
                 Ok(required) => required,
                 Err(error) => { println!("{}", game_deploy::error_value(&error)); std::process::exit(2); }
             }
+            #[cfg(not(feature = "game"))]
+            unreachable!()
         } else if gray {
             // Use the same value-aware stripping as admission. Host-only
             // clients must work while their persistent owner holds the lease;
@@ -935,6 +953,7 @@ fn main() {
             std::process::exit(frameaudit::run_frame_audit(&args[1..]));
         }
         Some("gray-artifact") => std::process::exit(grayartifact::run(&args[1..])),
+        #[cfg(feature = "game")]
         Some("game-deploy") => std::process::exit(game_deploy::run(&args[1..])),
         Some("gray-layer") => {
             // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)

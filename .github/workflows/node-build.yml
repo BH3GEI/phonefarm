@@ -39,7 +39,7 @@ jobs:
         env:
           HGAMEY_BUILD_REVISION: ${{ github.sha }}
           HGAMEY_BUILD_DIRTY: 'false'
-        run: cd src && cargo build --release
+        run: cd src && cargo build --release --features game   # 节点产物保留游戏资源部署 (可选特性)
       - name: 检查产物
         run: |
           file src/target/release/phonefarm

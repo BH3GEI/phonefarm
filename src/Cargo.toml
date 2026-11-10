@@ -17,6 +17,11 @@ sha2 = "0.10"
 rspirv = "0.13"
 libc = "0.2"
 
+[features]
+# 游戏资源部署 (game-deploy: APK 全新安装、游戏目录资源下发、启动器初始化、场景尝试)。
+# 只服务游戏优化研究, 设备层不依赖它, 默认不编译: cargo build --release --features game
+game = []
+
 [dev-dependencies]
 # Matches GOL's real GLSL→SPIR-V path; wgsl-in is needed by Naga30's feature gate.
 naga = { version = "30.0", default-features = false, features = ["glsl-in", "wgsl-in", "spv-out"] }

@@ -16,8 +16,11 @@ fn help_entry_preserves_focused_gray_usage() {
 
 #[test]
 fn help_entry_prints_usage_for_device_commands_without_running_them() {
-    for (command, expected) in [("devices", "devices"), ("eval", "--request"),
-                                ("game-deploy", "phonefarm game-deploy"), ("serve", "serve")] {
+    let mut cases = vec![("devices", "devices"), ("eval", "--request"), ("serve", "serve")];
+    if cfg!(feature = "game") {
+        cases.push(("game-deploy", "phonefarm game-deploy"));
+    }
+    for (command, expected) in cases {
         let output = Command::new(env!("CARGO_BIN_EXE_phonefarm"))
             .args(["help", command]).env("ADB_BIN", "/no-help-device-access/adb")
             .output().unwrap();
