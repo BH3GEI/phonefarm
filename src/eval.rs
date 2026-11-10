@@ -1042,7 +1042,7 @@ pub(crate) fn cool_summary(arms: &[Value]) -> (Option<f64>, bool) {
 }
 
 /// 测量窗口内多久回读一次 plan 里的节点 (两臂都读, 读的节奏一样)。
-/// 厂商性能服务约 10 秒内改回 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md),
+/// 厂商性能服务约 10 秒内改回 (knobs/DESIGN.md),
 /// 也会在臂中途再改, 所以不是施加后读一次, 而是整段窗口按固定节拍读。
 const READBACK_EVERY_S: u64 = 3;
 /// 改写臂在测量窗口内守住的时间比例至少这么多才进统计 (请求 `protocol.sysparam_hold_min` 可改)。
@@ -2427,7 +2427,7 @@ fn sysparam_eval(req: &Value, serial: Option<&str>, evidence: &Path, curtail: bo
             } else {
                 su(serial, &rb_cmd, 30)
             };
-            // 测量窗口内按固定节拍回读 (https://github.com/HGamey/docs/blob/main/repos/phonefarm/knobs/DESIGN.md:
+            // 测量窗口内按固定节拍回读 (knobs/DESIGN.md:
             // 写得进不等于守得住)。两臂都读 —— 只在改写臂读的话, 回读的 adb 调用本身就成了两臂之间的差别。
             let poller = HoldPoller::start(serial, &rb_cmd, READBACK_EVERY_S);
             let res = match &launch {
