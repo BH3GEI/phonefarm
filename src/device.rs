@@ -8,6 +8,16 @@ use std::sync::OnceLock;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+// The observation supervisor owns the process group and keeps its recovery
+// barrier when a transport's completion cannot be established. Never let the
+// worker turn a timed-out transport into an apparently completed empty result.
+fn observation_transport_uncertain(reason: &str) {
+    if crate::observation::in_worker() {
+        eprintln!("observation transport completion unknown: {reason}");
+        std::process::exit(90);
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Node {
     pub t: String,
@@ -155,14 +165,11 @@ pub fn single_online_adb(text: &str) -> Option<String> {
     online.next().is_none().then_some(first)
 }
 
-/// `hdc list targets` 里恰好一台设备的 connect key。
+/// `hdc list targets` 里恰好一台能用的设备的 connect key (未授权、离线的不算)。
 pub fn single_online_hdc(text: &str) -> Option<String> {
-    let mut it = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && *l != "[Empty]" && !l.starts_with("[Fail"));
+    let mut it = crate::fleet::parse_hdc_targets(text).into_iter();
     let first = it.next()?;
-    it.next().is_none().then(|| first.to_string())
+    it.next().is_none().then_some(first)
 }
 
 /// 这一局实际落在哪台机器上。
@@ -181,13 +188,13 @@ pub fn resolve_serial(requested: Option<&str>) -> Option<String> {
         }
     }
     if let Some(adb) = locate_adb() {
-        if let Ok(out) = Command::new(adb).arg("devices").output() {
+        if let Ok(out) = crate::fd_lock::transport_command(adb).arg("devices").output() {
             if let Some(s) = single_online_adb(&String::from_utf8_lossy(&out.stdout)) {
                 return Some(s);
             }
         }
     }
-    if let Ok(out) = Command::new("hdc").args(["list", "targets"]).output() {
+    if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
         if let Some(k) = single_online_hdc(&String::from_utf8_lossy(&out.stdout)) {
             return Some(format!("hdc:{k}"));
         }
@@ -202,7 +209,7 @@ pub fn locate_adb() -> Option<String> {
         let home = std::env::var("HOME").ok();
         for c in adb_search_order(bin.as_deref(), home.as_deref()) {
             if c == "PATH" {
-                let ok = Command::new("adb").arg("--version")
+                let ok = crate::fd_lock::transport_command("adb").arg("--version")
                     .stdout(Stdio::null()).stderr(Stdio::null())
                     .status().map(|st| st.success()).unwrap_or(false);
                 if ok { return Some("adb".into()); }
@@ -227,6 +234,18 @@ impl Adb {
     pub fn new(serial: Option<String>, tmp: String) -> Self {
         let Some(bin) = locate_adb() else {
             eprintln!("⚠ 未找到 adb: 请安装 Android platform-tools(或把 platform-tools/ 整个目录放进仓库根),或用 ADB_BIN=/path/to/adb 指定后重跑。");
+            // 测试进程不得因宿主缺 adb 集体退出：交给单个用例在使用时失败。
+            // CLI 入口不受影响（非 test 编译仍按原语义退出 2）。
+            if cfg!(test) {
+                return Adb {
+                    bin: "adb".into(),
+                    serial,
+                    tmp,
+                    frozen: AtomicBool::new(false),
+                    gamepad: std::sync::Mutex::new(None),
+                    is_root: AtomicBool::new(false),
+                };
+            }
             std::process::exit(2);
         };
         Adb {
@@ -245,18 +264,20 @@ impl Adb {
     fn frozen(&self) -> bool { self.frozen.load(Ordering::Relaxed) }
 
     fn run(&self, args: &[&str]) -> Vec<u8> {
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = crate::fd_lock::transport_command(&self.bin);
         if let Some(s) = &self.serial {
             cmd.arg("-s").arg(s);
         }
-        cmd.args(args).output().map(|o| o.stdout).unwrap_or_default()
+        cmd.args(args).output().map(|o| {
+            if crate::observation::in_worker() && !o.status.success() { vec![] } else { o.stdout }
+        }).unwrap_or_default()
     }
 
     /// 限时执行(uiautomator 偶发卡死 2~11s, 超时即杀); stdout 走临时文件避免管道阻塞
     fn run_timeout(&self, args: &[&str], ms: u64) -> Vec<u8> {
         let outfile = format!("{}/_cmd.out", self.tmp);
         let Ok(f) = std::fs::File::create(&outfile) else { return vec![] };
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = crate::fd_lock::transport_command(&self.bin);
         if let Some(s) = &self.serial {
             cmd.arg("-s").arg(s);
         }
@@ -269,13 +290,17 @@ impl Adb {
                 Ok(Some(_)) => return std::fs::read(&outfile).unwrap_or_default(),
                 Ok(None) => {
                     if t0.elapsed() > Duration::from_millis(ms) {
+                        observation_transport_uncertain("adb deadline exceeded");
                         let _ = child.kill();
                         let _ = child.wait();
                         return vec![];
                     }
                     sleep(Duration::from_millis(50));
                 }
-                Err(_) => return vec![],
+                Err(_) => {
+                    observation_transport_uncertain("adb child wait failed");
+                    return vec![];
+                }
             }
         }
     }
@@ -567,7 +592,7 @@ impl Adb {
     /// 流式 shell(CTS Harness 用): 拉起长生命周期管道,stdout/stderr 双 pipe 归调用方逐行消费。
     /// 纯新增通道——既有 run/run_timeout 路径一字不动;看门狗与清理都在调用方(cts.rs)外层。
     pub fn stream_shell(&self, cmd: &str) -> std::io::Result<std::process::Child> {
-        let mut c = Command::new(&self.bin);
+        let mut c = crate::fd_lock::transport_command(&self.bin);
         if let Some(s) = &self.serial {
             c.arg("-s").arg(s);
         }
@@ -581,7 +606,7 @@ impl Adb {
     /// 不 forward 就够不着它。失败要能看见原因 (端口被占、设备掉线),
     /// 故走 stderr 判定而不是看 stdout 空不空: `adb forward` 成功时本来就不打印东西。
     pub fn forward(&self, local: u16, remote: u16) -> Result<(), String> {
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = crate::fd_lock::transport_command(&self.bin);
         if let Some(s) = &self.serial {
             cmd.arg("-s").arg(s);
         }
@@ -769,7 +794,7 @@ impl Hdc {
     fn frozen(&self) -> bool { self.frozen.load(Ordering::Relaxed) }
 
     fn base(&self) -> Command {
-        let mut cmd = Command::new("hdc");
+        let mut cmd = crate::fd_lock::transport_command("hdc");
         if let Some(k) = &self.key {
             cmd.arg("-t").arg(k);
         }
@@ -783,24 +808,30 @@ impl Hdc {
     /// 限时执行(hdc 同样会卡死): 与 Adb::run_timeout 同构,但输出文件带 tag——
     /// capture 里 els_full 与 quick_thumb 在两个线程并行,共用一个文件会互相截胡
     fn run_timeout(&self, args: &[&str], ms: u64, tag: &str) -> Vec<u8> {
+        self.run_timeout_status(args, ms, tag).map(|(_, bytes)| bytes).unwrap_or_default()
+    }
+
+    fn run_timeout_status(&self, args: &[&str], ms: u64, tag: &str) -> Option<(std::process::ExitStatus, Vec<u8>)> {
         let outfile = format!("{}/_hdc_{tag}.out", self.tmp);
-        let Ok(f) = std::fs::File::create(&outfile) else { return vec![] };
-        let Ok(mut child) = self.base().args(args).stdout(f).stderr(Stdio::null()).spawn() else {
-            return vec![];
-        };
+        let f = std::fs::File::create(&outfile).ok()?;
+        let mut child = self.base().args(args).stdout(f).stderr(Stdio::null()).spawn().ok()?;
         let t0 = Instant::now();
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return std::fs::read(&outfile).unwrap_or_default(),
+                Ok(Some(status)) => return Some((status, std::fs::read(&outfile).unwrap_or_default())),
                 Ok(None) => {
                     if t0.elapsed() > Duration::from_millis(ms) {
+                        observation_transport_uncertain("hdc deadline exceeded");
                         let _ = child.kill();
                         let _ = child.wait();
-                        return vec![];
+                        return None;
                     }
                     sleep(Duration::from_millis(50));
                 }
-                Err(_) => return vec![],
+                Err(_) => {
+                    observation_transport_uncertain("hdc child wait failed");
+                    return None;
+                }
             }
         }
     }
@@ -907,9 +938,19 @@ impl Hdc {
 
     /// 截屏到本地(整幅 jpeg): snapshot_display 强制 .jpeg 后缀(实测),再 file recv
     fn shot(&self, local: &str, tag: &str) -> bool {
-        const REMOTE: &str = "/data/local/tmp/pf_shot.jpeg";
-        self.run_timeout(&["shell", "snapshot_display", "-f", REMOTE], 8000, tag);
-        self.recv(REMOTE, local, 8000, tag)
+        let remote = format!("/data/local/tmp/pf_shot-{}-{}.jpeg", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_nanos());
+        let captured = self.run_timeout_status(&["shell", "snapshot_display", "-f", &remote], 8000, tag)
+            .is_some_and(|(status, _)| status.success());
+        let received = if captured {
+            let _ = std::fs::remove_file(local);
+            self.run_timeout_status(&["file", "recv", &remote, local], 8000, tag)
+                .is_some_and(|(status, _)| status.success()) && std::path::Path::new(local).is_file()
+        } else { false };
+        // Only this invocation's remote file is eligible for cleanup or download.
+        self.run_timeout(&["shell", "rm", "-f", &remote], 3000, tag);
+        received
     }
 
     /// 截屏并压成 672 宽 jpg 写到 out_jpg; 返回 (宽, 高)——与 Adb::screen 同契约
@@ -1122,16 +1163,6 @@ impl Device {
     pub fn new(serial: Option<String>, tmp: String) -> Self {
         Self { b: crate::platform::open(serial, tmp) }
     }
-    /// 直接拿一个后端构造 (新平台 / 测试替身)。
-    #[allow(dead_code)]
-    pub fn from_backend(b: Box<dyn crate::platform::Backend>) -> Self {
-        Self { b }
-    }
-    /// 这台设备的后端 (平台名、三层可行性声明等)。
-    #[allow(dead_code)]
-    pub fn backend(&self) -> &dyn crate::platform::Backend {
-        self.b.as_ref()
-    }
     /// --freeze-on-done 置位:分发到具体后端。done 定局后调用。
     pub fn set_frozen(&self) { self.b.set_frozen() }
     pub fn health_check(&self, ms: u64) -> bool { self.b.health_check(ms) }
@@ -1255,6 +1286,8 @@ echo "-----PF:battery-----"; hidumper -s BatteryService -a -i 2>/dev/null | head
 echo "-----PF:cpufreq-----"; hidumper --cpufreq 2>/dev/null | head -60
 echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do cat $z/type $z/temp 2>/dev/null; done
 echo "-----PF:fpscount-----"; hidumper -s RenderService -a fpsCount 2>/dev/null | head -12
+echo "-----PF:gpufreq-----"; cat /sys/class/devfreq/gpufreq/cur_freq 2>/dev/null
+echo "-----PF:gpuutil-----"; for f in /sys/devices/platform/*/gpu_utilisation; do cat $f 2>/dev/null && break; done
 echo "-----PF:status-----"; if [ -n "$PID" ]; then grep -E "^(VmRSS|VmHWM|Threads):" /proc/$PID/status 2>/dev/null; fi
 echo "-----PF:nettcp-----"; cat /proc/net/tcp 2>/dev/null | wc -l; cat /proc/net/tcp6 2>/dev/null | wc -l
 echo "-----PF:faultcnt-----"; hidumper -e --list 2>/dev/null | head -10
@@ -1562,6 +1595,8 @@ mod tests {
         assert_eq!(single_online_hdc("[Empty]\n"), None);
         assert_eq!(single_online_hdc("[Fail]Connect failed\n"), None);
         assert_eq!(single_online_hdc("a\nb\n"), None, "两台就判不出");
+        assert_eq!(single_online_hdc("88X9K26901026869\tUnauthorized\n"), None, "未授权的不能用");
+        assert_eq!(single_online_hdc("abc\n88X9K26901026869\tUnauthorized\n").as_deref(), Some("abc"));
     }
 
     /// 不给 --serial 时的自动解析。
@@ -1871,5 +1906,24 @@ mod tests {
         let v = adb_search_order(None, Some("/home/user"));
         assert!(v.iter().any(|p| p == "/home/user/Android/Sdk/platform-tools/adb"),
             "应包含 Linux/WSL 标准 Android Sdk 路径");
+    }
+}
+
+#[cfg(test)]
+mod adb_missing_host_tests {
+    use super::*;
+
+    /// 无 adb 宿主（如 rhodes1）上，构造 Adb 不得杀死整个测试进程：
+    /// 这是全量套件曾异常退出（exit 2）的根因。使用时才在单个用例内失败。
+    #[test]
+    fn missing_adb_construction_survives_and_fails_at_use() {
+        if locate_adb().is_some() {
+            // 有 adb 的宿主上本前提不成立，跳过（不伪造失败路径）。
+            return;
+        }
+        let adb = Adb::new(None, std::env::temp_dir().to_string_lossy().into_owned());
+        let out = adb.run(&["version"]);
+        assert!(out.is_empty() || !std::str::from_utf8(&out).unwrap().contains("Android"),
+                "缺失 adb 的桩不应产生 Android 版本输出");
     }
 }

@@ -1234,6 +1234,8 @@ pub fn dispatch(cmd: &str, rest: &[String]) -> Option<i32> {
         "stats" => cmd_stats(&a),
         "status" => cmd_status(&a),
         "probe" => cmd_device_shell(&a, true),
+        "app-snapshot" => a.opt("--serial").ok_or_else(|| "需要 --serial <设备>".to_string())
+            .and_then(|serial| crate::app_snapshot::snapshot(&serial)).map(|value| println!("{value}")),
         "exec" => cmd_device_shell(&a, false),
         _ => return None,
     };

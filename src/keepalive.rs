@@ -9,8 +9,8 @@
 //!   - OH override 不跨重启/锁屏恢复存活, 每轮巡检必须重放。
 use serde_json::{json, Value};
 use std::io::Write;
-use std::process::Command;
 use std::time::Duration;
+use crate::fleet::parse_hdc_power_on;
 
 const TIMEOUT_NEVER: &str = "2147483647"; // int32 上限; 两族都没有真正的"永不"值
 const TIMEOUT_NEVER_MS: i64 = 2147483647;
@@ -73,12 +73,9 @@ fn parse_adb_devices(text: &str) -> Vec<String> {
     v
 }
 
-/// hdc list targets → connect key 集: 滤空行与 [Empty] 哨兵(与 devices 子命令同一纪律)
+/// hdc list targets → 能用的 connect key 集 (未授权、离线的不算; 见 fleet::hdc_targets)
 fn parse_hdc_targets(text: &str) -> Vec<String> {
-    text.lines().map(|l| l.trim())
-        .filter(|l| !l.is_empty() && *l != "[Empty]" && !l.starts_with("[Fail"))
-        .map(|l| l.to_string())
-        .collect()
+    crate::fleet::parse_hdc_targets(text)
 }
 
 /// dumpsys power 的 mWakefulness: Awake→true; 其余(Asleep/Dozing)→false; 采不到 None
@@ -87,18 +84,6 @@ fn parse_wakefulness(text: &str) -> Option<bool> {
     let val: String = text[i + "mWakefulness=".len()..].chars()
         .take_while(|c| c.is_ascii_alphabetic()).collect();
     if val.is_empty() { None } else { Some(val == "Awake") }
-}
-
-/// RenderService dump 的 powerStatus: POWER_STATUS_ON→true, OFF→false
-fn parse_hdc_power_on(text: &str) -> Option<bool> {
-    let i = text.find("powerStatus=POWER_STATUS_")?;
-    let val: String = text[i + "powerStatus=POWER_STATUS_".len()..].chars()
-        .take_while(|c| c.is_ascii_alphabetic()).collect();
-    match val.as_str() {
-        "ON" => Some(true),
-        "OFF" => Some(false),
-        _ => None,
-    }
 }
 
 /// PowerManagerService dump 的 OverrideTimeout(毫秒)
@@ -131,11 +116,11 @@ fn unlock_swipe(w: i32, h: i32) -> (i32, i32, i32, i32) {
 fn enumerate_devices() -> Vec<String> {
     let mut v = Vec::new();
     if let Some(adb) = crate::device::locate_adb() {
-        if let Ok(out) = Command::new(adb).arg("devices").output() {
+        if let Ok(out) = crate::fd_lock::transport_command(adb).arg("devices").output() {
             v.extend(parse_adb_devices(&String::from_utf8_lossy(&out.stdout)));
         }
     }
-    if let Ok(out) = Command::new("hdc").args(["list", "targets"]).output() {
+    if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
         v.extend(parse_hdc_targets(&String::from_utf8_lossy(&out.stdout))
             .into_iter().map(|k| format!("hdc:{k}")));
     }
@@ -310,6 +295,7 @@ mod tests {
         assert!(parse_hdc_targets("[Empty]\n").is_empty());
         assert!(parse_hdc_targets("").is_empty());
         assert!(parse_hdc_targets("[Fail]Connect failed\n").is_empty());
+        assert_eq!(parse_hdc_targets("abc\n88X9K26901026869\tUnauthorized\nxyz\tOffline\n"), vec!["abc"]);
     }
 
     #[test]

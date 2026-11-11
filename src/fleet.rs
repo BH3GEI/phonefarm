@@ -15,36 +15,18 @@
 //! 3. **读不到就留空**。每个字段都是 `Option`, 采不到记 `None` 并在 `unknown` 里写清楚
 //!    是哪一项、为什么。不拿 0 或空串冒充读数 —— 面板据此显示「未知」。
 //!
-//! 设备锁不是 phonefarm 的东西, 是农场上大家共用的一个文件锁 (`devlock`)。
-//! 这里**只读它的三个文件**, 不去 exec 那个脚本, 更不会去抢锁。
-//!
-//! # 别人占着手机的时候读什么
-//!
-//! 「只读」不等于「零影响」。一次 `dumpsys window` 会在设备上拉起一个进程,
-//! 而对面可能正在量 30 秒的帧时 —— 一个 CPU 尖峰就够多出一帧 jank。
-//! 所以探测分两档, 按设备锁自动选:
-//!
-//! - **锁空闲 / 锁是自己的 / 心跳已超期** → 完整档: getprop + dumpsys + settings get。
-//! - **锁被别人持有** → 轻量档: 只 `cat` 几个 sysfs 节点 (温度、电量、风扇、uptime)。
-//!   读文件不拉进程, 是这台机器正在跑测试时仍然安全的那部分。
-//!   dumpsys 才拿得到的字段 (前台应用、亮屏、保活策略) 照常留空并写明原因。
-//!
-//! `--probe-while-locked` 可以强制走完整档 —— 它会干扰对面的测量, 要用请自己清楚。
+//! 探测全程占有同一宿主租约域；短时 worker 覆盖枚举、shell 与截图。
+//! held / blocked / unknown 或存储未初始化时返回暂不可用，不把缓存或空列表当新快照。
+//! 标签和兼容参数 `--probe-while-locked` 不提供所有权，也不能绕过这个入口检查。
 
 use crate::device::Device;
 use crate::hwcond;
 use crate::telemetry;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Instant, SystemTime};
 
-/// 设备锁默认所在目录。可用 `--lock-dir` 或 `DEVLOCK_DIR` 覆盖 ——
-/// 这个路径是本机农场的约定, 不是 phonefarm 的一部分。
-const DEFAULT_LOCK_DIR: &str = "/private/tmp/claude-501";
-
 /// `devlock` 脚本认为心跳多久没动就算废弃 (它的 `STALE` 缺省值)。
-const LOCK_STALE_SECS: u64 = 600;
 
 /// 单台设备的探测超时。一趟 shell 里塞了十几个 dumpsys, 给足时间,
 /// 但必须有上限: 掉线的设备会把 adb 卡到天荒地老。
@@ -58,6 +40,7 @@ const DEFAULT_SCREENSHOT_EVERY_S: u64 = 300;
 #[derive(Debug, Serialize)]
 pub struct Fleet {
     pub schema: &'static str,
+    pub observation: &'static str,
     pub tool: &'static str,
     pub version: &'static str,
     pub generated_at: String,
@@ -99,12 +82,34 @@ pub struct LockEvent {
     pub label: String,
 }
 
+/// 一层改动面在这台设备上的可用性: 平台声明 + 这台机器的阻塞原因。
+#[derive(Debug, Serialize)]
+pub struct LayerRow {
+    /// `sysparam` | `gray` | `shader` | `measure`
+    pub layer: &'static str,
+    /// `yes` | `if_met` | `no` | `unknown`
+    pub support: &'static str,
+    /// 声明的前提 (例如 `root`)。
+    pub needs: &'static str,
+    /// 为什么这样声明。
+    pub why: &'static str,
+    /// 实测到的、会让这一层现在开不了的原因。`None` = 没发现阻塞 (不等于已跑通)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<String>,
+}
+
 /// 一台手机一张卡片。
 #[derive(Debug, Serialize)]
 pub struct Card {
     pub serial: String,
     /// `adb` | `hdc`
     pub transport: &'static str,
+    /// 后端声明的平台名: `android` | `openharmony` | `ios`。
+    pub platform: &'static str,
+    /// 三层改动面 + 测量在这台设备上的可用性。来自 `platform::Backend::layers()`,
+    /// 加上这台机器实测到的阻塞原因。上层与同事据此决定「这台能干什么」,
+    /// 不必再自己猜平台能力。
+    pub layers: Vec<LayerRow>,
     /// adb 自报的状态原文: `device` / `offline` / `unauthorized` / `no permissions` …
     pub state: String,
     pub online: bool,
@@ -186,6 +191,49 @@ pub struct Screenshot {
     pub fresh: bool,
 }
 
+// ══════════════ 层声明 (平台声明 + 这台机器的阻塞) ══════════════
+
+/// 「这台设备能改哪一层」—— 取自 `platform::Backend::layers()`, 再叠上这台机器实测到的事实。
+///
+/// 声明是平台级的 (`OPENHARMONY_LAYERS` 之类), 阻塞原因是这台机器的 (`root` 拿不到、设备掉线)。
+/// 两者不能混: 声明说「安卓上这层能开」, 阻塞说「这台不行」。
+///
+/// `layers()` 之前只有单测在读, 外面拿不到 —— 于是每次问「哪台能改哪层」都得靠人记。
+/// 摆进 `fleet` 是因为上层和同事要的就是「现在有哪几台、每台能开哪几层」这一趟拿齐。
+pub fn layer_rows(serial: &str, root: Option<bool>, online: bool) -> (&'static str, Vec<LayerRow>) {
+    // `layers()` 是纯声明, 不碰设备: 掉线/没授权的机器也能给出声明。
+    let backend = crate::platform::open(
+        Some(serial.to_string()),
+        std::env::temp_dir().to_string_lossy().to_string(),
+    );
+    let platform = backend.platform();
+    let rows = backend
+        .layers()
+        .into_iter()
+        .map(|l| {
+            let blocked_by = if !online {
+                Some("设备不在线: 这一层既没法核实也没法用".to_string())
+            } else if root == Some(false) && l.needs.contains("root") {
+                Some("这台机器拿不到 root (su 不可用)".to_string())
+            } else if l.layer == crate::platform::Layer::Measure && serial.starts_with("emulator-") {
+                // 框架自己的硬规矩: 性能测量必须上真机 (AGENTS「测试环境约束」)。
+                // 模拟器的帧时与功耗没有意义, 声明成 yes 会让人当真。
+                Some("模拟器: 帧时与功耗没有意义, 性能测量要真机".to_string())
+            } else {
+                None
+            };
+            LayerRow {
+                layer: l.layer.id(),
+                support: l.support.id(),
+                needs: l.needs,
+                why: l.why,
+                blocked_by,
+            }
+        })
+        .collect();
+    (platform, rows)
+}
+
 // ══════════════ 纯解析 (单测全打在这一层) ══════════════
 
 /// `adb devices -l` → (serial, state, 附带的 model)。
@@ -219,13 +267,30 @@ pub fn parse_adb_devices_l(text: &str) -> Vec<AdbEntry> {
     out
 }
 
-/// `hdc list targets` → connect key 集 (滤掉空行与 `[Empty]` / `[Fail...]` 哨兵)。
-pub fn parse_hdc_targets(text: &str) -> Vec<String> {
+/// `hdc list targets` → (connect key, 状态), 滤掉空行与 `[Empty]` / `[Fail...]` 哨兵。
+///
+/// hdc 在 key 后面可能跟一个状态 (`88X9K26901026869\tUnauthorized`): key 只取第一列, 不带状态。
+/// 没有状态或状态是 `Connected` 的才能用, 记作 `device` (与 adb 同一说法); `Unauthorized`、`Offline`
+/// 等记作小写的状态名, 不算在线。
+pub fn hdc_targets(text: &str) -> Vec<(String, String)> {
+    const STATES: [&str; 5] = ["Connected", "Ready", "Offline", "Unauthorized", "Unknown"];
     text.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && *l != "[Empty]" && !l.starts_with("[Fail"))
-        .map(str::to_string)
+        .filter_map(|l| {
+            let mut columns = l.split_whitespace();
+            let key = columns.next()?.to_string();
+            let state = columns
+                .find_map(|c| STATES.iter().find(|s| s.eq_ignore_ascii_case(c)))
+                .map_or("device".to_string(), |s| if *s == "Connected" { "device".to_string() } else { s.to_ascii_lowercase() });
+            Some((key, state))
+        })
         .collect()
+}
+
+/// `hdc list targets` 里能用的 connect key (见 `hdc_targets`)。
+pub fn parse_hdc_targets(text: &str) -> Vec<String> {
+    hdc_targets(text).into_iter().filter(|(_, state)| state == "device").map(|(key, _)| key).collect()
 }
 
 /// `dumpsys battery` 的充电状态。
@@ -445,7 +510,7 @@ fn probe_script_android_light() -> &'static str {
 echo "-----PF:uptime-----"; cat /proc/uptime 2>/dev/null
 echo "-----PF:sysbat-----"; for f in capacity status temp current_now voltage_now; do echo "$f=$(cat /sys/class/power_supply/battery/$f 2>/dev/null)"; done
 echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done
-echo "-----PF:fan-----"; for f in /sys/kernel/fan/fan_enable /sys/kernel/fan/fan_speed_level; do echo "$f=$(cat $f 2>/dev/null || su -c "cat $f" 2>/dev/null)"; done
+echo "-----PF:fan-----"; for f in /sys/kernel/fan/fan_enable /sys/kernel/fan/fan_speed_level; do echo "$f=$(cat $f 2>/dev/null)"; done
 echo "-----PF:end-----""#
 }
 
@@ -491,10 +556,23 @@ echo "-----PF:uptime-----"; cat /proc/uptime 2>/dev/null
 echo "-----PF:battery-----"; hidumper -s BatteryService -a -i 2>/dev/null
 echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done
 echo "-----PF:screen-----"; hidumper -s RenderService -a screen 2>/dev/null
+echo "-----PF:focus-----"; aa dump -l 2>/dev/null
+echo "-----PF:end-----""#
+}
+
+/// Busy domains get only cheap reads: no hidumper, aa or privileged fallback.
+fn probe_script_oh_light() -> &'static str {
+    r#"echo "-----PF:props-----"; param get const.product.model 2>/dev/null; param get const.product.brand 2>/dev/null; param get const.ohos.fullname 2>/dev/null; echo ""
+echo "-----PF:uptime-----"; cat /proc/uptime 2>/dev/null
+echo "-----PF:sysbat-----"; for f in capacity status temp current_now voltage_now; do echo "$f=$(cat /sys/class/power_supply/battery/$f 2>/dev/null)"; done
+echo "-----PF:thermal-----"; for z in /sys/class/thermal/thermal_zone*; do echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done
 echo "-----PF:end-----""#
 }
 
 /// OH 的 `hidumper -s RenderService -a screen` → 亮屏没有。
+///
+/// 熄屏在真机 (EMA-AL00U, OH 6.1) 上报的是 `SUSPEND` 而不是 `OFF`; `STANDBY`/`DOZE`
+/// 也都是屏幕不亮。`ON_ADVANCED` / `OFF_FAKE` 这类带后缀的取下划线前的那段。
 pub fn parse_hdc_power_on(text: &str) -> Option<bool> {
     let i = text.find("powerStatus=POWER_STATUS_")?;
     let v: String = text[i + "powerStatus=POWER_STATUS_".len()..]
@@ -503,9 +581,33 @@ pub fn parse_hdc_power_on(text: &str) -> Option<bool> {
         .collect();
     match v.as_str() {
         "ON" => Some(true),
-        "OFF" => Some(false),
+        "OFF" | "SUSPEND" | "STANDBY" | "DOZE" => Some(false),
         _ => None,
     }
+}
+
+/// OH 的 BatteryService dump → (状态, 插线没有)。状态词与安卓侧对齐, 面板只认一套。
+///
+/// `chargingStatus`: 0 NONE / 1 ENABLE / 2 DISABLE / 3 FULL;
+/// `pluggedType`: 0 NONE / 1 AC / 2 USB / 3 WIRELESS。
+pub fn parse_battery_status_oh(text: &str) -> (Option<String>, Option<bool>) {
+    let num = |key: &str| -> Option<i64> {
+        let l = text.lines().map(str::trim).find(|l| l.starts_with(key))?;
+        l[key.len()..].trim().parse().ok()
+    };
+    let plugged = match num("pluggedType:") {
+        Some(0) => Some(false),
+        Some(1..=3) => Some(true),
+        _ => None,
+    };
+    let status = match (num("chargingStatus:"), plugged) {
+        (Some(1), _) => Some("Charging"),
+        (Some(2), _) => Some("Not charging"),
+        (Some(3), _) => Some("Full"),
+        (Some(0), Some(false)) => Some("Discharging"),
+        _ => None,
+    };
+    (status.map(str::to_string), plugged)
 }
 
 // ══════════════ 组装 ══════════════
@@ -536,7 +638,9 @@ pub fn card_from_android(serial: &str, state: &str, raw: &str, probe_ms: u64, de
 
     // 轻量档没探 root —— 那要 `su -c`, 会在别人正跑测试的机器上多拉一个进程。
     // 没探就是 None, 不能默认成 false: "没 root" 与 "没查" 是两回事。
-    let root = sec(&ss, "root").map(parse_root);
+    // 段在就是探过了: `su` 不存在时脚本里 `2>/dev/null` 吃掉报错, 段是空的, 这也是「没 root」。
+    // 不能用 `sec` (它把空段当成没有), 否则没 root 的机器会被记成「没查」, 层声明照旧显示可用。
+    let root = ss.iter().find(|(k, _)| k == "root").map(|(_, v)| parse_root(v));
 
     let mut battery = Battery::default();
     if let Some(b) = sec(&ss, "sysbat") {
@@ -613,9 +717,12 @@ pub fn card_from_android(serial: &str, state: &str, raw: &str, probe_ms: u64, de
         }
     }
 
+    let (platform, layers) = layer_rows(serial, root, state == "device");
     Card {
         serial: serial.to_string(),
         transport: "adb",
+        platform,
+        layers,
         state: state.to_string(),
         online: state == "device",
         model,
@@ -637,7 +744,12 @@ pub fn card_from_android(serial: &str, state: &str, raw: &str, probe_ms: u64, de
 }
 
 /// OH 回包 → 卡片。字段比安卓少, 少的那些如实进 `unknown`。
+#[cfg(test)]
 pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
+    card_from_oh_depth(serial, raw, probe_ms, "full")
+}
+
+fn card_from_oh_depth(serial: &str, raw: &str, probe_ms: u64, depth: &'static str) -> Card {
     let ss = telemetry::split_sections(raw);
     let mut unknown = Vec::new();
 
@@ -647,13 +759,28 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
     let os = prop(props, 2);
 
     let mut battery = Battery::default();
-    if let Some(b) = sec(&ss, "battery") {
+    if let Some(b) = sec(&ss, "sysbat") {
+        battery = parse_sysfs_battery(b);
+    } else if let Some(b) = sec(&ss, "battery") {
         let (level, mv, temp, _cur) = telemetry::parse_battery_oh(b);
+        let (status, plugged) = parse_battery_status_oh(b);
         battery.level_pct = level;
         battery.voltage_mv = mv;
         battery.temp_c = temp;
+        // 口径同安卓侧 card: 充电/充满一定不是放电态; 没插线才算整机靠电池。
+        battery.on_battery = match (&status, plugged) {
+            (Some(s), _) if s == "Charging" || s == "Full" => Some(false),
+            (_, Some(false)) => Some(true),
+            _ => None,
+        };
+        battery.status = status;
+        battery.plugged = plugged;
     } else {
-        unknown.push("电池: hidumper BatteryService 没回值".into());
+        unknown.push(if depth == "light" {
+            "电池: sysfs 没回值".into()
+        } else {
+            "电池: hidumper BatteryService 没回值".into()
+        });
     }
 
     let mut thermal = Thermal::default();
@@ -669,25 +796,70 @@ pub fn card_from_oh(serial: &str, raw: &str, probe_ms: u64) -> Card {
     }
 
     unknown.push("风扇 / 不息屏策略: 鸿蒙侧这两项尚未上真机验证, 一律不猜".into());
+    if thermal.zones == 0 {
+        // 观测到的事实, 不是判定: 温度一个热区都读不到, HiSmartPerf 在 shell 权限下也没出数。
+        unknown.push(
+            "测量: 温度一个热区都读不到 (sysfs 无权限); SP_daemon 在 shell 权限下不出数, 未验证".into(),
+        );
+    }
 
+    let screen_on = sec(&ss, "screen").and_then(parse_hdc_power_on);
+    if screen_on.is_none() {
+        unknown.push(if depth == "light" {
+            "亮屏: 轻量观察未运行 hidumper RenderService".into()
+        } else {
+            "亮屏: hidumper RenderService 没给出可识别的 powerStatus".into()
+        });
+    }
+    // aa dump -l 里 state #FOREGROUND 的那条 ability; 熄屏或停在桌面时一条都没有。
+    let foreground = sec(&ss, "focus")
+        .map(crate::device::parse_aa_dump)
+        .map(|(bundle, _)| bundle)
+        .filter(|b| !b.is_empty());
+    if foreground.is_none() {
+        unknown.push(if depth == "light" {
+            "前台应用: 轻量观察未运行 aa dump".into()
+        } else {
+            match (sec(&ss, "focus"), screen_on) {
+                (None, _) => "前台应用: aa dump -l 没回值".into(),
+                (Some(_), Some(false)) => "前台应用: 熄屏中, 没有处于前台的应用".into(),
+                (Some(_), _) => "前台应用: 任务栈里没有前台 ability (可能停在桌面)".into(),
+            }
+        });
+    }
+
+    let root = sec(&ss, "root").map(|r| r.trim() == "0");
+    let (platform, mut layers) = layer_rows(serial, root, true);
+    // 声明说鸿蒙量测靠 HiSmartPerf, 但这台机器上 shell 权限取不到电量/温度, SP_daemon 也不出数。
+    // 测不了就没有「能测」的证据 —— 不能因为平台声明是 yes 就当它 now 可用。
+    if battery.level_pct.is_none() && thermal.zones == 0 {
+        if let Some(m) = layers.iter_mut().find(|l| l.layer == "measure") {
+            m.blocked_by = Some(
+                "这台机器上电量/温度/HiSmartPerf 都取不到 (shell 无权限): 能不能测没有证据".into(),
+            );
+        }
+        unknown.push("测量: 电量与温度都读不到, HiSmartPerf 也没出数".into());
+    }
     Card {
         serial: serial.to_string(),
         transport: "hdc",
+        platform,
+        layers,
         state: "device".to_string(),
         online: true,
         model,
         brand,
         os,
-        root: sec(&ss, "root").map(|r| r.trim() == "0"),
+        root,
         battery,
         thermal,
         fan: Fan::default(),
-        screen_on: sec(&ss, "screen").and_then(parse_hdc_power_on),
-        foreground: None,
+        screen_on,
+        foreground,
         keepalive: Keepalive::default(),
         uptime_s: sec(&ss, "uptime").and_then(parse_uptime_s),
         screenshot: None,
-        probe_depth: "full",
+        probe_depth: depth,
         probe_ms,
         unknown,
     }
@@ -700,38 +872,20 @@ fn file_age_s(path: &Path) -> Option<u64> {
     SystemTime::now().duration_since(m).ok().map(|d| d.as_secs())
 }
 
-pub fn read_lock(dir: &Path) -> Option<Lock> {
-    if !dir.is_dir() {
-        return None;
-    }
-    let owner_path = dir.join("devlock.d/owner");
-    let owner = std::fs::read_to_string(&owner_path)
-        .ok()
-        .and_then(|t| parse_lock_owner(&t));
-    let heartbeat_age_s = owner.as_ref().and_then(|_| file_age_s(&owner_path));
-    let queue = std::fs::read_to_string(dir.join("devlock.queue"))
-        .map(|t| {
-            t.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut recent: Vec<LockEvent> = std::fs::read_to_string(dir.join("devlock.log"))
-        .map(|t| t.lines().filter_map(parse_lock_event).collect())
-        .unwrap_or_default();
-    recent.reverse();
-    recent.truncate(10);
-
+pub fn read_lock(storage: &crate::lease_storage::Storage) -> Option<Lock> {
+    let status = crate::devlease::storage_status(storage);
+    let entries = status["entries"].as_array()?;
+    let labels = entries.iter().map(|entry| entry["label"].as_str().unwrap_or("unknown holder"))
+        .collect::<Vec<_>>().join(", ");
+    let held_by = match status["status"].as_str() {
+        Some("clear") => None,
+        Some("held") if !labels.is_empty() => Some(labels),
+        _ => Some("unknown holder".into()),
+    };
     Some(Lock {
-        dir: dir.display().to_string(),
-        held_by: owner.as_ref().map(|(l, _)| l.clone()),
-        since: owner.as_ref().and_then(|(_, s)| s.clone()),
-        stale: heartbeat_age_s.is_some_and(|a| a > LOCK_STALE_SECS),
-        heartbeat_age_s,
-        queue,
-        recent,
+        dir: storage.devlock_dir.as_ref()?.display().to_string(),
+        held_by, since: entries.first().and_then(|entry| entry["since"].as_str().map(str::to_owned)),
+        heartbeat_age_s: None, stale: false, queue: vec![], recent: vec![],
     })
 }
 
@@ -788,16 +942,11 @@ fn shoot(phone: &Device, serial: &str, screens: &Screens, lock: Option<&Lock>) -
     let existing_age = file_age_s(&out);
     if let Err(why) = screens.may_shoot(lock, existing_age) {
         // 沿用上一张 (如果有) 并说明为什么没有新的 —— 比直接没有图有用。
-        let shot = existing_age.map(|age| Screenshot {
-            path: out.display().to_string(),
-            at: now_rfc3339(),
-            age_s: age,
-            fresh: false,
-        });
+        let shot = cached_shot(serial, screens);
         return (shot, Some(format!("截图: {why}")));
     }
     if std::fs::create_dir_all(&screens.dir).is_err() {
-        return (None, Some(format!("截图: 建不了目录 {}", screens.dir.display())));
+        return (cached_shot(serial, screens), Some(format!("截图: 建不了目录 {}", screens.dir.display())));
     }
     match phone.screen(&out.display().to_string()) {
         Some(_) => (
@@ -809,8 +958,19 @@ fn shoot(phone: &Device, serial: &str, screens: &Screens, lock: Option<&Lock>) -
             }),
             None,
         ),
-        None => (None, Some("截图: screencap 没回图".into())),
+        None => (cached_shot(serial, screens), Some("截图: screencap 没回图".into())),
     }
+}
+
+fn cached_shot(serial: &str, screens: &Screens) -> Option<Screenshot> {
+    let path = screens.dir.join(format!("{}.jpg", safe_name(serial)));
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    Some(Screenshot {
+        path: path.display().to_string(),
+        at: chrono::DateTime::<chrono::Local>::from(modified).to_rfc3339(),
+        age_s: modified.elapsed().ok()?.as_secs(),
+        fresh: false,
+    })
 }
 
 // ══════════════ 采集 ══════════════
@@ -819,16 +979,16 @@ fn shoot(phone: &Device, serial: &str, screens: &Screens, lock: Option<&Lock>) -
 type AdbEntry = (String, String, Option<String>);
 
 /// 枚举两族设备。某一族的工具不在 PATH 就整族跳过 —— 与 `devices` 子命令同纪律。
-fn enumerate(adb: Option<&str>) -> (Vec<AdbEntry>, Vec<String>) {
+fn enumerate(adb: Option<&str>) -> (Vec<AdbEntry>, Vec<(String, String)>) {
     let mut android = Vec::new();
     if let Some(adb) = adb {
-        if let Ok(out) = Command::new(adb).args(["devices", "-l"]).output() {
+        if let Ok(out) = crate::fd_lock::transport_command(adb).args(["devices", "-l"]).output() {
             android = parse_adb_devices_l(&String::from_utf8_lossy(&out.stdout));
         }
     }
     let mut oh = Vec::new();
-    if let Ok(out) = Command::new("hdc").args(["list", "targets"]).output() {
-        oh = parse_hdc_targets(&String::from_utf8_lossy(&out.stdout));
+    if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
+        oh = hdc_targets(&String::from_utf8_lossy(&out.stdout));
     }
     (android, oh)
 }
@@ -836,11 +996,11 @@ fn enumerate(adb: Option<&str>) -> (Vec<AdbEntry>, Vec<String>) {
 pub struct Opts {
     pub serial: Option<String>,
     pub timeout_ms: u64,
-    pub lock_dir: PathBuf,
+    pub lock_dir: Option<PathBuf>,
     pub screens: Option<Screens>,
-    /// 自己持有的设备锁标签。锁正是这个标签时按"锁是自己的"处理。
+    /// 兼容旧调用方的标签；不提供所有权证明或绕过租约状态。
     pub own_label: Option<String>,
-    /// 别人持锁时也强行走完整档。会干扰对面的测量, 默认关。
+    /// 兼容旧调用方；不改变 full/light 选择，也不提供所有权证明。
     pub probe_while_locked: bool,
 }
 
@@ -849,9 +1009,7 @@ impl Default for Opts {
         Opts {
             serial: None,
             timeout_ms: DEFAULT_TIMEOUT_MS,
-            lock_dir: PathBuf::from(
-                std::env::var("DEVLOCK_DIR").unwrap_or_else(|_| DEFAULT_LOCK_DIR.to_string()),
-            ),
+            lock_dir: None,
             screens: None,
             own_label: None,
             probe_while_locked: false,
@@ -859,21 +1017,12 @@ impl Default for Opts {
     }
 }
 
-/// 这一轮该走哪一档。
-///
-/// 判据只有一条: **这台手机现在是不是别人的**。锁空着、锁是自己的、
-/// 或者持锁方心跳已经超期 (那把锁本来就可以被接管了) —— 这三种情况才走完整档。
-pub fn depth_for(lock: Option<&Lock>, own_label: Option<&str>, force: bool) -> &'static str {
-    if force {
-        return "full";
+pub fn collect(opts: &Opts) -> Result<Fleet, String> {
+    let storage = opts.lock_dir.as_deref().map(crate::lease_storage::Storage::custom)
+        .unwrap_or_else(crate::lease_storage::resolve);
+    if !crate::observation::in_worker() {
+        return Err("fleet device probes require the bounded observation worker".into());
     }
-    match lock.and_then(|l| l.held_by.as_deref().map(|h| (h, l.stale))) {
-        Some((holder, false)) if Some(holder) != own_label => "light",
-        _ => "full",
-    }
-}
-
-pub fn collect(opts: &Opts) -> Fleet {
     let adb = crate::device::locate_adb();
     let mut notes = Vec::new();
     if adb.is_none() {
@@ -881,7 +1030,7 @@ pub fn collect(opts: &Opts) -> Fleet {
     }
     let (android, oh) = enumerate(adb.as_deref());
     let hdc_ok = !oh.is_empty()
-        || Command::new("hdc")
+        || crate::fd_lock::transport_command("hdc")
             .arg("-v")
             .output()
             .map(|o| o.status.success())
@@ -889,7 +1038,7 @@ pub fn collect(opts: &Opts) -> Fleet {
     if !hdc_ok {
         notes.push("没找到 hdc, 鸿蒙这一族整族跳过".to_string());
     }
-    let lock = read_lock(&opts.lock_dir);
+    let lock = read_lock(&storage);
 
     let tmp = std::env::temp_dir()
         .join(format!("phonefarm-fleet-{}", std::process::id()))
@@ -898,14 +1047,6 @@ pub fn collect(opts: &Opts) -> Fleet {
     let _ = std::fs::create_dir_all(&tmp);
 
     let want = |s: &str| opts.serial.as_deref().is_none_or(|w| w == s);
-    let depth = depth_for(lock.as_ref(), opts.own_label.as_deref(), opts.probe_while_locked);
-    if depth == "light" {
-        notes.push(
-            "设备锁被别人持有: 这一轮只读了 sysfs (温度/电量/风扇/uptime), \
-没跑 dumpsys —— 跑了会给对面正在做的测量添噪声。--probe-while-locked 可强制完整档。"
-                .to_string(),
-        );
-    }
     let mut devices = Vec::new();
 
     for (serial, state, model_hint) in android.into_iter().filter(|(s, _, _)| want(s)) {
@@ -915,6 +1056,8 @@ pub fn collect(opts: &Opts) -> Fleet {
             devices.push(offline_card(&serial, "adb", &state, model_hint));
             continue;
         }
+        let lease = crate::devlease::EphemeralObservation::acquire(&storage, &serial).ok();
+        let depth = if lease.is_some() { "full" } else { "light" };
         let phone = Device::new(Some(serial.clone()), tmp.clone());
         let script = if depth == "light" {
             probe_script_android_light()
@@ -928,7 +1071,11 @@ pub fn collect(opts: &Opts) -> Fleet {
             card.model = model_hint;
         }
         if let Some(screens) = &opts.screens {
-            let (shot, why) = shoot(&phone, &serial, screens, lock.as_ref());
+            let (shot, why) = if lease.is_some() {
+                shoot(&phone, &serial, screens, None)
+            } else {
+                (cached_shot(&serial, screens), Some("设备忙，本轮不截图".into()))
+            };
             card.screenshot = shot;
             if let Some(w) = why {
                 card.unknown.push(w);
@@ -937,16 +1084,34 @@ pub fn collect(opts: &Opts) -> Fleet {
         devices.push(card);
     }
 
-    for key in oh.into_iter().filter(|k| want(&format!("hdc:{k}"))) {
+    for (key, state) in oh.into_iter().filter(|(k, _)| want(&format!("hdc:{k}"))) {
         let serial = format!("hdc:{key}");
+        if state != "device" {
+            devices.push(offline_card(&serial, "hdc", &state, None));
+            continue;
+        }
         let t0 = Instant::now();
+        let lease = crate::devlease::EphemeralObservation::acquire(&storage, &serial).ok();
+        let depth = if lease.is_some() { "full" } else { "light" };
         let phone = Device::new(Some(serial.clone()), tmp.clone());
-        let raw = phone.shell(probe_script_oh(), opts.timeout_ms);
-        devices.push(card_from_oh(&serial, &raw, t0.elapsed().as_millis() as u64));
+        let script = if lease.is_some() { probe_script_oh() } else { probe_script_oh_light() };
+        let raw = phone.shell(script, opts.timeout_ms);
+        let mut card = card_from_oh_depth(&serial, &raw, t0.elapsed().as_millis() as u64, depth);
+        if let Some(screens) = &opts.screens {
+            let (shot, why) = if lease.is_some() {
+                shoot(&phone, &serial, screens, None)
+            } else {
+                (cached_shot(&serial, screens), Some("设备忙，本轮不截图".into()))
+            };
+            card.screenshot = shot;
+            if let Some(why) = why { card.unknown.push(why); }
+        }
+        devices.push(card);
     }
 
-    Fleet {
+    Ok(Fleet {
         schema: "phonefarm/fleet@1",
+        observation: "sampled",
         tool: "phonefarm",
         version: env!("CARGO_PKG_VERSION"),
         generated_at: now_rfc3339(),
@@ -957,13 +1122,16 @@ pub fn collect(opts: &Opts) -> Fleet {
         lock,
         devices,
         notes,
-    }
+    })
 }
 
 fn offline_card(serial: &str, transport: &'static str, state: &str, model: Option<String>) -> Card {
+    let (platform, layers) = layer_rows(serial, None, false);
     Card {
         serial: serial.to_string(),
         transport,
+        platform,
+        layers,
         state: state.to_string(),
         online: false,
         model,
@@ -991,9 +1159,9 @@ fn usage() -> &'static str {
      \x20            [--lock-dir 目录] [--screenshot-dir 目录] [--screenshot-every 秒] [--lock-label 标签]\n\
      \x20            [--probe-while-locked]\n\
      \x20  只读: 一趟 shell 把每台手机的在线/型号/电量/温度/风扇/亮屏/前台应用读齐。\n\
-     \x20  别人占着手机时自动降成轻量档 (只 cat sysfs, 不跑 dumpsys), 免得给对面的测量添噪声。\n\
-     \x20  截图默认关闭; 开了也受设备锁与最小间隔约束 (别人占着手机时不截)。\n\
-     \x20  退出码 0=至少读到一台 / 1=一台都没有 / 2=参数错。"
+     \x20  空闲时 full probe 持 fd 互斥，进程退出自动释放；忙时只做无锁 light probe。\n\
+     \x20  截图只在 full probe 中运行并受最小间隔约束。标签/强制参数不授权 full probe。\n\
+     \x20  退出码 0=至少读到一台 / 1=一台都没有 / 2=参数错 / 3=观察失败。"
 }
 
 pub fn run_fleet(args: &[String]) -> i32 {
@@ -1023,7 +1191,7 @@ pub fn run_fleet(args: &[String]) -> i32 {
                     eprintln!("--lock-dir 需要一个目录\n{}", usage());
                     return 2;
                 };
-                opts.lock_dir = PathBuf::from(v);
+                opts.lock_dir = Some(PathBuf::from(v));
             }
             "--screenshot-dir" => screenshot_dir = it.next().map(PathBuf::from),
             "--screenshot-every" => {
@@ -1038,6 +1206,25 @@ pub fn run_fleet(args: &[String]) -> i32 {
         }
     }
     opts.own_label = own_label.clone();
+    if !crate::observation::in_worker() {
+        let storage = opts.lock_dir.as_deref().map(crate::lease_storage::Storage::custom)
+            .unwrap_or_else(crate::lease_storage::resolve);
+        return match crate::observation::run("fleet", args, &storage, std::time::Duration::from_secs(30)) {
+            Ok(output) => {
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(&output.stdout);
+                let _ = std::io::stderr().write_all(&output.stderr);
+                output.status.code().unwrap_or(3)
+            }
+            Err(e) => {
+                if json {
+                    println!("{}", serde_json::json!({"schema":"phonefarm/fleet@1",
+                        "observation":e.state,"reason":e.reason,"devices":null}));
+                } else { eprintln!("fleet {}: {}", e.state, e.reason); }
+                3
+            }
+        };
+    }
     if let Some(dir) = screenshot_dir {
         opts.screens = Some(Screens {
             dir,
@@ -1046,7 +1233,10 @@ pub fn run_fleet(args: &[String]) -> i32 {
         });
     }
 
-    let fleet = collect(&opts);
+    let fleet = match collect(&opts) {
+        Ok(fleet) => fleet,
+        Err(e) => { eprintln!("fleet: {e}"); return 3; }
+    };
     if json {
         match serde_json::to_string(&fleet) {
             Ok(s) => println!("{s}"),
@@ -1105,6 +1295,22 @@ pub fn render_text(f: &Fleet) -> String {
             match d.screen_on { Some(true) => "是", Some(false) => "否", None => "?" },
             d.foreground.clone().unwrap_or_else(|| "-".into()),
         ));
+        let layers = d
+            .layers
+            .iter()
+            .map(|l| format!("{}={}", l.layer, l.support))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !layers.is_empty() {
+            s.push_str(&format!("    · 层: {layers}\n"));
+        }
+        for l in d.layers.iter().filter(|l| l.blocked_by.is_some()) {
+            s.push_str(&format!(
+                "      {} 现在开不了: {}\n",
+                l.layer,
+                l.blocked_by.as_deref().unwrap_or_default()
+            ));
+        }
         for u in &d.unknown {
             s.push_str(&format!("    · {u}\n"));
         }
@@ -1146,6 +1352,18 @@ mod tests {
         assert_eq!(parse_hdc_targets("abc\ndef\n"), vec!["abc", "def"]);
         assert!(parse_hdc_targets("[Empty]\n").is_empty());
         assert!(parse_hdc_targets("[Fail]Connect failed\n").is_empty());
+    }
+
+    #[test]
+    fn an_hdc_status_is_not_part_of_the_key_and_only_connected_targets_are_usable() {
+        let text = "88X9K26901026869\tUnauthorized\nabc\nxyz\tOffline\nk1\tUSB\tConnected\tlocalhost\thdc\n";
+        let pair = |k: &str, s: &str| (k.to_string(), s.to_string());
+        assert_eq!(hdc_targets(text), vec![pair("88X9K26901026869", "unauthorized"), pair("abc", "device"),
+                                           pair("xyz", "offline"), pair("k1", "device")]);
+        assert_eq!(parse_hdc_targets(text), vec!["abc", "k1"]);
+        // An unauthorized phone is listed under its own serial (the one it is registered by), not online.
+        let card = offline_card("hdc:88X9K26901026869", "hdc", "unauthorized", None);
+        assert_eq!((card.serial.as_str(), card.state.as_str(), card.online), ("hdc:88X9K26901026869", "unauthorized", false));
     }
 
     /// `status: 4` 是 Not charging, **不是**放电 —— 停充之后内核常常就写这个。
@@ -1307,30 +1525,25 @@ mod tests {
         assert!(screens.may_shoot(Some(&free), Some(9999)).is_ok());
     }
 
-    /// 别人占着手机时不许跑 dumpsys —— 一次 `dumpsys window` 就够给
-    /// 对面那轮 30 秒帧时测量多出一帧 jank。
     #[test]
-    fn a_lock_held_by_someone_else_downgrades_the_probe() {
-        let held = |by: &str, stale: bool| Lock {
-            dir: "/x".into(), held_by: Some(by.into()), since: None,
-            heartbeat_age_s: Some(1), stale, queue: vec![], recent: vec![],
-        };
-        let other = held("wb-vksamples", false);
-        assert_eq!(depth_for(Some(&other), None, false), "light");
-        assert_eq!(depth_for(Some(&other), Some("gol-panel"), false), "light");
-        assert_eq!(
-            depth_for(Some(&other), None, true),
-            "full",
-            "--probe-while-locked 要能强制, 但那是明知会干扰"
-        );
+    fn collect_requires_the_bounded_observation_worker() {
+        let opts = Opts::default();
+        assert!(collect(&opts).unwrap_err().contains("observation worker"));
+    }
 
-        // 自己持锁、锁空着、心跳超期(本来就可接管) —— 这三种才是完整档
-        assert_eq!(depth_for(Some(&held("gol-panel", false)), Some("gol-panel"), false), "full");
-        assert_eq!(depth_for(Some(&held("someone", true)), None, false), "full");
-        let free = Lock { dir: "/x".into(), held_by: None, since: None,
-                          heartbeat_age_s: None, stale: false, queue: vec![], recent: vec![] };
-        assert_eq!(depth_for(Some(&free), None, false), "full");
-        assert_eq!(depth_for(None, None, false), "full", "没配锁目录就照常读");
+    #[test]
+    fn busy_oh_reads_battery_and_temperature_without_hidumper_or_screenshot() {
+        let script = probe_script_oh_light();
+        assert!(script.contains("/sys/class/power_supply/battery"));
+        assert!(!script.contains("hidumper"));
+        assert!(!script.contains("snapshot_display"));
+        let raw = "-----PF:props-----\nFixture\nFixture\nOpenHarmony\n\
+-----PF:sysbat-----\ncapacity=73\nstatus=Discharging\ntemp=390\ncurrent_now=-325000\n\
+-----PF:thermal-----\ngpu 43000\n-----PF:end-----\n";
+        let card = card_from_oh_depth("hdc:fixture", raw, 1, "light");
+        assert_eq!(card.battery.level_pct, Some(73));
+        assert_eq!(card.battery.temp_c, Some(39.0));
+        assert_eq!(card.thermal.gpu_c, Some(43.0));
     }
 
     #[test]
@@ -1367,6 +1580,9 @@ mod tests {
         assert_eq!(full.root, Some(true));
         let no_su = card_from_android("SER", "device", "-----PF:root-----\nsu: not found\n", 0, "full");
         assert_eq!(no_su.root, Some(false));
+        // 荣耀 AAP-AN00 实测: su 不存在, 报错被 2>/dev/null 吃掉, root 段是空的
+        let silent = card_from_android("SER", "device", "-----PF:root-----\n-----PF:uptime-----\n1.0 1.0\n", 0, "full");
+        assert_eq!(silent.root, Some(false));
     }
 
     #[test]
@@ -1399,6 +1615,7 @@ mod tests {
     fn text_render_marks_unknowns_with_question_marks() {
         let fleet = Fleet {
             schema: "phonefarm/fleet@1",
+            observation: "sampled",
             tool: "phonefarm",
             version: "0.2.0",
             generated_at: "now".into(),
@@ -1420,5 +1637,132 @@ mod tests {
         assert!(!card.fan.supported);
         assert_eq!(card.keepalive.policy_ok, None);
         assert!(card.unknown.iter().any(|u| u.contains("尚未上真机验证")));
+    }
+
+    /// 每台设备的卡片必须自带四层声明 —— 上层/同事不用再猜平台能力。
+    #[test]
+    fn every_card_carries_the_four_layer_rows() {
+        let android = offline_card("X", "adb", "offline", None);
+        let oh = card_from_oh("hdc:abc", "", 1);
+        for card in [android, oh] {
+            let names: Vec<&str> = card.layers.iter().map(|l| l.layer).collect();
+            assert_eq!(names, vec!["sysparam", "gray", "shader", "measure"], "{}", card.serial);
+            assert!(card.layers.iter().all(|l| !l.why.is_empty() && !l.needs.is_empty()));
+            assert!(!card.platform.is_empty());
+        }
+    }
+
+    /// 没有 root 的安卓机: 要 root 的那几层必须被点出来, 不能继续显示成可用。
+    #[test]
+    fn no_root_blocks_the_layers_that_need_it() {
+        let (_platform, rows) = layer_rows("91253241019A", Some(false), true);
+        let sys = rows.iter().find(|l| l.layer == "sysparam").unwrap();
+        assert_eq!(sys.support, "yes", "平台声明仍是我 yes");
+        assert!(sys.blocked_by.as_deref().unwrap_or_default().contains("root"));
+        let measure = rows.iter().find(|l| l.layer == "measure").unwrap();
+        assert!(measure.blocked_by.is_some(), "安卓上功耗/帧时测量要 root");
+
+        // 有 root 的时候不该凭空给出阻塞。
+        let (_p, rooted) = layer_rows("91253241019A", Some(true), true);
+        assert!(rooted.iter().all(|l| l.blocked_by.is_none()));
+    }
+
+    /// 掉线设备照样给声明 (纯声明不碰设备), 但每一层都标成现在用不了。
+    #[test]
+    fn offline_devices_keep_declarations_but_are_blocked() {
+        let (_platform, rows) = layer_rows("GONE", None, false);
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|l| l.blocked_by.as_deref().unwrap_or_default().contains("不在线")));
+    }
+
+    /// 模拟器上性能测量必须被拦: 模拟器的帧时与功耗没有意义。
+    #[test]
+    fn emulator_measure_layer_is_blocked() {
+        let (_platform, rows) = layer_rows("emulator-5554", Some(true), true);
+        let measure = rows.iter().find(|l| l.layer == "measure").unwrap();
+        assert!(measure.blocked_by.as_deref().unwrap_or_default().contains("模拟器"));
+        let sys = rows.iter().find(|l| l.layer == "sysparam").unwrap();
+        assert!(sys.blocked_by.is_none());
+    }
+
+    /// 鸿蒙机声明「能测」的前提是 HiSmartPerf/电量/温度取得得到; 这台机器取不到时
+    /// 不能继续显示 measure=yes — 声明是平台级的, 阻塞得是这台机器的。
+    #[test]
+    fn oh_without_any_measurement_source_blocks_measure() {
+        let card = card_from_oh("hdc:abc", "-----PF:props-----\nEMA-AL00U\nHUAWEI\nOpenHarmony 6.1\n", 5);
+        let measure = card.layers.iter().find(|l| l.layer == "measure").unwrap();
+        assert_eq!(measure.support, "yes");
+        assert!(
+            measure.blocked_by.as_deref().unwrap_or_default().contains("没有证据"),
+            "取不到电量/温度时必须点出没有证据: {:?}",
+            measure.blocked_by
+        );
+    }
+
+    /// 真机 (EMA-AL00U) 熄屏报 SUSPEND, 不能当成「判不出来」。
+    #[test]
+    fn oh_power_status_suspend_is_screen_off() {
+        let on = "screen[0]: id=0, powerStatus=POWER_STATUS_ON, backlight=223";
+        let suspend = "screen[0]: id=0, powerStatus=POWER_STATUS_SUSPEND, backlight=2039";
+        let adv = "screen[0]: id=0, powerStatus=POWER_STATUS_ON_ADVANCED, backlight=1";
+        assert_eq!(parse_hdc_power_on(on), Some(true));
+        assert_eq!(parse_hdc_power_on(suspend), Some(false));
+        assert_eq!(parse_hdc_power_on(adv), Some(true));
+        assert_eq!(parse_hdc_power_on("powerStatus=POWER_STATUS_BUTT"), None);
+    }
+
+    #[test]
+    fn oh_battery_status_and_foreground() {
+        let raw = "-----PF:props-----\nEMA-AL00U\nHUAWEI\nOpenHarmony 6.1\n\
+-----PF:battery-----\ncapacity: 100 \nchargingStatus: 3 \npluggedType: 1 \ntemperature: 270 \n\
+-----PF:screen-----\nscreen[0]: id=0, powerStatus=POWER_STATUS_ON, backlight=9\n\
+-----PF:focus-----\n    Mission ID #169\n        main name [UnityPlayerAbility]\n        bundle name [com.miHoYo.Yuanshen]\n        state #FOREGROUND  start time [1]\n";
+        let card = card_from_oh("hdc:abc", raw, 5);
+        assert_eq!(card.battery.status.as_deref(), Some("Full"));
+        assert_eq!(card.battery.plugged, Some(true));
+        assert_eq!(card.battery.on_battery, Some(false));
+        assert_eq!(card.screen_on, Some(true));
+        assert_eq!(card.foreground.as_deref(), Some("com.miHoYo.Yuanshen"));
+    }
+
+    /// 熄屏时任务栈全是 BACKGROUND: 前台留空, 但要写明为什么。
+    #[test]
+    fn oh_screen_off_explains_missing_foreground() {
+        let raw = "-----PF:screen-----\npowerStatus=POWER_STATUS_SUSPEND\n\
+-----PF:focus-----\n        bundle name [com.ohos.contacts]\n        state #BACKGROUND  start time [1]\n";
+        let card = card_from_oh("hdc:abc", raw, 5);
+        assert_eq!(card.screen_on, Some(false));
+        assert_eq!(card.foreground, None);
+        assert!(card.unknown.iter().any(|u| u.contains("熄屏")), "{:?}", card.unknown);
+    }
+
+    /// 有电量/温度的时候不该凭空给 measure 加阻塞。
+    #[test]
+    fn oh_with_measurement_data_does_not_block_measure() {
+        let raw = "-----PF:props-----\nEMA-AL00U\nHUAWEI\nOpenHarmony 6.1\n\
+-----PF:battery-----\ncapacity: 88\nvoltage: 4200000\ntemperature: 310\n\
+-----PF:thermal-----\nsoc-thermal 45000\n";
+        let card = card_from_oh("hdc:abc", raw, 5);
+        let measure = card.layers.iter().find(|l| l.layer == "measure").unwrap();
+        assert!(measure.blocked_by.is_none(), "{:?}", measure.blocked_by);
+    }
+
+    /// 人读的那一屏也要看得到层, 否则同事只能去读 JSON。
+    #[test]
+    fn text_render_prints_the_layer_line() {
+        let fleet = Fleet {
+            schema: "phonefarm/fleet@1",
+            observation: "sampled",
+            tool: "phonefarm",
+            version: "0.2.0",
+            generated_at: "now".into(),
+            backends: Backends { adb: None, hdc: false },
+            lock: None,
+            devices: vec![card_from_oh("hdc:abc", "", 1)],
+            notes: vec![],
+        };
+        let s = render_text(&fleet);
+        assert!(s.contains("sysparam=no"), "{s}");
+        assert!(s.contains("measure=yes"), "{s}");
     }
 }

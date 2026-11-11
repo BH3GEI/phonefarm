@@ -1216,66 +1216,398 @@ pub fn file_sha256(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", h.finalize()))
 }
 
-/// 设备端持久缓存目录(差量部署的落点;同事流程目前每轮全量推独立暂存目录,
-/// 本 harness 改为持久缓存 + 散列比对,跳过未变化的传输与安装)
+/// 设备端文件缓存；缓存文件/旧 .sha256 侧车不是当前安装事实。
 pub const DEVICE_CACHE_DIR: &str = "/data/local/tmp/pf_cts_cache";
 
-/// 差量部署: 本地散列 ↔ 设备缓存散列比对,未变化跳过 push 与安装。
-/// 返回 (设备侧apk路径, 本轮是否新装)。install_cmd 模板(可空=adb 默认 install -r;
-/// hdc 必须显式给,如 "bm install -p {apk}")——A2OH 桥的安装入口由桥定义,不臆造。
+fn install_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// CTS-local capture: Device::shell intentionally returns only stdout. Installation
+/// needs both the transport status and a fresh remote completion receipt instead.
+struct InstallEvidence {
+    dir: PathBuf,
+    sequence: usize,
+}
+
+impl InstallEvidence {
+    fn command(
+        &mut self,
+        label: &str,
+        command: &str,
+        spawn: impl FnOnce() -> std::io::Result<Child>,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        use std::os::fd::AsRawFd;
+        const LIMIT: usize = 1024 * 1024;
+        self.sequence += 1;
+        let stem = self.dir.join(format!("{:02}-{label}", self.sequence));
+        let mut out = fs::File::create(stem.with_extension("stdout")).map_err(|e| e.to_string())?;
+        let mut err = fs::File::create(stem.with_extension("stderr")).map_err(|e| e.to_string())?;
+        let start = Instant::now();
+        let mut status = None;
+        let mut output = Vec::new();
+        let mut sizes = [0usize; 2];
+        let mut failure = None;
+        match spawn() {
+            Err(e) => failure = Some(format!("spawn failed: {e}")),
+            Ok(mut child) => {
+                let mut pipes: Vec<Box<dyn Read>> = Vec::new();
+                // Nonblocking pipes keep both output and deadlines bounded, even if
+                // a descendant retains a pipe after the transport itself exits.
+                for fd in [
+                    child.stdout.as_ref().map(|p| p.as_raw_fd()),
+                    child.stderr.as_ref().map(|p| p.as_raw_fd()),
+                ] {
+                    match fd {
+                        Some(fd)
+                            if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } >= 0 => {
+                        }
+                        _ => failure = Some("cannot capture transport pipes".into()),
+                    }
+                }
+                if let Some(pipe) = child.stdout.take() {
+                    pipes.push(Box::new(pipe));
+                }
+                if let Some(pipe) = child.stderr.take() {
+                    pipes.push(Box::new(pipe));
+                }
+                let mut eof = [false; 2];
+                while failure.is_none() {
+                    for (i, pipe) in pipes.iter_mut().enumerate() {
+                        let mut buf = [0u8; 8192];
+                        match pipe.read(&mut buf) {
+                            Ok(0) => eof[i] = true,
+                            Ok(n) => {
+                                let keep = n.min(LIMIT.saturating_sub(sizes[i]));
+                                let saved = if i == 0 {
+                                    out.write_all(&buf[..keep])
+                                } else {
+                                    err.write_all(&buf[..keep])
+                                };
+                                if let Err(e) = saved {
+                                    failure = Some(format!("cannot preserve output: {e}"));
+                                }
+                                if i == 0 {
+                                    output.extend_from_slice(&buf[..keep]);
+                                }
+                                sizes[i] += keep;
+                                if keep < n {
+                                    failure = Some(
+                                        "output exceeded 1 MiB per stream; raw prefix preserved"
+                                            .into(),
+                                    );
+                                }
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(e) => failure = Some(format!("pipe read failed: {e}")),
+                        }
+                    }
+                    match child.try_wait() {
+                        Ok(Some(s)) => status = Some(s),
+                        Ok(None) => {}
+                        Err(e) => failure = Some(format!("wait failed: {e}")),
+                    }
+                    if status.is_some() && eof.iter().all(|v| *v) {
+                        break;
+                    }
+                    if start.elapsed() >= timeout {
+                        failure = Some("deadline exceeded; remote completion unknown".into());
+                    }
+                    if failure.is_none() {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                if failure.is_some() && status.is_none() {
+                    // Killing a local transport does NOT establish remote rollback.
+                    let _ = child.kill();
+                    let deadline = Instant::now() + Duration::from_secs(1);
+                    while Instant::now() < deadline {
+                        match child.try_wait() {
+                            Ok(Some(s)) => {
+                                status = Some(s);
+                                break;
+                            }
+                            Err(_) => break,
+                            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                        }
+                    }
+                }
+            }
+        }
+        if failure.is_none() && !status.is_some_and(|s| s.success()) {
+            failure = Some("transport/tool returned nonzero or signal status".into());
+        }
+        let decoded = String::from_utf8(output);
+        if failure.is_none() && decoded.is_err() {
+            failure = Some("stdout is not UTF-8".into());
+        }
+        fs::write(stem.with_extension("json"), serde_json::to_vec_pretty(&json!({
+            "command": command, "exit_code": status.and_then(|s| s.code()),
+            "elapsed_ms": start.elapsed().as_millis(), "stdout_bytes": sizes[0], "stderr_bytes": sizes[1],
+            "failure": failure,
+        })).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        match failure {
+            Some(reason) => Err(format!("{label}: {reason}; evidence {}", stem.display())),
+            None => Ok(decoded.unwrap()),
+        }
+    }
+
+    fn remote(
+        &mut self,
+        phone: &crate::device::Device,
+        label: &str,
+        command: &str,
+        seconds: u64,
+    ) -> Result<String, String> {
+        // A subshell keeps `exit` in the command from bypassing our receipt. The
+        // marker is unique to this attempt + command, not a generic Success word.
+        let marker = format!(
+            "PF_CTS_RC_{}_{}:",
+            self.dir.file_name().unwrap().to_string_lossy(),
+            self.sequence + 1
+        );
+        let wrapped = format!("(\n{command}\n); pf_cts_rc=$?; printf '\\n{marker}%s\\n' \"$pf_cts_rc\"; exit \"$pf_cts_rc\"");
+        let text = self.command(
+            label,
+            command,
+            || phone.stream_shell(&wrapped),
+            Duration::from_secs(seconds),
+        )?;
+        let mut lines: Vec<&str> = text.lines().collect();
+        let receipts: Vec<_> = lines
+            .iter()
+            .filter(|line| line.starts_with(&marker))
+            .collect();
+        if receipts.len() != 1 || lines.last().copied() != Some(format!("{marker}0").as_str()) {
+            return Err(format!(
+                "{label}: missing/invalid remote completion receipt; completion unknown"
+            ));
+        }
+        lines.pop();
+        Ok(lines.join("\n").trim_end().to_string())
+    }
+}
+
+fn installed_apk(
+    phone: &crate::device::Device,
+    evidence: &mut InstallEvidence,
+    package: &str,
+) -> Result<Option<(String, String)>, String> {
+    let listing = evidence.remote(
+        phone,
+        "package-list",
+        &format!("pm list packages {}", install_quote(package)),
+        15,
+    )?;
+    let mut present = false;
+    for line in listing.lines() {
+        let name = line
+            .strip_prefix("package:")
+            .ok_or("uninterpretable installed package list")?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+        {
+            return Err("uninterpretable installed package identity".into());
+        }
+        present |= name == package;
+    }
+    if !present {
+        return Ok(None);
+    }
+    let paths = evidence.remote(
+        phone,
+        "package-path",
+        &format!("pm path {}", install_quote(package)),
+        15,
+    )?;
+    let lines: Vec<_> = paths.lines().collect();
+    if lines.len() != 1 {
+        return Err("installed APK path unknown or split package unsupported by CTS cache".into());
+    }
+    let path = lines[0]
+        .strip_prefix("package:")
+        .ok_or("invalid installed APK path")?;
+    if !path.starts_with('/') || path.chars().any(char::is_control) {
+        return Err("invalid installed APK path".into());
+    }
+    let digest = evidence.remote(
+        phone,
+        "installed-sha256",
+        &format!("sha256sum {}", install_quote(path)),
+        30,
+    )?;
+    Ok(Some((path.to_string(), install_digest(&digest, path)?)))
+}
+
+fn install_digest(output: &str, path: &str) -> Result<String, String> {
+    let (hash, tail) = output
+        .split_once(char::is_whitespace)
+        .ok_or("missing SHA256 receipt")?;
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) || tail.trim() != path {
+        return Err("uninterpretable SHA256 receipt".into());
+    }
+    Ok(hash.to_ascii_lowercase())
+}
+
+fn deploy_verified_apk(
+    phone: &crate::device::Device,
+    apk: &Path,
+    install_cmd: Option<&str>,
+    log_sink: &mut dyn FnMut(&str),
+    evidence: &mut InstallEvidence,
+) -> Result<(String, bool, String), String> {
+    // HDC/OH module execution and cts-fetch remain available. Only this old
+    // installer is blocked until a bundle identity/completion contract exists.
+    if phone.backend_name() != "adb"
+        || install_cmd.is_some_and(|cmd| cmd.trim() != "pm install -r {apk}")
+    {
+        return Err("ENV_BLOCKED: CTS asset installation supports only Android default pm install -r / --install-cmd 'pm install -r {apk}'. HAP/A2OH/custom templates lack a verified identity/completion adapter; install separately and run an already-installed --module/profile without apk_path, or use the typed games installer for supported Android fresh installs. No installation command was sent.".into());
+    }
+    if apk.to_str().is_none() || apk.to_string_lossy().chars().any(char::is_control) {
+        return Err("APK path must be UTF-8 without control characters".into());
+    }
+    let local_hash = file_sha256(apk)?;
+    // Explicit AAPT2_BIN is authoritative. The legacy aapt fallback must also
+    // return a successful, parsed identity; filenames and target packages are not metadata.
+    let metadata_tool = if std::env::var_os("AAPT2_BIN").is_some() {
+        crate::apk_metadata::tool().ok_or("invalid AAPT2_BIN; APK identity unavailable")?
+    } else {
+        crate::apk_metadata::tool().unwrap_or_else(|| PathBuf::from("aapt"))
+    };
+    let metadata = evidence.command(
+        "apk-metadata",
+        "aapt/aapt2 dump badging (local APK)",
+        || {
+            std::process::Command::new(&metadata_tool)
+                .args(["dump", "badging"])
+                .arg(apk)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        },
+        Duration::from_secs(30),
+    )?;
+    if metadata
+        .lines()
+        .filter(|line| line.starts_with("package:"))
+        .count()
+        != 1
+    {
+        return Err("APK metadata must contain exactly one package identity".into());
+    }
+    let package_line = metadata
+        .lines()
+        .find(|line| line.starts_with("package:"))
+        .unwrap();
+    let package = parse_aapt_package(package_line).ok_or("APK package identity unavailable")?;
+    if package.is_empty()
+        || !package
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+    {
+        return Err("invalid APK package identity".into());
+    }
+    if let Some((path, hash)) = installed_apk(phone, evidence, &package)? {
+        if hash == local_hash {
+            log_sink(&format!(
+                "  当前安装已核验: {package} 单 APK SHA256 一致，跳过传输与安装"
+            ));
+            return Ok((path, false, package));
+        }
+    }
+    // Content-addressed path avoids basename collisions and shell interpolation.
+    let remote = format!("{DEVICE_CACHE_DIR}/{local_hash}.apk");
+    evidence.remote(
+        phone,
+        "cache-directory",
+        &format!("mkdir -p {}", install_quote(DEVICE_CACHE_DIR)),
+        5,
+    )?;
+    let cached = evidence.remote(
+        phone,
+        "cache-sha256",
+        &format!(
+            "if [ -e {p} ]; then sha256sum {p}; else printf 'PF_CTS_CACHE_MISSING\\n'; fi",
+            p = install_quote(&remote)
+        ),
+        30,
+    )?;
+    if cached != "PF_CTS_CACHE_MISSING" && install_digest(&cached, &remote)? == local_hash {
+        log_sink("  远端缓存文件 SHA256 已核验，只复用传输字节；安装事实另查");
+    } else {
+        log_sink(&format!("  推送 {} → {remote}", apk.display()));
+        if !phone.push_file(apk.to_str().unwrap(), &remote) {
+            return Err("push did not confirm completion; installation not started".into());
+        }
+        let digest = evidence.remote(
+            phone,
+            "pushed-sha256",
+            &format!("sha256sum {}", install_quote(&remote)),
+            30,
+        )?;
+        if install_digest(&digest, &remote)? != local_hash {
+            return Err("pushed APK SHA256 mismatch; installation not started".into());
+        }
+    }
+    let output = evidence.remote(
+        phone,
+        "install",
+        &format!("pm install -r {}", install_quote(&remote)),
+        180,
+    )?;
+    if output.trim() != "Success" {
+        return Err("installation lacks exact Success receipt; installed state unverified, do not automatically retry".into());
+    }
+    match installed_apk(phone, evidence, &package)? {
+        Some((_, hash)) if hash == local_hash => {}
+        _ => return Err("installer receipt not confirmed by actual installed APK SHA256; do not automatically retry".into()),
+    }
+    log_sink(&format!(
+        "  安装已核验: {package}，命令回执及当前单 APK SHA256 一致"
+    ));
+    Ok((remote, true, package))
+}
+
+/// 差量安装仅以本轮实际包身份和已安装字节核验为准；旧 hash 侧车不再使用。
+/// 每次尝试在 out/installation 留下独立、有限原始输出；未知完成不会自动重试。
 pub fn deploy_apk(
     phone: &crate::device::Device,
     apk: &Path,
     install_cmd: Option<&str>,
     log_sink: &mut dyn FnMut(&str),
-) -> Result<(String, bool), String> {
-    let name = apk
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| format!("APK 路径无文件名: {}", apk.display()))?;
-    let remote = format!("{DEVICE_CACHE_DIR}/{name}");
-    let hash_file = format!("{remote}.sha256");
-    let local_hash = file_sha256(apk)?;
-
-    phone.shell(&format!("mkdir -p {DEVICE_CACHE_DIR}"), 5000);
-    let remote_hash = phone
-        .shell(&format!("cat {hash_file} 2>/dev/null"), 5000)
-        .trim()
-        .to_string();
-
-    if remote_hash == local_hash {
-        log_sink(&format!("  差量命中: {name} 散列一致,跳过传输与安装"));
-        return Ok((remote, false));
-    }
-
-    log_sink(&format!("  推送 {name} → {remote}"));
-    if !phone.push_file(&apk.to_string_lossy(), &remote) {
-        return Err(format!("推送失败: {}", apk.display()));
-    }
-    match install_cmd {
-        Some(tpl) => {
-            let cmd = tpl.replace("{apk}", &remote);
-            log_sink(&format!("  安装: {cmd}"));
-            let out = phone.shell(&cmd, 180_000);
-            if out.contains("Failure") || out.contains("error") || out.contains("fail") {
-                return Err(format!("安装失败: {}", out.trim()));
-            }
-        }
-        None => {
-            if phone.backend_name() == "hdc" {
-                return Err(
-                    "hdc/A2OH 后端必须显式给 --install-cmd(桥安装入口由桥定义,不臆造)".into(),
-                );
-            }
-            log_sink("  安装: adb install -r");
-            let out = phone.shell(&format!("pm install -r {remote}"), 180_000);
-            if !out.contains("Success") {
-                return Err(format!("安装失败: {}", out.trim()));
-            }
-        }
-    }
-    phone.shell(&format!("echo {local_hash} > {hash_file}"), 5000);
-    Ok((remote, true))
+    out_dir: &Path,
+) -> Result<(String, bool, String), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let root = out_dir.join("installation");
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let dir = root.join(format!(
+        "{}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&dir).map_err(|e| e.to_string())?;
+    let mut evidence = InstallEvidence { dir, sequence: 0 };
+    let result = deploy_verified_apk(phone, apk, install_cmd, log_sink, &mut evidence);
+    fs::write(
+        evidence.dir.join("result.json"),
+        serde_json::to_vec_pretty(&json!({
+            "apk": apk, "backend": phone.backend_name(), "installed_verified": result.is_ok(),
+            "installed_this_attempt": result.as_ref().ok().map(|(_, installed, _)| *installed),
+            "package": result.as_ref().ok().map(|(_, _, package)| package),
+            "error": result.as_ref().err(), "recovery_verified": false,
+        }))
+        .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    result.map_err(|error| format!("{error}; installation evidence {}", evidence.dir.display()))
 }
 
 // ══════════════ 掉线恢复记录(不重用旧 PID 纪律) ══════════════
@@ -1453,13 +1785,14 @@ pub fn plan_from_profile(p: &CtsProfile) -> Result<ModulePlan, String> {
     })
 }
 
-/// APK 目录扫描 → ModulePlan 列表: aapt 取包名(无 aapt 用文件名兜底并如实标注),
+/// APK 目录扫描 → ModulePlan 列表: 复用安装阶段实际 metadata 包名，
 /// pm list instrumentation 对账 runner;对不上的模块如实 ENV_BLOCKED,不猜。
 fn scan_apk_dir(
     phone: &crate::device::Device,
     dir: &Path,
     install_cmd: Option<&str>,
     log_sink: &mut dyn FnMut(&str),
+    out_dir: &Path,
 ) -> Result<Vec<ModulePlan>, String> {
     let mut apks: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| format!("读不到 APK 目录 {}: {e}", dir.display()))?
@@ -1475,30 +1808,12 @@ fn scan_apk_dir(
     let instr = parse_instrumentation_list(&phone.shell("pm list instrumentation", 15000));
     let mut plans = Vec::new();
     for apk in apks {
-        // 包名: aapt 优先,文件名兜底
-        let pkg_guess = std::process::Command::new("aapt")
-            .args(["dump", "badging", &apk.to_string_lossy()])
-            .output()
-            .ok()
-            .and_then(|o| parse_aapt_package(&String::from_utf8_lossy(&o.stdout)))
-            .unwrap_or_else(|| {
-                let stem = apk
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                log_sink(&format!(
-                    "  (无 aapt,{stem} 以文件名猜包名,runner 对账为准)"
-                ));
-                stem
-            });
-
-        let (_, installed) = deploy_apk(phone, &apk, install_cmd, log_sink)?;
+        let (_, installed, package) = deploy_apk(phone, &apk, install_cmd, log_sink, out_dir)?;
         if installed {
             // 新装后 runner 清单可能变化,重查
             let instr2 = parse_instrumentation_list(&phone.shell("pm list instrumentation", 15000));
             for (tp, runner, target) in instr2 {
-                if target == pkg_guess || tp == pkg_guess || target.starts_with(&pkg_guess) {
+                if target == package || tp == package {
                     plans.push(ModulePlan {
                         package: target,
                         module: None,
@@ -1511,7 +1826,7 @@ fn scan_apk_dir(
             }
         } else {
             for (tp, runner, target) in &instr {
-                if target == &pkg_guess || tp == &pkg_guess || target.starts_with(&pkg_guess) {
+                if target == &package || tp == &package {
                     plans.push(ModulePlan {
                         package: target.clone(),
                         module: None,
@@ -1595,6 +1910,7 @@ pub fn run_batch(cfg: &BatchCfg) -> Result<i32, String> {
             Path::new(dir),
             cfg.install_cmd.as_deref(),
             &mut sink,
+            &out_dir,
         )?);
     }
     if plans.is_empty() {
@@ -1679,9 +1995,7 @@ pub fn run_batch(cfg: &BatchCfg) -> Result<i32, String> {
 
         // profile 的 APK 尚未部署时(直接给 --profile 而非 --dir),补差量部署
         if let Some(apk) = &plan.apk {
-            if apk.exists() {
-                let _ = deploy_apk(&phone, apk, cfg.install_cmd.as_deref(), &mut sink)?;
-            }
+            let _ = deploy_apk(&phone, apk, cfg.install_cmd.as_deref(), &mut sink, &out_dir)?;
         }
 
         // 遥测通道(被测包)
@@ -2461,6 +2775,321 @@ INSTRUMENTATION_CODE: -1
             !batch_is_clean(&summary_json("b2", "ser", &[m2], 10)),
             "ENV_BLOCKED 必须让批次判不干净(退出码 1)"
         );
+    }
+
+    // An isolated child owns ADB_BIN/AAPT2_BIN. No process-global environment
+    // mutation races other tests, and no discovered real transport can be used.
+    #[test]
+    fn cts_install_completion_and_cache() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        const CHILD: &str = "PF_CTS_INSTALL_FIXTURE";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = PathBuf::from(root);
+            let apk = root.join("inputs/a quote's package.apk");
+            let phone = crate::device::Device::new(
+                Some("cts-fake-only".into()),
+                root.to_string_lossy().into(),
+            );
+            let mode = root.join("mode");
+            let installed = root.join("installed.apk");
+            let log = root.join("transport.jsonl");
+            let run = |label: &str, command: Option<&str>| {
+                fs::write(&mode, label).unwrap();
+                let out = root.join(label);
+                deploy_apk(&phone, &apk, command, &mut |_| {}, &out)
+            };
+            for label in [
+                "silent-nonzero",
+                "success-nonzero",
+                "silent-zero",
+                "no-receipt",
+                "success-no-package",
+                "bad-metadata",
+            ] {
+                let result = run(label, None);
+                assert!(
+                    result.is_err(),
+                    "{label} must not claim installed: {result:?}"
+                );
+                assert!(
+                    !installed.exists(),
+                    "{label} fixture unexpectedly installed"
+                );
+                println!("{label}: {}", result.unwrap_err());
+            }
+            let before = fs::read(&log).unwrap();
+            assert!(run("custom-blocked", Some("bm install -p {apk}"))
+                .unwrap_err()
+                .contains("ENV_BLOCKED"));
+            assert_eq!(
+                fs::read(&log).unwrap(),
+                before,
+                "unsupported template must not reach transport"
+            );
+            let hdc = crate::device::Device::new(
+                Some("hdc:cts-fake-only".into()),
+                root.to_string_lossy().into(),
+            );
+            assert!(deploy_apk(
+                &hdc,
+                &apk,
+                Some("bm install -p {apk}"),
+                &mut |_| {},
+                &root.join("hdc-blocked")
+            )
+            .unwrap_err()
+            .contains("ENV_BLOCKED"));
+            assert_eq!(
+                fs::read(&log).unwrap(),
+                before,
+                "HDC installer must not launch hdc"
+            );
+
+            // A legacy sidecar survives but the package does not. It cannot bypass install.
+            fs::write(
+                root.join("cache").join("a quote's package.apk.sha256"),
+                file_sha256(&apk).unwrap(),
+            )
+            .unwrap();
+            let first = run("good", Some("pm install -r {apk}")).unwrap();
+            assert!(first.1);
+            assert_eq!(fs::read(&installed).unwrap(), fs::read(&apk).unwrap());
+            let install_count = || {
+                fs::read_to_string(root.join("install-count"))
+                    .unwrap()
+                    .lines()
+                    .count()
+            };
+            assert_eq!(
+                install_count(),
+                6,
+                "five attempted negative installs plus one verified install"
+            );
+            let second = run("reuse-installed", None).unwrap();
+            assert!(!second.1);
+            assert_eq!(second.0, installed.to_string_lossy());
+            assert_eq!(
+                install_count(),
+                6,
+                "actual installed identity permits skipping install"
+            );
+            fs::remove_file(&installed).unwrap();
+            assert!(run("removed-package", None).unwrap().1);
+            assert_eq!(
+                install_count(),
+                7,
+                "cached file must not stand in for current package existence"
+            );
+            assert_eq!(
+                fs::read_to_string(root.join("push-count"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1,
+                "verified transfer bytes are reused independently"
+            );
+            let plans = scan_apk_dir(
+                &phone,
+                &root.join("inputs"),
+                None,
+                &mut |_| {},
+                &root.join("scan"),
+            )
+            .unwrap();
+            assert_eq!(
+                plans.len(),
+                1,
+                "directory scan must reuse metadata, not guess the quoted filename"
+            );
+            assert_eq!(plans[0].package, "com.example.cts");
+            assert_eq!(
+                install_count(),
+                7,
+                "directory scan rechecks installed bytes without reinstalling"
+            );
+            let failures = root.join("silent-nonzero/installation");
+            let attempt = fs::read_dir(failures)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let entries: Vec<_> = fs::read_dir(attempt)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            let stderr = entries
+                .iter()
+                .find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .ends_with("-install.stderr")
+                })
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(stderr).unwrap(),
+                "installer diagnostic\n"
+            );
+            let status = entries
+                .iter()
+                .find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .ends_with("-install.json")
+                })
+                .unwrap();
+            let status: Value = serde_json::from_slice(&fs::read(status).unwrap()).unwrap();
+            assert_eq!(status["exit_code"], 7);
+            // Exercise bounded capture itself with real host processes, including
+            // a zero-output command: it still has no installation success receipt.
+            let bounded = root.join("bounded");
+            fs::create_dir(&bounded).unwrap();
+            let mut evidence = InstallEvidence {
+                dir: bounded.clone(),
+                sequence: 0,
+            };
+            let timeout = evidence.command(
+                "timeout",
+                "host sleep fixture",
+                || {
+                    Command::new("sh")
+                        .args(["-c", "exec sleep 2"])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                },
+                Duration::from_millis(25),
+            );
+            assert!(timeout.unwrap_err().contains("deadline exceeded"));
+            let limit = evidence.command(
+                "limit",
+                "host output limit fixture",
+                || {
+                    Command::new("sh")
+                        .args(["-c", "exec head -c 1056768 /dev/zero"])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                },
+                Duration::from_secs(5),
+            );
+            assert!(limit.unwrap_err().contains("1 MiB"));
+            assert_eq!(
+                fs::metadata(bounded.join("02-limit.stdout")).unwrap().len(),
+                1024 * 1024
+            );
+            return;
+        }
+        let base = std::env::var_os("PF_CTS_QA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let root = base.join(format!(
+            "cts-install-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("cache")).unwrap();
+        fs::create_dir(root.join("inputs")).unwrap();
+        fs::write(
+            root.join("inputs/a quote's package.apk"),
+            b"synthetic APK bytes, not an installable Android package",
+        )
+        .unwrap();
+        let fixture = root.join("fixture.py");
+        fs::write(
+            &fixture,
+            r##"#!/usr/bin/env python3
+import hashlib, json, os, pathlib, subprocess, sys
+root = pathlib.Path(os.environ['PF_CTS_INSTALL_FIXTURE'])
+mode = (root / 'mode').read_text() if (root / 'mode').exists() else 'good'
+name = pathlib.Path(sys.argv[0]).name
+args = sys.argv[1:]
+installed = root / 'installed.apk'
+if name == 'aapt2':
+    print("package: name='com.example.cts' versionCode='1' versionName='1'")
+    sys.exit(9 if mode == 'bad-metadata' else 0)
+if name == 'pm':
+    if args[:2] == ['list', 'packages']:
+        if installed.exists(): print('package:com.example.cts')
+    elif args[:2] == ['list', 'instrumentation']:
+        if installed.exists(): print('instrumentation:com.example.cts/androidx.test.runner.AndroidJUnitRunner (target=com.example.cts)')
+    elif args[0] == 'path':
+        if installed.exists(): print('package:' + str(installed))
+    elif args[:2] == ['install', '-r']:
+        with (root / 'install-count').open('a') as f: f.write(mode + '\n')
+        if mode == 'silent-nonzero':
+            print('installer diagnostic', file=sys.stderr)
+            sys.exit(7)
+        if mode == 'success-nonzero':
+            print('Success')
+            sys.exit(7)
+        if mode == 'silent-zero': sys.exit(0)
+        if mode != 'success-no-package': installed.write_bytes(pathlib.Path(args[2]).read_bytes())
+        print('Success')
+    else: sys.exit(90)
+    sys.exit(0)
+if name == 'sha256sum':
+    path = pathlib.Path(args[0])
+    display = str(path).replace(str(root / 'cache'), '/data/local/tmp/pf_cts_cache')
+    print(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + display)
+    sys.exit(0)
+assert name == 'adb', name
+assert args[:2] == ['-s', 'cts-fake-only'], args
+args = args[2:]
+with (root / 'transport.jsonl').open('a') as f: f.write(json.dumps(args) + '\n')
+def local(value): return value.replace('/data/local/tmp/pf_cts_cache', str(root / 'cache'))
+if args[0] == 'push':
+    pathlib.Path(local(args[2])).write_bytes(pathlib.Path(args[1]).read_bytes())
+    with (root / 'push-count').open('a') as f: f.write('push\n')
+elif args[:3] == ['shell', 'stat', '-c']:
+    print(pathlib.Path(local(args[4])).stat().st_size)
+elif args[0] == 'shell' and len(args) == 2:
+    if mode == 'no-receipt' and '\npm install ' in args[1]:
+        with (root / 'install-count').open('a') as f: f.write(mode + '\n')
+        print('Success')
+    else:
+        env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'])
+        result = subprocess.run(['sh', '-c', local(args[1])], env=env)
+        sys.exit(result.returncode)
+else: sys.exit(91)
+"##,
+        )
+        .unwrap();
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
+        for name in ["adb", "aapt2", "pm", "sha256sum"] {
+            fs::copy(&fixture, root.join(name)).unwrap();
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cts::tests::cts_install_completion_and_cache",
+                "--nocapture",
+            ])
+            .env(CHILD, &root)
+            .env("ADB_BIN", root.join("adb"))
+            .env("AAPT2_BIN", root.join("aapt2"))
+            .output()
+            .unwrap();
+        fs::write(root.join("test.stdout"), &output.stdout).unwrap();
+        fs::write(root.join("test.stderr"), &output.stderr).unwrap();
+        println!("CTS installation fixture evidence: {}", root.display());
+        assert!(
+            output.status.success(),
+            "child failed: {}\n{}\nevidence {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            root.display()
+        );
+        // Explicit QA output, and all failed runs, remain reviewable.
+        if std::env::var_os("PF_CTS_QA_DIR").is_none() {
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

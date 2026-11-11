@@ -5,10 +5,9 @@
 > - **安卓 sysfs 电源轨**：已验证（一直在用）。本轮交叉对比查出并修掉两个功耗口径错，见第 7 节。
 > - **安卓 HiSmartPerf**：**2026-09-23 已上真机验证**（红魔 NX809J / Android 16 / 原神 +
 >   refbench），与自家 ftrace/sysfs 通路做过同窗口并排对比，见第 7 节。
-> - **鸿蒙 HiSmartPerf**：**仍未上真机验证**。本机既没有鸿蒙真机，也没有装 `hdc`。
->   命令口径取自 HiSmartPerf-Editor 的实现与 SmartPerf-Device 官方参数表，解析器由真实采集
->   产物钉死（见「测试夹具的来路」），但**整条设备通路（hdc → SP_daemon → data.csv）
->   一次也没有在真机上跑过**。不要把鸿蒙侧读数当成已验证的实测值。
+> - **鸿蒙 HiSmartPerf**：旧研究工作树补记了 **2026-09-24 初步真机冒烟**（第 9 节）。
+>   这是历史作者记录，本轮未重新核验设备。游戏负载、放电功率、Xpower 与完整 A/B 仍待验证。
+>   当前供电过滤与离线规则见 [HARMONY-SUPPLY](../../../plans/2026-10-22-agent-platform/HARMONY-SUPPLY.md)。
 
 ## 1. 为什么要这层
 
@@ -192,8 +191,8 @@ src/hwcond.rs      安卓侧: 电源轨采样与可信度判断（既有代码�
 
 ## 6. 鸿蒙侧上真机后要补的验证
 
-> 下面五条**全部只关鸿蒙侧**（`hdc` / `SP_daemon` / `dubai.db`）。本机没有鸿蒙真机，
-> 一条都验不了，状态维持「未验证」。安卓侧的验证结果在第 7 节。
+> 下面五条**全部只关鸿蒙侧**（`hdc` / `SP_daemon` / `dubai.db`）。原清单形成时未连接鸿蒙真机；
+> 后补的有限冒烟作者记录见第 9 节，不据此将五条整体标为通过。安卓侧的验证结果在第 7 节。
 
 1. `hdc -t <k> shell "SP_daemon --version"` 能否拿到版本号（`version_looks_present` 的判据是否够）；
 2. `SP_daemon -N 10 -PKG <包名> -c -g -f -t -p` 落盘的 `data.csv` 表头**实际列名**
@@ -460,3 +459,21 @@ HiSmartPerf 算出 3.086 W，我们算出 777 W。同一段窗口、同一块电
 判据是 `BatteryState::on_battery()`：`status` 不是 `Charging` **且** `current_now` 确实是负的。
 两个判据都要看，因为两个都会单独骗人 —— 停充之后有的内核仍写 `Not charging` 而不是
 `Discharging`；而 `current_now` 在充放平衡的瞬间会过零。
+
+
+## 9. 保留的鸿蒙冒烟作者记录（2026-09-24）
+
+2026-10-25 从旧研究树 README 和本规格未提交修改回收。以下是原作者对当时实验的叙述，
+不是本轮设备复验；原始工作树及差异保留。本轮只验证供电过滤的离线代码行为。
+
+- macOS 使用 DevEco Studio 内置 hdc，设备自报 nova 16 / OpenHarmony 6.1.1；
+  SP_daemon 1.0.9，shell uid=2000。
+- perf --app com.ohos.sceneboard --rounds 5 --json 经 data.csv 解析到 5 个点及温度；
+  静止桌面没有 FPS / 帧时。该记录不证明活动游戏帧语义。
+- 初版将 USB 充电电流报为 7.53 W，数值合理但不是放电功率。作者记录 USB 状态为
+  chargingStatus=1、pluggedType=2；加前后 BatteryService 检查后 power_watt 为 null。
+- 原补丁仅在前后报告均 chargingStatus=0、pluggedType=0、nowCurrent<0 时保留估计。
+  离线 CSV 需要同轮 battery_before.txt 与 battery_after.txt。当前实现沿用该条件，
+  明确它只核端点，不能证明窗口中途未切换，也不自动认证 sidecar 所属窗口。
+- 活动游戏 fpsJitters、放电功率、Xpower 与完整候选 A/B 仍待独立验证；
+  不将 Android root 能力或本次宿主测试外推到这台无 root 鸿蒙设备。

@@ -4,11 +4,12 @@
 //! 不改插件决策 (只调用其公开的生命周期与单步接口), 不侵入游戏进程; 帧是 adb screencap 的原始字节, 不重编码。
 //! "无 UI" 的落地: 只保留大世界探索态的帧 (无对白/转场/标题/竖屏弹窗), HUD 固定区域由离线切块脚本按
 //! SPEC_SR_LOOP §4 的裁剪框排除。门禁驱动: 收满 --frames 张即停, --max-steps 只是安全阀。
-use crate::plugins::genshin::{classify_state, hud_present, GenshinQuestAgent, GenshinState, QuestConfig};
+use crate::plugins::genshin::{
+    classify_state, hud_present, GenshinQuestAgent, GenshinState, QuestConfig, QuestDevice, QuestMode,
+};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// 冻结判定: 64x36 灰度缩略图与上一张保留帧的平均绝对差 (0..255) 低于此值视为画面冻结 (卡住/暂停)
@@ -22,75 +23,169 @@ const READY_ONLY_TRIES: u32 = 8;
 
 fn emit(text: &str) {
     let mut out = std::io::stdout().lock();
-    if out.write_all(text.as_bytes()).is_err() || out.flush().is_err() {
-        std::process::exit(0);
-    }
+    let _ = out.write_all(text.as_bytes()).and_then(|_| out.flush());
 }
 
 fn progress(msg: &str) {
     eprintln!("[capture] {msg}");
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct CaptureArgs {
     serial: Option<String>,
     out: Option<String>,
     frames: u32,
-    /// 只确认已在大世界探索态 (不执行插件单步, 不走位): 探索态+HUD 即保留 1 帧并结束; 否则退回常规巡航
+    /// 有限观察已有画面：探索态+HUD 保留1帧，否则未就绪；不启动游戏或退回巡航。
     ready_only: bool,
     max_steps: u32,
     settle_ms: u64,
     mode: String,
     shutdown: bool,
     json: bool,
+    recover: Option<String>,
+    evidence_origin: String,
+    timeout_s: u64,
 }
 
 const USAGE: &str = "用法: phonefarm capture --serial <设备> [--out <目录>] [--frames 200] [--max-steps N] [--settle-ms 800]\n\
-      [--mode auto|navigate|dialogue] [--no-shutdown] [--ready-only] [--json]";
+      [--mode auto|navigate|dialogue] [--no-shutdown] [--ready-only] [--json] [--timeout-s 3600]\n\
+      phonefarm capture --serial <设备> --recover <session目录> [--json]\n\
+      [--evidence-origin device|synthetic]\n\
+      --ready-only: 最多观察8次，只取1帧，不启动/导航/强停游戏；恢复原stayon仍可能写设备。\n\
+      --mode 只约束采集单步；普通调用仍有自动启动引导，navigate不保证剧情绝不推进。";
 
 fn parse_args(args: &[String]) -> Result<CaptureArgs, String> {
-    let mut a = CaptureArgs { serial: None, out: None, frames: 200, max_steps: 0, settle_ms: 800,
-                              mode: "auto".into(), shutdown: true, json: false, ready_only: false };
+    let mut a = CaptureArgs {
+        serial: None,
+        out: None,
+        frames: 200,
+        max_steps: 0,
+        settle_ms: 800,
+        mode: "auto".into(),
+        shutdown: true,
+        json: false,
+        ready_only: false,
+        recover: None,
+        evidence_origin: "device".into(),
+        timeout_s: 3600,
+    };
     let need = |args: &[String], i: usize, name: &str| -> Result<String, String> {
-        args.get(i + 1).cloned().ok_or_else(|| format!("{name} 需要一个值\n{USAGE}"))
+        args.get(i + 1)
+            .cloned()
+            .ok_or_else(|| format!("{name} 需要一个值\n{USAGE}"))
     };
     let mut i = 0;
+    let mut frames_explicit = false;
     while i < args.len() {
         match args[i].as_str() {
-            "--serial" => { a.serial = Some(need(args, i, "--serial")?); i += 1; }
-            "--out" => { a.out = Some(need(args, i, "--out")?); i += 1; }
-            "--frames" => { a.frames = need(args, i, "--frames")?.parse().map_err(|_| "--frames 需为正整数")?; i += 1; }
-            "--max-steps" => { a.max_steps = need(args, i, "--max-steps")?.parse().map_err(|_| "--max-steps 需为正整数")?; i += 1; }
-            "--settle-ms" => { a.settle_ms = need(args, i, "--settle-ms")?.parse().map_err(|_| "--settle-ms 需为整数")?; i += 1; }
-            "--mode" => { a.mode = need(args, i, "--mode")?; i += 1; }
+            "--serial" => {
+                a.serial = Some(need(args, i, "--serial")?);
+                i += 1;
+            }
+            "--out" => {
+                a.out = Some(need(args, i, "--out")?);
+                i += 1;
+            }
+            "--frames" => {
+                frames_explicit = true;
+                a.frames = need(args, i, "--frames")?
+                    .parse()
+                    .map_err(|_| "--frames 需为正整数")?;
+                i += 1;
+            }
+            "--max-steps" => {
+                a.max_steps = need(args, i, "--max-steps")?
+                    .parse()
+                    .map_err(|_| "--max-steps 需为正整数")?;
+                i += 1;
+            }
+            "--settle-ms" => {
+                a.settle_ms = need(args, i, "--settle-ms")?
+                    .parse()
+                    .map_err(|_| "--settle-ms 需为整数")?;
+                i += 1;
+            }
+            "--mode" => {
+                a.mode = need(args, i, "--mode")?;
+                i += 1;
+            }
             "--no-shutdown" => a.shutdown = false,
             "--ready-only" => a.ready_only = true,
             "--json" => a.json = true,
+            "--recover" => {
+                a.recover = Some(need(args, i, "--recover")?);
+                i += 1;
+            }
+            "--evidence-origin" => {
+                a.evidence_origin = need(args, i, "--evidence-origin")?;
+                i += 1;
+            }
+            "--timeout-s" => {
+                a.timeout_s = need(args, i, "--timeout-s")?
+                    .parse()
+                    .map_err(|_| "--timeout-s 需为整数")?;
+                i += 1;
+            }
             other => return Err(format!("无法识别的参数 '{other}'\n{USAGE}")),
         }
         i += 1;
     }
-    if a.serial.is_none() { return Err(format!("缺 --serial\n{USAGE}")); }
-    if a.frames == 0 { return Err("--frames 必须 >= 1".into()); }
+    if a.serial.is_none() {
+        return Err(format!("缺 --serial\n{USAGE}"));
+    }
+    let mode = QuestMode::parse(&a.mode)?;
+    if mode == QuestMode::Interact {
+        return Err("capture --mode 只认 auto|navigate|dialogue".into());
+    }
+    if a.serial
+        .as_deref()
+        .is_some_and(|s| s.starts_with("hdc:") || s.starts_with("ios:"))
+    {
+        return Err("capture 只支持 Android/adb 设备".into());
+    }
+    if !matches!(a.evidence_origin.as_str(), "device" | "synthetic") {
+        return Err("--evidence-origin 只认 device|synthetic".into());
+    }
+    if !(1..=86400).contains(&a.timeout_s) {
+        return Err("--timeout-s 必须为 1..86400".into());
+    }
+    if a.recover.is_some() && a.out.is_some() {
+        return Err("--recover 使用已有session，不与 --out 混用".into());
+    }
+    if a.frames == 0 {
+        return Err("--frames 必须 >= 1".into());
+    }
+    if a.ready_only {
+        if frames_explicit && a.frames != 1 {
+            return Err("--ready-only 只取1帧，不与 --frames 非1同时使用".into());
+        }
+        a.frames = 1;
+        a.shutdown = false;
+    }
     // 安全阀缺省 = 目标帧数的 4 倍步数: 状态过滤与冻结去重都会消耗步数
-    if a.max_steps == 0 { a.max_steps = a.frames.saturating_mul(4).max(20); }
+    if a.max_steps == 0 {
+        a.max_steps = a.frames.saturating_mul(4).max(20);
+    }
     Ok(a)
-}
-
-/// 原始 PNG 字节 (adb exec-out screencap -p), 不经任何解码重编码
-fn screencap_png(adb: &str, serial: &str) -> Option<Vec<u8>> {
-    let out = Command::new(adb).args(["-s", serial, "exec-out", "screencap", "-p"]).output().ok()?;
-    if out.stdout.len() < 1000 { None } else { Some(out.stdout) }
 }
 
 /// 64x36 灰度缩略图: 冻结判定用
 fn thumb(img: &image::DynamicImage) -> Vec<u8> {
-    img.resize_exact(64, 36, image::imageops::FilterType::Triangle).to_luma8().into_raw()
+    img.resize_exact(64, 36, image::imageops::FilterType::Triangle)
+        .to_luma8()
+        .into_raw()
 }
 
 /// 两张缩略图的平均绝对差 (纯函数, 单测)
 pub fn thumb_diff(a: &[u8], b: &[u8]) -> f32 {
-    if a.is_empty() || a.len() != b.len() { return 255.0; }
-    a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).abs() as f32).sum::<f32>() / a.len() as f32
+    if a.is_empty() || a.len() != b.len() {
+        return 255.0;
+    }
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (*x as i32 - *y as i32).abs() as f32)
+        .sum::<f32>()
+        / a.len() as f32
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -113,57 +208,179 @@ fn state_name(s: GenshinState) -> &'static str {
 }
 
 pub fn run_capture(args: &[String]) -> i32 {
-    let a = match parse_args(args) {
+    let mut args = std::iter::once("capture".to_string()).chain(args.iter().cloned()).collect();
+    if let Err(e) = crate::devlock::strip_lock_args(&mut args) {
+        eprintln!("{e}");
+        return 2;
+    }
+    args.remove(0);
+    if args.iter().any(|s| matches!(s.as_str(), "--help" | "-h")) {
+        emit(&format!("{USAGE}\n"));
+        return 0;
+    }
+    let mut a = match parse_args(&args) {
         Ok(a) => a,
-        Err(e) => { eprintln!("{e}"); return 2; }
-    };
-    match capture(&a) {
-        Ok((report, code)) => {
-            if a.json {
-                emit(&format!("{}\n", serde_json::to_string_pretty(&report).unwrap_or_default()));
-            } else {
-                emit(&format!("capture 完成: 保留 {} 帧 / {} 步, 跳过 {}, 冻结 {}, 目录 {}\n",
-                    report["frames"], report["steps"], report["skipped"], report["duplicates"], report["out"].as_str().unwrap_or("?")));
-            }
-            code
-        }
         Err(e) => {
-            if a.json {
-                emit(&format!("{}\n", json!({"v": 1, "ok": false, "error": e})));
-            } else {
-                eprintln!("capture 失败: {e}");
-            }
-            2
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let session = if let Some(dir) = &a.recover {
+        crate::capture_session::Session::resume(
+            std::path::Path::new(dir),
+            a.serial.as_deref().unwrap(),
+        )
+    } else {
+        crate::devlease::Lease::target(a.serial.as_deref(), "capture").and_then(|lease| {
+            a.serial = Some(lease.serial.clone());
+            crate::capture_session::Session::new(
+                lease,
+                a.out.as_deref(),
+                a.shutdown,
+                &a.evidence_origin,
+            )
+        })
+    };
+    let session = match session {
+        Ok(s) => s,
+        Err(e) => {
+            emit(&format!("{}\n", json!({"v":1,"ok":false,"error":e})));
+            return 2;
+        }
+    };
+    let result = if a.recover.is_some() {
+        Ok((json!({"v":1,"ok":true,"recovery_only":true}), 0))
+    } else {
+        a.out = Some(session.dir.join("frames").to_string_lossy().into());
+        session
+            .prepare()
+            .and_then(|_| session.run(&a, Duration::from_secs(a.timeout_s)))
+    };
+    let recovery = session.finish(result.as_ref().err().map(String::as_str));
+    let (mut report, mut code) =
+        result.unwrap_or_else(|e| (json!({"v":1,"ok":false,"error":e}), 2));
+    report["session"] = json!(session.dir);
+    match recovery {
+        Ok(v) => report["recovery"] = v,
+        Err(e) => {
+            report["recovery"] = json!({"status":"required","error":e});
+            report["ok"] = json!(false);
+            code = 2;
         }
     }
+    let path = session.dir.join(format!(
+        "report-{}-{}.json",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap()
+    ));
+    report["report_path"] = json!(path);
+    if let Err(e) = crate::confirmation_transport::new_file(&path, report.to_string().as_bytes()) {
+        eprintln!("capture report persistence failed: {e}");
+        code = 2;
+        report["report_error"] = json!(e);
+        report["ok"] = json!(false);
+    }
+    if a.json {
+        emit(&format!(
+            "{}\n",
+            serde_json::to_string_pretty(&report).unwrap()
+        ));
+    } else {
+        emit(&format!(
+            "capture: ok={}, recovery={}, session={}\n",
+            report["ok"],
+            report["recovery"]["status"],
+            session.dir.display()
+        ));
+    }
+    code
 }
 
-fn capture(a: &CaptureArgs) -> Result<(Value, i32), String> {
+/// Internal entry: inherited worker authority and liveness must precede device work.
+pub(crate) fn run_worker(args: &[String]) -> i32 {
+    if let Err(e) = crate::lease_command::worker_guard() {
+        eprintln!("{e}");
+        return 90;
+    }
+    if args.len() != 1 {
+        eprintln!("capture worker requires one session");
+        return 90;
+    }
+    let dir = match std::path::Path::new(&args[0]).canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return 90;
+        }
+    };
+    let result: Result<(Value, i32), String> = (|| {
+        let a: CaptureArgs = serde_json::from_slice(&crate::confirmation_transport::bounded(
+            &dir.join("request.json"),
+            65536,
+        )?)
+        .map_err(|e| e.to_string())?;
+        let state = crate::capture_session::read_state(&dir)?;
+        crate::capture_session::validate(
+            &state,
+            a.serial.as_deref().ok_or("missing capture serial")?,
+        )?;
+        if a.out.as_deref() != dir.join("frames").to_str() || state["shutdown"] != a.shutdown {
+            return Err("capture request differs from session".into());
+        }
+        let worker = crate::capture_worker::Worker::open(&dir)?;
+        let captured = capture(&a, &worker, || worker.png());
+        let closed = worker.close();
+        let captured = captured?;
+        closed?;
+        Ok(captured)
+    })();
+    let (mut value, code) = match result {
+        Ok((report, code)) => (json!({"report":report,"error":null}), code),
+        Err(e) => (json!({"report":null,"error":e}), 2),
+    };
+    value["schema"] = json!("phonefarm/capture-worker-result@1");
+    // A missing authority is recorded as null; the parent then refuses the
+    // completion and keeps recovery required instead of losing the result.
+    value["token"] = json!(std::env::var("PHONEFARM_WORKER_TOKEN").ok());
+    value["serial"] = json!(std::env::var("PHONEFARM_WORKER_SERIAL").ok());
+    value["exit_code"] = json!(code);
+    if let Err(e) = crate::confirmation_transport::new_file(
+        &dir.join("worker-result.json"),
+        value.to_string().as_bytes(),
+    ) {
+        eprintln!("{e}");
+        return 2;
+    }
+    code
+}
+
+fn capture(
+    a: &CaptureArgs,
+    phone: &dyn QuestDevice,
+    mut read_png: impl FnMut() -> Result<Vec<u8>, String>,
+) -> Result<(Value, i32), String> {
     let t_all = Instant::now();
     let serial = a.serial.clone().unwrap();
-    if serial.starts_with("hdc:") {
-        return Err("capture 只支持 Android/adb 设备".into());
-    }
-    let adb = crate::device::locate_adb().ok_or("未找到 adb")?;
-    let out_dir = match &a.out {
-        Some(d) => std::path::PathBuf::from(d),
-        None => std::path::PathBuf::from(format!("tasks/sr_capture_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"))),
+    let out_dir = std::path::PathBuf::from(a.out.as_ref().ok_or("missing capture output")?);
+    let mode = QuestMode::parse(&a.mode)?;
+    let cfg = QuestConfig {
+        mode: a.mode.clone(),
+        max_seconds: u64::MAX,
+        auto_choice: true,
+        auto_shutdown: false,
     };
-    std::fs::create_dir_all(&out_dir).map_err(|e| format!("建不了输出目录 {}: {e}", out_dir.display()))?;
-    let tmp = std::env::temp_dir().join(format!("phonefarm-capture-{}", std::process::id())).to_string_lossy().to_string();
-    let _ = std::fs::create_dir_all(&tmp);
-    let phone = crate::device::Device::new(Some(serial.clone()), tmp);
-    if !phone.health_check(8000) {
-        return Err("设备无心跳".into());
+    let mut agent = GenshinQuestAgent::new(phone, cfg);
+    if !a.ready_only {
+        progress("拉起游戏并等待进入大世界 (插件 ensure_game_ready)");
+        agent.ensure_game_ready()?;
     }
-    let cfg = QuestConfig { mode: a.mode.clone(), serial: Some(serial.clone()), max_seconds: u64::MAX,
-                            auto_choice: true, auto_shutdown: a.shutdown };
-    let mut agent = GenshinQuestAgent::new(&phone, cfg);
-    progress("拉起游戏并等待进入大世界 (插件 ensure_game_ready)");
-    agent.ensure_game_ready()?;
+    phone.check()?;
 
     let manifest_path = out_dir.join("manifest.jsonl");
-    let mut manifest = std::fs::OpenOptions::new().create(true).append(true).open(&manifest_path)
+    let mut manifest = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&manifest_path)
         .map_err(|e| format!("打不开 manifest {}: {e}", manifest_path.display()))?;
     let mut kept = 0u32;
     let mut steps = 0u32;
@@ -176,18 +393,29 @@ fn capture(a: &CaptureArgs) -> Result<(Value, i32), String> {
     let mut stuck_state: Option<&'static str> = None;
     let mut stuck_n = 0u32;
     let mut prev_thumb: Vec<u8> = Vec::new();
+    let mut observations = 0u32;
     if a.ready_only {
-        // 只看不动: 连续截图确认 探索态 + 小地图 + 技能栏, 命中即保留该帧并结束; READY_ONLY_TRIES 次内未命中则退回常规巡航
+        // 两个终点都留在有限观察路径；不因未命中或默认目标而进入巡航。
         for _ in 0..READY_ONLY_TRIES {
             std::thread::sleep(Duration::from_millis(a.settle_ms));
-            let Some(png) = screencap_png(&adb, &serial) else { grab_fail += 1; continue; };
-            let Ok(img) = image::load_from_memory(&png) else { grab_fail += 1; continue; };
+            observations += 1;
+            let png = read_png()?;
+            let Ok(img) = image::load_from_memory(&png) else {
+                grab_fail += 1;
+                continue;
+            };
             let (w, h) = (img.width(), img.height());
-            if w < h { portrait += 1; continue; }
+            if w < h {
+                portrait += 1;
+                continue;
+            }
             let (state, _) = classify_state(&img);
             let (minimap, combat) = hud_present(&img);
             if state != GenshinState::OpenWorldExplore || !(minimap && combat) {
-                progress(&format!("ready-only: 状态 {} (小地图={minimap} 技能栏={combat}), 再看", state_name(state)));
+                progress(&format!(
+                    "ready-only: 状态 {} (小地图={minimap} 技能栏={combat}), 再看",
+                    state_name(state)
+                ));
                 continue;
             }
             let file = format!("frame_{kept:05}.png");
@@ -200,39 +428,56 @@ fn capture(a: &CaptureArgs) -> Result<(Value, i32), String> {
             writeln!(manifest, "{row}").map_err(|e| format!("manifest 写入失败: {e}"))?;
             prev_thumb = thumb(&img);
             kept += 1;
-            progress(&format!("ready-only: 已在大世界探索态, 保留 {file} ({w}x{h}), 不走位"));
+            progress(&format!(
+                "ready-only: 已在大世界探索态, 保留 {file} ({w}x{h}), 不走位"
+            ));
             break;
         }
     }
-    while kept < a.frames && steps < a.max_steps {
+    while !a.ready_only && kept < a.frames && steps < a.max_steps {
         steps += 1;
         // 巡航一步: 决策完全在插件里, 这里只负责在两步之间抓帧
-        if let Err(e) = agent.step() {
-            progress(&format!("第{steps}步插件单步异常: {e}"));
-            std::thread::sleep(Duration::from_millis(500));
-        }
+        agent.step()?;
+        phone.check()?;
         std::thread::sleep(Duration::from_millis(a.settle_ms));
-        let Some(png) = screencap_png(&adb, &serial) else { grab_fail += 1; continue; };
-        let Ok(img) = image::load_from_memory(&png) else { grab_fail += 1; continue; };
+        let png = read_png()?;
+        let Ok(img) = image::load_from_memory(&png) else {
+            grab_fail += 1;
+            continue;
+        };
         let (w, h) = (img.width(), img.height());
         if w < h {
             portrait += 1;
-            progress(&format!("第{steps}步: 竖屏画面 {w}x{h} (系统弹窗/非游戏), 跳过"));
+            progress(&format!(
+                "第{steps}步: 竖屏画面 {w}x{h} (系统弹窗/非游戏), 跳过"
+            ));
             continue;
         }
         let (state, _) = classify_state(&img);
         let (minimap, combat) = hud_present(&img);
         if state != GenshinState::OpenWorldExplore || !(minimap && combat) {
-            let name = if state == GenshinState::OpenWorldExplore { no_hud += 1; "explore_no_hud" } else { state_name(state) };
+            let name = if state == GenshinState::OpenWorldExplore {
+                no_hud += 1;
+                "explore_no_hud"
+            } else {
+                state_name(state)
+            };
             *skipped.entry(name).or_default() += 1;
-            progress(&format!("第{steps}步: 状态 {name} (小地图={minimap} 技能栏={combat}), 跳过"));
+            progress(&format!(
+                "第{steps}步: 状态 {name} (小地图={minimap} 技能栏={combat}), 跳过"
+            ));
             // 同一非探索态卡住 → 发 BACK 关弹窗 (公告/签到类界面插件的 A 键推不动), 有界且计数
-            if stuck_state == Some(name) { stuck_n += 1; } else { stuck_state = Some(name); stuck_n = 1; }
-            if stuck_n >= STUCK_STEPS_BACK {
+            if stuck_state == Some(name) {
+                stuck_n += 1;
+            } else {
+                stuck_state = Some(name);
+                stuck_n = 1;
+            }
+            if stuck_n >= STUCK_STEPS_BACK && mode.allows_capture_back(state, true) {
                 backs += 1;
                 stuck_n = 0;
                 progress(&format!("第{steps}步: {name} 连续 {STUCK_STEPS_BACK} 步未变, 发 BACK 键尝试关闭弹窗 (第{backs}次)"));
-                phone.shell("input keyevent 4", 3000);
+                phone.shell_write("input keyevent 4", 3000)?;
             }
             continue;
         }
@@ -242,7 +487,9 @@ fn capture(a: &CaptureArgs) -> Result<(Value, i32), String> {
         let diff = thumb_diff(&prev_thumb, &th);
         if !prev_thumb.is_empty() && diff < DUP_THRESH {
             dups += 1;
-            progress(&format!("第{steps}步: 与上一保留帧差 {diff:.2} < {DUP_THRESH}, 画面冻结, 跳过"));
+            progress(&format!(
+                "第{steps}步: 与上一保留帧差 {diff:.2} < {DUP_THRESH}, 画面冻结, 跳过"
+            ));
             continue;
         }
         let file = format!("frame_{kept:05}.png");
@@ -255,11 +502,11 @@ fn capture(a: &CaptureArgs) -> Result<(Value, i32), String> {
         writeln!(manifest, "{row}").map_err(|e| format!("manifest 写入失败: {e}"))?;
         prev_thumb = th;
         kept += 1;
-        progress(&format!("第{steps}步: 保留 {file} ({w}x{h}, {} KB, 差 {diff:.1}) 进度 {kept}/{}", png.len() / 1024, a.frames));
-    }
-    if a.shutdown {
-        progress("收尾: 复位手柄, 强停游戏并锁屏 (插件 shutdown_and_lock)");
-        agent.shutdown_and_lock();
+        progress(&format!(
+            "第{steps}步: 保留 {file} ({w}x{h}, {} KB, 差 {diff:.1}) 进度 {kept}/{}",
+            png.len() / 1024,
+            a.frames
+        ));
     }
     let ok = kept >= a.frames;
     let report = json!({
@@ -268,8 +515,9 @@ fn capture(a: &CaptureArgs) -> Result<(Value, i32), String> {
         "skipped": skipped.values().sum::<u32>(), "skipped_by_state": skipped, "duplicates": dups,
         "portrait": portrait, "grab_failed": grab_fail, "explore_without_hud": no_hud, "back_presses": backs, "segment_frames": SEGMENT_FRAMES, "dup_thresh": DUP_THRESH,
         "mode": a.mode, "shutdown": a.shutdown, "ready_only": a.ready_only, "wall_s": t_all.elapsed().as_secs_f64(),
+        "ready_observations": observations,
+        "stop_reason": if ok { "target_reached" } else if a.ready_only { "not_ready" } else { "max_steps" },
     });
-    let _ = std::fs::write(out_dir.join("capture.json"), serde_json::to_string_pretty(&report).unwrap_or_default());
     Ok((report, if ok { 0 } else { 1 }))
 }
 
@@ -288,13 +536,87 @@ mod tests {
     #[test]
     fn args_forms() {
         let a = parse_args(&["--serial".into(), "X".into()]).unwrap();
-        assert_eq!((a.frames, a.max_steps, a.settle_ms, a.shutdown, a.json), (200, 800, 800, true, false));
-        let a = parse_args(&["--serial".into(), "X".into(), "--frames".into(), "3".into(), "--no-shutdown".into(), "--json".into()]).unwrap();
-        assert_eq!((a.frames, a.max_steps, a.shutdown, a.json), (3, 20, false, true));
+        assert_eq!(
+            (a.frames, a.max_steps, a.settle_ms, a.shutdown, a.json),
+            (200, 800, 800, true, false)
+        );
+        let a = parse_args(&[
+            "--serial".into(),
+            "X".into(),
+            "--frames".into(),
+            "3".into(),
+            "--no-shutdown".into(),
+            "--json".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            (a.frames, a.max_steps, a.shutdown, a.json),
+            (3, 20, false, true)
+        );
         assert!(!a.ready_only, "缺省不是 ready-only");
-        let a = parse_args(&["--serial".into(), "X".into(), "--frames".into(), "1".into(), "--ready-only".into(), "--no-shutdown".into()]).unwrap();
+        let a = parse_args(&[
+            "--serial".into(),
+            "X".into(),
+            "--frames".into(),
+            "1".into(),
+            "--ready-only".into(),
+            "--no-shutdown".into(),
+        ])
+        .unwrap();
         assert!(a.ready_only && !a.shutdown && a.frames == 1);
+        let ready = parse_args(&["--serial".into(), "X".into(), "--ready-only".into()]).unwrap();
+        assert_eq!((ready.frames, ready.shutdown), (1, false));
+        for extra in [vec!["--ready-only", "--frames", "2"], vec!["--mode", "typo"], vec!["--mode", "interact"]] {
+            let mut args = vec!["--serial".into(), "X".into()];
+            args.extend(extra.into_iter().map(String::from));
+            assert!(parse_args(&args).is_err());
+        }
         assert!(parse_args(&[]).is_err());
         assert!(parse_args(&["--serial".into(), "X".into(), "--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn ready_only_returns_without_starting_or_cruising() {
+        struct ObserveOnly;
+        impl QuestDevice for ObserveOnly {
+            fn shell(&self, _: &str, _: u64) -> String { panic!("unexpected shell access") }
+            fn screen_image(&self) -> Option<image::DynamicImage> { panic!("unexpected agent observation") }
+            fn gamepad_press(&self, _: &str, _: u64) -> Result<(), String> { panic!("unexpected press") }
+            fn gamepad_stick(&self, _: &str, _: f32, _: f32, _: u64) -> Result<(), String> { panic!("unexpected stick") }
+            fn gamepad_wander(&self, _: u64) -> Result<(), String> { panic!("unexpected cruise") }
+            fn gamepad_reset(&self) -> Result<(), String> { panic!("unexpected reset") }
+            fn gamepad_close(&self) -> Result<(), String> { panic!("unexpected HID") }
+        }
+        let root = std::env::temp_dir().join(format!("pf-capture-policy-{}", std::process::id()));
+        for ready in [false, true] {
+            let dir = root.join(if ready { "ready" } else { "not-ready" });
+            std::fs::create_dir_all(&dir).unwrap();
+            let args = parse_args(&[
+                "--serial".into(), "X".into(), "--ready-only".into(), "--settle-ms".into(), "0".into(),
+                "--out".into(), dir.to_string_lossy().into_owned(),
+            ]).unwrap();
+            let mut img = image::RgbaImage::from_pixel(512, 256, image::Rgba([0, 0, 0, 255]));
+            if ready {
+                img = image::RgbaImage::from_pixel(512, 256, image::Rgba([80, 80, 80, 255]));
+                for (xs, xe, ys, ye) in [(20, 60, 10, 40), (430, 450, 200, 225)] {
+                    for x in xs..xe { for y in ys..ye { img.put_pixel(x, y, image::Rgba([255, 255, 255, 255])); } }
+                }
+            }
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(img).write_to(&mut png, image::ImageFormat::Png).unwrap();
+            let png = png.into_inner();
+            let mut reads = 0;
+            let (report, code) = capture(&args, &ObserveOnly, || { reads += 1; Ok(png.clone()) }).unwrap();
+            assert_eq!(code, if ready { 0 } else { 1 });
+            assert_eq!(report["steps"], 0);
+            assert_eq!(report["back_presses"], 0);
+            assert_eq!(report["target"], 1);
+            assert_eq!(report["frames"], if ready { 1 } else { 0 });
+            assert_eq!(reads, if ready { 1 } else { READY_ONLY_TRIES });
+            assert_eq!(report["ready_observations"], reads);
+            assert_eq!(report["stop_reason"], if ready { "target_reached" } else { "not_ready" });
+            if ready { assert_eq!(std::fs::read(dir.join("frame_00000.png")).unwrap(), png); }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

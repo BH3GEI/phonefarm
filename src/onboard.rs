@@ -653,7 +653,7 @@ impl Dev {
         out.rsplit_once("#adb_exit=").map(|(a, _)| a.to_string()).unwrap_or(out)
     }
     fn cap(&self) -> Vec<u8> {
-        Command::new(adb_path())
+        crate::fd_lock::transport_command(adb_path())
             .args(["-s", &self.serial, "exec-out", "screencap"])
             .output()
             .map(|o| o.stdout)
@@ -666,7 +666,7 @@ impl Dev {
         self.sh(&format!("input swipe {x0} {y0} {x1} {y1} {ms}"), ms / 1000 + 10);
     }
     fn swipe_bg(&self, x0: i32, y0: i32, x1: i32, y1: i32, ms: u64) -> Option<std::process::Child> {
-        Command::new(adb_path())
+        crate::fd_lock::transport_command(adb_path())
             .args(["-s", &self.serial, "shell", &format!("input swipe {x0} {y0} {x1} {y1} {ms}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -1278,7 +1278,7 @@ fn discover_render(dev: &Dev, pkg: &str, g: SwipeGeom, w: u32, h: u32, out: &Pat
     let (x0, x1, y) = px(g, w, h);
     let child = dev.swipe_bg(x0, y, x1, y, 6000);
     let path = format!("{DEV_TMP}/onboard_comm.txt");
-    dev.su(&format!("sh {DEV_TMP}/ftrace_capture.sh 4 {path}"), 60);
+    dev.su(&format!("sh {DEV_TMP}/ftrace_capture.sh 4 {path} {pkg}"), 60);
     wait_child(child, 20);
     dev.swipe(x1, y, x0, y, 6000);
     let local = out.join("comm_trace.txt");
@@ -1373,7 +1373,7 @@ fn measure(dev: &Dev, m: &MeasureCfg<'_>) -> (Vec<RoundStat>, Vec<Value>, bool, 
         let pre = dev.cap();
         let label = format!("onboard_{short}_r{i}");
         let dir = out.join("rounds").join(format!("r{i}"));
-        let r = run_one_with(&dev.serial, &label, &dir, cap_s, workload, pkg, comm);
+        let r = run_one_with(&dev.serial, &label, &dir, cap_s, workload, pkg, comm, None);
         std::thread::sleep(Duration::from_millis(1500));
         let post = dev.cap();
         // 原始 trace 压缩留档 (判据可离线重放, 但一轮十几 MB, 不压磁盘吃不消)
@@ -1591,6 +1591,10 @@ fn parse_args(a: &[String]) -> Result<Args, String> {
     Ok(r)
 }
 
+fn onboard_hdc_guidance(pkg: &str) -> String {
+    format!("onboard 目前只支持 Android；鸿蒙请用 aa start -b {pkg} -a <mainAbility> 启动，mainAbility 从 bm dump -n {pkg} 读")
+}
+
 pub fn run_onboard(args: &[String]) -> i32 {
     let a = match parse_args(args) {
         Ok(a) => a,
@@ -1603,6 +1607,10 @@ pub fn run_onboard(args: &[String]) -> i32 {
         eprintln!("没有唯一在线的设备, 用 --serial 指定");
         return 2;
     };
+    if serial.starts_with("hdc:") {
+        eprintln!("{}", onboard_hdc_guidance(&a.pkg));
+        return 2;
+    }
     let dev = Dev { serial: serial.clone() };
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let out = a.out.clone().unwrap_or_else(|| {
@@ -2201,5 +2209,19 @@ CHARGE_STATE status=Charging current_now=-632000 capacity=100 on_battery=no";
         let c = cv(&[1.0, 2.0, 3.0]).unwrap();
         assert!((c - 0.5).abs() < 1e-12);
         assert_eq!(cv(&[1.0]), None);
+    }
+
+    #[test]
+    fn onboard_hdc_gets_android_only_guidance_without_not_installed_error() {
+        let message = onboard_hdc_guidance("com.miHoYo.Yuanshen");
+        assert!(message.contains("onboard 目前只支持 Android"));
+        assert!(message.contains("aa start -b com.miHoYo.Yuanshen -a <mainAbility>"));
+        assert!(message.contains("bm dump -n com.miHoYo.Yuanshen"));
+        assert!(!message.contains("没装"));
+        let out = std::env::temp_dir().join(format!("onboard-hdc-reject-{}", std::process::id()));
+        let code = run_onboard(&["--package".into(), "com.miHoYo.Yuanshen".into(),
+                                "--serial".into(), "hdc:fake-device".into(), "--out".into(), out.to_string_lossy().into()]);
+        assert_eq!(code, 2);
+        assert!(!out.exists());
     }
 }

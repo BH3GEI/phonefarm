@@ -434,11 +434,11 @@ mod tests {
     use super::*;
 
     fn vks_root() -> std::path::PathBuf {
-        // runs_vks 的 JSON/报告都在库里 (gitignore 只挡 trace), 本仓库自带
+        // 这一组 runs_vks 的 JSON/报告留作测试夹具 (trace 本来就不入库)
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("仓库根")
-            .join("loop_v1/runs_vks/render_passes_c0_vs_c1")
+            .join("loop_v1/fixtures/golden/runs_vks/render_passes_c0_vs_c1")
     }
 
     /// 判读哈希 = 冻结的 rules.json 文件本身的哈希 (口径切换点之后的自证对象)。

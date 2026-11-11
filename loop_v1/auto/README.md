@@ -94,14 +94,14 @@ GPU `min_pwrlevel` / `max_pwrlevel` / devfreq 的 min/max/governor、DDR 与 LLC
 设备端 `knob_sysparam.sh` 再拦一道 —— 故意冗余, 设备端是最后一道。
 
 另有一个温度上限: 超了这一组直接作废并还原, 不参与比较。上限 =
-`max(45°C, 基线实测最高温 + 3°C)`, 在采第一组候选数据之前算好并写进 `rule.json`。
+`max(70°C, 基线实测最高温 + 10°C)`, 在采第一组候选数据之前算好并写进 `rule.json`。
 
 等冷目标是另一回事, 且不是绝对温度: 连跑几十轮原神之后设备根本降不到一个固定的
 低温, 拿绝对值当门槛会把每组候选都卡死在等冷超时上。目标取
 `min(max(40°C, 基线起跑温度 + 1°C), 温度上限 − 2°C)` —— 意思是「回到基线是在什么
-热态下量的」, 同样在看候选数据之前冻结。**等冷超时不作废本组**: 组内 ABBA 交替已经
-让两臂承受同样的残余热漂移, 起跑偏热会同等影响两臂, 不构成偏向; 安全由温度上限
-单独把关。哪几组是热起跑的, `result.json` 的 `cooldown` 字段看得见。
+热态下量的」, 同样在看候选数据之前冻结。Rust autoloop 的等冷未知/超时会阻断实验；
+ABBA 不能代替冷机资格。默认采 5 轮基线，还检查必需指标的重复性与双向漂移。
+完整资格合同见 [SPEC_EXPERIMENT_QUALIFICATION](../../docs/SPEC_EXPERIMENT_QUALIFICATION.md)。
 
 ## 判定规则 (看数据之前就冻结)
 
@@ -146,14 +146,11 @@ phonefarm `src/hwcond.rs` (PR #27 真机验过的那一版), 不另造一套 —
 一组里口径不一致 (或有轮没量到) 这组功耗就不进判定 (`sysparam::power_group_ok`, eval / autoloop /
 selftest 共用)。
 
-功耗进不进判定因此是 `--power-in-verdict {auto,on,off}`, 缺省 `auto`:
-**基线轮每一轮都真的拿到放电态才计入**。不是"能测到就用" —— 充电态下测到的数
-看起来很正常, 悄悄拿它判保留/淘汰比不测还糟。
-
-停充失败不致命: 拿不到放电态就只是功耗这一项不进判定, 帧时与帧率照常测。
-功耗数据无论如何照常逐轮记录 (`power_source` / `on_battery` / `battery_status` /
-`battery_capacity_pct` / `current_now` / `voltage_now` / `usb_input_w_mean` /
-`power_usable_reason` 全部落盘), 报告里 `test_conditions.power_caveat` 写明结论。
+Rust autoloop 在候选数据之前冻结 `--goal render_efficiency`（缺省）或
+`render_cadence`。能效目标必需功耗；停充失败、前后供电状态未知、混入正电流或缺采样时，
+保留原始 V×I，但不允许 KEEP。`--power-in-verdict off` 为兼容会选 render_cadence，
+只能研究渲染提交节奏，不能宣称节能。其余 auto/on 都要求能效合同的功耗完整。
+旧 Python autoloop.py 尚未迁移此合同，新实验使用 Rust `phonefarm autoloop`。
 
 停充节点本身是**测量前提, 不是可调参数** —— 它进不了自动调参白名单, 有单测钉死。
 
@@ -228,8 +225,8 @@ phonefarm autoloop --out loop_v1/runs_sysparam/probe --probe-only
 phonefarm autoloop --out loop_v1/runs_sysparam/<标签> \
     --generations 2 --children 3 --pairs 5
 
-# 功耗强制不进判定 (例如电量低停不了充时)
-phonefarm autoloop --out ... --power-in-verdict off
+# 显式只研究渲染提交节奏，不作节能结论
+phonefarm autoloop --out ... --goal render_cadence
 
 # 不用大模型, 只用本地变异器 (离线也能跑通闭环)
 phonefarm autoloop --out ... --no-llm

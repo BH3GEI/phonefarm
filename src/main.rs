@@ -4,14 +4,23 @@
 //! --app: 任务的目标应用包名;开局若前台不是它(也不是桌面),先按HOME归位再进循环
 //! --serial 带 "hdc:<connect key>" 前缀走 OpenHarmony/hdc 后端,不带前缀=Android/adb(devices 子命令两族并列)
 mod autoloop;
+mod app_snapshot;
 mod bench;
+mod bench_session;
+mod lease_command;
 mod ftrace;
 mod gpuop;
+mod shaderplan;
 mod gpustat;
 mod hwcond;
 mod brain;
 mod capture;
+mod capture_session;
+mod capture_worker;
 mod cli;
+mod collect;
+mod decision;
+mod ios;
 mod cts;
 mod experiment;
 mod fleet;
@@ -22,6 +31,7 @@ mod crosscheck;
 mod framecheck;
 mod llm;
 mod looptrace;
+mod render_attribution;
 mod sysparam;
 mod curtail;
 mod vksreport;
@@ -30,26 +40,73 @@ mod parallel;
 mod device;
 mod platform;
 mod devlock;
+mod devlease;
+mod fd_lock;
+mod lock_handoff;
+mod device_registry;
+mod host_process;
+mod observation;
+mod lease_receipt;
+mod lease_storage;
 mod eval;
 mod onboard;
+mod qualification;
+mod thermal_profile;
+mod confirmation_observation;
+mod confirmation_control;
+mod confirmation_driver;
+mod confirmation_transport;
 mod fold;
 mod gamepad;
+#[cfg(feature = "game")]
+mod game_deploy;
+#[cfg(feature = "game")]
+mod game_deploy_session;
+mod game_deploy_transport;
+mod remote_control;
+mod runtime_identity;
+#[cfg(feature = "game")]
+mod game_initialize;
+#[cfg(feature = "game")]
+mod game_scene;
+#[cfg(feature = "game")]
+mod game_install_session;
+mod apk_metadata;
 mod frameaudit;
 mod preflight;
 mod grayab;
 mod graylayer;
+mod gray_session;
+mod gray_refbench;
+mod gray_control;
+mod gray_quality;
+mod gray_script;
+mod gray_eval_session;
+mod grayartifact;
+mod upopabi;
+mod storageadapter;
+mod npuop_device;
 mod shotdiff;
+mod sequence_quality;
+mod iqjudge;
+mod iqsheet;
+mod interpjudge;
+mod scorecard;
+mod iqdiagnose;
 mod hypo;
 mod mtools;
 mod caps;
 mod gpdaemon;
 mod perfsrc;
+mod framesrc;
+mod sflatency;
 pub mod pyjson;
 mod pyrandom;
 mod refbenchreport;
 mod smartperf;
 mod plugins;
 mod runtime;
+mod screen;
 mod script;
 mod selftest;
 mod serve;
@@ -180,6 +237,8 @@ impl Config {
 }
 
 const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
+帮助:  help [命令...]                             (只打印用法，不查询设备)
+身份:  runtime-info --json                        (本程序构建声明；纯宿主，不查询设备)
 跑局:  run --task <T> [--serial S] [--endless] [--budget-calls N] [--max-steps N] [--app P] [--assert \"词1,词2\"] [--perceive ocr] \"<目标>\"
 评测:  benchmark --task <T> [--rounds N] [--app P] [--assert ..] [--json] \"<目标>\"
 并行:  parallel --job \"任务|目标|serial[|app[|assert]]\" [--job ...] [--budget-calls N] [--endless]
@@ -187,12 +246,13 @@ const USAGE: &str = "phonefarm v0.2 — 记录契约 v1 运行时
 插件:  plugins                                   (列出已登记的专用场景插件)
 CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/module/Runner | --dir APK目录)
        [--environment E.json] [--serial S] [--include 正则] [--exclude 正则] [--resume] [--retry N]
-       [--timeout-ms N] [--idle-timeout-ms N] [--heal-script 路径] [--install-cmd '模板{apk}'] [--out 目录]
+       [--timeout-ms N] [--idle-timeout-ms N] [--heal-script 路径] [--install-cmd 'pm install -r {apk}'] [--out 目录]
        [--detach 后台跑,轮询 <out>/summary.json]   (A2OH CTS 批量挂机执行器,Android/OH 双协议)
 取数:  cts-fetch --remote <设备侧结果路径> [--serial S] [--out 目录] [--pattern 正则] [--max-mb N]
        (设备上已有 CTS/XTS 结果 → hdc file recv/adb pull 拉回 + 断言扫描 → assertions.json)
 任务:  quest [--mode auto|dialogue|interact|navigate] [--sec N] [--serial S]  (原神场景插件的独立长跑Agent)
 设备:  devices | keepalive [--status|--watch [秒]] [--serial S] [--json] | probe --serial <S> \"只读命令\" | exec --serial <S> \"命令\" --yes
+       app-snapshot --serial S  (只读：前台与正在运行的第三方应用；读取失败记入 errors)
        fleet [--json] [--serial S] [--screenshot-dir 目录]
        (农场只读快照: 一趟 shell 把每台手机的在线/型号/电量/温度/风扇/亮屏/前台应用/
         保活策略/设备锁读齐, 采不到的字段留空并写明原因。截图默认关, 且别人持锁时不截)
@@ -210,7 +270,10 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        vks-report --root <A/B目录> --sample S --config-a N --config-b N   (两臂判读面, 判读哈希自证)
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
+资格:  qualify --from evidence.json --json (纯离线资格评估；通过不等于优化成功)
+       confirmation-observation --bundle B.json --out R.json (单轮原始记录验收，始终不授优化结论)
 评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
+       eval recover --session DIR --serial S [--json]
        (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
         shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
 接入:  onboard --package <包名> [--serial S] [--out 目录] [--rounds 5] [--seconds 30] [--enter-only]
@@ -222,21 +285,45 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)
 自检:  selftest calibrate|run|quality|report --out <证据目录> [--cases aa*4,better:1,worse:2] [--pairs N]
        (判定链已知答案自检: refbench 可控负载 → 现有 compare+decide / eval 画质地板 → 混淆矩阵 + MDE 表)
-灰档:  gray-layer {probe|loadop|passdump|copyprobe|upop|frameaudit|frameaudit-ts [pkg] | target <pkg> | status | off} [--keep-prop] [--so 层.so]
-       (Vulkan 层挂/摘/查, knobs/gray/enable_layer.sh 的移植; .so 由 build_layer.sh 产出)
+游戏资源 (可选特性 game, 默认不编译): game-deploy capabilities --json
+       game-deploy --request FILE --serial S --out DIR [--device-binding JSON] --json
+       game-deploy recover --session SOURCE --serial S --out RECOVERY_OUT --json
+灰档:  gray-layer status [--serial S] | off [pkg] [--serial S] [--json]
+       gray-layer session --mode MODE --package PKG --serial S --out DIR [--max-seconds 900] [--power-policy observe|battery] [--actor-id agent] [--so 层.so] [--keep-prop]
+       gray-layer session-status --out DIR [--request-id ID] --json
+       gray-layer session-action --out DIR --request REQUEST.json|- --json
+       gray-layer session-recover --session DIR --serial S --json
+       gray-layer refbench-loadop --serial S --out DIR [--frames 1800] [--intensity 8] [--timeout-seconds 150] [--so 层.so] [--evidence-origin device|synthetic] [--json]
+       gray-layer refbench-recover --session DIR --serial S --json
+       旧 probe/loadop/passdump/frameaudit/frameaudit-ts/target 挂层后退出入口已退役；须显式使用 session。
+       旧 --keep-prop 仅安装不启动流程不自动迁移；session 始终启动目标，--keep-prop 仅控制 marker 等待/收窄。
+       (Vulkan 层挂/摘/查; copyprobe/upop 当前不支持执行，包括自定义 SO；历史证据可离线分析)
        frame-audit capture --out <目录> [--ts] [--captures N] [--gap 秒] [--so 层.so]   (只读层抓原神一帧步骤清单)
+       frame-audit recover --session <会话目录> --serial S [--json]   (核验并恢复本次灰层抓帧范围)
        frame-audit analyze <knobs_frameaudit.json>... [--md F] [--json F]           (离线: 步骤总览 + 白存/白读/白清/白画)
-       gray-ab [--pairs N] [--mode loadop|copyprobe] [--serial S] --out <目录>
+工件:  gray-artifact {build (--source sampled.comp | --adapted-artifact DIR) --out DIR [--ndk DIR] [--timeout-seconds 1..120] [--process-supervision own-helper-groups|inherited-group] | inspect --spirv FILE | verify --artifact DIR | adapt-storage --source original.comp --spirv original.spv --out DIR | verify-adaptation --artifact DIR} [--json]
+       (离线编译/ABI/摘要门禁; deployable=false, 不构成真机部署资格)
+       gray-ab [--pairs N] [--mode loadop] [--serial S] --out <目录>
+       gray-ab recover --session DIR --serial S [--json]
+       (loadop 支持 --json / --evidence-origin device|synthetic；完整会话停充与恢复，copyprobe 当前不支持执行)
        (灰档 A/B 采集编排: 两臂都挂层只切改写属性, 每臂重启原神进大世界)
+画质:  sequence-quality --reference R.json --candidate C.json --rules frozen.json [--out tasks/quality/report.json]
+       (配对连续帧 RGB PSNR/色偏/残差变化, 零 Token 离线; PASS 只覆盖冻结指标, 不证明无鬼影)
 标尺:  bench --serial <S> --model <PATH.tflite> [--runs 3] [--json] [--limit-ms 4.0] [--metric gpu|invoke] [--gpu-level N] [--no-lock] [--out 目录]
        (端侧 TFLite 模型真机延迟标尺: 锁频+等冷+GPU Delegate 算子日志解析, SPEC_SR_LOOP Gate 0)
-性能:  perf [--serial S] [--app 包名] [--rounds 10] [--source sysfs|smartperf] [--power-rail usb|battery] [--xpower-out 目录] [--json]
-       perf --from-csv <本地 data.csv> [--json]   (离线解析已拉回的 SP_daemon 产物,不碰设备)
+性能:  perf [--serial S] [--app 包名] [--rounds 10] [--source sysfs|smartperf|sflatency] [--layer 图层] [--power-rail usb|battery] [--xpower-out 目录] [--json]
+       perf --from-csv <本地 data.csv> [--app 包名] [--json]   (离线解析已拉回的 SP_daemon 产物,不碰设备; --app 声明它是 -PKG 采的)
+       frame-sources [--serial S] [--app 包名] [--json]
+       (这台设备有哪些帧率/帧时来源: kgsl_ftrace / sf_latency / gfxinfo_hwui / sp_daemon_pkg / rs_fpscount ...,
+        各自口径 app / app_ui / global、能否进判定表; 只读探测, 退出码 0=有能进判定表的来源)
        (归一化性能快照: 三条通路同一份字段, 采不到的字段是 null 并附原因, 不填 0。
         安卓 --source sysfs(默认): 直读 /sys/class/power_supply 电源轨, 只出功耗;
         安卓 --source smartperf: HiSmartPerf 通路, 往设备推 GamePerfToolCollector 常驻 +
           adb forward socket 实时流, 出帧率/功耗/温度(要 --app 包名; 有副作用, 故不默认);
-        鸿蒙(--serial hdc:<key>): HiSmartPerf 的 SP_daemon 落盘 CSV。尚未上真机验证。
+        安卓 --source sflatency: 无 root 的显示帧, 轮询 dumpsys SurfaceFlinger --latency <目标图层>,
+          只出帧 (frame_judge 标 sf_latency); 要 --app 包名, 图层不给就按包名挑;
+        鸿蒙(--serial hdc:<key>): HiSmartPerf 的 SP_daemon 落盘 CSV; 带 --app 走 -PKG 应用口径
+          (frame_judge 标 sp_daemon_pkg), 不带是整机口径, fps 记缺失, meta.fps_scope 标口径。
         退出码 0=采到/1=没采到/2=通路不可用。--xpower-out 才刷 Xpower 落盘拉回 dubai.db)
 采集:  capture --serial <S> [--out 目录] [--frames 200] [--max-steps N] [--settle-ms 800] [--mode auto] [--no-shutdown] [--json]
        (原神无 UI 自动巡航原始帧采集: 只留大世界探索态帧 + manifest 路线分段, SPEC_SR_LOOP Gate 2)
@@ -249,8 +336,8 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
        schema [--type r类型] | config [--key k]     (查看类全部支持 --json,只读盘不烧token)
 服务:  serve [--root 目录]                        (MCP stdio 工具服务,供 octos 等客户端挂载)
 设备锁: 碰设备的子命令 (run/onboard/benchmark/parallel/script/bench/gray-ab/gray-layer/autoloop/eval/gpu-op/perf/
-       capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
-       通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h] [--no-devlock]
+       capture/test-batch/cts-fetch/quest/probe/exec/experiment/selftest/frame-sources) 自己拿锁、每 60s 心跳、跑完释放 (tools/devlock)。
+       通用参数 [--lock-label 名字 (缺省 $DEVLOCK_LABEL, 再缺省 phonefarm)] [--lock-wait 2h]（缺省一直等到拿到或取消）
        锁已在同一 label 手里 (外层 devlock run / optimize) 时原地执行; 没拿到锁不碰设备, 退出 2";
 
 /// 任务数据根(tasks 目录)解析: PF_TASKS_ROOT 环境变量优先(实验臂隔离/单测注入,
@@ -357,17 +444,123 @@ fn spawn_detached_with(args: &[String], console: &str, envs: &[(&str, &str)]) ->
     Ok(cmd.spawn()?.id())
 }
 
+#[cfg(test)]
+fn isolate_fd_test(name: &str) -> bool {
+    if std::env::var("PF_FD_UNIT_TEST").as_deref() == Ok(name) { return false; }
+    // A fork in another libtest thread duplicates even CLOEXEC descriptors until
+    // exec. Immediate last-close assertions need a process with only this test.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name]).env("PF_FD_UNIT_TEST", name).output().unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    true
+}
+
+#[cfg(not(feature = "game"))]
+const GAME_FEATURE_OFF: &str =
+    "game-deploy 属于可选特性 game, 本构建未启用: cd src && cargo build --release --features game";
+
 fn main() {
+    if let Some(code) = fd_lock::transport_entry() { std::process::exit(code); }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // A document read, including for commands whose old parser ignores --help.
+    if args.first().is_some_and(|arg| arg == "help") {
+        let usage = match args.get(1).map(String::as_str) {
+            Some("gray-layer") => graylayer::USAGE,
+            Some("gray-ab") => grayab::USAGE,
+            Some("eval") => eval::USAGE,
+            #[cfg(feature = "game")]
+            Some("game-deploy") => game_deploy::USAGE,
+            _ => USAGE,
+        };
+        println!("{usage}");
+        return;
+    }
+    runtime_identity::report_startup();
     // 碰设备的子命令先过设备锁 (src/devlock.rs): 没拿到锁不碰设备
     if let Some(sub) = args.first().cloned() {
-        if devlock::needs_lock(&sub, &args[1..]) {
+        let gray = matches!(sub.as_str(), "gray-layer" | "gray-ab");
+        let deployment = sub == "game-deploy";
+        if gray {
+            match graylayer::cli_admission(&sub, &args[1..]) {
+                Ok(graylayer::GrayCliAdmission::Help) => {
+                    // Admission has already identified true help (not an option value). Route
+                    // through the same focused usage as each executor, including lock-flag help.
+                    let help = ["--help".to_string()];
+                    let code = if sub == "gray-layer" {
+                        graylayer::run_gray_layer(&help)
+                    } else {
+                        grayab::run_gray_ab(&help)
+                    };
+                    std::process::exit(code);
+                }
+                Ok(graylayer::GrayCliAdmission::Reject(rejection)) => {
+                    println!("{rejection}");
+                    std::process::exit(2);
+                }
+                Err(error) => { eprintln!("{error}"); std::process::exit(2); }
+                Ok(graylayer::GrayCliAdmission::Proceed) => {},
+            }
+        }
+        // True help was handled above. A gray option's value named --help must
+        // not trigger the legacy gate's token-based help exemption.
+        #[cfg(not(feature = "game"))]
+        if deployment {
+            eprintln!("{GAME_FEATURE_OFF}");
+            std::process::exit(2);
+        }
+        let queue_required = if deployment {
+            #[cfg(feature = "game")]
+            match game_deploy::needs_queue(&args[1..]) {
+                Ok(required) => required,
+                Err(error) => { println!("{}", game_deploy::error_value(&error)); std::process::exit(2); }
+            }
+            #[cfg(not(feature = "game"))]
+            unreachable!()
+        } else if gray {
+            // Use the same value-aware stripping as admission. Host-only
+            // clients must work while their persistent owner holds the lease;
+            // recovery enters its retained context directly.
+            graylayer::needs_queue(&sub, &args[1..])
+        } else {
+            devlock::needs_lock(&sub, &args[1..])
+        };
+        if queue_required {
             if let devlock::Gate::Exit(code) = devlock::gate(&mut args) {
                 std::process::exit(code);
+            }
+        } else if gray || deployment {
+            // Admission already checked these flags; keep execution's argument
+            // view identical without invoking any lock process.
+            if let Err(error) = devlock::strip_lock_args(&mut args) {
+                eprintln!("{error}");
+                std::process::exit(2);
             }
         }
     }
     match args.first().map(|s| s.as_str()) {
+        Some("__lease-handoff") => std::process::exit(fd_lock::handoff(&args[1..])),
+        Some("runtime-info") => {
+            if args.len() > 2 || args.get(1).is_some_and(|arg| arg != "--json") {
+                eprintln!("usage: phonefarm runtime-info --json");
+                std::process::exit(2);
+            }
+            println!("{}", runtime_identity::identity());
+        }
+        Some("__capture-worker") => {
+            std::process::exit(capture::run_worker(&args[1..]));
+        }
+        Some("__observe-worker") => {
+            std::process::exit(observation::run_worker(&args[1..]));
+        }
+        Some("__lease-transport-worker") => {
+            std::process::exit(lease_command::transport_worker(&args[1..]));
+        }
+        Some("remote-control") => {
+            std::process::exit(remote_control::run(&args[1..]));
+        }
+        Some("lease") => {
+            std::process::exit(devlease::run_lease(&args[1..]));
+        }
         Some("serve") => {
             // MCP stdio 工具服务(SPEC_MCP_SERVE): octos 等客户端的外部工具契约
             std::process::exit(serve::run_serve(&args[1..]));
@@ -396,19 +589,31 @@ fn main() {
             // 两族并列,各自 best-effort(某族工具不在 PATH 就跳过):
             // hdc 目标直接以 "hdc:<key>" 形态给出,拷进 --serial 即用
             if let Some(adb) = device::locate_adb() {
-                if let Ok(out) = std::process::Command::new(&adb).arg("devices").output() {
+                if let Ok(out) = crate::fd_lock::transport_command(&adb).arg("devices").output() {
                     print!("{}", String::from_utf8_lossy(&out.stdout));
                 }
             } else {
                 eprintln!("(未找到 adb,仅列 hdc;ADB_BIN=/path/to/adb 可指定)");
             }
-            if let Ok(out) = std::process::Command::new("hdc").args(["list", "targets"]).output() {
-                for l in String::from_utf8_lossy(&out.stdout).lines() {
-                    let l = l.trim();
-                    if !l.is_empty() && l != "[Empty]" {
-                        println!("hdc:{l}");
+            if let Ok(out) = crate::fd_lock::transport_command("hdc").args(["list", "targets"]).output() {
+                // 与 adb devices 一样: 第一列是可直接用的 serial, 不能用的在后面标出状态
+                for (key, state) in crate::fleet::hdc_targets(&String::from_utf8_lossy(&out.stdout)) {
+                    if state == "device" { println!("hdc:{key}"); } else { println!("hdc:{key}\t{state}"); }
+                }
+            }
+            // iOS: 经 WebDriverAgent, serial 形态 "ios:<udid>"。
+            // 这里只列 USB 上看得见的设备(libimobiledevice 的 idevice_id);
+            // 能不能用还取决于手机上 WDA 是否已装并启动 —— 枚举不替这条说话。
+            match std::process::Command::new("idevice_id").arg("-l").output() {
+                Ok(out) => {
+                    for l in String::from_utf8_lossy(&out.stdout).lines() {
+                        let l = l.trim();
+                        if !l.is_empty() {
+                            println!("ios:{l}");
+                        }
                     }
                 }
+                Err(_) => eprintln!("(未找到 idevice_id, 不列 iOS; 装 libimobiledevice 或设 WDA_URL 直连已有隧道)"),
             }
         }
         Some("run") => {
@@ -720,9 +925,24 @@ fn main() {
             // 端侧模型物理延迟标尺(SPEC_SR_LOOP Gate 0): 锁频+等冷+GPU Delegate 真机秒筛, 纯增量子命令
             std::process::exit(bench::run_bench(&args[1..]));
         }
+        Some("interp-judge") => {
+            // 插帧验收: 插出的中间帧对原生 2 倍帧率真值, 静止块/运动块/最差块/包络/细节 + 序列闪烁
+            std::process::exit(interpjudge::run_interp_judge(&args[1..]));
+        }
+        Some("iq-diagnose") => {
+            // 画质降质诊断: 哪种降质 (模糊/振铃/锯齿/色偏/块效应/重影/光晕/闪烁)、在哪 (逐块热图 + 区域 + 最差块截图)
+            std::process::exit(iqdiagnose::run_iq_diagnose(&args[1..]));
+        }
+        Some("iq-judge") => {
+            // 画质验收: 候选与「原生自己跟自己比」同一水平才算画面不变 (稳定块 PSNR/SSIM + 细节能量)
+            std::process::exit(iqjudge::run_iq_judge(&args[1..]));
+        }
         Some("shot-diff") => {
             // copyprobe 验收 ②: 截帧逐像素比对 (控制对基线)
             std::process::exit(shotdiff::run_shot_diff(&args[1..]));
+        }
+        Some("sequence-quality") => {
+            std::process::exit(sequence_quality::run_sequence_quality(&args[1..]));
         }
         Some("gray-ab") => {
             // 灰档 A/B 采集编排 (两臂都挂层只切属性; 每臂重启原神)
@@ -732,6 +952,9 @@ fn main() {
             // 一帧步骤清单: capture 真机抓 (只读层) / analyze 离线找多余步骤
             std::process::exit(frameaudit::run_frame_audit(&args[1..]));
         }
+        Some("gray-artifact") => std::process::exit(grayartifact::run(&args[1..])),
+        #[cfg(feature = "game")]
+        Some("game-deploy") => std::process::exit(game_deploy::run(&args[1..])),
         Some("gray-layer") => {
             // knobs/gray 灰档 Vulkan 层的挂/摘/查 (enable_layer.sh 的移植)
             std::process::exit(graylayer::run_gray_layer(&args[1..]));
@@ -748,6 +971,13 @@ fn main() {
         Some("onboard") => {
             // 新游戏零人工接入: 进门 → 进游戏探针 → 生成负载 → 实测可重复 → 游戏档案
             std::process::exit(onboard::run_onboard(&args[1..]));
+        }
+        Some("qualify") => {
+            std::process::exit(qualification::run_qualify(&args[1..]));
+        }
+        Some("confirmation-driver") => { std::process::exit(confirmation_driver::run_confirmation_driver(&args[1..])); }
+        Some("confirmation-observation") => {
+            std::process::exit(confirmation_observation::run_confirmation_observation(&args[1..]));
         }
         Some("eval") => {
             // game_opt_loop 评测请求的唯一入口 (v2 信封 shader/sysparam/gray; v1 扁平兼容)
@@ -816,9 +1046,33 @@ fn main() {
             // 上层拿到的 JSON 字段完全一致。零 Token, 只读设备。纯增量子命令。
             std::process::exit(perfsrc::run_perf(&args[1..]));
         }
+        Some("frame-sources") => {
+            // 这台设备上有哪些帧率/帧时来源、各自什么口径 (app / app_ui / global)、能否进判定表。只读探测。
+            std::process::exit(framesrc::run(&args[1..]));
+        }
         Some("capture") => {
             // 原神无 UI 自动巡航截图(SPEC_SR_LOOP Gate 2): 复用 genshin 插件生命周期与单步, 只抓原始帧, 纯增量子命令
             std::process::exit(capture::run_capture(&args[1..]));
+        }
+        Some("collect") => {
+            // 有界滚动采集(SPEC_OBSERVATION_BUDGET 原语 1): 组合动作, 零 Token。
+            // 语义移自 iPhone-use 的 pua_scroll_find / pua_collect_list。
+            std::process::exit(collect::run_collect(&args[1..]));
+        }
+        Some("decide") => {
+            // 决策原语(typed decisions: choice/score/noul), 零 Token。
+            // 本地那档是降级占位不是模型; 侧车那一档是把 Core ML 接进来的地方。
+            std::process::exit(decision::run_decide(&args[1..]));
+        }
+        Some("ios-probe") => {
+            // iOS 后端真机体检: 逐项探 WDA 端点, 并核实界面树形状与解析器的假设对不对。
+            // 存在理由: 这个后端是照文档形状写的, 没过真机 —— 给人一条命令去核, 而不是等人想起来。
+            std::process::exit(ios::run_ios_probe(&args[1..]));
+        }
+        Some("screen") => {
+            // 设备屏幕观战窗口(SPEC_SCREEN_WIDGET): 零 Token 只读。
+            // 每帧短时 ownership，不能让看屏干扰已占有设备的测量。
+            std::process::exit(screen::run_screen(&args[1..]));
         }
         Some("test-batch") => {
             // CTS 批量挂机执行器 (CTS Harness Spec): A2OH 桥接环境的 instrument 调度,
@@ -940,18 +1194,31 @@ fn main() {
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--serial" => serial = it.next().cloned(),
-                    "--mode" => mode = it.next().cloned().unwrap_or_else(|| "auto".into()),
+                    "--mode" => {
+                        let Some(value) = it.next() else {
+                            eprintln!("quest --mode 缺少值，应为 auto|dialogue|interact|navigate");
+                            std::process::exit(2);
+                        };
+                        if let Err(e) = plugins::genshin::QuestMode::parse(value) {
+                            eprintln!("quest 参数错误: {e}");
+                            std::process::exit(2);
+                        }
+                        mode = value.clone();
+                    }
                     "--max-seconds" | "--sec" => max_sec = it.next().and_then(|v| v.parse().ok()).unwrap_or(1800),
                     "--no-shutdown" | "--no-lock" => auto_shutdown = false,
                     _ => {}
                 }
+            }
+            if let Err(e) = plugins::genshin::QuestMode::parse(&mode) {
+                eprintln!("quest 参数错误: {e}");
+                std::process::exit(2);
             }
             let tmp = std::env::temp_dir().join(format!("phonefarm-quest-{}", std::process::id())).to_string_lossy().to_string();
             let _ = std::fs::create_dir_all(&tmp);
             let phone = device::Device::new(serial.clone(), tmp);
             let cfg = plugins::genshin::QuestConfig {
                 mode,
-                serial,
                 max_seconds: max_sec,
                 auto_choice: true,
                 auto_shutdown,

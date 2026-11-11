@@ -339,10 +339,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 对照源: `loop_v1/runs/report.json` —— 判据 5 的回放自检直接 cmp 的就是这份。
+    /// 对照源: `loop_v1/fixtures/golden/runs/report.json` —— 判据 5 的回放自检直接 cmp 的就是这份。
     #[test]
     fn report_matches_recorded_golden() {
-        let runs = repo_root().join("loop_v1/runs");
+        let runs = repo_root().join("loop_v1/fixtures/golden/runs");
         let want = std::fs::read_to_string(runs.join("report.json")).unwrap();
         let base_runs = load_runs(&format!("{}/ctrl*", runs.display()));
         let knob_runs = load_runs(&format!("{}/knob*", runs.display()));

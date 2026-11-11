@@ -305,6 +305,59 @@ fn for_each_combination(n: usize, k: usize, mut f: impl FnMut(&[usize])) {
     }
 }
 
+/// n 对 n 的精确双侧置换检验里可能达到的**最小** p 值: 2 / C(2n, n)。
+///
+/// 用途是结构性防护: p 值不可能比这个更小, 所以当它已经不满足 alpha 时,
+/// 这个样本量下任何效应量都判不出「显著」。2026-10-21 实测到的一次事故就是
+/// 3v3 (min p = 0.1) 去判 alpha_win = 0.025, 一道预期 −14.7% 的考题被判成「无变化」。
+pub fn min_two_sided_p(n_per_arm: usize) -> f64 {
+    if n_per_arm == 0 {
+        return 1.0;
+    }
+    // C(2n, n) 用 f64 连乘, n 很大时自然很大 —— 这里只用于几十以内, 精度够
+    let n2 = 2 * n_per_arm;
+    let mut c = 1.0_f64;
+    for i in 0..n_per_arm {
+        c = c * (n2 - i) as f64 / (i + 1) as f64;
+        if !c.is_finite() {
+            // C(2n,n) 超出 double (n 约 >= 515): 真值小到 0 附近, 提前返回别把进程卡在大循环里
+            return 0.0;
+        }
+    }
+    (2.0 / c).min(1.0)
+}
+
+/// 「改善」一侧最严会收紧到几个指标: 帧时 p95、平均帧率, 再加上可能进判定的整机功耗。
+/// 功耗进不进判定要等数据出来 (两臂是否全程放电态) 才知道, 开跑前的防护只能按最严的算。
+pub const MAX_WIN_METRICS: usize = 3;
+
+/// n v n 精确置换检验要判得出 p < `alpha_win`, 每臂至少要几轮。
+/// 64 以内找不到就返回 None (alpha_win 小得离谱, 不是这里该猜的)。
+pub fn min_pairs_for(alpha_win: f64) -> Option<usize> {
+    (2..=64).find(|n| min_two_sided_p(*n) < alpha_win)
+}
+
+/// 结构性防护: n v n 的样本量在数学上判不出 p < `alpha_win` 时拒绝开跑。
+///
+/// `what` 是给人看的出处 (如 `autoloop --pairs`), 报错里会告诉调用方最少要给几轮。
+/// selftest / eval / autoloop 都走这一个函数, 不各自再算一遍 2/C(2n,n)。
+pub fn ensure_resolvable(n_per_arm: usize, alpha_win: f64, what: &str) -> Result<(), String> {
+    let p_min = min_two_sided_p(n_per_arm);
+    if p_min < alpha_win {
+        return Ok(());
+    }
+    let need = match min_pairs_for(alpha_win) {
+        Some(k) => format!("{what} 至少给 {k}"),
+        None => format!("alpha_win={alpha_win} 太小, 64 轮以内都够不着, 先检查显著性门槛"),
+    };
+    Err(format!(
+        "{n_per_arm}v{n_per_arm} 的样本量判不出显著改善: 精确置换检验的最小双侧 p = 2/C({},{}) = {p_min:.4}, \
+而显著改善要求 p < {alpha_win:.4}。{need}, 否则这次的结论只能是「没有显著变化」, 跑多久都一样",
+        2 * n_per_arm,
+        n_per_arm,
+    ))
+}
+
 /// 均值差的精确双侧置换 p 值。
 ///
 /// 把 a+b 合并后穷举所有"取 len(a) 个作为 A 组"的分法, 统计 |均值差| 不小于
@@ -767,6 +820,9 @@ pub fn run_loopstat(_args: &[String]) -> i32 {
             req.get("power_available").and_then(|v| v.as_bool()).unwrap_or(false),
             &s("power_note")),
         "env_stats" => sysparam::env_stats(&s("text")),
+        // 取窗口径: trace 只需给头部 (#loop_v1_meta 行), 用来离线重算已存的臂
+        "env_stats_window" => sysparam::env_stats_window(
+            &s("text"), sysparam::capture_window_from_trace(&s("trace_head"))),
         // ── 模型侧 (src/llm.rs) ──
         "load_keys" => {
             match llm::load_keys(&arr("paths").iter().map(|p| p.py_str()).collect::<Vec<_>>()) {
@@ -847,7 +903,37 @@ mod tests {
         xs.iter().map(|x| Num::Float(*x)).collect()
     }
 
-    /// 5v5 精确置换检验就是 C(10,5)=252 种分法, 一种不多一种不少。
+    /// 5v5 精确置换检验就是 C(10,5)=252 种分法, 一种不多一种不少。    /// 样本量能判到什么: 3v3 的最小 p 是 0.1, 对 alpha_win=0.025 根本不够。
+    #[test]
+    fn min_two_sided_p_gates_the_sample_size() {
+        assert!((min_two_sided_p(3) - 0.1).abs() < 1e-12, "{}", min_two_sided_p(3));
+        assert!((min_two_sided_p(5) - 2.0 / 252.0).abs() < 1e-12);
+        assert!(min_two_sided_p(5) < 0.025);
+        assert!(min_two_sided_p(4) > 0.025, "4v4 的最小 p = 2/70 = 0.0286, 仍不够");
+        assert_eq!(min_two_sided_p(0), 1.0);
+        // 单调下降
+        assert!(min_two_sided_p(10) < min_two_sided_p(8));
+    }
+
+    /// 防护函数: 给出最少轮数, 而且对 alpha/2 与 alpha/3 两种 Bonferroni 口径都是 5。
+    #[test]
+    fn ensure_resolvable_names_the_minimum_pairs() {
+        assert_eq!(min_pairs_for(0.05 / 2.0), Some(5));
+        assert_eq!(min_pairs_for(0.05 / 3.0), Some(5));
+        // p_threshold=0.01 时 (gpu-op 的生产口径) 要 6 轮: 2/C(12,6) = 0.00216 < 0.0033
+        assert_eq!(min_pairs_for(0.01 / 3.0), Some(6));
+        assert!(ensure_resolvable(5, 0.05 / 3.0, "--pairs").is_ok());
+        let e = ensure_resolvable(3, 0.05 / 3.0, "--pairs").unwrap_err();
+        assert!(e.contains("3v3") && e.contains("0.1000") && e.contains("--pairs 至少给 5"), "{e}");
+        let e = ensure_resolvable(4, 0.025, "protocol.rounds").unwrap_err();
+        assert!(e.contains("protocol.rounds 至少给 5"), "{e}");
+        assert!(ensure_resolvable(2, 1e-60, "x").unwrap_err().contains("太小"));
+        // 0 轮/1 轮也拒
+        assert!(ensure_resolvable(0, 0.5, "x").is_err());
+        assert!(ensure_resolvable(1, 0.5, "x").is_err());
+    }
+
+
     #[test]
     fn permutation_enumerates_every_split() {
         let (p, total) = perm_p_two_sided(&n(&[1.0, 2.0, 3.0, 4.0, 5.0]), &n(&[6.0, 7.0, 8.0, 9.0, 10.0]));
@@ -958,7 +1044,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 对照源: `loop_v1/runs/` 的 21 轮真实录制 —— 旧 Python 版在同一批 summary.json
+    /// 对照源: `loop_v1/fixtures/golden/runs/` 的 21 轮真实录制 —— 旧 Python 版在同一批 summary.json
     /// 上产出的 describe / compare, 与这里逐字节比。
     #[test]
     fn compare_no_ci_differs_only_in_the_interval() {
@@ -984,7 +1070,7 @@ mod tests {
     fn analyze_matches_recorded_golden() {
         let dir = repo_root().join("loop_v1/fixtures");
         let want = std::fs::read_to_string(dir.join("analyze_ctrl_knob.json")).unwrap();
-        let runs = repo_root().join("loop_v1/runs");
+        let runs = repo_root().join("loop_v1/fixtures/golden/runs");
         let a = load_runs(&format!("{}/ctrl*", runs.display()));
         let b = load_runs(&format!("{}/knob*", runs.display()));
         assert_eq!(a.len(), 5);

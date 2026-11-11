@@ -6,8 +6,53 @@ phonefarm 里所有「和设备说话」的功能（任务回放 `run`、`perf`�
 ```
 调用方 ──► device::Device ──► Box<dyn platform::Backend> ──┬─ device::Adb  Android      serial 不带前缀
                                                            ├─ device::Hdc  OpenHarmony  serial = "hdc:<key>"
+                                                           ├─ ios::Ios     iOS          serial = "ios:<udid>"
                                                            └─ 你的实现     serial = "<前缀>:<key>"
 ```
+
+## 现有平台一览
+
+| 平台 | 传输 | serial 形态 | 能做 | 不能做 |
+| :--- | :--- | :--- | :--- | :--- |
+| Android | `adb` | 裸 serial | 三层改动面 + 全套遥测 | — |
+| OpenHarmony | `hdc` | `hdc:<connect key>` | 只能测（无 root） | 三层改动面 |
+| **iOS** | `wda` | `ios:<udid>`（udid 可省） | **看与动**：UI 树、截图、点按/滑动/输入、应用启停 | 三层改动面、遥测、shell、文件进出（见 `src/ios.rs` 头部）；真机体检走 `phonefarm ios-probe` |
+
+### iOS 后端（`src/ios.rs`）
+
+经 **WebDriverAgent**（WDA）操作真实 iPhone。隧道取值顺序：环境变量 `WDA_URL` >
+本机 `127.0.0.1:18100` > 该端口没人听且 serial 带了 udid 时自起 `iproxy` 并托管其生命周期。
+WDA 本体需要在手机上先装好并启动（见 iPhone-use 的 setup 流程），本后端**不负责装**。
+
+三件必须知道的事：
+
+1. **坐标一律是 WDA 的「点」(point)**，`size()` 也返回点。安卓侧是像素，两者语义不同，
+   但下游用的是归一化到 0~999 的相对位置，单位在归一化时相消。
+2. **`clickable` / `scrollable` 是推导出来的，不是设备给的。** WDA 的 JSON source 没有
+   安卓那套标志，本后端按 `XCUIElementType` 推导（口径在 `is_actionable` / `is_scrollable`）。
+   推导保守：控件类型 + `accessible` + 可用且可见，三条都满足才算可点。
+3. **性能数据来源是「整条通路不可用」**（`perfsrc::SRC_IOS_NONE`），不是「字段缺」。
+   WDA 不提供帧时与功耗，设备侧也没有 sysfs/ftrace —— 因此 iOS 后端**不能用于优化闭环的
+   改动面评测**，只能做 UI 遍历与画面取证。
+
+> **状态：形状已可一条命令核实，但本仓库环境上未跑过真机。**
+> 解析与报文构造有单测钉死（`src/ios.rs` 的 tests 段）；WDA 各版本的 JSON source 形状
+> **不靠文档猜 —— 靠 `phonefarm ios-probe`**。
+
+```bash
+phonefarm ios-probe [--serial ios:<udid>] [--json]
+```
+
+逐项探 WDA 的每个端点（隧道/status、会话、窗口尺寸、**界面树形状**、前台应用、应用清单、
+截图），并**核实界面树形状与解析器的假设对不对**：解出多少节点、多少个带 `type` / 文字 /
+坐标、用的是 `rect` 对象还是平铺形态、有多少零面积框。形状对不上就把 `problems` 打印出来，
+而不是静默返回空树。
+
+退出码 `0` = 全部就绪（可以把上面那条「未上真机」改掉）；`1` = 有端点不通或形状不匹配
+（并给出逐条修复建议）；`2` = 用法错。
+
+这一条命令的存在理由：把「未验证」变成一个**跑一次就有答案**的问题，
+而不是一句等人想起来的备注。
 
 ## 接一种新平台要做的事
 

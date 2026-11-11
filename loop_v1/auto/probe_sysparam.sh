@@ -24,6 +24,31 @@ CPU=/sys/devices/system/cpu/cpufreq
 
 echo "# probe_sysparam v1"
 
+# ── 探测时游戏在不在跑 ──
+# 厂商游戏模式 (perf2-hal / zperfcubeservice) 只在游戏切到前台、跑着的时候才去改频率边界。
+# 游戏没跑时探, kgsl.max_pwrlevel 这类节点写进去守得住, 会被判 live 进白名单; 真到测量时
+# 游戏一起来就被改回去。所以由调用方先把游戏拉起来, 通过 PROBE_PKG 告诉本脚本包名,
+# 本脚本在开头和结尾各记一次「游戏进程在不在、是不是前台」。调用方据此决定厂商服务会动的
+# 节点能不能进白名单。没给 PROBE_PKG 就如实记 none。
+PROBE_PKG="${PROBE_PKG:-}"
+game_state() {
+  gs_when="$1"
+  if [ -z "$PROBE_PKG" ]; then
+    printf 'probe.game_pkg=none\n'
+    return
+  fi
+  if [ -n "$(pidof "$PROBE_PKG" 2>/dev/null)" ]; then gs_run=yes; else gs_run=no; fi
+  if dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | grep -q "$PROBE_PKG"; then
+    gs_fg=yes
+  else
+    gs_fg=no
+  fi
+  printf 'probe.game_pkg=%s\n' "$PROBE_PKG"
+  printf 'probe.game_running_%s=%s\n' "$gs_when" "$gs_run"
+  printf 'probe.game_foreground_%s=%s\n' "$gs_when" "$gs_fg"
+}
+game_state start
+
 # ── effect_test <key> <path> <试写值> ──
 # 写一个与当前不同的合法值, 等 1s 回读:
 #   live     : 值稳住了 (内核接受并保持)
@@ -54,15 +79,23 @@ effect_test() {
   # scaling_max_freq 与 kgsl.max_pwrlevel —— 1 秒回读看到的还是我们写的值,
   # 十几秒后就被管家压回去了。实测一组候选只写了 DDR/LLCC, 退出时 policy0 的
   # scaling_max 却从 1785600 变成 1228800。守不住的节点当不了旋钮, 不进白名单。
-  sleep 10
-  hold=$(cat "$et_p" 2>/dev/null)
+  # 守住检查分 5 次、每 2 秒读一次 (共 10 秒), 中途任何一次不是写的值就算守不住:
+  # 只在第 10 秒读一次的话, 厂商服务改回去又被别的东西改成同值的情况看不出来。
+  hold="$back"
+  et_i=0
+  while [ "$et_i" -lt 5 ]; do
+    sleep 2
+    et_now=$(cat "$et_p" 2>/dev/null)
+    if [ "$et_now" != "$et_val" ]; then hold="$et_now"; break; fi
+    et_i=$((et_i + 1))
+  done
   echo "$old" > "$et_p" 2>/dev/null
   sleep 1
   rst=$(cat "$et_p" 2>/dev/null)
   if [ "$back" != "$et_val" ]; then
     printf '%s.effect=rejected(wrote=%s readback=%s)\n' "$et_key" "$et_val" "$back"
   elif [ "$hold" != "$et_val" ]; then
-    printf '%s.effect=contested(wrote=%s 1s=%s 11s=%s)\n' "$et_key" "$et_val" "$back" "$hold"
+    printf '%s.effect=contested(wrote=%s 1s=%s lost=%s)\n' "$et_key" "$et_val" "$back" "$hold"
   else
     printf '%s.effect=live\n' "$et_key"
   fi
@@ -126,6 +159,26 @@ for pol_dir in "$CPU"/policy*; do
   curgov=$(cat "$pol_dir/scaling_governor" 2>/dev/null)
   othergov=$(cat "$pol_dir/scaling_available_governors" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -vx "$curgov" | head -1)
   [ -n "$othergov" ] && effect_test "$k.scaling_governor" "$pol_dir/scaling_governor" "$othergov"
+  # walt 调速器的冲高规则与升降频速率 (只在当前 governor 是 walt、目录存在时探)。
+  # 这几项决定「负载多高就直接拉到多高频」, 不碰渲染, 画面天然不变; 红魔超大核 hispeed_load=90
+  # 比中核 (100) 冲得积极, 是省电的候选方向。试写值都取与当前不同的合法值。
+  wd="$pol_dir/walt"
+  if [ "$curgov" = walt ] && [ -d "$wd" ]; then
+    for t in hispeed_load hispeed_freq up_rate_limit_us down_rate_limit_us; do
+      [ -e "$wd/$t" ] || continue
+      printf '%s.walt.%s.cur=%s\n' "$k" "$t" "$(cat "$wd/$t" 2>/dev/null)"
+      writable_test "$k.walt.$t" "$wd/$t"
+    done
+    hl=$(cat "$wd/hispeed_load" 2>/dev/null)
+    case "$hl" in ''|*[!0-9]*) ;; *) [ "$hl" -ge 100 ] && hl2=95 || hl2=$((hl + 5)); effect_test "$k.walt.hispeed_load" "$wd/hispeed_load" "$hl2" ;; esac
+    hf=$(cat "$wd/hispeed_freq" 2>/dev/null)
+    hf2=$(echo "$avail" | awk -v cur="$hf" '$1!=cur' | head -1)
+    [ -n "$hf" ] && [ -n "$hf2" ] && effect_test "$k.walt.hispeed_freq" "$wd/hispeed_freq" "$hf2"
+    for t in up_rate_limit_us down_rate_limit_us; do
+      v=$(cat "$wd/$t" 2>/dev/null)
+      case "$v" in ''|*[!0-9]*) ;; *) effect_test "$k.walt.$t" "$wd/$t" "$((v + 500))" ;; esac
+    done
+  fi
 done
 
 # ════ GPU (kgsl) ════
@@ -264,4 +317,5 @@ for z in /sys/class/thermal/thermal_zone*; do
   printf 'thermal.%s=%s\n' "$(cat "$z/type" 2>/dev/null)" "$(cat "$z/temp" 2>/dev/null)"
 done
 
+game_state end
 echo "# end"
