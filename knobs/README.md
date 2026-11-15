@@ -7,15 +7,15 @@
 
 ## 在整体里的位置
 
-整套东西是一个 harness：用户只提一种任务「把某个游戏在某台手机上优化一下」，
-内部决定开哪几层。phonefarm 是底座，本目录是底座里「应用改动」那一块。
+phonefarm 是移动设备的操作、采集与实测框架，本目录是其中「施加改动」那一块：
+上层（人、脚本或编排器）提候选，本目录负责施加与还原，测量和判定在 `loop_v1/` 与 `eval`。
 
-优化分三个层级：① 游戏代码（需要白盒，本目录管不到）② 图形接口 Vulkan 层（灰档）
-③ 系统参数（黑档）。闭源商用游戏上只剩 ②③，这两档就是本目录的全部内容。
+改动面分三档：① 应用自身（源码/资源/配置，需要白盒，本目录管不到）② 图形接口 Vulkan 层（灰档）
+③ 系统参数（黑档）。闭源应用上只剩 ②③，这两档就是本目录的全部内容。
 鸿蒙商用机在没有 root 的情况下两档都动不了，只能用 HiSmartPerf 测。
 
-本目录原先是独立仓库 `HGamey/knobs`，2026-09-23 并入 `phonefarm/knobs/`（保留提交历史），
-原仓库已归档。引用路径请写 `phonefarm/knobs/…`。灰档主机侧编排（`phonefarm gray-layer` / `gray-ab` / `shot-diff`）已收进 Rust 内核，剩超分那批实验脚本（genshin_quality.sh / genshin_upop_ab.sh）、`test_loadop.sh`（refbench 三臂对照配方）与设备端 shell 还没收。
+本目录 2026-09-23 由独立仓库并入 `phonefarm/knobs/`（保留提交历史），
+引用路径请写 `phonefarm/knobs/…`。灰档主机侧编排（`phonefarm gray-layer` / `gray-ab` / `shot-diff`）已收进 Rust 内核，剩超分那批实验脚本（genshin_quality.sh / genshin_upop_ab.sh）、`test_loadop.sh`（refbench 三臂对照配方）与设备端 shell 还没收。
 
 - 为什么、边界、判据、灰档可行性三问 → [`DESIGN.md`](DESIGN.md)
 - 旋钮接口（`apply`/`restore`/`status` + 自报）→ [`contract/knob.md`](contract/knob.md)
@@ -32,7 +32,7 @@ bash gray/enable_layer.sh probe             # 对 refbench 挂只读层 (问题 
 bash gray/enable_layer.sh loadop            # 同上 + 打开 LoadOp 改写 (判据 5) ✅ 成立
 bash gray/test_loadop.sh                    # 四臂对照, 证据落 evidence/05_loadop/
 bash gray/enable_layer.sh passdump <pkg>    # 只读观测: 导出 pass 形状表 + 描述符溯源
-bash gray/enable_layer.sh target <目标包名>  # 对目标游戏挂空层 (问题 2) ✅ 成立
+bash gray/enable_layer.sh target <目标包名>  # 对目标应用挂空层 (问题 2) ✅ 成立
 bash gray/enable_layer.sh status            # 只读看当前挂载态
 bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清扫)
 ```
@@ -40,7 +40,7 @@ bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清�
 | 问题 | 结论 | 判据 |
 |---|---|---|
 | 1 能给非 debuggable 应用挂层 | ✅ 成立 | refbench 外部 files 出现 `layer_loaded=true`；层数到 3600 帧 = 应用自报 3600 帧 |
-| 2 目标游戏反作弊放行 | ✅ 成立 | 更新到 7.1.0 后补齐：正常登录、进大世界、跑满一轮负载，无崩溃无反作弊告警 |
+| 2 目标应用反作弊放行 | ✅ 成立 | 更新到 7.1.0 后补齐：正常登录、进大世界、跑满一轮负载，无崩溃无反作弊告警 |
 | 3 鸿蒙等价机制 | ⏸ 无设备 | |
 | 灰档改写 #1 LoadOp→DONT_CARE（refbench） | ✅ 成立 | 四臂对照；改写被绑 14400 次、应用仍自报 LOAD、四臂 `clean_exit=true` |
 | 灰档改写 #2 前置：copyprobe 1:1 拷贝探针（原神） | ✅ 通过 | 5 臂跑满一轮无反作弊拦截；copies=subs≈帧数；p50 与无层差 <0.05ms；画面目检无异常（跨 run 逐像素受游戏内时辰影响不可比） |
@@ -66,7 +66,7 @@ bash gray/enable_layer.sh off               # 还原 (state 回滚 + 残留清�
 **黑档**：`black/knob_framecap.sh` 仍是接口骨架（限帧解除，判据 6 的关键），
 控制点待真机确认再落实现——未确认前安全空转，不乱写系统状态。
 
-## 换了游戏版本之后
+## 换了目标应用版本之后
 
 客户端更新到 7.1.0 才通的大世界，代价是两条：
 

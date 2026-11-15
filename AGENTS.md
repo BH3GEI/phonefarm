@@ -1,6 +1,6 @@
 # phonefarm
 
-设备自动化与实测基础设施：一个 Rust 内核，两种设备后端（Android `adb` / OpenHarmony `hdc`），
+移动设备的操作、数据采集与实测框架：一个 Rust 内核，两种设备后端（Android `adb` / OpenHarmony `hdc`），
 在同一套「设备抽象 + 记录契约 + 遥测 + 证据分级」之上，并列提供多条互不依赖的上层能力。
 
 多模态视觉模型（VLM）只是其中一条上层通路，不是这个项目的定义。
@@ -8,25 +8,27 @@
 宿主架构实现执行回路与决策机制分离：模型只做屏幕理解与动作规划，状态采集、规则拦截、
 校验、复盘与系统监控全部由 Rust 宿主进程控制。
 
-## 在整体里的位置（改这个仓库之前先看这一段）
+## 定位与边界（改这个仓库之前先看这一段）
 
-整套东西是一个 harness。用户只提一种任务——「把某个游戏在某台手机上优化一下」，
-内部自动决定用哪几层。本仓库是底座那一层，四件事：
+phonefarm 是泛用的移动设备框架，不绑定某一类应用或某一个上层。它负责四件事：
 
-- 设备：adb / hdc 两族的连接、保活、确定性脚本回放。新增一种设备/平台 = 实现 `platform::Backend`
-  并登记 serial 前缀，各平台能开哪几层及原因见 `docs/DEVICES.md`。
-- 应用改动（`knobs/`）：黑档系统参数，灰档 Vulkan layer 注入。
-- 测量：安卓 sysfs 电源轨加 raw ftrace kgsl，鸿蒙 HiSmartPerf，上层拿同一份 JSON；
-  测功耗期间停充。
-- 统计判定与还原：规则先于数据冻结，不显著就回退，退出前恢复现场。
+- 设备：adb / hdc 两族的连接、保活、设备锁、输入注入、确定性脚本回放。新增一种设备/平台 = 实现 `platform::Backend`
+  并登记 serial 前缀，各平台支持到哪一步及原因见 `docs/DEVICES.md`。
+- 采集：步骤级截图与 UI 树、遥测、帧时序、功耗、帧采集、测试结果，全部落盘、可离线下钻。
+- 施加改动（`knobs/`）：黑档系统参数，灰档 Vulkan layer 注入。
+- 测量、统计判定与还原：规则先于数据冻结，不显著就回退，退出前恢复现场。
 
-提改动的是上层（`game_opt_loop` 的决策层，或者人），判定这一侧留在本仓库。
+上层是谁不重要——人、shell 脚本、外部 agent / 编排器都通过 CLI、`--json`、MCP（`serve`）
+或评测请求契约（`eval --request`）来用它。上层提候选，判定这一侧留在本仓库。
 这条边界是硬的：**判定口径与阈值只能在本仓库里定，且在看到候选数据之前冻结**。
-上层可以随请求带参数（比如 `incumbent_latency_ms` 说明现任冠军的耗时），
+上层可以随请求带参数（比如 `incumbent_latency_ms` 说明现任最优的耗时），
 但那是被判定的输入，不是判定规则本身——出主意的一方不能改判定，否则整套证据失去意义。
 
-优化分三个层级：① 游戏代码（需要白盒）② 图形接口 Vulkan 层 ③ 系统参数。
-闭源商用游戏只剩 ②③。鸿蒙商用机在没有 root 的情况下只能测不能改：HiSmartPerf 采得到
+**不要把本仓库写成某个具体上层或某类应用的附属品**：README、skill、注释里描述能力时用通用措辞；
+具体应用（某款 App、某个负载）只作为案例、插件或载体出现。
+
+改动面分三档：① 应用自身（源码/资源/配置，需要白盒）② 图形接口 Vulkan 层 ③ 系统参数。
+闭源应用只剩 ②③。鸿蒙商用机在没有 root 的情况下只能测不能改：HiSmartPerf 采得到
 帧率、帧时、温度、功耗，但 ② 和 ③ 都动不了。可能的出路有工程机、官方性能接口、
 开发者模式下自签名应用三条，都还没核实过，不要当成现成能力写进文档或代码注释。
 
@@ -36,8 +38,7 @@
 **进行中，别写成已完成**：`loop_v1/` 的判定口径（解析→归因→统计→判据收口→白名单→判定→
 画面判据→模型交互/本地变异器）、两通路对照、Vulkan-Samples 三道闸与两臂判读面、refbench/vks
 报告都已经收进 Rust，`autoloop` 编排（`phonefarm autoloop`）与灰档主机侧编排（`phonefarm gray-layer` / `gray-ab` / `shot-diff`）也已收进，剩下载体构建/路线工具、
-设备端 shell（按约定保持设备端）与 `knobs/` 超分那批实验脚本还没收。上层的 `game_opt_loop` 那边，`optimize` 总入口、agent skill 与
-可视化前端都已经落地，还差的只是系统参数与画面流程改写两层的真机评测——`eval --request`
+设备端 shell（按约定保持设备端）与 `knobs/` 超分那批实验脚本还没收。`eval --request`
 入口已经落地并真机验证（③ 系统参数端到端已出报告，② 灰档机械链路已通、命中口径已对齐——真机实测命中 27 处 / begins 9195）。写目标形态时要标明状态。
 
 ## 能力族与常用命令
@@ -69,18 +70,18 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ./phonefarm run --serial hdc:<serial_id> --task OH设置冒烟 --budget-calls 30 "<目标>"
 ./phonefarm parallel --job "任务A|目标A|emulator-5554|com.pkg" --job "任务B|目标B|hdc:<key>"
 ./phonefarm plugins                        # 列出场景插件
-./phonefarm quest --mode auto --sec 1800   # 原神插件的独立长跑 Agent
+./phonefarm quest --mode auto --sec 1800   # 插件自带的独立长跑 Agent
 ```
 
 **确定性脚本与回放**（零 Token，同一套遥测）
 
 ```bash
-./phonefarm script --task 游戏压测 --app <pkg> --repeat 10 examples/sample_game_benchmark.json
+./phonefarm script --task 压测 --app <pkg> --repeat 10 examples/sample_game_benchmark.json
 ./phonefarm script --task 轨迹重放 20260831-213215      # 原样回放历史对局
 ./phonefarm script --detach ...                        # 后台跑，立即回报局 ID
 ```
 
-**一致性测试 harness（CTS / XTS）**（零 Token，Android/OH 双协议）
+**一致性测试（CTS / XTS）**（零 Token，Android/OH 双协议）
 
 ```bash
 # 批量执行：profile / 模块 / APK 目录三种入口
@@ -112,7 +113,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 
 ```bash
 ./phonefarm eval --request <eval_request.json> --serial S --json      # 评测唯一入口: v1 转交 gpu-op; v2 按 kind 路由 shader/sysparam/gray
-                                                                     # sysparam 真机已验证 (probe + 1 候选端到端, optimize 可直连);
+                                                                     # sysparam 真机已验证 (probe + 1 候选端到端, 上层可直连);
                                                                      # 自驱动负载 workload.launch = {extras, marker, static_extras} (Megacity city_flythrough):
                                                                      #   sysparam 每臂带 extras 重启应用、等 marker 落地再采; gray 挂层时带 extras 启动;
                                                                      #   gray 的画面比对改为上机前跑一次 storeop-check (static_extras 场景, 孪生 pass 现场开关)
@@ -121,7 +122,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
                                                                      # sysparam 改写臂施加后 +12s 与负载末尾各回读一次, 对不上 = 被厂商性能服务抢回 (contested),
                                                                      #   那一臂不进统计, conditions_observed.contested_arms 单列; 快照里只有厂商服务会动的
                                                                      #   频率边界 (kgsl.*pwrlevel、cpu.*.scaling_max/min) 变了不判留痕, 记进 snapshot_vendor_drift
-                                                                     # gray 命中口径已对齐 (hits = effective[].begins 之和, 真机实测 9195); 注意游戏必须先进入渲染态, 否则 require_hit 如实 ABORT
+                                                                     # gray 命中口径已对齐 (hits = effective[].begins 之和, 真机实测 9195); 注意目标应用必须先进入渲染态, 否则 require_hit 如实 ABORT
                                                                      # gray 改写: loadop_dont_care / storeop_dont_care (scope="<frame-audit sig 前缀≥8位>:<附件下标>", 可多条);
                                                                      #   每轮两臂负载前同位置截图比 PSNR, 低于 payload.image_check.min_psnr_db (缺省 30) → ABORT「画面出错」;
                                                                      #   过了才做统计判定 (可判 PASS/REJECT), psnr_db = 最差一轮。真机未验证
@@ -129,15 +130,15 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 ./phonefarm gpu-op --serial S --unlock                               # 回滚遗留锁频态
 ```
 
-`game_opt_loop` 决策层的物理采样与统计裁决端，契约见 `docs/SPEC_GPU_OP.md`。
+上层候选的物理采样与统计裁决端，契约见 `docs/SPEC_GPU_OP.md`。
 设备条件化与功耗遥测在 `src/hwcond.rs`（与 `bench` 共享），统计在 `src/gpustat.rs`。
 设备侧 `vkop_runner` 已构建（`tools/vkop/android_aarch64_vkop_runner`，源码与 `build.sh` 同目录）。
 画质补测支持真机参考帧集，回包里 `quality_reference` 记清真值出处。
 
-**性能优化闭环**（零 Token，需 root）
+**受控 A/B 实验**（零 Token，需 root）
 
 实现在 `loop_v1/`（工具链 + 纯函数解析器），**不是 phonefarm 子命令**。
-跑法与五条判据见 `loop_v1/README.md`；候选改动从 `docs/MOBILE_GPU_OPT_ROUTES.md` 的清单里挑。
+跑法与五条判据见 `loop_v1/README.md`；图形方向的候选手段清单见 `docs/MOBILE_GPU_OPT_ROUTES.md`（案例）。
 
 三条纪律，动手前必须清楚：
 
@@ -145,7 +146,7 @@ tools/devlock status                       # 设备锁：谁持有、谁在排�
 - **sysfs 写入退出前全部恢复**，进出设备快照逐行相等才算这轮成立
 - **解析全是纯函数**，同一份 trace 每次重算必须逐字节一致
 
-帧时序走 raw ftrace 的 kgsl 事件（不侵入游戏进程）。`SurfaceFlinger --latency`、
+帧时序走 raw ftrace 的 kgsl 事件（不侵入目标进程）。`SurfaceFlinger --latency`、
 `gfxinfo`、Perfetto GPU producer 三条路都已在本机实测排除，别再重复试，原因见 `loop_v1/README.md`。
 
 **假设—实验—证据闭环**
@@ -244,16 +245,16 @@ VLM 通路内部再分两层：核心层（`src/universal/`、`runtime.rs`、`de
 ## 目录结构
 
 ```
-loop_v1/               性能优化闭环：采集/归因/旋钮/统计判定/回滚/证据归档（Python 工具链，正在往 Rust 收）
+loop_v1/               受控 A/B 实验：采集/归因/旋钮/统计判定/回滚/证据归档（Python 工具链，正在往 Rust 收）
   carriers/            测试载体：megacity / vulkan-samples / anki-sponza
   refbench/            白盒靶子的驱动侧（靶子本身在同级 refbench 仓库）；判定链已知答案自检 phonefarm selftest 的用法也在这里
   auto/                自动挑旋钮：白名单探测 → 冻结规则 → 大模型选参 → 逐组对照
 knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入（由 loop_v1 驱动，
-                       说明见 knobs/README.md；原 HGamey/knobs 仓库已归档并入，shell 正在往 Rust 收）
+                       说明见 knobs/README.md；shell 正在往 Rust 收）
 src/                   Rust 内核源码
   universal/           通用核心：统一动作协议、三大算子、优先级引擎、插件契约
   plugins/             场景插件层
-  cts.rs               一致性测试 harness（双协议解析、对账、报告、结果提取）
+  cts.rs               一致性测试（双协议解析、对账、报告、结果提取）
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
   gpuop.rs gpustat.rs  Compute Shader 算子标尺 / A-B 冻结判定统计
   hwcond.rs            共享的设备条件化（等冷/锁频/还原）与功耗遥测

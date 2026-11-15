@@ -1,27 +1,27 @@
 # SPEC: GPU_OP — Compute Shader 算子的真机标尺与 A/B 裁决
 
 > 状态: 实施中 · 2026-09-22 起
-> 角色: `game_opt_loop` 自主进化闭环的**物理采样与统计裁决端**。
+> 角色: 上层候选（人、脚本或自主演化编排器提交）的**物理采样与统计裁决端**。
 > 上游负责变异与防爆门禁, 本通路只负责在真机上量出数字并做冻结规则判定,
 > **不做任何算法判断** —— 快慢好坏由数字说话。
 >
 > 代码分工: 本仓库提供 `phonefarm gpu-op` 一个独立 CLI 子命令 (`src/gpuop.rs`),
 > 共享的设备条件化与功耗遥测在 `src/hwcond.rs`, 统计在 `src/gpustat.rs`。
-> 基因组、变异、门禁、Pareto 归档全部在 `~/projects/game_opt_loop` (Rust)。
+> 基因组、变异、门禁、Pareto 归档全部在上层编排器里, 不在本仓库。
 >
 > **统一入口**: v2 起 (contract 加了 kind 信封) 上层只打 `phonefarm eval`
 > (`src/eval.rs`) —— v1 扁平请求原样转交 gpu-op, v2 shader 降级成 v1 转交,
 > sysparam / gray 由 eval 直接实现。gpu-op 仍是 shader 通路的实现本体。
-> 真机验证状态 (2026-09-23): sysparam 的 probe_only 与候选路径已在原神上端到端
-> 跑通 (game_opt_loop optimize --budget 30m 走完 1 候选, 出统计判定);
-> gray 已端到端验证: 命中口径 = 层自报 effective[].begins 之和 (原神实测 9195);
-> 游戏未进入渲染态时层看不到帧, require_hit 如实 ABORT (先预热游戏再发请求)。
+> 真机验证状态 (2026-09-23): sysparam 的 probe_only 与候选路径已在一款闭源 3D 应用上端到端
+> 跑通 (上层编排器 30 分钟预算走完 1 候选, 出统计判定);
+> gray 已端到端验证: 命中口径 = 层自报 effective[].begins 之和 (真机实测 9195);
+> 目标应用未进入渲染态时层看不到帧, require_hit 如实 ABORT (先预热应用再发请求)。
 
 ## 0. 铁律
 
 | # | 铁律 | 实现落点 |
 |---|---|---|
-| 1 | 不侵入任何游戏进程, 设备上零常驻、零残留 | runner 推到 `/data/local/tmp/phonefarm_gpuop`, 跑完 `rm -rf`; 采样循环有界, adb 断开自行到头 |
+| 1 | 不侵入任何目标进程, 设备上零常驻、零残留 | runner 推到 `/data/local/tmp/phonefarm_gpuop`, 跑完 `rm -rf`; 采样循环有界, adb 断开自行到头 |
 | 2 | sysfs 写入退出前全部恢复, 回读一致才算这轮成立 | `hwcond::Lock`; 回读不符即整轮作废并报错 |
 | 3 | 判定规则在看到数据之前冻结 | `FrozenRules` 由 `eval_request.protocol` 带入, 代码中无任何事后可调的阈值 |
 | 4 | 量不到的指标如实留空, 绝不用默认值填补 | 取不到的回 `null` (契约里声明成可空, 见 §6); 功耗轨不可用时当场报错退出, 不报 `0 W` |
@@ -42,7 +42,7 @@ phonefarm gpu-op --serial S --unlock      # 回滚上次异常退出遗留的锁
 - 退出码: `0` = PASS; `1` = 测量有效但判定失败 (SLOW / POOR_QUALITY / CRASH);
   `2` = 用法错 / 设备错 / 测量无效。与 `bench` 同一套口径。
 - `--json` 时 stdout 只有一个 `eval_report` 对象, 进度一律走 stderr。
-- 输入输出契约见 `game_opt_loop/contracts/eval_request.schema.json` 与 `eval_report.schema.json`。
+- 输入输出契约: `eval_request` / `eval_report` 两份 JSON Schema (由上层编排器维护, 字段口径以本文与 `src/eval.rs` 为准)。
 
 ## 2. 每轮协议 (顺序即契约)
 
@@ -142,7 +142,7 @@ phonefarm gpu-op --serial S --unlock      # 回滚上次异常退出遗留的锁
 ### 2026-09-23 真机验证 (NX809J, 19 张原神截帧)
 
 帧集用 `phonefarm capture` 采于璃月港大世界探索态, 2688x1216 原生截帧,
-中心裁剪到 1920x1080。上游证据: `game_opt_loop/evidence/M2_realframes_conditions.md`。
+中心裁剪到 1920x1080。上游证据在上层编排器的仓库里 (M2_realframes_conditions)。
 
 赛道基线模板在这 19 张上的**逐帧** PSNR:
 
@@ -360,7 +360,7 @@ USB 轨待机读数 5.127V x 0.144A = 0.738 W, 随负载变化。
 2026-09-23 接上真机参考帧集。
 
 其余部分 (契约、设备条件化、A/B 调度、功耗遥测、Welch 检验、冻结判定、报告渲染)
-已完成并有单测覆盖。上游 `game_opt_loop` 的演化闭环走的是 refbench 载体,
+已完成并有单测覆盖。上游演化编排器走的是 refbench 载体,
 两条载体的取舍见 §4.3。
 
 找不到 runner、SPIR-V 预检不过或缺 root 时, `phonefarm gpu-op` 仍会走完

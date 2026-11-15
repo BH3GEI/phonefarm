@@ -1,8 +1,8 @@
 # knobs — 可改动面：黑盒系统旋钮 + 灰盒 API 注入层
 
 > 立项 2026-09-21 · 上游依赖本仓库根目录的 phonefarm（`../loop_v1` 是驱动方）
-> 分工：harness 那条线单独有会话在跑；本仓库只提供「能改什么」，不碰编排/采集/判定
-> 配套：[HGamey/refbench](https://github.com/HGamey/refbench) 是白档靶子（已知答案的考场）
+> 分工：编排、采集、判定在别处（`../loop_v1`、`phonefarm eval`、上层编排器）；本目录只提供「能改什么」
+> 配套：refbench 是白档靶子（已知答案的考场）
 
 ## 0. 三档可改动面
 
@@ -23,8 +23,8 @@
 
 ## 1. 一句话目标
 
-给 harness 一个**可插拔的旋钮库**：黑档是系统级开关，灰档是 API 拦截层。
-每一条对应 [`../docs/MOBILE_GPU_OPT_ROUTES.md`](../docs/MOBILE_GPU_OPT_ROUTES.md) 里的一条路线，能被 harness 从外部驱动。
+给上层一个**可插拔的旋钮库**：黑档是系统级开关，灰档是 API 拦截层。
+每一条对应 [`../docs/MOBILE_GPU_OPT_ROUTES.md`](../docs/MOBILE_GPU_OPT_ROUTES.md) 里的一条路线，能被上层从外部驱动。
 
 ## 2. 边界
 
@@ -120,7 +120,7 @@
 | 改写·高风险 | shader 替换（fp32→fp16/mediump） | C 类 |
 
 每档改写**可逆且自报**：层写出「本次改了哪些 pass 的哪些字段」供 loop_v1 记证据。
-**层不判断改得好不好，那是 harness 的事。**
+**层不判断改得好不好，那是判定一侧（loop_v1 / eval）的事。**
 
 `gray/layer/vk_layer_refknobs.cpp` 是只读起步实现：pass-through + render pass 计数，
 经 `/proc/self/cmdline` 取包名，把计数写进该应用的外部 files 目录（logcat 在本机会哑掉，
@@ -148,10 +148,10 @@
 ## 7. 与另两条线的关系
 
 ```
-harness (loop_v1)        knobs（本仓库）      refbench（白档靶子）
+判定 (loop_v1)           knobs（本仓库）      refbench（白档靶子）
 ─────────────────        ──────────────      ──────────────────
 编排/采集/归因/判定  ←→  能改什么          ←→  已知答案的考场
 （另有会话在跑）          黑 + 灰               验证归因对不对
 ```
 
-本仓库让 harness **有东西可改**；refbench 让 harness **知道自己有没有归因错**。互不替代。
+knobs 让判定一侧**有东西可改**；refbench 让判定一侧**知道自己有没有归因错**。互不替代。
