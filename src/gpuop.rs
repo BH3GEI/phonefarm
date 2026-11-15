@@ -779,7 +779,7 @@ const USAGE: &str = "用法: phonefarm gpu-op --request <eval_request.json> [--s
 \x20      phonefarm gpu-op --serial S --unlock        回滚遗留的锁频态\n\
 \n\
 Compute Shader 算子的真机标尺: 等冷 → 锁频 → A/B/A/B 交替跑测 → Welch t 检验 → eval_report。\n\
-契约见 game_opt_loop/contracts/{eval_request,eval_report}.schema.json。";
+契约见 docs/SPEC_GPU_OP.md (eval_request / eval_report)。";
 
 pub fn parse_args(args: &[String]) -> Result<GpuOpArgs, String> {
     let mut a = GpuOpArgs {

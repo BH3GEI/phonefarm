@@ -1,131 +1,56 @@
 # phonefarm
 
-移动端图形能效 harness 的底座，兼通用移动端自动化基础设施。
+移动设备的操作、数据采集与实测框架。
 
-## 在整体里的位置
+一个 Rust 内核，两种设备后端（Android `adb` / OpenHarmony `hdc`），共用一套设备抽象、记录契约、
+遥测和证据分级。上面并列挂多条互不依赖的通路：UI 自动化、确定性脚本回放、一致性测试、
+数据采集、性能与功耗测量、受控 A/B 实验。用它的可以是人、shell 脚本，也可以是外部 agent
+（CLI 全部支持 `--json`，另有 MCP 服务）。
 
-整套东西是一个 harness。用户只提一种任务——「把某个游戏在某台手机上优化一下」，
-内部自动决定用哪几层。本仓库是底座那一层，负责四件事：
+## 能做什么
 
-- 设备：Android `adb` 与 OpenHarmony `hdc` 两族的连接、保活、确定性脚本回放。
-- 应用改动（[`knobs/`](knobs/README.md)）：黑档系统参数（DVFS / 限帧 / 热 / 调度 / 刷新率），
-  灰档 Vulkan layer 注入（render pass 观测，以及 LoadOp / 精度 / 分辨率 / shader 改写）。
-- 测量：安卓读 sysfs 电源轨加 raw ftrace kgsl，鸿蒙走 HiSmartPerf，上层拿同一份 JSON。
-  测功耗期间 root 停充，供电状态写进报告。
-- 统计判定与还原：判定规则在看到候选数据之前落盘冻结，不显著就回退，sysfs 写入退出前
-  全部恢复，进出快照逐行相等才算这轮成立。
+- **操作设备**：发现、保活、设备锁排队；触控、按键、虚拟手柄注入；VLM 自主 UI 遍历；
+  固定动作脚本与历史轨迹原样回放；多设备并行。
+- **采集数据**：步骤级截图与原始 UI 树、每步 72 项遥测、帧时序与 GPU 执行（raw ftrace）、
+  停充状态下的功耗、按状态筛选的帧采集、CTS/XTS 逐用例结果与断言栈。全部落盘，可离线下钻。
+- **做实验**：对任意可改动面（系统参数、图形 API layer、应用自身配置）做 A/B 对照。判定规则先冻结、
+  再看数据，用置换检验出结论，不显著就回退，退出前把现场恢复原样。
+- **对外接口**：CLI（查看类命令全带 `--json`）、MCP stdio 服务（`serve`）、
+  评测请求契约（`eval --request`）。上层编排器或人提候选，本仓库负责施加、测量、判定、还原。
 
-提改动的是上层——[`game_opt_loop`](https://github.com/HGamey/game_opt_loop)
-（入口与决策层：接任务、摸底、决定开哪几路、出方案、归档优胜、出报告），或者直接是人。
-判定这一侧留在本仓库，规则先于数据冻结，所以出主意的一方改不了判定。
+## 设计原则
 
-### 三个优化层级
+- **判定与提议分离**：判定口径与阈值只在本仓库里定，并在看到候选数据之前落盘冻结。上层可以随请求带参数，
+  但那是被判定的输入，不是判定规则本身——出主意的一方改不了判定。
+- **采不到就是 `null`**：任何字段取不到都留空并写明原因，绝不拿 0 顶替。
+- **能改就能还原**：sysfs 等写入在退出前全部恢复，进出快照逐行相等才算这一轮成立。
+- **设备独占**：碰设备的命令自己拿设备锁，排队而不是硬跑；两个任务同时压一台手机，两边的数都作废。
+- **内核不含应用特化**：具体应用的包名、文案、流程一律落在插件层，核心一行不改。
 
-| 层级 | 改什么 | 白盒（有源码） | 黑盒（商用游戏） |
-|---|---|---|---|
-| ① 游戏代码 | 渲染流程、资源、shader 源码 | 可用 | 不可用 |
-| ② 图形接口 Vulkan 层 | LoadOp / 精度 / 分辨率 / shader 改写 | 可用 | 可用（需能挂层） |
-| ③ 系统参数 | DVFS、总线、调度、限帧、刷新率 | 可用 | 可用（需 root） |
-
-鸿蒙商用机在没有 root 的情况下只能测不能改：HiSmartPerf 采得到帧率、帧时、温度、功耗，
-但 ② 和 ③ 都动不了。可能的出路有工程机、官方性能接口、开发者模式下自签名应用三条，
-都还没核实过。
-
-### 测试载体
-
-载体在 [`loop_v1/carriers/`](loop_v1/carriers/)：Megacity、Vulkan-Samples、AnKi，
-另有白盒靶子 [`refbench`](https://github.com/HGamey/refbench) 🔒。
-白盒载体源码在手、瓶颈已知，用来验机制；闭源真游戏用来验效果。
-`sr_loop` 是已结项的前序实验（端侧超分网络演化），不在当前主线上。
-
-### 设备
-
-同一个候选的 A/B 两臂必须落在同一台手机上：跨机比较会把机间差异算进改动的效果里。
-规划中的设备构成：安卓旗舰机（一台跑测试、一台留给调试；要并行跑多条线，得是同型号的多台）、
-鸿蒙手机 1 到 2 台做对照（无 root，只能测）、海外版华为手机几台（EMUI，基于安卓改的系统，
-麒麟芯片，能 root，用来在麒麟上测 Vulkan 层与系统参数的改动到底有多少效果）。
-这是计划，不是现状。
-
-设备是共享资源，跑之前用设备锁 `devlock` 抢占：拿锁、后台心跳续期、跑完释放，
-被占着时排队而不是绕过去硬跑。两个任务同时压一台手机，两边的数都作废。
-
-锁脚本在仓库里：[`tools/devlock`](tools/devlock)（zsh，macOS；原子 mkdir + 心跳 + 排队，
-锁文件默认在 `/private/tmp/claude-501/`，`DEVLOCK_DIR` 可改）。安装成命令行工具：
-
-```bash
-mkdir -p ~/.local/bin && ln -sf "$PWD/tools/devlock" ~/.local/bin/devlock
-devlock status                      # 谁持有、谁在排队
-devlock run <label> -- <命令…>       # 拿锁 → 每 60 秒心跳 → 跑命令 → 释放 (命令里拿得到 DEVLOCK_LABEL)
-```
-
-碰设备的子命令（`eval` / `gpu-op` / `gray-layer` / `gray-ab` / `autoloop` / `perf` / `capture` /
-`script` / `bench` / `run` 等，完整清单见 `src/devlock.rs`）**自己拿锁**：排队等到轮到自己、
-跑的时候每 60 秒心跳、退出时释放，不必再在外面包一层 `devlock run`。
-
-```bash
-./phonefarm eval --request r.json --json --lock-label core   # label 缺省取 $DEVLOCK_LABEL, 再缺省 phonefarm
-./phonefarm gray-layer off --lock-wait 30m                   # 最多排 30 分钟 (缺省 2h), 没轮到就退出 2, 不碰设备
-```
-
-- lead 用 `devlock queue <l1> <l2> …` 预排了队列时，`--lock-label` 必须用队列里那个名字，
-  自己起新名字会排到队尾。
-- 锁已经在同一个 label 手里（外层 `devlock run <label>`、上层 `game_opt_loop optimize`）时原地执行，
-  心跳与释放归外层，不会自己等自己。
-- 不拿锁的：`fleet`（只读快照，别人持锁时自动降成只读 sysfs）、`devices`、`keepalive`、`serve`、
-  以及所有纯离线的解析/报告类子命令。`--no-devlock` 可以显式跳过（只在确实没人共用这台手机时用）。
-- 进程被 Ctrl-C 杀掉时来不及释放，锁会在心跳停 600 秒后被当成废弃、由下一个人接管（有日志）。
-
----
-
-## 📌 先读这两份
-
-| 文档 | 是什么 | 什么时候看 |
-|---|---|---|
-| **[移动 GPU 优化技术路线梳理](docs/MOBILE_GPU_OPT_ROUTES.md)** | 移动 GPU 上能做的优化手段全清单，按带宽/几何/shader/分辨率/时序热分五类。每条标注**移动端特有性、量级、在 loop_v1 里用哪个指标验、需不需要白盒** | **决定下一步优化做什么时** —— 闭环里的候选改动从这份清单里挑 |
-| **[loop_v1 — 最小可信闭环](loop_v1/README.md)** | 端到端性能优化闭环：负载 → 采集 → 归因 → 旋钮 → 复量 → 统计判定 → 回滚 → 证据归档。五条判据 2026-09-16 实测全部通过 | **想跑一轮真实优化实验时** |
-
-可改动面（「能改什么」这一侧）在 [`knobs/`](knobs/README.md)：黑档系统旋钮 + 灰档 Vulkan layer 注入，供 loop_v1 驱动。
-
-几个已落盘的实测结论，写在这里免得重复踩：
-
-- 「带宽不够」不能当默认假设。60 fps 原神上把 DDR/LLCC 下限钉到硬件上限，`frame_p95` 差 −2.93%（p=0.135，不显著），整机功耗反而 +16.5%（p=0.0079）——GPU 没被带宽饿着，多烧电换不来统计显著的帧时改善（PR #52）。旧的「p95 显著改善 −1.61%（p=0.0079）」是 30 fps 时代测的，已不可比。
-- 帧率封顶时，降工作量换不出帧率。2026-09-16 那一轮归因 5 轮一致：帧率封顶 @30fps，GPU 只用掉 64.5%，余量 11.91ms，热事件 0。在这种负载上，任何降低 GPU 工作量的路线（含 NN 超分）都只能换功耗与热预算。
-  需要更正的是当时的归因：把它说成「厂商把原神限在 30fps」没有依据。那是原神 7.0.0、当时那套游戏设置下的观测。2026-09-23 同一台机器、7.1.0、游戏内 60 帧设置下实测就是 60fps（`frame_p50` 16.69ms），`gpu_active_mean` 约 13.3ms/帧，证据在 `knobs/evidence/06_genshin_world/ab_report.json`。当时为什么封在 30fps 还没核实，别再当定论引用。
-- 改得准不等于换得出性能。灰档 Vulkan 层在原神大世界里把 LoadOp `LOAD→DONT_CARE` 的改写绑上了 4.4 到 5.2 万次，确实命中；但 5 对交替 A/B 下 `frame_p95` 只差 −0.51%，置换检验 p=0.325，判无效（PR #31）。机制成立（能改、改得准、可自报、可回滚），这一条换不出性能。
-- 功耗要停充了才能比。原神固定场景两通路并排采 30 秒、全窗口停充：整机功耗 HiSmartPerf 报 4.867 W，本仓库报 4.979 W，相对差 2.3%（PR #32）。对照充电态那一轮，同一条轨两边分别报 3.086 W 与 777 W。
-- NN 的账要算端到端。`phonefarm bench` 区分 `gpu`（只含模型算子）与 `invoke`（含张量拷贝同步）两个口径，后者高约 7ms 且与网络结构无关，540×960→1080×1920 每帧拷贝 31MB。端到端约 10ms，吃掉 60fps 帧预算的 60%。这 7ms 是否测量工装产物尚未定论，见路线图 §3。
-
-载体的可重复性基线（`frame_p95` 离散度，越小越好）：refbench 0.45%，Megacity 0.987%（PR #33），原神 1.37%。白盒靶子最稳，闭源真游戏最散，所以验机制在前者、验效果在后者。
-
-NN（端侧超分 / 插帧）是这个闭环里的**一类候选改动**，不是主线；那条线的前序实验在 [`sr_loop`](https://github.com/HGamey/sr_loop)（已结项），后续的 Compute 算子直通管线在 `game_opt_loop`。
-
----
-
-## 底座怎么搭的
-
-性能闭环不是独立造的一套东西，它和其它能力共用同一个底座：
-**一个 Rust 内核，两种设备后端（Android `adb` / OpenHarmony `hdc`），
-在「设备抽象 + 记录契约 + 遥测 + 证据分级」之上并列挂多条互不依赖的上层通路。**
+## 架构：不变内核 + 并列上层
 
 ```
-   性能优化闭环   自主UI遍历   确定性脚本回放   一致性测试   端侧模型标尺   采集   假设-实验-证据
-    (loop_v1)   run/benchmark    script      test-batch      bench      capture   experiment
-         │            │            │             │             │           │          │
-         └────────────┴────────────┴─────────────┴─────────────┴───────────┴──────────┘
-                                          │
-              ┌───────────────────────────┴────────────────────────────┐
-              │ 不变内核：设备抽象(adb/hdc) · 记录契约 · 遥测           │
-              │           确定性纪律(三道检查/双重看门狗) · 证据分级     │
+ UI 自动化   确定性脚本   一致性测试   数据采集   性能测量   A/B 实验     假设—实验—证据
+ run/bench-  script      test-batch   capture    perf       eval/autoloop  experiment
+ mark/quest              cts-fetch    bench      fleet      loop_v1/
+     │          │            │           │          │           │             │
+     └──────────┴────────────┴───────────┴──────────┴───────────┴─────────────┘
+                                         │
+              ┌──────────────────────────┴─────────────────────────────┐
+              │ 不变内核：设备抽象(adb/hdc) · 记录契约 · 遥测 · 设备锁 │
+              │           确定性纪律(三道检查/双重看门狗) · 证据分级    │
               └────────────────────────────────────────────────────────┘
 ```
 
 上层各通路互不依赖：卸掉 VLM 通路，`script` / `test-batch` / `bench` 照常工作；反之亦然。
-**多模态视觉模型（VLM）只是其中一条通路，不是这个项目的定义**——
-`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `keepalive` 全程零 Token，
-不碰模型也各自成立。遥测口径全局统一，因此性能局、脚本局、CTS 局、VLM 局可以横向对比。
+新增一条上层通路不应该修改内核。**VLM 只是其中一条通路，不是这个项目的定义**——
+`script` / `test-batch` / `cts-fetch` / `bench` / `capture` / `perf` / `keepalive` 全程零 Token。
+遥测口径全局统一，所以脚本局、CTS 局、VLM 局、性能局可以横向对比。
+
+新增一种设备或平台 = 实现 `platform::Backend` 并登记 serial 前缀；各平台支持到哪一步见 `docs/DEVICES.md`。
 
 > **🤖 给 AI Agent 用（推荐姿势）**：本项目自带 agent 说明书 `skills/phonefarm/SKILL.md`。
-> 复制下面这段发给你的 Agent（Claude Code / Codex / Cindy / octos 等），立即开始使用：
+> 复制下面这段发给你的 Agent（Claude Code / Codex / octos 等），立即开始使用：
 >
 > ```
 > Read https://raw.githubusercontent.com/BH3GEI/phonefarm/main/skills/phonefarm/SKILL.md and strictly follow its rules. Then drive the phonefarm tool accordingly. Run `phonefarm last` first to verify the environment, then report the current device status to me.
@@ -138,17 +63,18 @@ NN（端侧超分 / 插帧）是这个闭环里的**一类候选改动**，不�
 
 | 能力族 | 命令 / 位置 | 烧 Token | 说明 |
 | :--- | :--- | :--- | :--- |
-| **性能优化闭环**（主线） | `loop_v1/` | 否 | 对可重复游戏负载跑完整一轮「基线 → 归因 → 改动 → 对照 → 统计判定 → 回滚 → 证据归档」。判定用精确置换检验 + 置换反演 CI，**规则先于数据冻结**；sysfs 写入退出前全部恢复，进出快照逐行相等才算这轮成立；下游解析全是纯函数，同一份 trace 每次重算逐字节一致 |
-| **帧时序与 GPU 归因** | `loop_v1/`（raw ftrace kgsl） | 否 | 不侵入游戏进程，一次采集同时拿到帧节奏、GPU 执行时长、总线带宽投票、热降频。`SurfaceFlinger --latency`、`gfxinfo`、Perfetto GPU producer 三条路都已实测排除，原因见 [`loop_v1/README.md`](loop_v1/README.md) |
-| 端侧模型实测标尺 | `bench` | 否 | TFLite 模型真机延迟：锁频 + 等冷 + GPU Delegate 算子日志解析。区分 `gpu` 与 `invoke` 两个口径 |
-| 数据采集管线 | `capture` | 否 | 按状态筛选的原始帧采集 + manifest 路线分段 |
-| 确定性脚本与回放 | `script` | 否 | 固定动作序列执行，或原样回放某次历史对局——性能评测要求各轮动作路径完全一致，靠它消除模型决策发散 |
-| 自主 UI 遍历 | `run` `benchmark` `parallel` `quest` `plugins` | **是** | VLM 决策的六步回路：深度遍历、多轮评测、多设备并行 |
-| 一致性测试 harness | `test-batch` `cts-fetch` | 否 | CTS/XTS 批量执行与结果提取，Android/OpenHarmony 双协议，逐用例出断言栈 |
-| 设备与农场运维 | `devices` `keepalive` `probe` `exec` | 否 | adb/hdc 双族设备发现、保活巡检（唤醒+解锁+不息屏）、只读调试通道 |
-| 假设—实验—证据闭环 | `hyp` `pred` `caps` `tools` `experiment` `export` `eval` | 部分 | 竞争解释登记、预测先行、能力固化、A/B/C 对比实验、训练数据导出 |
+| 设备与农场运维 | `devices` `keepalive` `fleet` `preflight` `probe` `exec` · `tools/devlock` | 否 | adb/hdc 双族设备发现、保活巡检（唤醒+解锁+不息屏）、农场快照、环境不变量检查、设备锁、只读调试通道 |
+| 自主 UI 遍历 | `run` `benchmark` `parallel` `quest` `plugins` | **是** | VLM 决策的六步回路：深度遍历、多轮评测、多设备并行；场景插件承载专用流程 |
+| 确定性脚本与回放 | `script` | 否 | 固定动作序列执行，或原样回放某次历史对局，消除模型决策发散；遥测与 VLM 局同构 |
+| 一致性测试 | `test-batch` `cts-fetch` | 否 | CTS/XTS 批量执行与结果提取，Android/OpenHarmony 双协议，逐用例出断言栈 |
+| 数据采集 | `capture` | 否 | 按状态筛选的原始帧采集 + manifest 路线分段，供下游训练/评测 |
+| 性能与功耗测量 | `perf` `frame-audit` | 否 | 安卓 sysfs 电源轨 + raw ftrace kgsl、鸿蒙 HiSmartPerf，上层拿同一份 JSON；测功耗期间停充 |
+| 受控 A/B 实验 | `eval` `autoloop` `gray-layer` `gray-ab` `report` · `loop_v1/` `knobs/` | 否 | 「基线 → 归因 → 改动 → 对照 → 统计判定 → 回滚 → 证据归档」。精确置换检验 + 置换反演 CI，**规则先于数据冻结** |
+| 端侧模型标尺 | `bench` `gpu-op` | 否 | TFLite / Compute Shader 真机延迟：锁频 + 等冷 + 算子日志解析，区分 `gpu` 与 `invoke` 两个口径 |
+| 应用接入 | `onboard` | 少量 | 冷启动一个没见过的应用，走白名单点击进到可重复的场景，生成负载并验证可重复性，产出 `profile.json` |
+| 假设—实验—证据闭环 | `hyp` `pred` `caps` `tools` `experiment` `export` | 部分 | 竞争解释登记、预测先行、能力固化、A/B/C 对比实验、训练数据导出 |
 | 只读下钻 | `last` `runs` `show` `status` `stats` `cat` `tasks` `tree` `lessons` `campaign` `schema` `config` | 否 | 全部离线解析本地落盘产物 |
-| 工具服务 | `serve` | 否 | 21 个 `phonefarm_*` MCP 工具，供 octos 等客户端挂载 |
+| 工具服务 | `serve` | 否 | 21 个 `phonefarm_*` MCP 工具，供 octos 等 agent 宿主挂载 |
 
 底座层面的两条老能力贯穿全部通路：**经验库与状态共享**（`lessons.jsonl` 经验库 +
 `tree.json` 状态转移图，跨局累积）、**无损落盘与下钻**（步骤级截图、原始 UI 树、
@@ -157,7 +83,7 @@ NN（端侧超分 / 插帧）是这个闭环里的**一类候选改动**，不�
 ## 快速开始
 
 ```bash
-# 1. 配置密钥（只有 VLM 通路需要；script/test-batch/bench/capture 不需要）
+# 1. 配置密钥（只有 VLM 通路需要；script/test-batch/bench/capture/perf 不需要）
 cp secrets.env.example secrets.env   # 填入 GLM_KEY(智谱 Coding 套餐)等
 # 程序运行时自动读取 ./secrets.env；检测到必选密钥缺失时给出配置说明并安全退出
 
@@ -176,7 +102,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 # 3. 先确认设备在线
 ./phonefarm devices                        # 列出当前连接的 adb 与 hdc 设备
 
-# 4. 挑一条上层通路开跑（下面各节分述）
+# 4. 挑一条上层通路开跑（下面各节分述；完整上手流程见 docs/QUICKSTART.md）
 ```
 
 ## 设备与农场运维
@@ -207,6 +133,43 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 `keepalive` 补的是**农场级**待命期：只要设备挂在农场里，就该醒着、解着锁、不息屏。
 任务级的生命周期（进任务常亮、退出锁屏保电池）由各上层通路自己管。规格见 `docs/SPEC_KEEPALIVE.md`。
 
+### 设备锁
+
+设备是共享资源，跑之前用设备锁 `devlock` 抢占：拿锁、后台心跳续期、跑完释放，
+被占着时排队而不是绕过去硬跑。两个任务同时压一台手机，两边的数都作废。
+
+锁脚本在仓库里：[`tools/devlock`](tools/devlock)（zsh，macOS；原子 mkdir + 心跳 + 排队，
+锁文件默认在 `/private/tmp/claude-501/`，`DEVLOCK_DIR` 可改）。安装成命令行工具：
+
+```bash
+mkdir -p ~/.local/bin && ln -sf "$PWD/tools/devlock" ~/.local/bin/devlock
+devlock status                      # 谁持有、谁在排队
+devlock run <label> -- <命令…>       # 拿锁 → 每 60 秒心跳 → 跑命令 → 释放 (命令里拿得到 DEVLOCK_LABEL)
+```
+
+碰设备的子命令（`eval` / `gpu-op` / `gray-layer` / `gray-ab` / `autoloop` / `perf` / `capture` /
+`script` / `bench` / `run` 等，完整清单见 `src/devlock.rs`）**自己拿锁**：排队等到轮到自己、
+跑的时候每 60 秒心跳、退出时释放，不必再在外面包一层 `devlock run`。
+
+```bash
+./phonefarm eval --request r.json --json --lock-label core   # label 缺省取 $DEVLOCK_LABEL, 再缺省 phonefarm
+./phonefarm gray-layer off --lock-wait 30m                   # 最多排 30 分钟 (缺省 2h), 没轮到就退出 2, 不碰设备
+```
+
+- lead 用 `devlock queue <l1> <l2> …` 预排了队列时，`--lock-label` 必须用队列里那个名字，
+  自己起新名字会排到队尾。
+- 锁已经在同一个 label 手里（外层 `devlock run <label>`、上层编排器已持锁）时原地执行，
+  心跳与释放归外层，不会自己等自己。
+- 不拿锁的：`fleet`（只读快照，别人持锁时自动降成只读 sysfs）、`devices`、`keepalive`、`serve`、
+  以及所有纯离线的解析/报告类子命令。`--no-devlock` 可以显式跳过（只在确实没人共用这台手机时用）。
+- 进程被 Ctrl-C 杀掉时来不及释放，锁会在心跳停 600 秒后被当成废弃、由下一个人接管（有日志）。
+
+### 测量型任务的设备纪律
+
+同一个候选的 A/B 两臂必须落在同一台手机上：跨机比较会把机间差异算进改动的效果里。
+影响稳态的环境条件（风扇、冷机阈值、供电状态）逐轮记进证据，条件不同的两批数据不能混在一起比。
+性能测量必须上真机，模拟器的帧时与功耗没有意义。
+
 ## 自主 UI 遍历（VLM 通路）
 
 ```bash
@@ -225,7 +188,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 
 # 场景插件与其独立长跑 Agent
 ./phonefarm plugins                        # 列出已登记的场景插件
-./phonefarm quest --mode auto --sec 1800   # 原神插件的独立长跑 Agent（零 Token 轻量视觉 + 手柄注入）
+./phonefarm quest --mode auto --sec 1800   # 插件自带的独立长跑 Agent（零 Token 轻量视觉 + 手柄注入）
 ```
 
 这条通路会消耗真实 API Token。跑大规模并行或长测之前请先估算预算。
@@ -234,13 +197,13 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 
 ```bash
 # 跑一份固定动作脚本，保留全套遥测
-./phonefarm script --task 游戏压测 --app com.tencent.tmgp.projectc --repeat 10 examples/sample_game_benchmark.json
+./phonefarm script --task 压测 --app <包名> --repeat 10 examples/sample_game_benchmark.json
 
 # 原样回放某次历史对局的动作流
 ./phonefarm script --task 轨迹重放 20260831-213215
 
 # 后台跑，立即回报局 ID
-./phonefarm script --detach --task 游戏压测 examples/sample_game_benchmark.json
+./phonefarm script --detach --task 压测 examples/sample_game_benchmark.json
 ```
 
 脚本模式不调用任何模型，但走同一套执行与遥测管线，因此产出的记录与 VLM 局完全同构，
@@ -248,7 +211,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd .. && co
 
 脚本的 `instrument` 原语跟设备后端走：hdc 设备上合成 OH 的 `aa test`，adb 设备上合成 `am instrument`。
 
-## 一致性测试 harness（CTS / XTS）
+## 一致性测试（CTS / XTS）
 
 把测试 APK/HAP 的批量执行、逐用例结果解析、断言栈提取、对账与报告串成一个 mini-Tradefed。
 Android 与 OpenHarmony 两套官方 runner 协议都解析，**上层报告格式一致**。
@@ -329,7 +292,35 @@ Android 与 OpenHarmony 两套官方 runner 协议都解析，**上层报告格�
 > 的真实采集产物钉死，但整条设备通路一次也没在真机上跑过。口径出处、单位约定与
 > 上真机后要补的验证清单见 `docs/SPEC_PERF_SOURCE.md`。
 
-## 性能优化闭环（`loop_v1/`）怎么跑
+## 受控 A/B 实验（`eval` / `autoloop` / `loop_v1/` / `knobs/`）
+
+对一个**可重复**的负载，无人值守地跑完一轮：
+
+```
+选负载 → 量基线 → 归因 → 施加改动 → 复量 → 统计判定 → 回滚 → 留证据
+```
+
+改动面分三档，本仓库负责后两档的施加、全部三档的测量与判定：
+
+| 改动面 | 改什么 | 需要什么 |
+|---|---|---|
+| 应用自身 | 源码、资源、引擎/应用配置 | 白盒（有源码或可重打包） |
+| 图形 API 层（灰档，[`knobs/gray/`](knobs/)） | Vulkan layer 注入：render pass 观测，LoadOp / 精度 / 分辨率 / shader 改写 | 能给目标进程挂层（root） |
+| 系统参数（黑档，[`knobs/black/`](knobs/)） | DVFS、总线、调度、限帧、热策略、刷新率 | root |
+
+鸿蒙商用机在没有 root 的情况下只能测不能改：HiSmartPerf 采得到帧率、帧时、温度、功耗，
+但后两档都动不了。可能的出路有工程机、官方性能接口、开发者模式下自签名应用三条，都还没核实过。
+
+上层（人、脚本或外部编排器）通过统一入口提交候选：
+
+```bash
+./phonefarm eval --request r.json --serial S --json      # v2 信封按 kind 路由: shader / sysparam / gray
+./phonefarm autoloop --out 证据目录 --generations N       # 系统参数全自动: 白名单探测 → 冻结规则 → 提名 → ABBA 真机评测 → 报告
+./phonefarm gray-layer target <pkg> | off                # 灰档层挂/摘
+./phonefarm selftest run --out 证据目录                   # 判定链已知答案自检: 混淆矩阵 + 最小可检出效应
+```
+
+也可以手工跑一轮（`loop_v1/` 的工具链）：
 
 ```bash
 cd loop_v1
@@ -349,42 +340,61 @@ done
 bash tools/replay_test.sh runs      # 离线回放自检
 ```
 
-两条写死在流程里的纪律：**判定规则在看到候选数据之前落盘冻结**；负载必须在外部条件稳定的
-窗口内跑完（原神的昼夜循环会把离散度从 1.37% 推到 5.35%，而且是单向漂移，只看离散度发现不了，
-所以 `phonefarm analyze` 除离散度外还报最小二乘斜率与相邻递增比例）。
+写死在流程里的纪律：
 
-细节、测帧手段的选型排除过程、以及「一帧不等于一次 GPU 提交」这个坑，见 [`loop_v1/README.md`](loop_v1/README.md)。
-候选改动从 [`docs/MOBILE_GPU_OPT_ROUTES.md`](docs/MOBILE_GPU_OPT_ROUTES.md) 里挑。
+- **判定规则在看到候选数据之前落盘冻结**，不显著就回退。
+- **sysfs 写入退出前全部恢复**，进出快照逐行相等才算这轮成立。
+- **下游解析全是纯函数**，同一份 trace 每次重算逐字节一致。
+- 负载必须在外部条件稳定的窗口内跑完。漂移常常是单向的，只看离散度发现不了，
+  所以 `phonefarm analyze` 除离散度外还报最小二乘斜率与相邻递增比例。
 
-> **现状**：`loop_v1/` 的判定口径与编排**全部收进 Rust 内核**——解析→归因→统计→
-> 判据收口→白名单→判定→画面判据→模型交互/本地变异器→两通路对照→
-> Vulkan-Samples 三道闸与两臂判读面→refbench/vks 报告→`autoloop` 编排→
-> 灰档层挂/摘（`gray-layer`）/灰档 A/B（`gray-ab`）/截帧比对（`shot-diff`）→
-> 统一评测入口（`eval`）。剩余：设备端 shell（按约定保持设备端，风险是
-> 翻译损失；trap 回滚纪律不动）、载体构建工具（gradle/ndk 包装层）、
-> `knobs/` 超分那一批实验脚本。上面的跑法仍然有效。
+帧时序走 raw ftrace 的 kgsl 事件，不侵入目标进程，一次采集同时拿到帧节奏、GPU 执行时长、
+总线带宽投票、热降频。`SurfaceFlinger --latency`、`gfxinfo`、Perfetto GPU producer 三条路
+都已实测排除，原因与「一帧不等于一次 GPU 提交」这个坑见 [`loop_v1/README.md`](loop_v1/README.md)。
 
-## 新游戏接入（`onboard`）
+### 测试载体
 
-给一个没见过的包名，自己把游戏带进一个可重复的测试场景，产出一份游戏档案（`profile.json`，
-契约见 game_opt_loop 的 `contracts/game_profile.schema.json`），`game_opt_loop optimize --game <包名>` 读它。
+载体在 [`loop_v1/carriers/`](loop_v1/carriers/)：Megacity、Vulkan-Samples、AnKi，另有白盒靶子 refbench。
+白盒载体源码在手、瓶颈已知，用来验机制；闭源的真实应用用来验效果。载体的可重复性基线
+（`frame_p95` 离散度，越小越好）：refbench 0.45%，Megacity 0.987%，闭源 3D 应用实测 1.37%。
+
+### 已落盘的经验（案例负载：3D 实时渲染应用）
+
+下面几条来自图形能效方向的真机实验，写在这里免得重复踩。图形方向的候选手段清单在
+[`docs/MOBILE_GPU_OPT_ROUTES.md`](docs/MOBILE_GPU_OPT_ROUTES.md)。
+
+- 「带宽不够」不能当默认假设。60 fps 负载上把 DDR/LLCC 下限钉到硬件上限，`frame_p95` 差 −2.93%（p=0.135，不显著），整机功耗反而 +16.5%（p=0.0079）（PR #52）。
+- 帧率封顶时，降工作量换不出帧率，只能换功耗与热预算。封顶的原因要单独核实，别把一次观测当成厂商策略的定论。
+- 改得准不等于换得出性能。灰档层把 LoadOp `LOAD→DONT_CARE` 的改写命中了 4.4 到 5.2 万次，但 5 对交替 A/B 下 `frame_p95` 只差 −0.51%，置换检验 p=0.325，判无效（PR #31）。机制成立，这一条换不出性能。
+- 功耗要停充了才能比。两通路并排采 30 秒、全窗口停充：HiSmartPerf 报 4.867 W，本仓库报 4.979 W，相对差 2.3%（PR #32）；充电态下同一条轨两边分别报 3.086 W 与 777 W。
+- NN 的账要算端到端。`bench` 的 `invoke` 口径（含张量拷贝同步）比 `gpu` 口径高约 7ms，与网络结构无关。
+
+> **现状**：判定口径与编排已**全部收进 Rust 内核**——解析→归因→统计→判据收口→白名单→判定→
+> 画面判据→模型交互/本地变异器→两通路对照→Vulkan-Samples 三道闸与两臂判读面→refbench/vks 报告→
+> `autoloop` 编排→灰档层挂/摘（`gray-layer`）/灰档 A/B（`gray-ab`）/截帧比对（`shot-diff`）→
+> 统一评测入口（`eval`）。剩余：设备端 shell（按约定保持设备端；trap 回滚纪律不动）、
+> 载体构建工具（gradle/ndk 包装层）、`knobs/` 超分那一批实验脚本。上面的手工跑法仍然有效。
+
+## 应用接入（`onboard`）
+
+给一个没见过的包名，自动把应用带进一个可重复的测试场景，产出一份应用档案（`profile.json`），
+供 `eval` 和上层编排器复用。当前实现面向 3D 实时渲染类应用（用视角探针判断是否进入场景）。
 
 ```bash
 phonefarm onboard --package <包名> --lock-label <名字> [--out 目录] [--rounds 5] [--seconds 30]
-phonefarm onboard --package <包名> --enter-only     # 只把游戏带进游戏场景: 退出码 0 在游戏里 / 3 需要人 / 1 失败
-# 手机在节点上时: pf-node --exe <本机构建> phonefarm onboard --package <包名> --ocr ./ocr --out @out/ob
+phonefarm onboard --package <包名> --enter-only     # 只把应用带进目标场景: 退出码 0 已进入 / 3 需要人 / 1 失败
 ```
 
 流程：冷启动 → 截图 + OCR（`ocr.swift`）认画面 → 只点白名单（关公告、点击进入、拒权限、同意协议、
-游客）→ 进游戏探针（静置 / 拖过去 / 拖回来三帧：视角跟手指转、拖回来明显回到原样才算在游戏里）→
-生成只转视角的触控负载（右拖左拖成对，净转角为零）→ 从 ftrace 数出渲染线程 → 停充跑 N 轮 →
+游客）→ 场景探针（静置 / 拖过去 / 拖回来三帧：视角跟手指转、拖回来明显回到原样才算进入）→
+生成净位移为零的触控负载（右拖左拖成对）→ 从 ftrace 数出渲染线程 → 停充跑 N 轮 →
 frame_p95 变异系数 ≤ 3% 且每轮帧数够、温度没超才判 PASS。
 
 纪律：碰到更新确认、登录表单、实名、验证码、付费画面一律停下，原因写进档案 `needs_human`，不假装成功；
 带 设置 / 退出 / 账号 / 商店 / 下载 / 多人 等字样的控件一律不点；大模型（`--vlm-calls` 封顶，缺省 4）
 只在 OCR 和探针都认不出时才问，给出的点击同样要过白名单。评测请求带 `workload.enter = "onboard"` 时，
-`eval` 的 gray 每臂重启游戏后用同一套状态机走回游戏场景，走不回去整次作废；`workload.render_comm`
-指定解析帧时用的渲染线程（非 Unity 游戏必需）。
+`eval` 的 gray 每臂重启应用后用同一套状态机走回目标场景，走不回去整次作废；`workload.render_comm`
+指定解析帧时用的渲染线程（非 Unity 应用必需）。
 
 ## 假设—实验—证据闭环
 
@@ -437,21 +447,7 @@ phonefarm tasks | tree | lessons | campaign | config
 指标按设备能力尽力采集，取不到的字段留空而不是填 0。**所有上层通路共用同一套遥测**——脚本局、CTS 局、VLM 局的遥测口径完全一致，
 因此可以横向对比。
 
-## 架构：不变内核 + 并列上层
-
-```
-        run/benchmark/parallel/quest   script   test-batch/cts-fetch   bench   capture   experiment
-                     │                   │              │                │        │          │
-                     └───────────────────┴──────────────┴────────────────┴────────┴──────────┘
-                                                  │
-                        ┌─────────────────────────┴──────────────────────────┐
-                        │  不变内核：设备抽象(adb/hdc) · 记录契约 · 遥测      │
-                        │            确定性纪律(三道检查/双重看门狗) · 证据分级 │
-                        └────────────────────────────────────────────────────┘
-```
-
-上层各通路互不依赖：卸掉 VLM 通路，`script`/`test-batch`/`bench` 照常工作；反之亦然。
-新增一条上层通路不应该修改内核。
+## VLM 通路的内部结构
 
 ### 通用核心 + 场景插件
 
@@ -525,19 +521,19 @@ octos 侧挂载（`config.json` 或 profile 的 `[[mcp_servers]]`）：
 ## 目录结构
 
 ```
-loop_v1/               性能优化闭环：负载→采集→归因→旋钮→复量→统计判定→回滚→证据
+loop_v1/               受控 A/B 实验工具链：负载→采集→归因→旋钮→复量→统计判定→回滚→证据
   scripts/ tools/      采集与解析（raw ftrace kgsl；解析全是纯函数，可逐字节复算）
   carriers/            测试载体：megacity / vulkan-samples / anki-sponza
   refbench/            白盒靶子的驱动侧（靶子本身在 refbench 仓库）
   auto/                自动挑旋钮：白名单探测 → 冻结规则 → 大模型选参 → 逐组对照
   fixtures/ runs/      夹具与历轮证据
-knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入（原 HGamey/knobs，已归档并入）
+knobs/                 可改动面：黑档系统参数 + 灰档 Vulkan layer 注入
   black/ gray/         两档的脚本与层源码
   contract/ evidence/  旋钮接口约定与上机证据
 src/                   Rust 内核源码
   universal/           通用核心：统一动作协议、三大算子、优先级引擎、插件契约
   plugins/             场景插件层：一切专用场景都落在这里
-  cts.rs               一致性测试 harness（双协议解析、对账、报告、结果提取）
+  cts.rs               一致性测试（双协议解析、对账、报告、结果提取）
   bench.rs capture.rs  端侧模型标尺 / 数据采集管线
   hypo.rs caps.rs mtools.rs experiment.rs   假设—实验—证据闭环
   keepalive.rs serve.rs script.rs parallel.rs telemetry.rs device.rs
@@ -557,18 +553,31 @@ tasks/<任务名>/        程序唯一可写区域
 
 ## 文档索引
 
+**框架**
+
 | 文档 | 内容 |
 | :--- | :--- |
-| **`docs/MOBILE_GPU_OPT_ROUTES.md`** | 移动 GPU 优化技术路线梳理：五类候选 / 每条怎么在 loop_v1 里验 / 黑盒白盒分叉 / NN 的实测代价 |
-| **`loop_v1/README.md`** | 端到端性能优化闭环：负载→采集→归因→旋钮→复量→统计判定→回滚→证据，五条判据实测通过 |
-| `docs/GOLDEN_RULES.md` | 研发与操作金科玉律：架构铁律 / 设备生命周期 / 模型选型纪律 / 工程规范 |
+| `docs/QUICKSTART.md` | 从一台新手机到第一份实测数据 |
 | `docs/DESIGN.md` | 核心架构契约：分层与跨通路不变量 / 记录契约 v1 / 六步回路 / 任务隔离 / 写入权限 |
+| `docs/GOLDEN_RULES.md` | 研发与操作金科玉律：架构铁律 / 设备生命周期 / 模型选型纪律 / 工程规范 |
+| `docs/DEVICES.md` | 设备后端与各平台支持到哪一步 |
+| `docs/SPEC_KEEPALIVE.md` | 农场级设备保活巡检：顺序契约 / adb 与 hdc 两族差异 |
+| `docs/SPEC_SCRIPT_MODE.md` | 确定性脚本与历史轨迹回放：纯离线 / 零 Token / 全遥测 / 重放契约 |
+| `docs/SPEC_CTS_HARNESS.md` | 一致性测试：双协议解析 / 对账判定 / 结果提取 |
 | `docs/SPEC_PERF_SOURCE.md` | 性能数据来源抽象：安卓 sysfs 与鸿蒙 HiSmartPerf 同一份 JSON / 命令口径出处 / null 纪律（鸿蒙侧未上真机验证） |
 | `docs/SPEC_SR_LOOP.md` | 端侧模型标尺与采集管线：bench / capture 的判定口径 |
-| `docs/SPEC_SCRIPT_MODE.md` | 确定性脚本与历史轨迹回放：纯离线 / 零 Token / 全遥测 / 重放契约 |
-| `docs/SPEC_CTS_HARNESS.md` | 一致性测试 harness：双协议解析 / 对账判定 / 结果提取 |
-| `docs/SPEC_KEEPALIVE.md` | 农场级设备保活巡检：顺序契约 / adb 与 hdc 两族差异 |
+| `docs/SPEC_GPU_OP.md` | 评测请求契约（`eval --request`）与 Compute Shader 算子标尺 |
 | `docs/SPEC_MCP_SERVE.md` | MCP stdio 工具服务：工具面 / 协议子集 / 安全护栏 / octos 接法 |
 | `docs/SPEC_EVOLUTION.md` | 假设—实验—证据闭环：证据分级 / 预测先行 / 能力固化 / A_B_C 实验 |
 | `docs/EVOLUTION_OPS.md` | 上一条的日常操作与审计面 |
+| `loop_v1/README.md` | 受控 A/B 实验：负载→采集→归因→旋钮→复量→统计判定→回滚→证据，五条判据实测通过 |
+| `knobs/README.md` | 可改动面：黑档系统参数 + 灰档 Vulkan layer |
 | `phonefarm schema` | log.jsonl 全部合法记录的字段手册（代码内生成，永远最新） |
+
+**案例：图形能效方向**
+
+| 文档 | 内容 |
+| :--- | :--- |
+| `docs/MOBILE_GPU_OPT_ROUTES.md` | 移动 GPU 优化候选手段清单：五类候选 / 每条怎么验 / 黑盒白盒分叉 / NN 的实测代价 |
+| `docs/GENSHIN_FRAME_AUDIT.md` · `docs/MEGACITY_FRAME_AUDIT.md` | 两个负载的逐帧拆解报告 |
+| `docs/MEGACITY_WHITEBOX_KNOBS.md` | 白盒载体的引擎设置旋钮 |

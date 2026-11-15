@@ -211,12 +211,12 @@ CTS:   test-batch (--profile P.json | --module pkg/runner | --module oh:bundle/m
 算子:  gpu-op --request <eval_request.json> [--serial S] [--json] [--power-rail usb|battery]
        (Compute Shader 真机标尺: 等冷 + 锁频 + A/B/A/B + Welch t 检验 -> eval_report)
 评测:  eval --request <eval_request.json> [--serial S] [--out 目录] [--json]
-       (game_opt_loop 评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
+       (上层候选的评测唯一入口: v1 扁平转交 gpu-op; v2 信封按 kind 路由
         shader=降级转交 / sysparam=白名单校验+设备端旋钮+精确置换 / gray=knobs 层调用)
 接入:  onboard --package <包名> [--serial S] [--out 目录] [--rounds 5] [--seconds 30] [--enter-only]
               [--no-cold] [--no-guest] [--no-consent] [--no-charge-suspend] [--vlm-calls N]
-       (新游戏零人工接入: 冷启动 -> OCR 认画面只做白名单点击 -> 进游戏探针 -> 生成转视角负载
-        -> 渲染线程 -> N 轮实测可重复 -> profile.json; --enter-only 只把游戏带进游戏场景)
+       (新应用零人工接入, 当前面向 3D 实时渲染类应用: 冷启动 -> OCR 认画面只做白名单点击 -> 场景探针
+        -> 生成转视角负载 -> 渲染线程 -> N 轮实测可重复 -> profile.json; --enter-only 只带进目标场景)
 闭环:  autoloop --out <证据目录> [--generations N] [--children N] [--pairs N]
               [--no-llm] [--probe-only] [--baseline-runs N] [--power-in-verdict auto|on|off]
        (系统参数全自动闭环: 白名单探测 -> 冻结规则 -> 大模型/本地变异提名 -> ABBA 真机评测 -> 报告)

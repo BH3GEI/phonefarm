@@ -36,8 +36,8 @@ phonefarm 里所有「和设备说话」的功能（任务回放 `run`、`perf`�
 
 | 位置 | 做什么 | 现状 |
 |---|---|---|
-| `eval.rs`（`adb()` / 采样进程） | `game_opt_loop` 下发的 ③ ② 评测：推工具、写 sysfs、su 跑采样脚本、拉证据 | 只支持 Android。整条判定链路假定 `su` + sysfs + ftrace |
-| `capture.rs` | 超分训练数据截帧（`exec-out screencap`） | 遇 `hdc:` 明确拒绝 |
+| `eval.rs`（`adb()` / 采样进程） | 上层下发的 ③ ② 评测：推工具、写 sysfs、su 跑采样脚本、拉证据 | 只支持 Android。整条判定链路假定 `su` + sysfs + ftrace |
+| `capture.rs` | 训练/评测数据截帧（`exec-out screencap`） | 遇 `hdc:` 明确拒绝 |
 | `bench.rs` | kgsl + TFLite GPU Delegate 基准 | 遇 `hdc:` 明确拒绝 |
 | `gamepad.rs` | uinput 虚拟手柄守护进程 | 只 Android；`Hdc` 走 trait 缺省实现报「不支持」 |
 | `fleet.rs` / `keepalive.rs` / `main.rs devices` | 设备枚举 | 各自调 `adb devices` 与 `hdc list targets` |
@@ -48,13 +48,13 @@ phonefarm 里所有「和设备说话」的功能（任务回放 `run`、`perf`�
 ## 每个平台能开哪几层，为什么
 
 代码里的声明在 `platform::ANDROID_LAYERS` / `platform::OPENHARMONY_LAYERS`，真正开不开以每次
-真机摸底（`game_opt_loop optimize` 的 caps）为准。
+真机摸底（`eval` 的 probe / `autoloop --probe-only`）为准。
 
 | 层 | Android（adb） | OpenHarmony 商用机（hdc） |
 |---|---|---|
 | ③ 系统参数 | **能**，要 root。白名单靠真机「写入→读回→还原」探出来，写了被内核弹回的不进白名单 | **不能**。拿不到 root，hdc shell 是普通用户，sysfs 频率/调度节点写不进去 |
 | ② 渲染流程改写（Vulkan 层） | **能**，要 root 且目标应用已装：`setprop debug.vulkan.layers` + 把 `.so` 放进目标应用自己的 `nativeLibraryDir`。`settings put global gpu_debug_*` 那一套在实测机上不生效 | **不知道**。OpenHarmony 图形栈有没有等价的 layer 注入点没有设备验证过；即便有，往目标应用目录放 `.so` 同样要 root |
-| ① 画面算子 | 有条件：白盒载体（refbench）直接挂进管线；黑盒游戏只能经 ② 的挂层通路注入 | **不能**：黑盒依赖 ② 的通路；refbench 没有鸿蒙版，没有白盒载体 |
+| ① 画面算子 | 有条件：白盒载体（refbench）直接挂进管线；闭源应用只能经 ② 的挂层通路注入 | **不能**：黑盒依赖 ② 的通路；refbench 没有鸿蒙版，没有白盒载体 |
 | 测量 | 能：帧时走 SurfaceFlinger / ftrace kgsl，功耗走 sysfs 电源轨（要停充才是整机功耗，停充要 root） | 能：HiSmartPerf（SP_daemon），不需要 root |
 
 所以国内鸿蒙商用机上 ①②③ 一层都改不了，只能测。可能的出路（工程机、厂商官方性能接口、

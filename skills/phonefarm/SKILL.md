@@ -1,6 +1,6 @@
 ---
 name: phonefarm
-description: Drive the phonefarm device automation and measurement infrastructure (Rust core, adb + hdc backends). Use when operating Android emulators or OpenHarmony devices through the phonefarm binary — VLM-driven UI traversal (run/benchmark/parallel/quest), zero-token deterministic scripts and replay (script), conformance-test batches and result extraction (test-batch/cts-fetch), on-device model latency benchmarking (bench), frame capture (capture), device farm keep-alive (keepalive/devices/probe), the hypothesis-experiment-evidence loop (hyp/pred/caps/tools/experiment/export), inspecting results via the read-only CLI (last/runs/show/cat/stats/schema), the MCP tool service (serve), or working on the Rust codebase. Covers both Android (adb) and OpenHarmony (hdc) backends, telemetry, and the house rules for spending model tokens and pushing changes. For the task "optimize this game on this phone" use the game_opt_loop skill instead — it orchestrates the decisions and calls into phonefarm for every device write, measurement and verdict.
+description: Drive phonefarm, a general-purpose framework for operating mobile devices, collecting data from them and measuring them (Rust core, adb + hdc backends). Use when operating Android emulators or OpenHarmony devices through the phonefarm binary — VLM-driven UI traversal (run/benchmark/parallel/quest), zero-token deterministic scripts and replay (script), conformance-test batches and result extraction (test-batch/cts-fetch), on-device model latency benchmarking (bench), frame capture (capture), device farm keep-alive (keepalive/devices/probe), the hypothesis-experiment-evidence loop (hyp/pred/caps/tools/experiment/export), inspecting results via the read-only CLI (last/runs/show/cat/stats/schema), the MCP tool service (serve), or working on the Rust codebase. Covers both Android (adb) and OpenHarmony (hdc) backends, telemetry, and the house rules for spending model tokens and pushing changes. Also the measurement and verdict side for any upper-layer orchestrator that submits candidate changes (performance / power A/B experiments via `eval --request`, system-parameter and Vulkan-layer knobs).
 license: MIT
 metadata:
   version: 3.1
@@ -9,8 +9,8 @@ metadata:
 
 # phonefarm
 
-phonefarm is a **device automation and measurement infrastructure**: one Rust
-kernel, two device backends (Android `adb` / OpenHarmony `hdc`), carrying
+phonefarm is a **general-purpose framework for operating mobile devices,
+collecting data from them, and measuring them**: one Rust kernel, two device backends (Android `adb` / OpenHarmony `hdc`), carrying
 several independent upper paths on one shared foundation of device abstraction,
 record contract, telemetry, and evidence grading.
 
@@ -26,38 +26,27 @@ are all enforced by deterministic Rust code in the host process.
 This skill is self-contained: everything an agent needs to install, build,
 run, and inspect phonefarm is in this file and the `references/` folder.
 
-## Wrong skill? "Optimize this game on this phone"
+## Upper layers: who calls phonefarm
 
-If the task is **"make this game run faster / smoother / cooler on this
-device"**, that is the `game_opt_loop` skill, not this one.
-`game_opt_loop optimize --game <name>` surveys what the device actually allows,
-opens whichever change surfaces are available (system parameters / render-flow
-rewrites / image operators), has a model propose candidates for each, and then
-calls **into phonefarm** for every write, measurement, statistical verdict and
-rollback.
+phonefarm is not tied to any particular kind of app or any particular caller.
+A human, a shell script, or an external agent / orchestrator can sit on top.
+For experiments that change something on the device, the split is fixed:
 
 ```
-game_opt_loop   decides what to try            ← that skill
-     │          (proposes, orchestrates, archives, reports)
+upper layer     decides what to try            (human / script / orchestrator)
+     │          (proposes candidates, archives, reports)
      ▼
 phonefarm       applies · measures · judges · restores   ← this skill
 ```
 
-- Skill: `game_opt_loop/skills/game_opt_loop/SKILL.md`
-- Repo: `github.com/HGamey/game_opt_loop` — **private, needs HGamey org
-  membership.** A "Repository not found" on clone is an access problem, not a
-  typo.
-- Layout: the two repos (plus the optional white-box target `refbench`) sit as
-  **siblings** — `~/projects/{game_opt_loop,phonefarm,refbench}`. Default paths
-  assume it.
-- Interface: `game_opt_loop/contracts/eval_{request,report}.schema.json`, driven
-  through `phonefarm eval --request <json> --json`. Three change surfaces, one
-  envelope (`kind = shader | sysparam | gray`).
-
-Use **this** skill directly when the job is "drive this device" rather than
-"optimize this game" — everything below stands on its own and needs no part of
-`game_opt_loop`: deterministic replay, conformance batches, model latency
-benchmarking, frame capture, farm keep-alive, read-only inspection, MCP service.
+- Interface: `phonefarm eval --request <json> --json`. Three change surfaces,
+  one envelope (`kind = shader | sysparam | gray`). Contract: `docs/SPEC_GPU_OP.md`.
+- The verdict rule lives in phonefarm and is frozen to disk before candidate
+  data is seen. The caller may pass inputs (e.g. the incumbent's latency) but
+  can never change the rule.
+- Everything else below — deterministic replay, conformance batches, data
+  capture, model latency benchmarking, farm keep-alive, read-only inspection,
+  MCP service — stands on its own and needs no upper layer at all.
 
 ## Capability map
 
@@ -69,7 +58,7 @@ benchmarking, frame capture, farm keep-alive, read-only inspection, MCP service.
 | Conformance tests (CTS/XTS) | `test-batch` `cts-fetch` | none |
 | On-device model benchmark | `bench` | none |
 | Frame capture | `capture` | none |
-| Performance optimization loop | `loop_v1/` toolchain (not a subcommand) | none |
+| Controlled A/B experiments | `eval` `autoloop` `gray-layer` `report` + `loop_v1/` toolchain | none |
 | Hypothesis-experiment-evidence | `hyp` `pred` `caps` `tools` `experiment` `export` `eval` | some |
 | Read-only inspection | `last` `runs` `show` `status` `stats` `cat` `tasks` `tree` `lessons` `campaign` `schema` `config` | none |
 | MCP tool service | `serve` | none |
@@ -77,8 +66,8 @@ benchmarking, frame capture, farm keep-alive, read-only inspection, MCP service.
 ## When to use this skill
 
 - Running any of the paths above against a device
-- **Not** for "optimize this game on this device" — that is `game_opt_loop`
-  (see above); it calls back into these paths
+- Serving as the apply / measure / judge / restore side for an upper layer
+  that proposes candidate changes (see above)
 - Inspecting results (`last` / `runs` / `show` / `cat` / `stats`) or reading the
   ledger schema (`schema`)
 - Modifying the Rust kernel (`runtime` / `device` / `cli` / `telemetry` / `cts`)
@@ -152,7 +141,7 @@ cd src && cargo build --release && cp target/release/phonefarm .. && cd ..
 # collide) — use distinct task names.
 
 # Deterministic script execution or historical run replay (zero model tokens, full telemetry)
-./phonefarm script --task game-bench --app com.pkg --repeat 10 script.json
+./phonefarm script --task load-bench --app com.pkg --repeat 10 script.json
 ./phonefarm script --task replay <run-id>
 
 # Conformance test batches (zero tokens; Android and OpenHarmony both supported)
@@ -216,7 +205,7 @@ The full CLI surface is in `references/cli.md`.
 - All inspection commands are offline local parsing and consume no API quota.
 - Telemetry is shared across every path, so a script run, a CTS run and a VLM
   run are directly comparable — same fields, same units.
-- Verdicts are never guessed. Anything the harness could not account for is
+- Verdicts are never guessed. Anything phonefarm could not account for is
   labelled as such (`NOT_RUN` / `ENV_BLOCKED` / left empty), never silently
   zeroed and never counted as a pass.
 - MCP hosts (e.g. octos): `phonefarm serve [--root <dir>]` exposes 21
@@ -235,7 +224,7 @@ The full CLI surface is in `references/cli.md`.
 
 In the repo checkout (not bundled with this skill):
 
-- `loop_v1/README.md` — the performance optimization loop. Read it **before**
+- `loop_v1/README.md` — the controlled A/B experiment loop. Read it **before**
   attempting any frame-timing work: `SurfaceFlinger --latency`, `gfxinfo` and
   the Perfetto GPU producer have all been ruled out on real hardware there, and
   raw ftrace kgsl is what is actually used. Its three disciplines are binding:
@@ -243,5 +232,5 @@ In the repo checkout (not bundled with this skill):
   sysfs write is restored on exit and the device snapshot must match line for
   line; parsing is pure functions so re-running on the same trace is
   byte-identical.
-- `docs/MOBILE_GPU_OPT_ROUTES.md` — candidate optimization routes, each tagged
+- `docs/MOBILE_GPU_OPT_ROUTES.md` — (case study, graphics) candidate optimization routes, each tagged
   with how it would be verified inside that loop

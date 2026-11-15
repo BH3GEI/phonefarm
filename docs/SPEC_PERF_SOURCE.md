@@ -21,7 +21,7 @@
 | 温度 | `/sys/class/thermal/thermal_zone*`（`hwcond` 的冷机门禁） | `SP_daemon -t` 的热区列 |
 | 通道 | `adb` | `hdc` |
 
-但上层 `game_opt_loop` 消费的 `contracts/eval_report.schema.json` 只认一组字段：
+但上层消费的 `eval_report` 契约只认一组字段：
 `operator_latency_ms` / `fps_p95_ms` / `power_watt` / `psnr_db`。
 
 若让上层自己去分辨「这台是安卓还是鸿蒙」，每加一个平台就要改一次上层，
@@ -390,7 +390,7 @@ HiSmartPerf 算出 3.086 W，我们算出 777 W。同一段窗口、同一块电
 
 更要命的是充电电流随电量上升**自己衰减**（CC→CV），是一条单调漂移：
 跨时间比较的两个候选之间会凭空多出一个"功耗改善"。
-`game_opt_loop` 的 M1 演化 `6.26 W → 5.94 W` 就是这么来的 —— 那 −0.32 W（约 5 %）
+上层演化编排器早期的 M1 演化 `6.26 W → 5.94 W` 就是这么来的 —— 那 −0.32 W（约 5 %）
 只需要 3.3 W 的充电分量衰减 10 % 就能造出来，而报告里**连轨别和电池状态都没记**，
 事后完全无法分辨。该结论已撤回。
 
