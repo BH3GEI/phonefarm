@@ -633,6 +633,11 @@ static std::string self_pkg() {
     return pkg;
 }
 
+// framecap.h (在 dev_of 之后 include) 的前向声明
+static std::string fc_report();
+static void fc_read_props();
+static void fc_on_create_device(const VkDeviceCreateInfo*, VkDevice, PFN_vkGetDeviceProcAddr);
+
 static void write_marker() {
     std::string pkg = self_pkg();
 
@@ -712,6 +717,7 @@ static void write_marker() {
             json += b;
         }
     }
+    json += fc_report();
     json += "}";
 
     // 通道 1: logcat (root 可读, 不受目标应用存储沙箱影响)。
@@ -802,6 +808,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateInstance(
     g_frameaudit = read_bool_prop("debug.knobs.frameaudit");
     g_frameaudit_ts = g_frameaudit && read_bool_prop("debug.knobs.frameaudit_ts");
     if (g_copyprobe || g_upop || g_frameaudit) g_dump_passes = true;   // 探针/算子/步骤清单全部建立在溯源表上
+    fc_read_props();
     RK_LOG("rk_CreateInstance entered (pkg=%s) rewrite_loadop=%d passdump=%d copyprobe=%d upop=%d frameaudit=%d ts=%d",
            self_pkg().c_str(), (int)g_rewrite_loadop, (int)g_dump_passes, (int)g_copyprobe, (int)g_upop,
            (int)g_frameaudit, (int)g_frameaudit_ts);
@@ -964,6 +971,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateDevice(
         if (gpp) { VkPhysicalDeviceProperties pp{}; gpp(phys, &pp); d.ts_period_ns = pp.limits.timestampPeriod; }
     }
     { std::lock_guard<std::mutex> lk(g_mtx); g_dev[key(*pDev)] = d; }
+    fc_on_create_device(ci, *pDev, gdpa);
     return r;
 }
 
@@ -1006,6 +1014,8 @@ static bool dev_of(void* k, DevDisp* out) {
     *out = it->second;
     return true;
 }
+
+#include "framecap.h"   // 按帧序号抓帧 + 盖帧序号条码 (debug.knobs.framecap / framecap_stamp)
 
 // ── 改写: LoadOp LOAD → DONT_CARE ──
 //
@@ -1432,7 +1442,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_CreateSwapchainKHR(
     if (!dev_of(key(dev), &d) || !d.CreateSwapchainKHR) {
         RK_LOG_ONCE("CreateSwapchainKHR: 查不到下层函数"); return VK_ERROR_INITIALIZATION_FAILED;
     }
+    VkSwapchainCreateInfoKHR fc_ci;
+    bool fc_usage = false;
+    if (ci && (g_fc.on || g_fc.stamp)) { fc_ci = *ci; fc_usage = fc_patch_swapchain_usage(dev, &fc_ci); if (fc_usage) ci = &fc_ci; }
     VkResult r = d.CreateSwapchainKHR(dev, ci, a, out);
+    if (r == VK_SUCCESS && ci) fc_on_swapchain(*out, ci, fc_usage);
     if (r == VK_SUCCESS && ci) {
         {
             // 读方 (write_marker / note_pass) 都持 g_mtx, 写方也必须持 (评审 #11: 否则是 UB
@@ -2675,6 +2689,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL rk_QueuePresentKHR(VkQueue q, const VkPres
         else if (f == 1751 && !g_seq_done) { std::lock_guard<std::mutex> lk(g_mtx); g_sampling = false; g_seq_done = true; }
     }
     if ((f % 300) == 0) write_marker();  // 周期落盘, 无需等退出
+    VkPresentInfoKHR fc_sub; VkSemaphore fc_sem = VK_NULL_HANDLE;
+    pi = fc_on_present(d, q, f, pi, &fc_sub, &fc_sem);
     return d.QueuePresentKHR(q, pi);
 }
 
@@ -2700,6 +2716,7 @@ static PFN_vkVoidFunction dispatch_instance(VkInstance instance, const char* nam
     RK_HOOK("vkCreateRenderPass", rk_CreateRenderPass);
     RK_HOOK("vkDestroyRenderPass", rk_DestroyRenderPass);
     RK_HOOK("vkCreateSwapchainKHR", rk_CreateSwapchainKHR);
+    if (g_fc.on || g_fc.stamp) RK_HOOK("vkGetDeviceQueue", rk_GetDeviceQueue);
     // 这几个只为 passdump 观测服务。passdump 没开就**不要挂** ——
     // vkCmdDraw 这种每帧上万次的热函数, 挂上等于给 loadop 的 A/B 两臂凭空加一层开销。
     if (g_dump_passes) {
@@ -2770,6 +2787,7 @@ static PFN_vkVoidFunction dispatch_device(VkDevice dev, const char* name) {
     RK_HOOK("vkCreateRenderPass", rk_CreateRenderPass);
     RK_HOOK("vkDestroyRenderPass", rk_DestroyRenderPass);
     RK_HOOK("vkCreateSwapchainKHR", rk_CreateSwapchainKHR);
+    if (g_fc.on || g_fc.stamp) RK_HOOK("vkGetDeviceQueue", rk_GetDeviceQueue);
     // 这几个只为 passdump 观测服务。passdump 没开就**不要挂** ——
     // vkCmdDraw 这种每帧上万次的热函数, 挂上等于给 loadop 的 A/B 两臂凭空加一层开销。
     if (g_dump_passes) {
